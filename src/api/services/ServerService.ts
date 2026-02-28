@@ -1,0 +1,2521 @@
+/**
+ * Server Service
+ *
+ * Handles server management with direct team membership.
+ * - Create/update/delete servers
+ * - Manage members and roles
+ * - Handle invitations
+ */
+
+import { db } from '../../db/index';
+import {
+  servers,
+  serverMembers,
+  serverInvites,
+  serverInviteLinks,
+  serverBans,
+  serverTemplates,
+  users,
+  type Server,
+  type ServerRole,
+  type DeploymentType,
+  type ServerStatusType,
+  type ServerTier,
+} from '../../db/schema';
+import { eq, and, gt, isNull, inArray, sql } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
+import { createHash } from 'crypto';
+import * as CloudflareTunnelService from './CloudflareTunnelService';
+import * as PublicPortService from './PublicPortService';
+import { getOrCreateSubscription, PLAN_CONFIG, isAdmin } from './UsageService';
+import * as MachineUsageService from './MachineUsageService';
+import * as ServerSessionService from './ServerSessionService';
+import { getUserByEmail } from '../../db/services';
+import { getProvider, isAnyProviderConfigured, getDefaultProviderId } from './providers/registry';
+import { flyTierToTierId, tierIdToFlyTier } from './providers/FlyProvider';
+import { HetznerProvider } from './providers/HetznerProvider';
+import type { ProviderId } from './providers/types';
+
+// Server is considered offline after 60 seconds without heartbeat
+const SERVER_HEARTBEAT_TIMEOUT_MS = 60_000;
+
+// Fast-path threshold: skip wake/verify for machines with recent heartbeats (half of timeout)
+const FAST_PATH_HEARTBEAT_THRESHOLD_MS = 30_000;
+
+// ============================================================================
+// Custom Errors
+// ============================================================================
+
+/**
+ * Error thrown when remote server provisioning fails.
+ * Contains the server that was created (in error state) so caller can handle cleanup.
+ */
+export class ProvisioningError extends Error {
+  readonly server: Server;
+  readonly serverToken: string;
+  readonly cause: unknown;
+
+  constructor(message: string, server: Server, serverToken: string, cause: unknown) {
+    super(message);
+    this.name = 'ProvisioningError';
+    this.server = server;
+    this.serverToken = serverToken;
+    this.cause = cause;
+  }
+}
+
+// ============================================================================
+// Server Token Utilities
+// ============================================================================
+
+/**
+ * Hash a server token using SHA-256
+ */
+function hashServerToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+// ============================================================================
+// Machine Provisioning
+// ============================================================================
+
+/**
+ * Generate a secure server token
+ */
+function generateServerToken(): string {
+  return `wst_${nanoid(32)}`;
+}
+
+async function getOrCreateTunnelCredentials(
+  serverId: string,
+  existingTunnelId?: string | null,
+): Promise<{ tunnelId: string; tunnelToken: string; createdTunnelId: string | null }> {
+  if (existingTunnelId) {
+    const tunnelToken = await CloudflareTunnelService.getTunnelToken(existingTunnelId);
+    return {
+      tunnelId: existingTunnelId,
+      tunnelToken,
+      createdTunnelId: null,
+    };
+  }
+
+  const tunnel = await CloudflareTunnelService.createTunnel(serverId);
+  return {
+    tunnelId: tunnel.tunnelId,
+    tunnelToken: tunnel.tunnelToken,
+    createdTunnelId: tunnel.tunnelId,
+  };
+}
+
+/**
+ * Provision a new machine for a server via the provider abstraction.
+ * Handles: machine creation -> save IDs to DB -> wait for started -> wait for healthy -> set online.
+ *
+ * This is the shared core used by createServer, reprovisionRemoteServer, and changeRegion.
+ * The caller is responsible for:
+ * - Generating the server token and storing its hash
+ * - Any pre-provisioning cleanup (deleting old machines, clearing old DB refs)
+ * - Error handling (setting appropriate status on failure)
+ */
+async function provisionNewMachine(
+  serverId: string,
+  serverToken: string,
+  region: string,
+  tier?: ServerTier,
+  autoSuspendEnabled: boolean = true,
+  existingVolumeId?: string | null,
+  existingTunnelId?: string | null,
+  providerId?: ProviderId,
+): Promise<{ machineId: string; machineName: string; url: string; region: string; volumeId: string }> {
+  const resolvedProviderId = providerId || getDefaultProviderId();
+  const provider = getProvider(resolvedProviderId);
+
+  // Create Cloudflare tunnel for all providers (routes traffic through CF for TLS + IP hiding)
+  let tunnelId: string | null = null;
+  let tunnelToken: string | null = null;
+  let createdTunnelId: string | null = null;
+  if (CloudflareTunnelService.isConfigured()) {
+    const tunnelResult = await getOrCreateTunnelCredentials(serverId, existingTunnelId);
+    tunnelId = tunnelResult.tunnelId;
+    tunnelToken = tunnelResult.tunnelToken;
+    createdTunnelId = tunnelResult.createdTunnelId;
+  }
+
+  let provisionResult;
+
+  try {
+    const tierId = tier ? flyTierToTierId(tier) : 'micro';
+    provisionResult = await provider.createMachine({
+      serverId,
+      serverToken,
+      tunnelToken,
+      region,
+      tier: tierId,
+      autoSuspendEnabled,
+      existingVolumeId,
+    });
+  } catch (error) {
+    if (createdTunnelId) {
+      try {
+        await CloudflareTunnelService.deleteTunnel(createdTunnelId);
+      } catch (cleanupError) {
+        console.error(`[ServerService] Failed to cleanup tunnel ${createdTunnelId}:`, cleanupError);
+      }
+    }
+    throw error;
+  }
+
+  // Add server ingress rule + DNS record so the tunnel routes to localhost:3001
+  if (tunnelId && provisionResult.machineId) {
+    const serverSubdomain = `srv-${provisionResult.machineId}`;
+    await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 3001);
+    await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+  }
+
+  // Save machine details immediately to prevent orphaned machines if wait times out
+  await db
+    .update(servers)
+    .set({
+      serverUrl: provisionResult.serverUrl,
+      machineId: provisionResult.machineId,
+      machineName: provisionResult.machineName,
+      region: provisionResult.region,
+      volumeId: provisionResult.volumeId,
+      rootPassword: provisionResult.rootPassword || null,
+      tunnelId,
+      tunnelToken: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(servers.id, serverId));
+
+  // Wait for machine to start — Hetzner cloud-init needs much longer (docker pull + setup)
+  const startTimeout = resolvedProviderId === 'hetzner' ? 600000 : 180000;
+  await provider.waitForState(provisionResult.machineId, ['running'], startTimeout);
+
+  // Wait for health checks — Hetzner needs extra time for Docker container startup
+  const healthTimeout = resolvedProviderId === 'hetzner' ? 600000 : 60000;
+  await provider.waitForHealthy(provisionResult.machineId, healthTimeout);
+
+  // Update status to online
+  await db
+    .update(servers)
+    .set({ status: 'online', updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  // Start machine billing
+  await MachineUsageService.onMachineStarted(serverId);
+
+  console.log(`[ServerService] Machine ${provisionResult.machineId} provisioned at ${provisionResult.serverUrl} (region: ${provisionResult.region}, provider: ${resolvedProviderId})`);
+  return {
+    machineId: provisionResult.machineId,
+    machineName: provisionResult.machineName,
+    url: provisionResult.serverUrl,
+    region: provisionResult.region,
+    volumeId: provisionResult.volumeId,
+  };
+}
+
+// ============================================================================
+// Server CRUD
+// ============================================================================
+
+/**
+ * Create a new server (or ensure it exists)
+ * Returns the server with plaintext serverToken (shown to user once, stored as hash)
+ */
+export async function createServer(
+  ownerId: string,
+  data: { id: string; name: string; deploymentType?: DeploymentType; region?: string; tier?: ServerTier; provider?: ProviderId }
+): Promise<Server & { serverToken: string }> {
+  // Check if server already exists
+  const existing = await db.query.servers.findFirst({
+    where: eq(servers.id, data.id),
+  });
+
+  if (existing) {
+    // For existing servers, we can't return the plaintext token (it's hashed)
+    // Return empty string - user would need to regenerate if they lost it
+    return { ...existing, serverToken: '' };
+  }
+
+  // Generate a server token for remote server registration
+  const serverToken = generateServerToken();
+  const tokenHash = hashServerToken(serverToken);
+
+  const deploymentType = data.deploymentType || 'local';
+
+  const providerId = (data.provider || getDefaultProviderId()) as ProviderId;
+
+  const [server] = await db
+    .insert(servers)
+    .values({
+      id: data.id,
+      name: data.name,
+      ownerId,
+      tokenHash,
+      deploymentType,
+      provider: providerId,
+      tier: data.tier || 'micro',
+      region: data.region || 'ash',
+      autoSuspendEnabled: true,
+      status: deploymentType === 'remote' ? 'offline' : null,
+    })
+    .returning();
+
+  // Add owner as a member with 'owner' role
+  const [membership] = await db.insert(serverMembers).values({
+    serverId: server.id,
+    userId: ownerId,
+    role: 'owner',
+  }).returning();
+
+  console.log(`[ServerService] Created server ${server.id} for user ${ownerId} (${deploymentType})`);
+  console.log(`[ServerService] Added membership: ${membership?.id || 'FAILED'} (server=${server.id}, user=${ownerId})`);
+
+  // If remote deployment, only provision machine if user has a payment method.
+  // Without a card on file, server stays in 'pending' status (no machine).
+  // The frontend will show a credit card gate; once the user adds a card and retries,
+  // the session endpoint will trigger provisioning.
+  if (deploymentType === 'remote' && isAnyProviderConfigured()) {
+    const subscription = await getOrCreateSubscription(ownerId);
+    if (subscription.stripeCustomerId) {
+      console.log(`[ServerService] Kicking off background provisioning for server ${server.id}`);
+      await db
+        .update(servers)
+        .set({ status: 'provisioning', updatedAt: new Date() })
+        .where(eq(servers.id, server.id));
+      provisionNewMachine(server.id, serverToken, data.region || 'ash', data.tier, server.autoSuspendEnabled ?? true, undefined, undefined, providerId).catch(async (error) => {
+        console.error(`[ServerService] Background provisioning failed for ${server.id}:`, error);
+        await db
+          .update(servers)
+          .set({ status: 'error', updatedAt: new Date() })
+          .where(eq(servers.id, server.id));
+      });
+    } else {
+      console.log(`[ServerService] Skipping provisioning for ${server.id} — no payment method on file`);
+    }
+  }
+
+  // Return server with plaintext token (user sees this once)
+  return { ...server, serverToken };
+}
+
+/**
+ * Ensure server exists in cloud (create if not)
+ */
+export async function ensureServer(
+  serverId: string,
+  ownerId: string,
+  name: string = 'Untitled Server'
+): Promise<Server> {
+  const existing = await db.query.servers.findFirst({
+    where: eq(servers.id, serverId),
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  return createServer(ownerId, { id: serverId, name });
+}
+
+/**
+ * Get server by ID
+ */
+export async function getServer(serverId: string): Promise<Server | null> {
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+
+  return server || null;
+}
+
+/**
+ * Ensure a remote server has a Cloudflare tunnel ID and connector token on its machine.
+ * Tunnel token is fetched on-demand and never persisted in plaintext.
+ */
+export async function ensureServerTunnelConnector(
+  serverId: string,
+  options: { requireMachineUpdate?: boolean } = {},
+): Promise<{ tunnelId: string } | null> {
+  const server = await getServer(serverId);
+  if (!server || server.deploymentType !== 'remote') {
+    return null;
+  }
+
+  if (!CloudflareTunnelService.isConfigured()) {
+    return null;
+  }
+
+  const { tunnelId, tunnelToken } = await getOrCreateTunnelCredentials(serverId, server.tunnelId);
+
+  if (server.tunnelId !== tunnelId || server.tunnelToken !== null) {
+    await db
+      .update(servers)
+      .set({
+        tunnelId,
+        tunnelToken: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(servers.id, serverId));
+  }
+
+  if (server.machineId) {
+    try {
+      const provider = getProvider((server.provider || 'fly') as ProviderId);
+      await provider.updateMachineEnv(server.machineId, { TUNNEL_TOKEN: tunnelToken });
+    } catch (error) {
+      if (options.requireMachineUpdate) {
+        throw error;
+      }
+      console.warn(`[ServerService] Failed to ensure tunnel token on machine ${server.machineId}:`, error);
+    }
+
+    // Add server routing ingress rule + DNS record (backfill for existing servers)
+    try {
+      const serverSubdomain = `srv-${server.machineId}`;
+      await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 3001);
+      await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+    } catch (error) {
+      console.warn(`[ServerService] Failed to add server ingress rule during backfill for ${server.machineId}:`, error);
+    }
+  }
+
+  return { tunnelId };
+}
+
+
+/**
+ * Get all servers a user is a member of
+ */
+export async function getUserServers(userId: string): Promise<Array<Server & { role: ServerRole; memberCount: number }>> {
+  console.log(`[ServerService] getUserServers called for user: ${userId}`);
+
+  const memberships = await db
+    .select({
+      server: servers,
+      role: serverMembers.role,
+    })
+    .from(serverMembers)
+    .innerJoin(servers, eq(serverMembers.serverId, servers.id))
+    .where(eq(serverMembers.userId, userId));
+
+  // Also find servers where user is owner but has no member row (orphaned ownership)
+  const memberServerIds = memberships.map(m => m.server.id);
+  const ownedServers = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.ownerId, userId));
+
+  for (const owned of ownedServers) {
+    if (!memberServerIds.includes(owned.id)) {
+      console.warn(`[ServerService] Found orphaned server ${owned.id} (${owned.name}) - owner has no member row, backfilling`);
+      // Backfill the missing member row
+      await db.insert(serverMembers).values({
+        serverId: owned.id,
+        userId,
+        role: 'owner',
+      });
+      memberships.push({ server: owned, role: 'owner' });
+    }
+  }
+
+  // Get member counts for all servers in one query
+  const serverIds = memberships.map(m => m.server.id);
+  const memberCounts = serverIds.length > 0
+    ? await db
+        .select({
+          serverId: serverMembers.serverId,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(serverMembers)
+        .where(inArray(serverMembers.serverId, serverIds))
+        .groupBy(serverMembers.serverId)
+    : [];
+
+  const memberCountMap = new Map(memberCounts.map(mc => [mc.serverId, mc.count]));
+
+  console.log(`[ServerService] Found ${memberships.length} memberships for user ${userId}`);
+
+  // Ensure all servers have token (backfill if missing)
+  // Also check for stale heartbeats and mark servers as offline
+  const results: Array<Server & { role: ServerRole; memberCount: number }> = [];
+  const now = Date.now();
+
+  for (const m of memberships) {
+    let server = m.server;
+
+    // Generate token if missing (for servers created before this feature)
+    if (!server.tokenHash) {
+      const newToken = generateServerToken();
+      const [updated] = await db
+        .update(servers)
+        .set({ tokenHash: hashServerToken(newToken) })
+        .where(eq(servers.id, server.id))
+        .returning();
+      if (updated) {
+        server = updated;
+      }
+    }
+
+    // Check if server heartbeat is stale - mark as offline if no heartbeat for > 60s
+    if (server.status === 'online' && server.lastSeen) {
+      const timeSinceHeartbeat = now - server.lastSeen.getTime();
+      if (timeSinceHeartbeat > SERVER_HEARTBEAT_TIMEOUT_MS) {
+        // Mark as offline in database
+        const [updated] = await db
+          .update(servers)
+          .set({ status: 'offline' })
+          .where(eq(servers.id, server.id))
+          .returning();
+        if (updated) {
+          server = updated;
+          console.log(`[ServerService] Marked stale server as offline for server ${server.id} (last seen ${Math.round(timeSinceHeartbeat / 1000)}s ago)`);
+          // Stop machine billing
+          await MachineUsageService.onMachineStopped(server.id);
+        }
+      }
+    }
+
+    const memberCount = memberCountMap.get(server.id) || 1;
+    results.push({ ...server, role: m.role, memberCount });
+  }
+
+  return results;
+}
+
+/**
+ * Update server
+ */
+export async function updateServer(
+  serverId: string,
+  userId: string,
+  data: { name?: string; iconUrl?: string | null; autoSuspendEnabled?: boolean; autoSuspendIdleMinutes?: number }
+): Promise<Server | null> {
+  // Check if user has permission (owner or admin)
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return null;
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return null;
+  }
+
+  const [updated] = await db
+    .update(servers)
+    .set({
+      ...data,
+      updatedAt: new Date(),
+    })
+    .where(eq(servers.id, serverId))
+    .returning();
+
+  // If autoSuspendEnabled changed and server has a machine, update machine config
+  if (
+    typeof data.autoSuspendEnabled === 'boolean'
+    && server.deploymentType === 'remote'
+    && server.machineId
+    && isAnyProviderConfigured()
+  ) {
+    try {
+      const provider = getProvider((server.provider || 'fly') as ProviderId);
+      await provider.updateAutoSuspendPolicy(server.machineId, data.autoSuspendEnabled);
+    } catch (error) {
+      console.error(`[ServerService] Failed to update machine autostop config:`, error);
+      // Don't fail the update -- DB is already updated
+    }
+  }
+
+  return updated || null;
+}
+
+/**
+ * Delete server (owner only)
+ */
+export async function deleteServer(serverId: string, userId: string): Promise<{ success: boolean; error?: string }> {
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only the owner can delete a server' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  // Delete cloud resources FIRST — abort if this fails
+  if (server.deploymentType === 'remote' && isAnyProviderConfigured()) {
+    const remoteDeleted = await deleteRemoteServer(serverId);
+    if (!remoteDeleted) {
+      console.error(`[ServerService] Aborting delete of ${serverId}: cloud resources could not be fully removed`);
+      return { success: false, error: 'Failed to delete cloud resources. Server not deleted to prevent orphaned machines.' };
+    }
+  }
+
+  // Cloud resources confirmed gone — now safe to clean up DB
+
+  // Delete public port mappings (DB + Cloudflare DNS/ingress)
+  try {
+    await PublicPortService.deleteAllPortMappings(serverId);
+  } catch (error) {
+    console.error(`[ServerService] Failed to delete port mappings (continuing):`, error);
+  }
+
+  // Delete Cloudflare tunnel after all mappings are removed
+  if (server.tunnelId) {
+    try {
+      await CloudflareTunnelService.deleteTunnel(server.tunnelId);
+    } catch (error) {
+      console.error(`[ServerService] Failed to delete tunnel (continuing):`, error);
+    }
+  }
+
+  // Delete members first (foreign key constraint)
+  await db.delete(serverMembers).where(eq(serverMembers.serverId, serverId));
+
+  // Delete invite links
+  await db.delete(serverInviteLinks).where(eq(serverInviteLinks.serverId, serverId));
+
+  // Delete invites
+  await db.delete(serverInvites).where(eq(serverInvites.serverId, serverId));
+
+  // Delete bans
+  await db.delete(serverBans).where(eq(serverBans.serverId, serverId));
+
+  // Delete server
+  await db.delete(servers).where(eq(servers.id, serverId));
+
+  console.log(`[ServerService] Deleted server ${serverId}`);
+  return { success: true };
+}
+
+// ============================================================================
+// Member Management
+// ============================================================================
+
+/**
+ * Get all members of a server
+ */
+export async function getServerMembers(
+  serverId: string
+): Promise<Array<{ user: { id: string; email: string | null; name: string | null; avatarUrl: string | null }; role: ServerRole; joinedAt: Date }>> {
+  const members = await db
+    .select({
+      userId: serverMembers.userId,
+      role: serverMembers.role,
+      joinedAt: serverMembers.joinedAt,
+      userEmail: users.email,
+      userName: users.name,
+      userAvatar: users.avatarUrl,
+    })
+    .from(serverMembers)
+    .innerJoin(users, eq(serverMembers.userId, users.id))
+    .where(eq(serverMembers.serverId, serverId));
+
+  return members.map((m) => ({
+    user: {
+      id: m.userId,
+      email: m.userEmail,
+      name: m.userName,
+      avatarUrl: m.userAvatar,
+    },
+    role: m.role,
+    joinedAt: m.joinedAt,
+  }));
+}
+
+/**
+ * Update member role
+ */
+export async function updateMemberRole(
+  serverId: string,
+  requesterId: string,
+  targetUserId: string,
+  newRole: ServerRole
+): Promise<boolean> {
+  // Only owner can change roles
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
+  if (!hasPermission) {
+    return false;
+  }
+
+  // Can't change owner's role
+  const server = await getServer(serverId);
+  if (server?.ownerId === targetUserId && newRole !== 'owner') {
+    return false;
+  }
+
+  await db
+    .update(serverMembers)
+    .set({ role: newRole })
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, targetUserId)));
+
+  return true;
+}
+
+/**
+ * Remove member from server
+ */
+export async function removeMember(serverId: string, requesterId: string, targetUserId: string): Promise<boolean> {
+  // Owner or admin can remove members
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return false;
+  }
+
+  // Can't remove owner
+  const server = await getServer(serverId);
+  if (server?.ownerId === targetUserId) {
+    return false;
+  }
+
+  // Admin can't remove other admins
+  const requesterRole = await getMemberRole(serverId, requesterId);
+  const targetRole = await getMemberRole(serverId, targetUserId);
+  if (requesterRole === 'admin' && targetRole === 'admin') {
+    return false;
+  }
+
+  await db
+    .delete(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, targetUserId)));
+
+  console.log(`[ServerService] Removed user ${targetUserId} from server ${serverId}`);
+  return true;
+}
+
+/**
+ * Leave server (self-removal)
+ */
+export async function leaveServer(serverId: string, userId: string): Promise<boolean> {
+  // Owner can't leave (must transfer ownership first)
+  const server = await getServer(serverId);
+  if (server?.ownerId === userId) {
+    return false;
+  }
+
+  await db
+    .delete(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
+
+  console.log(`[ServerService] User ${userId} left server ${serverId}`);
+  return true;
+}
+
+// ============================================================================
+// Invitations
+// ============================================================================
+
+const INVITE_EXPIRY_DAYS = 7;
+
+/**
+ * Create an invitation to join the server
+ */
+export async function createInvite(
+  serverId: string,
+  inviterId: string,
+  email: string,
+  role: ServerRole = 'member'
+): Promise<{ token: string; expiresAt: Date } | null> {
+  // Check permission (owner or admin)
+  const hasPermission = await checkServerPermission(serverId, inviterId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return null;
+  }
+
+  // Check if user is already a member
+  const existingMember = await db
+    .select()
+    .from(serverMembers)
+    .innerJoin(users, eq(serverMembers.userId, users.id))
+    .where(and(eq(serverMembers.serverId, serverId), eq(users.email, email)))
+    .limit(1);
+
+  if (existingMember.length > 0) {
+    console.log(`[ServerService] User ${email} is already a member of server ${serverId}`);
+    return null;
+  }
+
+  // Check for existing pending invite
+  const existingInvite = await db
+    .select()
+    .from(serverInvites)
+    .where(and(eq(serverInvites.serverId, serverId), eq(serverInvites.email, email), isNull(serverInvites.usedAt)))
+    .limit(1);
+
+  if (existingInvite.length > 0) {
+    // Return existing invite token
+    return {
+      token: existingInvite[0].token,
+      expiresAt: existingInvite[0].expiresAt,
+    };
+  }
+
+  const token = nanoid(32);
+  const expiresAt = new Date(Date.now() + INVITE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
+  await db.insert(serverInvites).values({
+    serverId,
+    email,
+    role,
+    token,
+    invitedById: inviterId,
+    expiresAt,
+  });
+
+  console.log(`[ServerService] Created invite for ${email} to server ${serverId}`);
+  return { token, expiresAt };
+}
+
+/**
+ * Get pending invites for a server
+ */
+export async function getServerInvites(
+  serverId: string
+): Promise<Array<{ email: string; role: ServerRole; expiresAt: Date; createdAt: Date }>> {
+  const invites = await db
+    .select({
+      email: serverInvites.email,
+      role: serverInvites.role,
+      expiresAt: serverInvites.expiresAt,
+      createdAt: serverInvites.createdAt,
+    })
+    .from(serverInvites)
+    .where(and(eq(serverInvites.serverId, serverId), isNull(serverInvites.usedAt)));
+
+  return invites;
+}
+
+/**
+ * Accept an invitation
+ */
+export async function acceptInvite(token: string, userId: string): Promise<{ success: boolean; serverId?: string; error?: string }> {
+  const [invite] = await db
+    .select()
+    .from(serverInvites)
+    .where(eq(serverInvites.token, token))
+    .limit(1);
+
+  if (!invite) {
+    return { success: false, error: 'Invalid invite token' };
+  }
+
+  if (invite.usedAt) {
+    return { success: false, error: 'Invite already used' };
+  }
+
+  if (invite.expiresAt < new Date()) {
+    return { success: false, error: 'Invite expired' };
+  }
+
+  // Verify user email matches invite
+  const [user] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+
+  if (!user || user.email?.toLowerCase() !== invite.email.toLowerCase()) {
+    return { success: false, error: 'Email does not match invite' };
+  }
+
+  // Check if banned
+  if (await isUserBanned(invite.serverId, userId)) {
+    return { success: false, error: 'You are banned from this server' };
+  }
+
+  // Check if already a member
+  const existingMember = await db
+    .select()
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, invite.serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+
+  if (existingMember.length > 0) {
+    return { success: false, error: 'Already a member of this server' };
+  }
+
+  // Add as member
+  await db.insert(serverMembers).values({
+    serverId: invite.serverId,
+    userId,
+    role: invite.role,
+    invitedById: invite.invitedById,
+  });
+
+  // Mark invite as used
+  await db.update(serverInvites).set({ usedAt: new Date() }).where(eq(serverInvites.id, invite.id));
+
+  console.log(`[ServerService] User ${userId} accepted invite to server ${invite.serverId}`);
+  return { success: true, serverId: invite.serverId };
+}
+
+/**
+ * Cancel/revoke an invitation
+ */
+export async function cancelInvite(serverId: string, requesterId: string, email: string): Promise<boolean> {
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return false;
+  }
+
+  await db
+    .delete(serverInvites)
+    .where(and(eq(serverInvites.serverId, serverId), eq(serverInvites.email, email), isNull(serverInvites.usedAt)));
+
+  return true;
+}
+
+/**
+ * Get pending server invites for a user (by email)
+ */
+export async function getUserPendingInvites(
+  email: string
+): Promise<Array<{ token: string; serverId: string; serverName: string; inviterEmail: string; role: ServerRole; expiresAt: Date }>> {
+  const invites = await db
+    .select({
+      token: serverInvites.token,
+      serverId: serverInvites.serverId,
+      role: serverInvites.role,
+      expiresAt: serverInvites.expiresAt,
+      serverName: servers.name,
+      invitedById: serverInvites.invitedById,
+    })
+    .from(serverInvites)
+    .innerJoin(servers, eq(serverInvites.serverId, servers.id))
+    .where(and(eq(serverInvites.email, email.toLowerCase()), isNull(serverInvites.usedAt)));
+
+  // Get inviter emails
+  const validInvites = invites.filter((i) => i.expiresAt > new Date());
+  const inviterIds = [...new Set(validInvites.map(i => i.invitedById))];
+
+  const inviters = inviterIds.length > 0
+    ? await db.select({ id: users.id, email: users.email }).from(users).where(inArray(users.id, inviterIds))
+    : [];
+  const inviterMap = new Map(inviters.map(u => [u.id, u.email]));
+
+  return validInvites.map(inv => ({
+    token: inv.token,
+    serverId: inv.serverId,
+    serverName: inv.serverName,
+    inviterEmail: inviterMap.get(inv.invitedById) || 'unknown',
+    role: inv.role,
+    expiresAt: inv.expiresAt,
+  }));
+}
+
+/**
+ * Accept an invitation by server ID (for the current user)
+ */
+export async function acceptInviteByServer(serverId: string, userId: string): Promise<{ success: boolean; error?: string }> {
+  // Get user's email
+  const [user] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+  if (!user?.email) {
+    return { success: false, error: 'User not found' };
+  }
+
+  // Find the pending invite for this user + server
+  const [invite] = await db
+    .select()
+    .from(serverInvites)
+    .where(and(
+      eq(serverInvites.serverId, serverId),
+      eq(serverInvites.email, user.email.toLowerCase()),
+      isNull(serverInvites.usedAt)
+    ))
+    .limit(1);
+
+  if (!invite) {
+    return { success: false, error: 'No pending invite found' };
+  }
+
+  if (invite.expiresAt < new Date()) {
+    return { success: false, error: 'Invite expired' };
+  }
+
+  // Check if banned
+  if (await isUserBanned(serverId, userId)) {
+    return { success: false, error: 'You are banned from this server' };
+  }
+
+  // Check if already a member
+  const existingMember = await db
+    .select()
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+
+  if (existingMember.length > 0) {
+    return { success: false, error: 'Already a member of this server' };
+  }
+
+  // Add as member
+  await db.insert(serverMembers).values({
+    serverId,
+    userId,
+    role: invite.role,
+    invitedById: invite.invitedById,
+  });
+
+  // Mark invite as used
+  await db.update(serverInvites).set({ usedAt: new Date() }).where(eq(serverInvites.id, invite.id));
+
+  console.log(`[ServerService] User ${userId} accepted invite to server ${serverId}`);
+  return { success: true };
+}
+
+/**
+ * Decline an invitation by server ID (for the current user)
+ */
+export async function declineInviteByServer(serverId: string, userId: string): Promise<{ success: boolean; error?: string }> {
+  // Get user's email
+  const [user] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+  if (!user?.email) {
+    return { success: false, error: 'User not found' };
+  }
+
+  // Delete the pending invite for this user + server
+  const result = await db
+    .delete(serverInvites)
+    .where(and(
+      eq(serverInvites.serverId, serverId),
+      eq(serverInvites.email, user.email.toLowerCase()),
+      isNull(serverInvites.usedAt)
+    ));
+
+  console.log(`[ServerService] User ${userId} declined invite to server ${serverId}`);
+  return { success: true };
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Check if user has required permission in server
+ */
+export async function checkServerPermission(serverId: string, userId: string, allowedRoles: ServerRole[]): Promise<boolean> {
+  const [membership] = await db
+    .select({ role: serverMembers.role })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+
+  if (membership) {
+    return allowedRoles.includes(membership.role);
+  }
+
+  // Fallback: check if user is the server owner (servers.ownerId is the source of truth)
+  // This handles cases where the server_members record is missing
+  if (allowedRoles.includes('owner')) {
+    const [server] = await db
+      .select({ ownerId: servers.ownerId })
+      .from(servers)
+      .where(eq(servers.id, serverId))
+      .limit(1);
+    return server?.ownerId === userId;
+  }
+
+  return false;
+}
+
+/**
+ * Get member's role in server
+ */
+export async function getMemberRole(serverId: string, userId: string): Promise<ServerRole | null> {
+  const [membership] = await db
+    .select({ role: serverMembers.role })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+
+  if (membership?.role) {
+    return membership.role;
+  }
+
+  // Fallback: check if user is the server owner (servers.ownerId is the source of truth)
+  // This handles cases where the server_members record is missing or has stale data
+  const [server] = await db
+    .select({ ownerId: servers.ownerId })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+
+  if (server?.ownerId === userId) {
+    console.warn(`[ServerService] getMemberRole: user ${userId} is server owner but missing server_members record for server ${serverId}, returning 'owner'`);
+    return 'owner';
+  }
+
+  return null;
+}
+
+/**
+ * Check if user can access a server
+ */
+export async function canAccessServer(serverId: string, userId: string): Promise<boolean> {
+  return checkServerPermission(serverId, userId, ['owner', 'admin', 'member', 'viewer']);
+}
+
+/**
+ * Check if user can edit a server
+ */
+export async function canEditServer(serverId: string, userId: string): Promise<boolean> {
+  return checkServerPermission(serverId, userId, ['owner', 'admin', 'member']);
+}
+
+// ============================================================================
+// Server Registration
+// ============================================================================
+
+/**
+ * Get server by token (for server registration)
+ * Hashes the incoming token and looks up by hash
+ */
+export async function getServerByToken(serverToken: string): Promise<Server | null> {
+  const tokenHash = hashServerToken(serverToken);
+
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.tokenHash, tokenHash))
+    .limit(1);
+
+  return server || null;
+}
+
+/**
+ * Register a server
+ */
+export async function registerServer(
+  serverToken: string,
+  serverUrl: string
+): Promise<{ success: boolean; server?: Server; error?: string }> {
+  const server = await getServerByToken(serverToken);
+
+  if (!server) {
+    return { success: false, error: 'Invalid server token' };
+  }
+
+  const [updated] = await db
+    .update(servers)
+    .set({
+      serverUrl,
+      status: 'online',
+      lastSeen: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(servers.id, server.id))
+    .returning();
+
+  console.log(`[ServerService] Server registered for server ${server.id} at ${serverUrl}`);
+  return { success: true, server: updated };
+}
+
+/**
+ * Update server heartbeat (keep-alive)
+ */
+export async function updateServerHeartbeat(serverToken: string): Promise<boolean> {
+  const server = await getServerByToken(serverToken);
+
+  if (!server) {
+    return false;
+  }
+
+  await db
+    .update(servers)
+    .set({
+      status: 'online',
+      lastSeen: new Date(),
+    })
+    .where(eq(servers.id, server.id));
+
+  // Ensure billing is tracking this machine
+  if (!server.machineStartedAt && server.deploymentType === 'remote') {
+    await MachineUsageService.onMachineStarted(server.id);
+  }
+
+  return true;
+}
+
+/**
+ * Mark server as offline
+ */
+export async function markServerOffline(serverId: string): Promise<void> {
+  // Stop machine billing before marking offline
+  await MachineUsageService.onMachineStopped(serverId);
+
+  await db
+    .update(servers)
+    .set({
+      status: 'offline',
+      updatedAt: new Date(),
+    })
+    .where(eq(servers.id, serverId));
+
+  console.log(`[ServerService] Server marked offline for server ${serverId}`);
+}
+
+/**
+ * Regenerate server token
+ * Returns the new plaintext token (stored as hash)
+ */
+export async function regenerateServerToken(
+  serverId: string,
+  userId: string
+): Promise<{ success: boolean; serverToken?: string; error?: string }> {
+  // Only owner can regenerate token
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner can regenerate token' };
+  }
+
+  // Generate new token
+  const serverToken = `wst_${nanoid(32)}`;
+  const tokenHash = hashServerToken(serverToken);
+
+  // Clear existing server registration (new token = new server)
+  await db
+    .update(servers)
+    .set({
+      tokenHash,
+      serverUrl: null,
+      status: null,
+      lastSeen: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(servers.id, serverId));
+
+  console.log(`[ServerService] Regenerated token for server ${serverId}`);
+  return { success: true, serverToken };
+}
+
+// ============================================================================
+// Remote Server Management (Fly.io)
+// ============================================================================
+
+/**
+ * Wake a suspended remote server (internal version that accepts pre-fetched server).
+ * Use this when you've already verified access and fetched the server.
+ */
+export async function wakeRemoteServerInternal(
+  server: Server
+): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string; wasAlreadyRunning?: boolean }> {
+  const serverId = server.id;
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (!server.machineId) {
+    return { success: false, error: 'No machine associated with this server' };
+  }
+
+  // Legacy backfill: ensure remote servers have tunnel metadata and connector on the machine.
+  if (!server.tunnelId) {
+    try {
+      await ensureServerTunnelConnector(server.id);
+    } catch (error) {
+      console.warn(`[ServerService] Tunnel backfill failed during wake for ${server.id}:`, error);
+    }
+  }
+
+  // Check current machine status
+  const provider = getProvider((server.provider || 'fly') as ProviderId);
+  try {
+    const machineState = await provider.getMachineState(server.machineId);
+
+    if (machineState === 'running') {
+      // Already running - no wait needed
+      return { success: true, status: 'online', url: server.serverUrl || undefined, wasAlreadyRunning: true };
+    }
+
+    if (machineState === 'starting') {
+      // Already starting - just wait for it to be ready
+      console.log(`[ServerService] Machine ${server.machineId} is already starting, waiting...`);
+      await provider.waitForState(server.machineId, ['running'], 90000);
+      await provider.waitForHealthy(server.machineId, 60000);
+
+      // Update status
+      await db
+        .update(servers)
+        .set({
+          status: 'online',
+          lastSeen: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(servers.id, serverId));
+
+      return { success: true, status: 'online', url: server.serverUrl || undefined };
+    }
+
+    if (machineState === 'destroyed') {
+      // Machine was destroyed - clear the reference so we can reprovision
+      console.log(`[ServerService] Machine ${server.machineId} was destroyed, clearing reference`);
+      await db
+        .update(servers)
+        .set({
+          machineId: null,
+          status: 'offline',
+          updatedAt: new Date(),
+        })
+        .where(eq(servers.id, serverId));
+      return { success: false, error: 'Machine was destroyed. Please try again to reprovision.' };
+    }
+
+    if (machineState === 'stopped' || machineState === 'suspended') {
+      console.log(`[ServerService] Waking machine ${server.machineId} (state: ${machineState})`);
+
+      // Start the machine
+      await provider.startMachine(server.machineId);
+
+      // Wait for it to be ready and healthy
+      await provider.waitForState(server.machineId, ['running'], 90000);
+      await provider.waitForHealthy(server.machineId, 60000);
+
+      // Update status
+      await db
+        .update(servers)
+        .set({
+          status: 'online',
+          lastSeen: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(servers.id, serverId));
+
+      return { success: true, status: 'online', url: server.serverUrl || undefined };
+    }
+
+    // Machine is in another state (stopping, etc.) - wait and retry
+    console.log(`[ServerService] Machine ${server.machineId} is in ${machineState} state, waiting...`);
+    await provider.waitForState(server.machineId, ['running', 'stopped', 'suspended'], 90000);
+
+    // Retry after waiting - re-fetch server for fresh state
+    const refreshed = await getServer(serverId);
+    if (!refreshed) return { success: false, error: 'Server not found' };
+    return wakeRemoteServerInternal(refreshed);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[ServerService] Failed to wake machine:`, errorMessage);
+
+    // If the machine was not found (404), handle like "destroyed" - clear stale reference
+    if (errorMessage.includes('404') || errorMessage.includes('not found')) {
+      console.log(`[ServerService] Machine ${server.machineId} not found, clearing reference`);
+      await db
+        .update(servers)
+        .set({
+          machineId: null,
+          status: 'offline',
+          updatedAt: new Date(),
+        })
+        .where(eq(servers.id, serverId));
+      return { success: false, error: 'Machine not found. Please try again to reprovision.' };
+    }
+
+    return { success: false, error: `Failed to wake server: ${errorMessage}` };
+  }
+}
+
+/**
+ * Wake a suspended remote server (public API with access check)
+ */
+export async function wakeRemoteServer(
+  serverId: string,
+  userId: string
+): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string; wasAlreadyRunning?: boolean }> {
+  // Check access
+  const hasAccess = await canAccessServer(serverId, userId);
+  if (!hasAccess) {
+    return { success: false, error: 'Access denied' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  return wakeRemoteServerInternal(server);
+}
+
+/**
+ * Restart a remote server (stop + start the Fly.io machine)
+ */
+export async function restartRemoteServer(
+  serverId: string,
+  userId: string
+): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
+  // Check access
+  const hasAccess = await canAccessServer(serverId, userId);
+  if (!hasAccess) {
+    return { success: false, error: 'Access denied' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (!server.machineId) {
+    return { success: false, error: 'No machine associated with this server' };
+  }
+
+  try {
+    await ensureServerTunnelConnector(serverId, { requireMachineUpdate: true });
+
+    const provider = getProvider((server.provider || 'fly') as ProviderId);
+    console.log(`[ServerService] Restarting machine ${server.machineId} for server ${serverId} (with image update)`);
+
+    await provider.updateMachineImage(server.machineId);
+
+    // Wait for it to be ready and healthy
+    await provider.waitForState(server.machineId, ['running'], 30000);
+    await provider.waitForHealthy(server.machineId, 45000);
+
+    // Update status
+    await db
+      .update(servers)
+      .set({
+        status: 'online',
+        lastSeen: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(servers.id, serverId));
+
+    return { success: true, status: 'online', url: server.serverUrl || undefined };
+  } catch (error) {
+    console.error(`[ServerService] Failed to restart machine:`, error);
+    return { success: false, error: 'Failed to restart server' };
+  }
+}
+
+/**
+ * Reset the root password of a Hetzner server.
+ * Owner-only. Calls Hetzner API to generate a new password and saves it to DB.
+ */
+export async function resetRootPassword(
+  serverId: string,
+  userId: string
+): Promise<{ success: boolean; rootPassword?: string; error?: string }> {
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Access denied' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (server.provider !== 'hetzner') {
+    return { success: false, error: 'Password reset is only supported for Hetzner servers' };
+  }
+
+  if (!server.machineId) {
+    return { success: false, error: 'No machine associated with this server' };
+  }
+
+  try {
+    const provider = new HetznerProvider();
+    const newPassword = await provider.resetRootPassword(server.machineId);
+
+    // Save to DB
+    await db
+      .update(servers)
+      .set({ rootPassword: newPassword, updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+
+    return { success: true, rootPassword: newPassword };
+  } catch (error) {
+    console.error(`[ServerService] Failed to reset root password:`, error);
+    return { success: false, error: 'Failed to reset root password' };
+  }
+}
+
+/**
+ * Reprovision a remote server (after machine was destroyed)
+ * Generates a new token and creates a new machine
+ */
+export async function reprovisionRemoteServer(
+  serverId: string,
+  userId: string
+): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
+  // Check access - need owner permission to reprovision
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner can reprovision' };
+  }
+
+  if (!isAnyProviderConfigured()) {
+    return { success: false, error: 'Remote servers are not configured' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  // If machine already exists and isn't destroyed, just wake it
+  if (server.machineId) {
+    try {
+      const provider = getProvider((server.provider || 'fly') as ProviderId);
+      const machineState = await provider.getMachineState(server.machineId);
+      if (machineState !== 'destroyed') {
+        console.log(`[ServerService] Machine ${server.machineId} exists, waking instead of reprovisioning`);
+        return wakeRemoteServer(serverId, userId);
+      }
+    } catch {
+      // Machine not found - proceed with reprovisioning
+      console.log(`[ServerService] Machine ${server.machineId} not found, proceeding to reprovision`);
+    }
+  }
+
+  console.log(`[ServerService] Reprovisioning remote server for server ${serverId}`);
+
+  try {
+    // Generate new token and clear old machine refs
+    const serverToken = generateServerToken();
+    const tokenHash = hashServerToken(serverToken);
+
+    await db
+      .update(servers)
+      .set({
+        tokenHash,
+        status: 'provisioning',
+        machineId: null,
+        machineName: null,
+        serverUrl: null,
+        tunnelToken: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(servers.id, serverId));
+
+    // Pass existing volumeId so reprovision reuses the same volume instead of creating a new empty one
+    const result = await provisionNewMachine(
+      server.id,
+      serverToken,
+      server.region || 'ash',
+      server.tier as ServerTier | undefined,
+      server.autoSuspendEnabled ?? true,
+      server.volumeId,
+      server.tunnelId,
+      (server.provider || getDefaultProviderId()) as ProviderId,
+    );
+
+    return { success: true, status: 'online', url: result.url };
+  } catch (error) {
+    console.error(`[ServerService] Failed to reprovision remote server:`, error);
+
+    // Update status to offline (not 'error') so retry is possible
+    await db
+      .update(servers)
+      .set({ status: 'offline', updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+
+    return { success: false, error: 'Failed to reprovision server' };
+  }
+}
+
+/**
+ * Validate a region change request without performing it.
+ * Used to return fast validation errors before starting the async operation.
+ */
+export async function validateChangeRegion(
+  serverId: string,
+  userId: string,
+  region: string
+): Promise<{ success: boolean; error?: string }> {
+  const VALID_REGIONS = ['iad', 'ams', 'sin', 'gru'];
+  if (!VALID_REGIONS.includes(region)) {
+    return { success: false, error: `Invalid region. Must be one of: ${VALID_REGIONS.join(', ')}` };
+  }
+
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner can change region' };
+  }
+
+  if (!isAnyProviderConfigured()) {
+    return { success: false, error: 'Remote servers are not configured' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (server.region === region) {
+    return { success: false, error: 'Server is already in this region' };
+  }
+
+  if (server.status === 'provisioning') {
+    return { success: false, error: 'Server is already being provisioned' };
+  }
+
+  return { success: true };
+}
+
+/**
+ * Change the region of a remote server.
+ * Forks the existing volume to the new region (preserving all data),
+ * creates a new machine there, then cleans up old infrastructure.
+ */
+export async function changeRegion(
+  serverId: string,
+  userId: string,
+  region: string
+): Promise<{ success: boolean; region?: string; status?: ServerStatusType; error?: string }> {
+  // Owner-only permission check
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner can change region' };
+  }
+
+  if (!isAnyProviderConfigured()) {
+    return { success: false, error: 'Remote servers are not configured' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (server.region === region) {
+    return { success: false, error: 'Server is already in this region' };
+  }
+
+  const provider = getProvider((server.provider || 'fly') as ProviderId);
+
+  // Validate region for the server's provider
+  const validRegions = provider.getRegions().map(r => r.id);
+  if (!validRegions.includes(region)) {
+    return { success: false, error: `Invalid region for ${provider.id}. Must be one of: ${validRegions.join(', ')}` };
+  }
+  console.log(`[ServerService] Changing region for server ${serverId} from ${server.region} to ${region}`);
+
+  // Stop machine billing before destroying
+  await MachineUsageService.onMachineStopped(serverId);
+
+  // Set status to provisioning
+  await db
+    .update(servers)
+    .set({ status: 'provisioning', updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  const oldMachineId = server.machineId;
+  const oldVolumeId = server.volumeId;
+
+  try {
+    // Fork volume to new region (preserves all data via block-level copy)
+    let forkedVolumeId: string | undefined;
+    if (oldVolumeId) {
+      const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+      const volumeName = `data_${sanitizedId}`;
+      const oldVolume = await provider.getVolume(oldVolumeId);
+      const sizeGb = oldVolume?.sizeGb || 1;
+
+      const forkedVolume = await provider.forkVolume(oldVolumeId, volumeName, region, sizeGb);
+      forkedVolumeId = forkedVolume.id;
+      console.log(`[ServerService] Forked volume ${oldVolumeId} -> ${forkedVolumeId} in ${region}`);
+    }
+
+    // Stop old machine (don't delete yet — volume fork may still be hydrating from source)
+    if (oldMachineId) {
+      try {
+        await provider.stopMachine(oldMachineId);
+      } catch {
+        // Machine may already be stopped
+      }
+      console.log(`[ServerService] Stopped old machine ${oldMachineId}`);
+    }
+
+    // Generate new server token
+    const serverToken = generateServerToken();
+    const tokenHash = hashServerToken(serverToken);
+
+    // Clear old machine info and set new token
+    await db
+      .update(servers)
+      .set({
+        tokenHash,
+        machineId: null,
+        machineName: null,
+        volumeId: null,
+        region: region,
+        serverUrl: null,
+        tunnelToken: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(servers.id, serverId));
+
+    // Create new machine in new region with forked volume
+    const result = await provisionNewMachine(
+      server.id,
+      serverToken,
+      region,
+      server.tier as ServerTier | undefined,
+      server.autoSuspendEnabled ?? true,
+      forkedVolumeId,
+      server.tunnelId,
+      (server.provider || getDefaultProviderId()) as ProviderId,
+    );
+
+    console.log(`[ServerService] Region changed to ${region}, new machine at ${result.url}`);
+
+    // Clean up old infrastructure after new machine is healthy
+    if (oldMachineId) {
+      try {
+        await provider.deleteMachine(oldMachineId);
+        console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
+      } catch (cleanupError) {
+        console.error(`[ServerService] Failed to delete old machine ${oldMachineId}:`, cleanupError);
+      }
+    }
+    if (oldVolumeId) {
+      try {
+        await provider.deleteVolume(oldVolumeId);
+        console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
+      } catch (cleanupError) {
+        console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
+      }
+    }
+
+    return { success: true, region: result.region, status: 'online' };
+  } catch (error) {
+    console.error(`[ServerService] Failed to change region:`, error);
+
+    await db
+      .update(servers)
+      .set({ status: 'error', updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+
+    return { success: false, error: 'Failed to change region' };
+  }
+}
+
+/**
+ * Validate a tier change request (sync check before background operation).
+ */
+export async function validateChangeTier(
+  serverId: string,
+  userId: string,
+  newTier: string
+): Promise<{ success: boolean; error?: string }> {
+  const VALID_TIERS = ['shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
+  if (!VALID_TIERS.includes(newTier)) {
+    return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
+  }
+
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner or admin can change tier' };
+  }
+
+  if (!isAnyProviderConfigured()) {
+    return { success: false, error: 'Remote servers are not configured' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (server.tier === newTier) {
+    return { success: false, error: 'Server is already on this tier' };
+  }
+
+  if (server.status === 'provisioning') {
+    return { success: false, error: 'Server is already being provisioned' };
+  }
+
+  return { success: true };
+}
+
+/**
+ * Change server tier (resize machine).
+ * Destroys old machine/volume, creates new ones with new tier specs.
+ * Volume is snapshotted before deletion for safety.
+ */
+export async function changeTier(
+  serverId: string,
+  userId: string,
+  newTier: ServerTier
+): Promise<{ success: boolean; tier?: ServerTier; status?: ServerStatusType; error?: string }> {
+  const VALID_TIERS: ServerTier[] = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
+  if (!VALID_TIERS.includes(newTier)) {
+    return { success: false, error: `Invalid tier. Must be one of: micro, small, medium, large` };
+  }
+
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner or admin can change tier' };
+  }
+
+  if (!isAnyProviderConfigured()) {
+    return { success: false, error: 'Remote servers are not configured' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  if (server.tier === newTier) {
+    return { success: false, error: 'Server is already on this tier' };
+  }
+
+  const provider = getProvider((server.provider || 'fly') as ProviderId);
+  console.log(`[ServerService] Changing tier for server ${serverId} from ${server.tier} to ${newTier}`);
+
+  // Stop machine billing before destroying
+  await MachineUsageService.onMachineStopped(serverId);
+
+  // Set status to provisioning
+  await db
+    .update(servers)
+    .set({ status: 'provisioning', updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  try {
+    // Stop and delete old machine
+    if (server.machineId) {
+      try {
+        await provider.stopMachine(server.machineId);
+      } catch {
+        // Machine may already be stopped
+      }
+      await provider.deleteMachine(server.machineId);
+      console.log(`[ServerService] Deleted old machine ${server.machineId}`);
+    }
+
+    // Snapshot old volume before deletion
+    if (server.volumeId) {
+      try {
+        const snapshot = await provider.createSnapshot(server.volumeId);
+        console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${server.volumeId} before tier change`);
+      } catch (snapshotError) {
+        console.error(`[ServerService] Failed to snapshot volume before tier change:`, snapshotError);
+      }
+    }
+
+    // Delete old volume
+    if (server.volumeId) {
+      await provider.deleteVolume(server.volumeId);
+      console.log(`[ServerService] Deleted old volume ${server.volumeId}`);
+    }
+
+    // Generate new server token
+    const serverToken = generateServerToken();
+    const tokenHash = hashServerToken(serverToken);
+
+    // Clear old machine info, set new tier and token
+    await db
+      .update(servers)
+      .set({
+        tokenHash,
+        tier: newTier,
+        machineId: null,
+        machineName: null,
+        volumeId: null,
+        serverUrl: null,
+        tunnelToken: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(servers.id, serverId));
+
+    // Create new machine with new tier in same region
+    const region = server.region || 'ash';
+    const result = await provisionNewMachine(
+      server.id,
+      serverToken,
+      region,
+      newTier,
+      server.autoSuspendEnabled ?? true,
+      undefined,
+      server.tunnelId,
+      (server.provider || getDefaultProviderId()) as ProviderId,
+    );
+
+    console.log(`[ServerService] Tier changed to ${newTier}, new machine at ${result.url}`);
+    return { success: true, tier: newTier, status: 'online' };
+  } catch (error) {
+    console.error(`[ServerService] Failed to change tier:`, error);
+
+    await db
+      .update(servers)
+      .set({ status: 'error', updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+
+    return { success: false, error: 'Failed to change tier' };
+  }
+}
+
+/**
+ * Get remote server status from Fly.io
+ */
+export async function getRemoteServerStatus(
+  serverId: string,
+  userId: string
+): Promise<{ status: ServerStatusType; machineState?: string; url?: string } | null> {
+  const hasAccess = await canAccessServer(serverId, userId);
+  if (!hasAccess) {
+    return null;
+  }
+
+  const server = await getServer(serverId);
+  if (!server || server.deploymentType !== 'remote' || !server.machineId) {
+    return null;
+  }
+
+  try {
+    const provider = getProvider((server.provider || 'fly') as ProviderId);
+    const machineState = await provider.getMachineState(server.machineId);
+
+    // Map normalized machine state to our status
+    let status: ServerStatusType;
+    switch (machineState) {
+      case 'running':
+        status = 'online';
+        break;
+      case 'suspended':
+        status = 'suspended';
+        break;
+      case 'stopped':
+        status = 'offline';
+        break;
+      case 'starting':
+      case 'creating':
+        status = 'provisioning';
+        break;
+      default:
+        status = 'offline';
+    }
+
+    // Update server status if different
+    if (server.status !== status) {
+      await db
+        .update(servers)
+        .set({ status, updatedAt: new Date() })
+        .where(eq(servers.id, serverId));
+    }
+
+    return {
+      status,
+      machineState,
+      url: server.serverUrl || undefined,
+    };
+  } catch (error) {
+    console.error(`[ServerService] Failed to get machine status:`, error);
+    return { status: 'error' };
+  }
+}
+
+/**
+ * Delete a remote server (machine + volume)
+ */
+export async function deleteRemoteServer(serverId: string): Promise<boolean> {
+  const server = await getServer(serverId);
+  if (!server || server.deploymentType !== 'remote') {
+    return false;
+  }
+
+  // Stop machine billing before deletion
+  await MachineUsageService.onMachineStopped(serverId);
+
+  const provider = getProvider((server.provider || 'fly') as ProviderId);
+  let success = true;
+
+  // Snapshot volume before deletion (safety net for data recovery)
+  if (server.volumeId) {
+    try {
+      const snapshot = await provider.createSnapshot(server.volumeId);
+      console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${server.volumeId} before deletion`);
+    } catch (snapshotError) {
+      console.error(`[ServerService] Failed to snapshot volume before deletion:`, snapshotError);
+    }
+  }
+
+  // Delete machine (independent — don't let failure skip volume cleanup)
+  if (server.machineId) {
+    try {
+      console.log(`[ServerService] Deleting machine ${server.machineId} (provider: ${server.provider})`);
+      await provider.deleteMachine(server.machineId);
+      console.log(`[ServerService] Machine ${server.machineId} deleted`);
+    } catch (error) {
+      console.error(`[ServerService] Failed to delete machine ${server.machineId}:`, error);
+      success = false;
+    }
+  }
+
+  // Delete volume (independent — always attempt even if machine delete failed)
+  if (server.volumeId) {
+    try {
+      console.log(`[ServerService] Deleting volume ${server.volumeId} (provider: ${server.provider})`);
+      await provider.deleteVolume(server.volumeId);
+      console.log(`[ServerService] Volume ${server.volumeId} deleted`);
+    } catch (error) {
+      console.error(`[ServerService] Failed to delete volume ${server.volumeId}:`, error);
+      success = false;
+    }
+  }
+
+  return success;
+}
+
+/**
+ * Check if user can access a server by serverId
+ */
+export async function checkServerAccess(
+  userId: string,
+  serverId: string
+): Promise<{ hasAccess: boolean; role?: string }> {
+  const [membership] = await db
+    .select({ role: serverMembers.role })
+    .from(serverMembers)
+    .where(and(
+      eq(serverMembers.serverId, serverId),
+      eq(serverMembers.userId, userId)
+    ))
+    .limit(1);
+
+  if (!membership) {
+    return { hasAccess: false };
+  }
+
+  return { hasAccess: true, role: membership.role };
+}
+
+// ============================================================================
+// Bans
+// ============================================================================
+
+export async function banMember(serverId: string, requesterId: string, targetUserId: string, reason?: string): Promise<boolean> {
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  if (!hasPermission) return false;
+
+  const server = await getServer(serverId);
+  if (server?.ownerId === targetUserId) return false;
+
+  const requesterRole = await getMemberRole(serverId, requesterId);
+  const targetRole = await getMemberRole(serverId, targetUserId);
+  if (requesterRole === 'admin' && targetRole === 'admin') return false;
+
+  // Insert ban record
+  await db.insert(serverBans).values({
+    serverId,
+    userId: targetUserId,
+    reason: reason || null,
+    bannedById: requesterId,
+  });
+
+  // Also remove from members (kick + ban)
+  await db
+    .delete(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, targetUserId)));
+
+  console.log(`[ServerService] Banned user ${targetUserId} from server ${serverId}`);
+  return true;
+}
+
+export async function unbanMember(serverId: string, requesterId: string, targetUserId: string): Promise<boolean> {
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  if (!hasPermission) return false;
+
+  await db
+    .delete(serverBans)
+    .where(and(eq(serverBans.serverId, serverId), eq(serverBans.userId, targetUserId)));
+
+  console.log(`[ServerService] Unbanned user ${targetUserId} from server ${serverId}`);
+  return true;
+}
+
+export async function isUserBanned(serverId: string, userId: string): Promise<boolean> {
+  const [ban] = await db
+    .select({ id: serverBans.id })
+    .from(serverBans)
+    .where(and(eq(serverBans.serverId, serverId), eq(serverBans.userId, userId)))
+    .limit(1);
+  return !!ban;
+}
+
+export async function getServerBans(serverId: string): Promise<Array<{
+  id: string;
+  userId: string;
+  userName: string | null;
+  userEmail: string | null;
+  reason: string | null;
+  bannedById: string;
+  createdAt: Date;
+}>> {
+  const bans = await db
+    .select({
+      id: serverBans.id,
+      userId: serverBans.userId,
+      userName: users.name,
+      userEmail: users.email,
+      reason: serverBans.reason,
+      bannedById: serverBans.bannedById,
+      createdAt: serverBans.createdAt,
+    })
+    .from(serverBans)
+    .innerJoin(users, eq(serverBans.userId, users.id))
+    .where(eq(serverBans.serverId, serverId));
+  return bans;
+}
+
+// ============================================================================
+// Ownership Transfer
+// ============================================================================
+
+/**
+ * Transfer server ownership to another user (by email).
+ * Validates recipient exists, isn't already the owner, and hasn't hit their server limit.
+ * On success: recipient becomes owner, old owner becomes admin.
+ */
+export async function transferOwnership(
+  serverId: string,
+  currentOwnerId: string,
+  newOwnerEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  // Verify server exists and current user is the owner
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+  if (server.ownerId !== currentOwnerId) {
+    return { success: false, error: 'Only the server owner can transfer ownership' };
+  }
+
+  // Look up recipient by email
+  const recipient = await getUserByEmail(newOwnerEmail.toLowerCase());
+  if (!recipient) {
+    return { success: false, error: 'No account found with that email' };
+  }
+
+  // Can't transfer to yourself
+  if (recipient.id === currentOwnerId) {
+    return { success: false, error: 'You already own this server' };
+  }
+
+  // Check recipient's server limit (admins bypass)
+  const recipientIsAdmin = await isAdmin(recipient.id);
+  if (!recipientIsAdmin) {
+    const subscription = await getOrCreateSubscription(recipient.id);
+    const planId = subscription.planId as keyof typeof PLAN_CONFIG;
+    const planConfig = PLAN_CONFIG[planId] || PLAN_CONFIG.free;
+
+    const [countResult] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(servers)
+      .where(eq(servers.ownerId, recipient.id));
+    const ownedCount = Number(countResult?.count ?? 0);
+
+    if (ownedCount >= planConfig.maxServers) {
+      return {
+        success: false,
+        error: `Recipient has reached their server limit (${ownedCount}/${planConfig.maxServers} on ${planConfig.name} plan). They need to upgrade or free up a server.`,
+      };
+    }
+  }
+
+  // Execute the transfer
+  // 1. Update server owner
+  await db
+    .update(servers)
+    .set({ ownerId: recipient.id, updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  // 2. Check if recipient is already a member
+  const [existingMembership] = await db
+    .select()
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, recipient.id)))
+    .limit(1);
+
+  if (existingMembership) {
+    // Update their role to owner
+    await db
+      .update(serverMembers)
+      .set({ role: 'owner' })
+      .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, recipient.id)));
+  } else {
+    // Add them as owner
+    await db.insert(serverMembers).values({
+      serverId,
+      userId: recipient.id,
+      role: 'owner',
+    });
+  }
+
+  // 3. Demote old owner to admin
+  await db
+    .update(serverMembers)
+    .set({ role: 'admin' })
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, currentOwnerId)));
+
+  console.log(`[ServerService] Transferred ownership of server ${serverId} from ${currentOwnerId} to ${recipient.id} (${newOwnerEmail})`);
+  return { success: true };
+}
+
+// ============================================================================
+// Invite Links (Discord-style shareable links)
+// ============================================================================
+
+/**
+ * Create a shareable invite link for a server
+ */
+export async function createInviteLink(
+  serverId: string,
+  createdById: string,
+  options: { expiresIn?: number; maxUses?: number }
+): Promise<{ success: boolean; inviteLink?: any; error?: string }> {
+  const hasPermission = await checkServerPermission(serverId, createdById, ['owner', 'admin']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only owners and admins can create invite links' };
+  }
+
+  const code = nanoid(10);
+  const expiresAt = new Date(Date.now() + (options.expiresIn || 7 * 24 * 60 * 60) * 1000);
+
+  const [link] = await db
+    .insert(serverInviteLinks)
+    .values({
+      serverId,
+      code,
+      createdById,
+      expiresAt,
+      maxUses: options.maxUses || null,
+    })
+    .returning();
+
+  return {
+    success: true,
+    inviteLink: {
+      id: link.id,
+      code: link.code,
+      expiresAt: link.expiresAt.toISOString(),
+      maxUses: link.maxUses,
+      uses: link.uses,
+      createdAt: link.createdAt.toISOString(),
+    },
+  };
+}
+
+/**
+ * Get active invite links for a server
+ */
+export async function getInviteLinks(serverId: string): Promise<any[]> {
+  const links = await db
+    .select({
+      id: serverInviteLinks.id,
+      code: serverInviteLinks.code,
+      expiresAt: serverInviteLinks.expiresAt,
+      maxUses: serverInviteLinks.maxUses,
+      uses: serverInviteLinks.uses,
+      createdAt: serverInviteLinks.createdAt,
+      createdByName: users.name,
+    })
+    .from(serverInviteLinks)
+    .innerJoin(users, eq(serverInviteLinks.createdById, users.id))
+    .where(
+      and(
+        eq(serverInviteLinks.serverId, serverId),
+        gt(serverInviteLinks.expiresAt, new Date())
+      )
+    );
+
+  // Filter out maxed-out links
+  return links
+    .filter((l) => !l.maxUses || l.uses < l.maxUses)
+    .map((l) => ({
+      id: l.id,
+      code: l.code,
+      expiresAt: l.expiresAt.toISOString(),
+      maxUses: l.maxUses,
+      uses: l.uses,
+      createdBy: l.createdByName || 'Unknown',
+      createdAt: l.createdAt.toISOString(),
+    }));
+}
+
+/**
+ * Revoke (delete) an invite link
+ */
+export async function revokeInviteLink(
+  serverId: string,
+  requesterId: string,
+  linkId: string
+): Promise<{ success: boolean; error?: string }> {
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only owners and admins can revoke invite links' };
+  }
+
+  await db
+    .delete(serverInviteLinks)
+    .where(and(eq(serverInviteLinks.id, linkId), eq(serverInviteLinks.serverId, serverId)));
+
+  return { success: true };
+}
+
+/**
+ * Get public info about an invite link (no auth required)
+ */
+export async function getInviteLinkInfo(code: string): Promise<{ success: boolean; invite?: any; error?: string }> {
+  const [link] = await db
+    .select({
+      code: serverInviteLinks.code,
+      expiresAt: serverInviteLinks.expiresAt,
+      maxUses: serverInviteLinks.maxUses,
+      uses: serverInviteLinks.uses,
+      serverName: servers.name,
+      createdByName: users.name,
+    })
+    .from(serverInviteLinks)
+    .innerJoin(servers, eq(serverInviteLinks.serverId, servers.id))
+    .innerJoin(users, eq(serverInviteLinks.createdById, users.id))
+    .where(eq(serverInviteLinks.code, code))
+    .limit(1);
+
+  if (!link) {
+    return { success: false, error: 'Invite link not found' };
+  }
+
+  const now = new Date();
+  const expired = link.expiresAt <= now;
+  const maxedOut = link.maxUses ? link.uses >= link.maxUses : false;
+  const valid = !expired && !maxedOut;
+
+  return {
+    success: true,
+    invite: {
+      code: link.code,
+      serverName: link.serverName,
+      creatorName: link.createdByName || 'Unknown',
+      expiresAt: link.expiresAt.toISOString(),
+      valid,
+    },
+  };
+}
+
+/**
+ * Accept an invite link and join the server
+ */
+export async function acceptInviteLink(
+  code: string,
+  userId: string
+): Promise<{ success: boolean; serverId?: string; error?: string }> {
+  const [link] = await db
+    .select({
+      id: serverInviteLinks.id,
+      serverId: serverInviteLinks.serverId,
+      expiresAt: serverInviteLinks.expiresAt,
+      maxUses: serverInviteLinks.maxUses,
+      uses: serverInviteLinks.uses,
+      createdById: serverInviteLinks.createdById,
+    })
+    .from(serverInviteLinks)
+    .where(eq(serverInviteLinks.code, code))
+    .limit(1);
+
+  if (!link) {
+    return { success: false, error: 'Invite link not found' };
+  }
+
+  const now = new Date();
+  if (link.expiresAt <= now) {
+    return { success: false, error: 'This invite link has expired' };
+  }
+  if (link.maxUses && link.uses >= link.maxUses) {
+    return { success: false, error: 'This invite link has reached its maximum uses' };
+  }
+
+  // Check if banned
+  if (await isUserBanned(link.serverId, userId)) {
+    return { success: false, error: 'You are banned from this server' };
+  }
+
+  // Check if already a member
+  const [existing] = await db
+    .select({ id: serverMembers.id })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, link.serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+
+  if (existing) {
+    return { success: true, serverId: link.serverId }; // Already a member, just return success
+  }
+
+  // Add as member
+  await db.insert(serverMembers).values({
+    serverId: link.serverId,
+    userId,
+    role: 'member',
+    invitedById: link.createdById,
+  });
+
+  // Increment uses
+  await db
+    .update(serverInviteLinks)
+    .set({ uses: sql`${serverInviteLinks.uses} + 1` })
+    .where(eq(serverInviteLinks.id, link.id));
+
+  return { success: true, serverId: link.serverId };
+}
+
+// ============================================================================
+// Server Templates
+// ============================================================================
+
+/**
+ * Build fetch headers for a fishtank server request.
+ * Generates a server session token and adds Fly routing headers if needed.
+ */
+async function buildServerFetchHeaders(
+  server: Server,
+  userId: string,
+): Promise<{ url: string; headers: Record<string, string> }> {
+  const token = await ServerSessionService.generateServerSessionToken(
+    userId,
+    server.id,
+    300, // 5 min expiry
+    { serverRole: 'owner' },
+  );
+
+  let url: string;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  };
+
+  if (server.machineId) {
+    const provider = getProvider((server.provider || 'fly') as ProviderId);
+    const routing = provider.getRoutingInfo(server.machineId);
+    url = routing.serverUrl;
+    if (routing.routingToken && routing.requiresRoutingHeaders) {
+      headers['fly-force-instance-id'] = routing.routingToken;
+    }
+  } else {
+    url = server.serverUrl!;
+  }
+
+  return { url, headers };
+}
+
+/**
+ * Apply a template to a newly created server.
+ * Waits for the new server to come online, fetches template data from the
+ * source server, and imports it into the new server.
+ */
+export async function applyTemplate(
+  newServerId: string,
+  templateId: string,
+  userId: string,
+): Promise<void> {
+  console.log(`[ServerService] Applying template ${templateId} to server ${newServerId}`);
+
+  // 1. Look up template → get source serverId
+  const [template] = await db
+    .select()
+    .from(serverTemplates)
+    .where(eq(serverTemplates.id, templateId))
+    .limit(1);
+  if (!template) {
+    console.error(`[ServerService] Template ${templateId} not found`);
+    return;
+  }
+
+  // 2. Look up source server
+  const sourceServer = await getServer(template.serverId);
+  if (!sourceServer?.serverUrl) {
+    console.error(`[ServerService] Template source server ${template.serverId} not found or has no URL`);
+    return;
+  }
+
+  // 3. Wait for the new server to come online (poll every 5s, up to 5 minutes)
+  let newServer: Server | null = null;
+  for (let i = 0; i < 60; i++) {
+    newServer = await getServer(newServerId);
+    if (newServer?.status === 'online' && newServer?.serverUrl) {
+      break;
+    }
+    if (newServer?.status === 'error') {
+      console.error(`[ServerService] New server ${newServerId} entered error state, aborting template`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+
+  if (!newServer?.serverUrl || newServer.status !== 'online') {
+    console.error(`[ServerService] New server ${newServerId} did not come online in time`);
+    return;
+  }
+
+  // 4. Fetch export from template server
+  const { url: sourceUrl, headers: sourceHeaders } = await buildServerFetchHeaders(sourceServer, userId);
+  console.log(`[ServerService] Fetching template export from ${sourceUrl}/api/export-template`);
+
+  const exportRes = await fetch(`${sourceUrl}/api/export-template`, {
+    headers: sourceHeaders,
+  });
+
+  if (!exportRes.ok) {
+    console.error(`[ServerService] Failed to export template from ${template.serverId}: ${exportRes.status}`);
+    return;
+  }
+
+  const exportData = await exportRes.json() as { success: boolean; data?: unknown };
+  if (!exportData.success || !exportData.data) {
+    console.error(`[ServerService] Template export returned error from ${template.serverId}`);
+    return;
+  }
+
+  // 5. Post import to new server
+  const { url: newUrl, headers: newHeaders } = await buildServerFetchHeaders(newServer, userId);
+  console.log(`[ServerService] Importing template data to ${newUrl}/api/import-template`);
+
+  const importRes = await fetch(`${newUrl}/api/import-template`, {
+    method: 'POST',
+    headers: newHeaders,
+    body: JSON.stringify(exportData.data),
+  });
+
+  if (!importRes.ok) {
+    console.error(`[ServerService] Failed to import template to ${newServerId}: ${importRes.status}`);
+    return;
+  }
+
+  const importData = await importRes.json() as { success: boolean };
+  if (!importData.success) {
+    console.error(`[ServerService] Template import returned error for ${newServerId}`);
+    return;
+  }
+
+  console.log(`[ServerService] Successfully applied template ${templateId} to server ${newServerId}`);
+}
