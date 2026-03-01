@@ -3,19 +3,27 @@
 import Link from 'next/link';
 import { X } from 'lucide-react';
 import { usePathname } from 'next/navigation';
-import { useSession } from 'next-auth/react';
+
+export interface SidebarUser {
+  id: string;
+  name?: string | null;
+  email?: string | null;
+  image?: string | null;
+  isAdmin: boolean;
+}
 
 export interface SidebarProps {
   /** Mobile-only: whether the sidebar drawer is open. On desktop it is always shown. */
   isOpen?: boolean;
   /** Mobile-only: invoked to close the drawer (e.g. close button / nav click). */
   onClose?: () => void;
+  /** User data passed from server component */
+  user?: SidebarUser | null;
 }
 
-export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
+export function Sidebar({ isOpen = false, onClose, user }: SidebarProps) {
   const pathname = usePathname();
-  const { data: session } = useSession();
-  const isAdmin = (session?.user as any)?.isAdmin;
+  const isAdmin = user?.isAdmin;
 
   const mobileTranslateClass = isOpen ? 'translate-x-0' : '-translate-x-full';
 
@@ -78,11 +86,11 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
 
       <div className="border-t border-slate-700 p-4">
         <div className="flex items-center gap-3">
-          {session?.user?.image && (
-            <img src={session.user.image} alt="" className="h-8 w-8 rounded-full" />
+          {user?.image && (
+            <img src={user.image} alt="" className="h-8 w-8 rounded-full" />
           )}
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-white truncate">{session?.user?.name}</p>
+            <p className="text-sm font-medium text-white truncate">{user?.name}</p>
             <p className="text-xs text-slate-400 truncate">{isAdmin ? 'Admin' : 'User'}</p>
           </div>
           <div className="flex items-center gap-2">

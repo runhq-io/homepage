@@ -1,14 +1,18 @@
-import { signOut } from '@/lib/auth';
+import { NextResponse } from 'next/server';
 
 /**
- * Server-side sign-out endpoint.
+ * GET /api/logout
  *
- * Unlike the client-side signOut() from next-auth/react (which does a fetch
- * + window.location.href redirect), this clears the session cookie and
- * redirects to /login in a single HTTP response — eliminating the race
- * condition where the browser navigates to /login before the Set-Cookie
- * from the fetch response has been fully processed.
+ * Clears the auth_token cookie and redirects to /login.
  */
 export async function GET() {
-  await signOut({ redirectTo: '/login' });
+  const response = NextResponse.redirect(new URL('/login', process.env.NEXTAUTH_URL || 'http://localhost:9000'));
+  response.cookies.set('auth_token', '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0, // Expire immediately
+  });
+  return response;
 }

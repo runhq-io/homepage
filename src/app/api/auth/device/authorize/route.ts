@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Code already used' }, { status: 400 });
   }
 
-  const userId = (session.user as any).id;
+  const userId = session.user.id;
   const success = await authorizeDeviceCode(userCode, userId);
 
   if (!success) {

@@ -14,16 +14,16 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node --env-file=.env scripts/run-migration.js",
     "db:seed": "tsx --env-file=.env scripts/seed.ts",
-    "deploy": "bash scripts/deploy.sh"
+    "deploy": "echo 'No deploy target configured'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
-    "@auth/drizzle-adapter": "^1.7.4",
     "@fishtank/server-protocol": "workspace:*",
     "@hono/node-server": "^1.19.9",
     "@neondatabase/serverless": "^0.10.4",
     "@xyflow/react": "^12.10.0",
     "arctic": "^3.7.0",
+    "bcryptjs": "^3.0.3",
     "dagre": "^0.8.5",
     "dotenv": "^16.5.0",
     "drizzle-orm": "^0.38.3",
@@ -32,16 +32,17 @@
     "lucide-react": "^0.469.0",
     "nanoid": "^5.1.5",
     "next": "^16.1.6",
-    "next-auth": "^5.0.0-beta.25",
     "pg": "^8.18.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "resend": "^6.9.3",
     "stripe": "^20.2.0",
     "ws": "^8.18.0",
     "xstate": "^5.18.0"
   },
   "devDependencies": {
     "@tailwindcss/forms": "^0.5.10",
+    "@types/bcryptjs": "^3.0.0",
     "@types/dagre": "^0.7.53",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.16.0",

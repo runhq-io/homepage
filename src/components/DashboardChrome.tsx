@@ -4,9 +4,9 @@ import { Menu } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
-import { Sidebar } from '@/components/Sidebar';
+import { Sidebar, type SidebarUser } from '@/components/Sidebar';
 
-export function DashboardChrome({ children }: { children: React.ReactNode }) {
+export function DashboardChrome({ children, user }: { children: React.ReactNode; user?: SidebarUser | null }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const pathname = usePathname();
 
@@ -17,7 +17,7 @@ export function DashboardChrome({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="relative z-10 flex h-[100dvh] bg-slate-900/90">
-      <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} user={user} />
 
       {sidebarOpen && (
         <button

@@ -133,6 +133,7 @@ export const users = pgTable('users', {
   email: text('email').unique(),
   name: text('name'),
   avatarUrl: text('avatar_url'),
+  passwordHash: text('password_hash'),
   authProvider: text('auth_provider'), // 'google', 'github', 'email'
   authProviderId: text('auth_provider_id'),
   isActivated: boolean('is_activated').default(false), // Requires invite code to activate
@@ -823,3 +824,26 @@ export const deviceCodes = pgTable('device_codes', {
 
 export type DeviceCode = typeof deviceCodes.$inferSelect;
 export type NewDeviceCode = typeof deviceCodes.$inferInsert;
+
+// ============================================================================
+// Password Reset Tokens
+// ============================================================================
+
+export const passwordResetTokens = pgTable('password_reset_tokens', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  tokenHash: text('token_hash').notNull(), // SHA-256 hash of the token (plaintext sent in email)
+  expiresAt: timestamp('expires_at').notNull(),
+  usedAt: timestamp('used_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const passwordResetTokensRelations = relations(passwordResetTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [passwordResetTokens.userId],
+    references: [users.id],
+  }),
+}));
+
+export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
+export type NewPasswordResetToken = typeof passwordResetTokens.$inferInsert;

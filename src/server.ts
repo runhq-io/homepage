@@ -5,7 +5,7 @@
  * single Node.js process on a single port.
  *
  * Routing:
- *   /api/auth/*           → Next.js (NextAuth OAuth)
+ *   /api/auth/*           → Next.js (auth endpoints)
  *   /api/*                → Hono (80+ REST endpoints)
  *   /health               → Hono
  *   /billing/*            → Hono
@@ -74,11 +74,11 @@ async function main() {
     const url = req.url || '/';
 
     // Routes that go to Next.js:
-    //   /api/auth/*   (NextAuth OAuth handlers)
+    //   /api/auth/*   (auth endpoints: login, register, me, web-me, web-token, device)
     //   /_next/*      (Next.js assets)
     //   /login, /auth/*, /join/*, /admin/*, /(dashboard)/*
     //   Everything not matched by Hono patterns below
-    const isNextAuthRoute = url.startsWith('/api/auth/');
+    const isNextAuthRoute = url.startsWith('/api/auth/'); // legacy variable name; routes auth endpoints to Next.js
     const isNextAsset = url.startsWith('/_next/');
 
     // Routes that go to Hono:

@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useSession } from 'next-auth/react';
 import { useParams, useRouter } from 'next/navigation';
 import { Users, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
 
@@ -14,7 +13,6 @@ interface InviteInfo {
 
 export default function JoinPage() {
   const { code } = useParams<{ code: string }>();
-  const { data: session, status: sessionStatus } = useSession();
   const router = useRouter();
 
   const [invite, setInvite] = useState<InviteInfo | null>(null);
@@ -22,6 +20,21 @@ export default function JoinPage() {
   const [error, setError] = useState<string | null>(null);
   const [accepting, setAccepting] = useState(false);
   const [accepted, setAccepted] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // Check auth status via API
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then(res => {
+        setIsAuthenticated(res.ok);
+        setAuthChecked(true);
+      })
+      .catch(() => {
+        setIsAuthenticated(false);
+        setAuthChecked(true);
+      });
+  }, []);
 
   // Fetch invite info (public, no auth required)
   useEffect(() => {
@@ -44,14 +57,14 @@ export default function JoinPage() {
   const pendingAccept = typeof window !== 'undefined' && sessionStorage.getItem('pendingInviteAccept') === code;
 
   useEffect(() => {
-    if (pendingAccept && sessionStatus === 'authenticated' && invite?.valid && !accepting && !accepted) {
+    if (pendingAccept && authChecked && isAuthenticated && invite?.valid && !accepting && !accepted) {
       sessionStorage.removeItem('pendingInviteAccept');
       handleAccept();
     }
-  }, [pendingAccept, sessionStatus, invite]);
+  }, [pendingAccept, authChecked, isAuthenticated, invite]);
 
   const handleAccept = async () => {
-    if (sessionStatus !== 'authenticated') {
+    if (!isAuthenticated) {
       // Store intent and redirect to login
       sessionStorage.setItem('pendingInviteAccept', code);
       router.push(`/login?callbackUrl=${encodeURIComponent(`/join/${code}`)}`);

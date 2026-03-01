@@ -4,7 +4,7 @@ import { createToken } from '@/api/auth/jwt';
 
 /**
  * Generate a JWT token for the web client.
- * Called after OAuth completes to give the web client a token.
+ * Called after login to give the web client a token.
  */
 export async function POST() {
   const session = await auth();
@@ -13,7 +13,7 @@ export async function POST() {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const userId = (session.user as any).id;
+  const userId = session.user.id;
 
   if (!userId) {
     console.error('[web-token] Session missing user ID:', session.user);

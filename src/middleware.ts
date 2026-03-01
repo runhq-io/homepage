@@ -1,6 +1,7 @@
-import { auth } from './lib/auth';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { verifyToken } from '@/api/auth/jwt';
+import { isAdmin } from '@/lib/adminPolicy';
 
 export const runtime = 'nodejs';
 
@@ -28,8 +29,10 @@ function corsHeaders(origin: string | null) {
 export default async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
   const isLoginPage = pathname === '/login';
+  const isResetPasswordPage = pathname === '/reset-password';
+  const isPublicPage = isLoginPage || isResetPasswordPage;
   const isApiRoute = pathname.startsWith('/api/');
-  const isAuthRoute = pathname.startsWith('/auth/'); // All auth routes (device, web-login, etc.)
+  const isAuthRoute = pathname.startsWith('/auth/'); // All auth routes (device auth, etc.)
   const isAdminRoute = pathname.startsWith('/admin');
   const isHealthCheck = pathname === '/health' || pathname === '/health/';
 
@@ -44,7 +47,7 @@ export default async function middleware(req: NextRequest) {
 
   // Routes that should not require auth.
   // - API routes handle auth (and return JSON/401) themselves.
-  // - /auth/* routes handle their own OAuth flows (device auth, web-login, etc.)
+  // - /auth/* routes handle their own auth flows (device auth, etc.)
   // - /health is used for uptime monitoring and must not redirect.
   if (isApiRoute || isAuthRoute || isHealthCheck) {
     // Add CORS headers to API responses
@@ -57,24 +60,29 @@ export default async function middleware(req: NextRequest) {
     return response;
   }
 
-  const session = await auth();
-  const isLoggedIn = !!session;
+  // Read JWT from cookie (middleware uses req.cookies, not next/headers cookies())
+  const token = req.cookies.get('auth_token')?.value;
+  let userId: string | null = null;
+  if (token) {
+    userId = await verifyToken(token);
+  }
+  const isLoggedIn = !!userId;
 
-  // Redirect logged-in users away from login page
+  // Redirect logged-in users away from login/reset pages
   if (isLoginPage && isLoggedIn) {
     return NextResponse.redirect(new URL('/', req.url));
   }
 
-  // Redirect unauthenticated users to login
-  if (!isLoginPage && !isLoggedIn) {
+  // Redirect unauthenticated users to login (but allow public pages)
+  if (!isPublicPage && !isLoggedIn) {
     return NextResponse.redirect(new URL('/login', req.url));
   }
 
   // Redirect non-admin users away from /admin.
   // (Layout also enforces this; middleware makes the redirect faster/cheaper.)
-  if (isAdminRoute) {
-    const user = session?.user as any;
-    if (!user?.isAdmin) {
+  if (isAdminRoute && userId) {
+    const userIsAdmin = await isAdmin(userId);
+    if (!userIsAdmin) {
       return NextResponse.redirect(new URL('/', req.url));
     }
   }
@@ -85,4 +93,3 @@ export default async function middleware(req: NextRequest) {
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 };
-

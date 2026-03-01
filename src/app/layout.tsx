@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import { SessionProvider } from 'next-auth/react';
 import { GoogleAnalytics } from '@/components/analytics/GoogleAnalytics';
 import './globals.css';
 
@@ -28,9 +27,8 @@ export default function RootLayout({
       {/* Match marketing site base layout/typography defaults */}
       <body className="min-h-screen overflow-x-hidden">
         <GoogleAnalytics />
-        <SessionProvider>{children}</SessionProvider>
+        {children}
       </body>
     </html>
   );
 }
-
