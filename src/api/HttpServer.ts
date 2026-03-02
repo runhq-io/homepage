@@ -1857,8 +1857,6 @@ export function createHttpApp() {
           autoSuspendEnabled: server.autoSuspendEnabled ?? true,
           autoSuspendIdleMinutes: server.autoSuspendIdleMinutes ?? 15,
           machineStartedAt: server.machineStartedAt?.toISOString() || null,
-          // Only expose root password to the server owner
-          rootPassword: userId === server.ownerId ? (server.rootPassword || null) : undefined,
           createdAt: server.createdAt,
           updatedAt: server.updatedAt,
         },
@@ -2817,36 +2815,6 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Restart server error:', error);
       return c.json({ error: 'Failed to restart server' }, 500);
-    }
-  });
-
-  // Reset root password (Hetzner only, owner only)
-  app.post('/api/servers/:serverId/reset-root-password', async (c) => {
-    try {
-      const authHeader = c.req.header('Authorization');
-      if (!authHeader?.startsWith('Bearer ')) {
-        return c.json({ error: 'Unauthorized' }, 401);
-      }
-      const token = authHeader.substring(7);
-      const userId = await extractUserIdFromToken(token);
-      if (!userId) {
-        return c.json({ error: 'Invalid token' }, 401);
-      }
-
-      const serverId = c.req.param('serverId');
-      const result = await ServerService.resetRootPassword(serverId, userId);
-
-      if (!result.success) {
-        return c.json({ error: result.error }, result.error === 'Access denied' ? 403 : 400);
-      }
-
-      return c.json({
-        success: true,
-        rootPassword: result.rootPassword,
-      });
-    } catch (error) {
-      console.error('[HttpServer] Reset root password error:', error);
-      return c.json({ error: 'Failed to reset root password' }, 500);
     }
   });
 

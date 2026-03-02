@@ -8,7 +8,6 @@
 import type { IProvider } from './IProvider';
 import type { ProviderId, TierId } from './types';
 import { FlyProvider } from './FlyProvider';
-import { HetznerProvider } from './HetznerProvider';
 
 // ---------------------------------------------------------------------------
 // Registry state
@@ -27,12 +26,6 @@ const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
     medium: 4,  // $0.04/hr — shared-cpu-4x / 4GB
     large: 6,   // $0.06/hr — shared-cpu-4x / 8GB
   },
-  hetzner: {
-    micro: 1,    // cx22: ~€0.0076/hr ≈ $0.008/hr
-    small: 2,    // cx32: ~€0.0153/hr ≈ $0.017/hr
-    medium: 5,   // cx42: ~€0.0306/hr ≈ $0.034/hr
-    large: 10,   // cx52: ~€0.0611/hr ≈ $0.067/hr
-  },
 };
 
 // ---------------------------------------------------------------------------
@@ -42,11 +35,6 @@ const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
 export function initProviders(): void {
   const fly = new FlyProvider();
   providers.set('fly', fly);
-
-  if (process.env.HETZNER_API_TOKEN) {
-    const hetzner = new HetznerProvider();
-    providers.set('hetzner', hetzner);
-  }
 
   const configured = [...providers.values()].filter(p => p.isConfigured()).map(p => p.id);
   console.log(`[Providers] Initialized: ${configured.length ? configured.join(', ') : 'none configured'}`);
@@ -69,13 +57,9 @@ export function getAllProviders(): IProvider[] {
 }
 
 /**
- * Get the default provider. Always prefer Fly.io — Hetzner is available but not default.
+ * Get the default provider.
  */
 export function getDefaultProviderId(): ProviderId {
-  if (providers.has('fly') && providers.get('fly')!.isConfigured()) return 'fly';
-  for (const p of providers.values()) {
-    if (p.isConfigured()) return p.id;
-  }
   return 'fly';
 }
 

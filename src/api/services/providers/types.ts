@@ -9,7 +9,7 @@
 // Provider identity
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'fly' | 'hetzner';
+export type ProviderId = 'fly';
 
 // ---------------------------------------------------------------------------
 // Machine states (normalized across providers)
@@ -70,7 +70,6 @@ export interface ProvisionResult {
   serverUrl: string;
   region: string;
   volumeId: string;
-  rootPassword?: string;
   providerMetadata?: Record<string, unknown>;
 }
 

@@ -8,7 +8,7 @@
 import { db } from '../../db/index';
 import { servers, subscriptions, type ServerTier } from '../../db/schema';
 import { eq, and, isNotNull } from 'drizzle-orm';
-import { getHourlyRate, getProvider, hasProvider } from './providers/registry';
+import { getHourlyRate } from './providers/registry';
 import type { ProviderId, TierId } from './providers/types';
 
 // Legacy tier name → TierId mapping (for backward compat during transition)
@@ -40,14 +40,14 @@ function getServerHourlyRate(tier: string | null, providerId: ProviderId = 'fly'
 
 // Export legacy TIER_HOURLY_RATES for backward compat (tests, etc.)
 export const TIER_HOURLY_RATES: Partial<Record<ServerTier, number>> = {
-  'shared-cpu-1x': 1,       // $0.01/hr (Fly)
-  'shared-cpu-2x': 2,       // $0.02/hr (Fly)
-  'performance-cpu-2x': 14, // $0.14/hr (Fly)
-  'performance-cpu-4x': 27, // $0.27/hr (Fly)
-  'micro': 1,               // $0.01/hr (Hetzner cx22)
-  'small': 2,               // $0.02/hr (Hetzner cx32)
-  'medium': 5,              // $0.05/hr (Hetzner cx42)
-  'large': 10,              // $0.10/hr (Hetzner cx52)
+  'shared-cpu-1x': 1,       // $0.01/hr
+  'shared-cpu-2x': 2,       // $0.02/hr
+  'performance-cpu-2x': 14, // $0.14/hr
+  'performance-cpu-4x': 27, // $0.27/hr
+  'micro': 2,               // $0.02/hr
+  'small': 3,               // $0.03/hr
+  'medium': 4,              // $0.04/hr
+  'large': 6,               // $0.06/hr
 };
 
 /**
@@ -209,60 +209,6 @@ export async function getMachineUsage(serverId: string): Promise<{
     hourlyRateCents,
     tier,
   };
-}
-
-/**
- * Check for idle Hetzner machines and stop them.
- * Hetzner has no auto-suspend, so we stop machines with stale heartbeats.
- * Called alongside tickBilling on the same 5-minute interval.
- */
-export async function checkIdleHetznerMachines(): Promise<void> {
-  if (!hasProvider('hetzner')) return;
-
-  const now = new Date();
-  const idleThresholdMs = 15 * 60 * 1000; // 15 minutes default
-
-  const hetznerServers = await db
-    .select({
-      id: servers.id,
-      machineId: servers.machineId,
-      status: servers.status,
-      lastSeen: servers.lastSeen,
-      autoSuspendEnabled: servers.autoSuspendEnabled,
-      autoSuspendIdleMinutes: servers.autoSuspendIdleMinutes,
-    })
-    .from(servers)
-    .where(
-      and(
-        eq(servers.provider, 'hetzner'),
-        eq(servers.deploymentType, 'remote'),
-        isNotNull(servers.machineId),
-      )
-    );
-
-  for (const srv of hetznerServers) {
-    if (!srv.machineId || !srv.autoSuspendEnabled) continue;
-    if (srv.status !== 'online') continue;
-
-    const idleMs = (srv.autoSuspendIdleMinutes ?? 15) * 60 * 1000;
-    if (!srv.lastSeen) continue;
-
-    const staleMs = now.getTime() - srv.lastSeen.getTime();
-    if (staleMs < idleMs) continue;
-
-    console.log(`[MachineUsage] Hetzner server ${srv.id} idle for ${Math.round(staleMs / 60000)}min, stopping`);
-    try {
-      const provider = getProvider('hetzner');
-      await provider.stopMachine(srv.machineId);
-      await onMachineStopped(srv.id);
-      await db
-        .update(servers)
-        .set({ status: 'suspended', updatedAt: new Date() })
-        .where(eq(servers.id, srv.id));
-    } catch (error) {
-      console.error(`[MachineUsage] Failed to stop idle Hetzner server ${srv.id}:`, error);
-    }
-  }
 }
 
 /**

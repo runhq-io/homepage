@@ -600,7 +600,7 @@ export const servers = pgTable('servers', {
   machineName: text('machine_name'), // Machine name
   region: text('region'), // Provider region (e.g., 'iad', 'fsn1')
   volumeId: text('volume_id'), // Provider volume ID for persistent storage
-  provider: text('provider').$type<'fly' | 'hetzner'>().notNull().default('fly'), // Infrastructure provider
+  provider: text('provider').$type<'fly'>().notNull().default('fly'), // Infrastructure provider
   tier: text('tier').$type<ServerTier>().default('shared-cpu-1x'), // Machine tier based on hardware specs
   iconUrl: text('icon_url'), // Custom server icon (base64 data URL)
   // Auto-suspend settings
@@ -608,8 +608,6 @@ export const servers = pgTable('servers', {
   autoSuspendIdleMinutes: integer('auto_suspend_idle_minutes').default(15),
   // Machine billing
   machineStartedAt: timestamp('machine_started_at'), // When the machine last started (for billing ticks)
-  // SSH credentials (Hetzner only — initial root password returned at creation)
-  rootPassword: text('root_password'),
   // Cloudflare Tunnel fields (for public port routing)
   tunnelId: text('tunnel_id'), // Cloudflare Named Tunnel ID
   tunnelToken: text('tunnel_token'), // Deprecated: no longer persisted in plaintext (kept for migration compatibility)

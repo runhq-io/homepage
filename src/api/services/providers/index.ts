@@ -10,4 +10,3 @@ export {
   isAnyProviderConfigured,
 } from './registry';
 export { FlyProvider, flyTierToTierId, tierIdToFlyTier } from './FlyProvider';
-export { HetznerProvider } from './HetznerProvider';

@@ -1,7 +1,7 @@
 /**
  * Provider Interface
  *
- * Every infrastructure provider (Fly.io, Hetzner, etc.) implements this interface.
+ * Every infrastructure provider (Fly.io) implements this interface.
  * ServerService calls through IProvider — it never touches provider-specific APIs directly.
  */
 

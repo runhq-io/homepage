@@ -47,7 +47,6 @@ async function main() {
   // ── Billing tick (every 5 min) ────────────────────────────────────────
   setInterval(() => {
     MachineUsageService.tickBilling().catch(console.error);
-    MachineUsageService.checkIdleHetznerMachines().catch(console.error);
   }, 5 * 60 * 1000);
   MachineUsageService.tickBilling().catch(console.error);
 

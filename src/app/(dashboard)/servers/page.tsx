@@ -66,7 +66,7 @@ export default function ServersPage() {
         name: w.name,
         deploymentType: w.deploymentType || 'local',
         status: w.serverStatus || (w.deploymentType === 'remote' ? 'provisioning' : 'offline'),
-        region: w.flyRegion,
+        region: w.region,
         lastActiveAt: w.serverLastSeen,
         serverUrl: w.serverUrl,
         createdAt: w.createdAt,

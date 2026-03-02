@@ -4,17 +4,14 @@ import { useState, useTransition } from 'react';
 import { destroyMachines } from './actions';
 import type { InfrastructureRow } from './page';
 
-type ProviderFilter = 'all' | 'fly' | 'hetzner';
 type StatusFilter = 'all' | 'orphaned' | 'matched' | 'stale';
 
 export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
-  const [providerFilter, setProviderFilter] = useState<ProviderFilter>('all');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [isPending, startTransition] = useTransition();
 
   const filtered = rows.filter(r => {
-    if (providerFilter !== 'all' && r.provider !== providerFilter) return false;
     if (statusFilter !== 'all' && r.status !== statusFilter) return false;
     return true;
   });
@@ -60,16 +57,6 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
     <div>
       {/* Toolbar */}
       <div className="flex items-center gap-4 mb-4">
-        <select
-          value={providerFilter}
-          onChange={e => setProviderFilter(e.target.value as ProviderFilter)}
-          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-        >
-          <option value="all">All Providers</option>
-          <option value="fly">Fly.io</option>
-          <option value="hetzner">Hetzner</option>
-        </select>
-
         <select
           value={statusFilter}
           onChange={e => setStatusFilter(e.target.value as StatusFilter)}
@@ -206,17 +193,10 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
   );
 }
 
-function ProviderBadge({ provider }: { provider: 'fly' | 'hetzner' }) {
-  if (provider === 'fly') {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-purple-900/50 text-purple-300">
-        Fly.io
-      </span>
-    );
-  }
+function ProviderBadge({ provider }: { provider: 'fly' }) {
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-blue-900/50 text-blue-300">
-      Hetzner
+    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-purple-900/50 text-purple-300">
+      Fly.io
     </span>
   );
 }

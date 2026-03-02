@@ -33,7 +33,6 @@ import * as ServerSessionService from './ServerSessionService';
 import { getUserByEmail } from '../../db/services';
 import { getProvider, isAnyProviderConfigured, getDefaultProviderId } from './providers/registry';
 import { flyTierToTierId, tierIdToFlyTier } from './providers/FlyProvider';
-import { HetznerProvider } from './providers/HetznerProvider';
 import type { ProviderId } from './providers/types';
 
 // Server is considered offline after 60 seconds without heartbeat
@@ -181,20 +180,17 @@ async function provisionNewMachine(
       machineName: provisionResult.machineName,
       region: provisionResult.region,
       volumeId: provisionResult.volumeId,
-      rootPassword: provisionResult.rootPassword || null,
       tunnelId,
       tunnelToken: null,
       updatedAt: new Date(),
     })
     .where(eq(servers.id, serverId));
 
-  // Wait for machine to start — Hetzner cloud-init needs much longer (docker pull + setup)
-  const startTimeout = resolvedProviderId === 'hetzner' ? 600000 : 180000;
-  await provider.waitForState(provisionResult.machineId, ['running'], startTimeout);
+  // Wait for machine to start
+  await provider.waitForState(provisionResult.machineId, ['running'], 180000);
 
-  // Wait for health checks — Hetzner needs extra time for Docker container startup
-  const healthTimeout = resolvedProviderId === 'hetzner' ? 600000 : 60000;
-  await provider.waitForHealthy(provisionResult.machineId, healthTimeout);
+  // Wait for health checks
+  await provider.waitForHealthy(provisionResult.machineId, 60000);
 
   // Update status to online
   await db
@@ -1388,53 +1384,6 @@ export async function restartRemoteServer(
   } catch (error) {
     console.error(`[ServerService] Failed to restart machine:`, error);
     return { success: false, error: 'Failed to restart server' };
-  }
-}
-
-/**
- * Reset the root password of a Hetzner server.
- * Owner-only. Calls Hetzner API to generate a new password and saves it to DB.
- */
-export async function resetRootPassword(
-  serverId: string,
-  userId: string
-): Promise<{ success: boolean; rootPassword?: string; error?: string }> {
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasPermission) {
-    return { success: false, error: 'Access denied' };
-  }
-
-  const server = await getServer(serverId);
-  if (!server) {
-    return { success: false, error: 'Server not found' };
-  }
-
-  if (server.deploymentType !== 'remote') {
-    return { success: false, error: 'Not a remote server' };
-  }
-
-  if (server.provider !== 'hetzner') {
-    return { success: false, error: 'Password reset is only supported for Hetzner servers' };
-  }
-
-  if (!server.machineId) {
-    return { success: false, error: 'No machine associated with this server' };
-  }
-
-  try {
-    const provider = new HetznerProvider();
-    const newPassword = await provider.resetRootPassword(server.machineId);
-
-    // Save to DB
-    await db
-      .update(servers)
-      .set({ rootPassword: newPassword, updatedAt: new Date() })
-      .where(eq(servers.id, serverId));
-
-    return { success: true, rootPassword: newPassword };
-  } catch (error) {
-    console.error(`[ServerService] Failed to reset root password:`, error);
-    return { success: false, error: 'Failed to reset root password' };
   }
 }
 
