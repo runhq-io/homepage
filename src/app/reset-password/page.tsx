@@ -7,6 +7,7 @@ import Link from 'next/link';
 function ResetPasswordContent() {
   const searchParams = useSearchParams();
   const token = searchParams.get('token');
+  const redirect = searchParams.get('redirect');
 
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -77,12 +78,12 @@ function ResetPasswordContent() {
           </div>
           <h1 className="text-2xl font-bold text-white mb-2">Password Reset</h1>
           <p className="text-slate-400 mb-6">Your password has been reset successfully.</p>
-          <Link
-            href="/login"
+          <a
+            href={redirect || '/login'}
             className="inline-block px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors"
           >
             Sign in
-          </Link>
+          </a>
         </div>
       </div>
     );

@@ -29,14 +29,14 @@ export async function POST(request: NextRequest) {
     return rateLimitResponse(corsHeaders);
   }
 
-  let body: { email?: string };
+  let body: { email?: string; redirect?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
   }
 
-  const { email } = body;
+  const { email, redirect } = body;
   if (!email) {
     return NextResponse.json({ error: 'Email is required' }, { status: 400, headers: corsHeaders });
   }
@@ -81,8 +81,9 @@ export async function POST(request: NextRequest) {
   });
 
   // Build reset URL
-  const baseUrl = process.env.NEXTAUTH_URL || 'http://localhost:8080';
-  const resetUrl = `${baseUrl}/reset-password?token=${rawToken}`;
+  const baseUrl = process.env.APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:8080';
+  const redirectParam = redirect ? `&redirect=${encodeURIComponent(redirect)}` : '';
+  const resetUrl = `${baseUrl}/reset-password?token=${rawToken}${redirectParam}`;
 
   try {
     await sendPasswordResetEmail(normalizedEmail, resetUrl);
