@@ -131,12 +131,14 @@ export const paymentsRelations = relations(payments, ({ one }) => ({
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').unique(),
+  username: text('username').unique(),
   name: text('name'),
   avatarUrl: text('avatar_url'),
   passwordHash: text('password_hash'),
   authProvider: text('auth_provider'), // 'google', 'github', 'email'
   authProviderId: text('auth_provider_id'),
   isActivated: boolean('is_activated').default(false), // Requires invite code to activate
+  emailVerifiedAt: timestamp('email_verified_at'), // When user verified their email
   lastLoginAt: timestamp('last_login_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -845,3 +847,26 @@ export const passwordResetTokensRelations = relations(passwordResetTokens, ({ on
 
 export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 export type NewPasswordResetToken = typeof passwordResetTokens.$inferInsert;
+
+// ============================================================================
+// Email Verification Tokens
+// ============================================================================
+
+export const emailVerificationTokens = pgTable('email_verification_tokens', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  tokenHash: text('token_hash').notNull(), // SHA-256 hash of the token (plaintext sent in email)
+  expiresAt: timestamp('expires_at').notNull(),
+  usedAt: timestamp('used_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const emailVerificationTokensRelations = relations(emailVerificationTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [emailVerificationTokens.userId],
+    references: [users.id],
+  }),
+}));
+
+export type EmailVerificationToken = typeof emailVerificationTokens.$inferSelect;
+export type NewEmailVerificationToken = typeof emailVerificationTokens.$inferInsert;

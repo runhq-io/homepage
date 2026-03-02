@@ -69,6 +69,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid email or password' }, { status: 401, headers });
   }
 
+  // Block unverified email accounts
+  if (user.authProvider === 'email' && !user.emailVerifiedAt) {
+    return NextResponse.json(
+      { error: 'Please verify your email before signing in. Check your inbox for the verification link.' },
+      { status: 403, headers },
+    );
+  }
+
   // Update last login
   await db.update(users).set({ lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(users.id, user.id));
 
@@ -76,6 +84,7 @@ export async function POST(request: NextRequest) {
   const userInfo = {
     id: user.id,
     email: user.email,
+    username: user.username,
     name: user.name,
     avatarUrl: user.avatarUrl,
   };

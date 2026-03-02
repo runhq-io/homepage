@@ -2904,11 +2904,11 @@ export function createHttpApp() {
       }
 
       // Fetch user info + server role for JWT (name/email for presence + chat display, role for permissions)
-      const [sessionUser] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId));
+      const [sessionUser] = await db.select({ username: users.username, name: users.name, email: users.email }).from(users).where(eq(users.id, userId));
       const serverRole = await ServerService.getMemberRole(serverId, userId);
       console.log(`[HttpServer] Session for server ${serverId}, user ${userId}: serverRole=${serverRole}`);
       const sessionTokenOpts = {
-        userName: sessionUser?.name ?? undefined,
+        userName: sessionUser?.username || sessionUser?.name || undefined,
         userEmail: sessionUser?.email ?? undefined,
         serverRole: serverRole ?? undefined,
       };
@@ -3112,7 +3112,7 @@ export function createHttpApp() {
       }
 
       // Look up user info for the server server to use
-      const [user] = await db.select({ name: users.name, email: users.email })
+      const [user] = await db.select({ username: users.username, name: users.name, email: users.email })
         .from(users)
         .where(eq(users.id, payload.userId))
         .limit(1);
@@ -3120,7 +3120,7 @@ export function createHttpApp() {
       return c.json({
         valid: true,
         userId: payload.userId,
-        userName: user?.name || user?.email || 'User',
+        userName: user?.username || user?.name || user?.email || 'User',
         userEmail: user?.email,
         serverId: payload.serverId,
         serverRole: payload.serverRole,
