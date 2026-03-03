@@ -260,26 +260,40 @@ export async function createDnsRecord(subdomain: string, tunnelId: string): Prom
     throw new Error('[CloudflareTunnel] Not configured');
   }
 
+  const hostname = `${subdomain}.${PUBLIC_PORTS_DOMAIN}`;
+  const content = `${tunnelId}.cfargotunnel.com`;
+
   const res = await fetch(`${zoneApiBase()}/dns_records`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({
       type: 'CNAME',
-      name: `${subdomain}.${PUBLIC_PORTS_DOMAIN}`,
-      content: `${tunnelId}.cfargotunnel.com`,
+      name: hostname,
+      content,
       proxied: true,
     }),
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`[CloudflareTunnel] Failed to create DNS record: ${res.status} ${text}`);
+    const data = (await res.json()) as CloudflareApiResponse<unknown>;
+    const alreadyExists = data.errors?.some(e => e.code === 81053);
+
+    if (alreadyExists) {
+      // Record already exists — find it and return its ID
+      const existing = await findDnsRecord(hostname);
+      if (existing) {
+        console.log(`[CloudflareTunnel] DNS CNAME already exists for ${hostname} (record: ${existing.id})`);
+        return existing.id;
+      }
+    }
+
+    throw new Error(`[CloudflareTunnel] Failed to create DNS record: ${res.status} ${JSON.stringify(data)}`);
   }
 
   const data = (await res.json()) as CloudflareApiResponse<{ id: string }>;
   const dnsRecordId = data.result.id;
 
-  console.log(`[CloudflareTunnel] Created DNS CNAME: ${subdomain}.${PUBLIC_PORTS_DOMAIN} → ${tunnelId}.cfargotunnel.com (record: ${dnsRecordId})`);
+  console.log(`[CloudflareTunnel] Created DNS CNAME: ${hostname} → ${content} (record: ${dnsRecordId})`);
   return dnsRecordId;
 }
 
@@ -308,6 +322,21 @@ export async function deleteDnsRecord(dnsRecordId: string): Promise<void> {
 // ============================================================================
 // Internal Helpers
 // ============================================================================
+
+/**
+ * Find an existing DNS record by hostname.
+ */
+async function findDnsRecord(hostname: string): Promise<{ id: string } | null> {
+  const res = await fetch(
+    `${zoneApiBase()}/dns_records?type=CNAME&name=${encodeURIComponent(hostname)}`,
+    { method: 'GET', headers: getHeaders() },
+  );
+
+  if (!res.ok) return null;
+
+  const data = (await res.json()) as CloudflareApiResponse<Array<{ id: string }>>;
+  return data.result?.[0] || null;
+}
 
 /**
  * Generate a random 32-byte base64-encoded tunnel secret.
