@@ -328,14 +328,21 @@ export async function deleteDnsRecord(dnsRecordId: string): Promise<void> {
  */
 async function findDnsRecord(hostname: string): Promise<{ id: string } | null> {
   const res = await fetch(
-    `${zoneApiBase()}/dns_records?type=CNAME&name=${encodeURIComponent(hostname)}`,
+    `${zoneApiBase()}/dns_records?name=${encodeURIComponent(hostname)}`,
     { method: 'GET', headers: getHeaders() },
   );
 
-  if (!res.ok) return null;
+  if (!res.ok) {
+    console.warn(`[CloudflareTunnel] findDnsRecord lookup failed for ${hostname}: ${res.status}`);
+    return null;
+  }
 
-  const data = (await res.json()) as CloudflareApiResponse<Array<{ id: string }>>;
-  return data.result?.[0] || null;
+  const data = (await res.json()) as CloudflareApiResponse<Array<{ id: string; type: string }>>;
+  const record = data.result?.[0];
+  if (record) {
+    console.log(`[CloudflareTunnel] Found existing ${record.type} record for ${hostname} (id: ${record.id})`);
+  }
+  return record || null;
 }
 
 /**
