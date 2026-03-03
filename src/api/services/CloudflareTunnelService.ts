@@ -19,6 +19,10 @@ function getZoneId(): string | undefined {
   return process.env.CLOUDFLARE_ZONE_ID;
 }
 
+function getPublicPortsZoneId(): string | undefined {
+  return process.env.CLOUDFLARE_PUBLIC_PORTS_ZONE_ID || getZoneId();
+}
+
 const PUBLIC_PORTS_DOMAIN = process.env.PUBLIC_PORTS_DOMAIN || 'tank.fish';
 
 // ============================================================================
@@ -58,6 +62,10 @@ function tunnelApiBase(): string {
 
 function zoneApiBase(): string {
   return `https://api.cloudflare.com/client/v4/zones/${getZoneId()}`;
+}
+
+function publicPortsZoneApiBase(): string {
+  return `https://api.cloudflare.com/client/v4/zones/${getPublicPortsZoneId()}`;
 }
 
 // ============================================================================
@@ -263,7 +271,7 @@ export async function createDnsRecord(subdomain: string, tunnelId: string): Prom
   const hostname = `${subdomain}.${PUBLIC_PORTS_DOMAIN}`;
   const content = `${tunnelId}.cfargotunnel.com`;
 
-  const res = await fetch(`${zoneApiBase()}/dns_records`, {
+  const res = await fetch(`${publicPortsZoneApiBase()}/dns_records`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({
@@ -310,7 +318,7 @@ export async function deleteDnsRecord(dnsRecordId: string): Promise<void> {
     return;
   }
 
-  const res = await fetch(`${zoneApiBase()}/dns_records/${dnsRecordId}`, {
+  const res = await fetch(`${publicPortsZoneApiBase()}/dns_records/${dnsRecordId}`, {
     method: 'DELETE',
     headers: getHeaders(),
   });
@@ -332,7 +340,7 @@ export async function deleteDnsRecord(dnsRecordId: string): Promise<void> {
  */
 async function findDnsRecord(hostname: string): Promise<{ id: string } | null> {
   const res = await fetch(
-    `${zoneApiBase()}/dns_records?name=${encodeURIComponent(hostname)}`,
+    `${publicPortsZoneApiBase()}/dns_records?name=${encodeURIComponent(hostname)}`,
     { method: 'GET', headers: getHeaders() },
   );
 
