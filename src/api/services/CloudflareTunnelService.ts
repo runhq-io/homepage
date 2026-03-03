@@ -279,12 +279,16 @@ export async function createDnsRecord(subdomain: string, tunnelId: string): Prom
     const alreadyExists = data.errors?.some(e => e.code === 81053);
 
     if (alreadyExists) {
-      // Record already exists — find it and return its ID
+      // Record already exists — try to find it and return its ID
       const existing = await findDnsRecord(hostname);
       if (existing) {
         console.log(`[CloudflareTunnel] DNS CNAME already exists for ${hostname} (record: ${existing.id})`);
         return existing.id;
       }
+      // Lookup failed but record definitely exists — return sentinel.
+      // Callers that store dnsRecordId for cleanup handle missing records gracefully (deleteDnsRecord ignores 404).
+      console.warn(`[CloudflareTunnel] DNS record exists for ${hostname} but lookup failed, returning sentinel`);
+      return `existing:${hostname}`;
     }
 
     throw new Error(`[CloudflareTunnel] Failed to create DNS record: ${res.status} ${JSON.stringify(data)}`);
