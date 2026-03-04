@@ -412,9 +412,13 @@ export async function createSnapshot(volumeId: string): Promise<{ id: string }> 
     await new Promise(r => setTimeout(r, pollIntervalMs));
     try {
       const snapshots = await listSnapshots(volumeId);
-      if (snapshots.some(s => s.id === snapshotId)) {
-        console.log(`[FlyService] Snapshot ${snapshotId} is ready (waited ${Math.round((Date.now() - start) / 1000)}s)`);
-        return { id: snapshotId };
+      const snap = snapshots.find(s => s.id === snapshotId);
+      if (snap) {
+        if (snap.status === 'created') {
+          console.log(`[FlyService] Snapshot ${snapshotId} is ready (waited ${Math.round((Date.now() - start) / 1000)}s)`);
+          return { id: snapshotId };
+        }
+        console.log(`[FlyService] Snapshot ${snapshotId} found but status is '${snap.status}', waiting...`);
       }
     } catch {
       // List call failed, keep polling
@@ -429,8 +433,8 @@ export async function createSnapshot(volumeId: string): Promise<{ id: string }> 
 /**
  * List snapshots for a volume
  */
-export async function listSnapshots(volumeId: string): Promise<Array<{ id: string; size: number; created_at: string }>> {
-  return flyRequest<Array<{ id: string; size: number; created_at: string }>>(
+export async function listSnapshots(volumeId: string): Promise<Array<{ id: string; size: number; created_at: string; status?: string }>> {
+  return flyRequest<Array<{ id: string; size: number; created_at: string; status?: string }>>(
     'GET',
     `/apps/${getServerAppName()}/volumes/${volumeId}/snapshots`
   );
