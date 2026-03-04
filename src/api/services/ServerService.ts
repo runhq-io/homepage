@@ -598,13 +598,14 @@ export async function deleteServer(serverId: string, userId: string): Promise<{ 
  */
 export async function getServerMembers(
   serverId: string
-): Promise<Array<{ user: { id: string; email: string | null; name: string | null; avatarUrl: string | null }; role: ServerRole; joinedAt: Date }>> {
+): Promise<Array<{ user: { id: string; email: string | null; username: string | null; name: string | null; avatarUrl: string | null }; role: ServerRole; joinedAt: Date }>> {
   const members = await db
     .select({
       userId: serverMembers.userId,
       role: serverMembers.role,
       joinedAt: serverMembers.joinedAt,
       userEmail: users.email,
+      userUsername: users.username,
       userName: users.name,
       userAvatar: users.avatarUrl,
     })
@@ -616,6 +617,7 @@ export async function getServerMembers(
     user: {
       id: m.userId,
       email: m.userEmail,
+      username: m.userUsername,
       name: m.userName,
       avatarUrl: m.userAvatar,
     },

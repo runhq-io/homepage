@@ -36,7 +36,7 @@ export async function PATCH(request: Request) {
     const db = getDb();
 
     if (typeof body.username === 'string') {
-      const trimmed = body.username.trim().toLowerCase();
+      const trimmed = body.username.trim();
       if (!USERNAME_REGEX.test(trimmed)) {
         return NextResponse.json({ error: 'Username must be 3-20 characters, letters, numbers, and underscores only' }, { status: 400, headers: corsHeaders });
       }
