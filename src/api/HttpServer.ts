@@ -2104,6 +2104,35 @@ export function createHttpApp() {
   });
 
   // Change server tier (upgrade/downgrade machine)
+  // Validate tier change (pre-check before showing confirmation)
+  app.post('/api/servers/:serverId/validate-tier', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const body = await c.req.json();
+      const { tier } = body;
+
+      if (!tier || typeof tier !== 'string') {
+        return c.json({ error: 'Tier is required' }, 400);
+      }
+
+      const validation = await ServerService.validateChangeTier(serverId, userId, tier);
+      return c.json(validation);
+    } catch (error) {
+      console.error('[HttpServer] Validate tier error:', error);
+      return c.json({ success: false, error: 'Failed to validate tier' }, 500);
+    }
+  });
+
   app.post('/api/servers/:serverId/change-tier', async (c) => {
     try {
       const authHeader = c.req.header('Authorization');
