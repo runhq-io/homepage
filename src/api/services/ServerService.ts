@@ -1766,35 +1766,36 @@ export async function changeTier(
   const region = server.region || 'ash';
 
   try {
-    // Fork volume to preserve all data (same region, potentially larger size for new tier)
-    let forkedVolumeId: string | undefined;
-    if (oldVolumeId) {
-      const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
-      const volumeName = `data_${sanitizedId}`;
-      const tierId = flyTierToTierId(newTier);
-      const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
-      const newSizeGb = tierSpec?.diskGb || 1;
-
-      const forkedVolume = await provider.forkVolume(oldVolumeId, volumeName, region, newSizeGb);
-      forkedVolumeId = forkedVolume.id;
-      console.log(`[ServerService] Forked volume ${oldVolumeId} -> ${forkedVolumeId} (${newSizeGb}GB)`);
-    }
-
-    // Stop old machine (don't delete yet — volume fork may still be hydrating)
+    // Stop and delete old machine (must be stopped before volume can be reattached)
     if (oldMachineId) {
       try {
         await provider.stopMachine(oldMachineId);
       } catch {
         // Machine may already be stopped
       }
-      console.log(`[ServerService] Stopped old machine ${oldMachineId}`);
+      await provider.deleteMachine(oldMachineId);
+      console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
+    }
+
+    // Extend volume if new tier needs more disk (Fly only supports growing, not shrinking)
+    if (oldVolumeId) {
+      const tierId = flyTierToTierId(newTier);
+      const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
+      const newSizeGb = tierSpec?.diskGb || 1;
+      const oldVolume = await provider.getVolume(oldVolumeId);
+      const oldSizeGb = oldVolume?.sizeGb || 1;
+
+      if (newSizeGb > oldSizeGb) {
+        await provider.extendVolume(oldVolumeId, newSizeGb);
+        console.log(`[ServerService] Extended volume ${oldVolumeId} from ${oldSizeGb}GB to ${newSizeGb}GB`);
+      }
     }
 
     // Generate new server token
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info, set new tier and token
+    // Clear old machine info, set new tier and token (keep volumeId — reusing same volume)
     await db
       .update(servers)
       .set({
@@ -1802,45 +1803,25 @@ export async function changeTier(
         tier: newTier,
         machineId: null,
         machineName: null,
-        volumeId: null,
         serverUrl: null,
         tunnelToken: null,
         updatedAt: new Date(),
       })
       .where(eq(servers.id, serverId));
 
-    // Create new machine with new tier, reusing forked volume
+    // Create new machine with new tier, reusing existing volume
     const result = await provisionNewMachine(
       server.id,
       serverToken,
       region,
       newTier,
       server.autoSuspendEnabled ?? true,
-      forkedVolumeId,
+      oldVolumeId,
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
     );
 
     console.log(`[ServerService] Tier changed to ${newTier}, new machine at ${result.url}`);
-
-    // Clean up old infrastructure after new machine is healthy
-    if (oldMachineId) {
-      try {
-        await provider.deleteMachine(oldMachineId);
-        console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
-      } catch (cleanupError) {
-        console.error(`[ServerService] Failed to delete old machine ${oldMachineId}:`, cleanupError);
-      }
-    }
-    if (oldVolumeId) {
-      try {
-        await provider.deleteVolume(oldVolumeId);
-        console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
-      } catch (cleanupError) {
-        console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
-      }
-    }
-
     return { success: true, tier: newTier, status: 'online' };
   } catch (error) {
     console.error(`[ServerService] Failed to change tier:`, error);

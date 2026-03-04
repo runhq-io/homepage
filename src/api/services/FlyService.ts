@@ -355,6 +355,16 @@ export async function forkVolume(
 }
 
 /**
+ * Extend a volume to a larger size (cannot shrink)
+ */
+export async function extendVolume(volumeId: string, newSizeGb: number): Promise<void> {
+  await flyRequest<unknown>('PUT', `/apps/${getServerAppName()}/volumes/${volumeId}/extend`, {
+    size_gb: newSizeGb,
+  });
+  console.log(`[FlyService] Extended volume ${volumeId} to ${newSizeGb}GB`);
+}
+
+/**
  * Delete a volume
  */
 export async function deleteVolume(volumeId: string): Promise<void> {

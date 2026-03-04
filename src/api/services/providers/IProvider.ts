@@ -50,6 +50,7 @@ export interface IProvider {
 
   createVolume(name: string, region: string, sizeGb?: number): Promise<VolumeInfo>;
   getVolume(volumeId: string): Promise<VolumeInfo | null>;
+  extendVolume(volumeId: string, newSizeGb: number): Promise<void>;
   forkVolume(sourceVolumeId: string, name: string, region: string, sizeGb?: number): Promise<VolumeInfo>;
   createSnapshot(volumeId: string): Promise<SnapshotInfo>;
   deleteVolume(volumeId: string): Promise<void>;
