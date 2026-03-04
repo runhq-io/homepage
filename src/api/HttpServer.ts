@@ -2086,6 +2086,10 @@ export function createHttpApp() {
         return c.json({ error: validation.error }, 400);
       }
 
+      // Set provisioning status immediately to prevent race condition where
+      // client reloads and reconnects to the old machine before changeRegion runs
+      await ServerService.setServerStatus(serverId, 'provisioning');
+
       // Start the region change in the background (don't await - it takes minutes)
       // The client will poll server status to track progress
       ServerService.changeRegion(serverId, userId, region).catch((error) => {
@@ -2124,6 +2128,10 @@ export function createHttpApp() {
       if (!validation.success) {
         return c.json({ error: validation.error }, 400);
       }
+
+      // Set provisioning status immediately to prevent race condition where
+      // client reloads and reconnects to the old machine before changeTier runs
+      await ServerService.setServerStatus(serverId, 'provisioning');
 
       // Start the tier change in the background (don't await - it takes minutes)
       ServerService.changeTier(serverId, userId, tier as any).catch((error) => {

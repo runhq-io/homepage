@@ -988,6 +988,16 @@ export async function declineInviteByServer(serverId: string, userId: string): P
 // ============================================================================
 
 /**
+ * Set server status (used to prevent race conditions in background operations)
+ */
+export async function setServerStatus(serverId: string, status: ServerStatusType): Promise<void> {
+  await db
+    .update(servers)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+}
+
+/**
  * Check if user has required permission in server
  */
 export async function checkServerPermission(serverId: string, userId: string, allowedRoles: ServerRole[]): Promise<boolean> {
