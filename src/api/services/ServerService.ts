@@ -1792,8 +1792,8 @@ export async function changeTier(
     }
 
     // Handle volume: upgrade via snapshot, same size reuses existing volume
-    // Downgrades are blocked in validateChangeTier
-    let volumeIdForNewMachine = oldVolumeId;
+    // Extend volume if upgrading to a larger disk (downgrades blocked in validateChangeTier)
+    const volumeIdForNewMachine = oldVolumeId;
     if (oldVolumeId) {
       const tierId = flyTierToTierId(newTier);
       const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
@@ -1803,23 +1803,9 @@ export async function changeTier(
       const currentSizeGb = currentVolume?.sizeGb || 0;
 
       if (newSizeGb > currentSizeGb) {
-        // Upgrade: snapshot and create larger volume
-        console.log(`[ServerService] Upgrading volume from ${currentSizeGb}GB to ${newSizeGb}GB via snapshot`);
-        const snapshot = await provider.createSnapshot(oldVolumeId);
-        console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${oldVolumeId}`);
-
-        const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
-        const volumeName = `data_${sanitizedId}`;
-        const newVolume = await provider.createVolumeFromSnapshot(snapshot.id, volumeName, region, newSizeGb);
-        volumeIdForNewMachine = newVolume.id;
-        console.log(`[ServerService] Created volume ${newVolume.id} (${newSizeGb}GB) from snapshot`);
-
-        try {
-          await provider.deleteVolume(oldVolumeId);
-          console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
-        } catch (cleanupError) {
-          console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
-        }
+        console.log(`[ServerService] Extending volume ${oldVolumeId} from ${currentSizeGb}GB to ${newSizeGb}GB`);
+        await provider.extendVolume(oldVolumeId, newSizeGb);
+        console.log(`[ServerService] Volume extended successfully`);
       } else {
         console.log(`[ServerService] Reusing existing volume ${oldVolumeId} (${currentSizeGb}GB)`);
       }
