@@ -1668,7 +1668,7 @@ export async function validateChangeTier(
   userId: string,
   newTier: string
 ): Promise<{ success: boolean; error?: string }> {
-  const VALID_TIERS = ['shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
+  const VALID_TIERS = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x'];
   if (!VALID_TIERS.includes(newTier)) {
     return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
@@ -1712,7 +1712,7 @@ export async function changeTier(
   userId: string,
   newTier: ServerTier
 ): Promise<{ success: boolean; tier?: ServerTier; status?: ServerStatusType; error?: string }> {
-  const VALID_TIERS: ServerTier[] = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
+  const VALID_TIERS: ServerTier[] = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x'];
   if (!VALID_TIERS.includes(newTier)) {
     return { success: false, error: `Invalid tier. Must be one of: micro, small, medium, large` };
   }
