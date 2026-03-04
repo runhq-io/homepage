@@ -13,9 +13,6 @@ import type { ServerTier } from '../../db/schema';
 // Fly.io Machines API base URL
 const FLY_API_URL = 'https://api.machines.dev/v1';
 
-// Fly.io Platform GraphQL API
-const FLY_GRAPHQL_URL = 'https://api.fly.io/graphql';
-
 // Read env vars at runtime via getters (not module load time, to ensure dotenv has loaded)
 function getFlyAppName(): string {
   return process.env.FLY_APP_NAME || 'fishtank-workspaces';
@@ -255,43 +252,15 @@ async function flyRequest<T>(
 // ============================================================================
 
 /**
- * Get the latest release image from the Fly.io GraphQL API.
- * Uses `currentRelease.imageRef` which points to the newest release,
- * regardless of whether it deployed machines (unlike the `:latest` tag
- * which only resolves to the last "running" release).
+ * Get the latest server image.
+ *
+ * The deploy script tags the latest build as `:latest` in the Fly registry
+ * after each deploy. We simply reference that well-known tag.
  */
 async function getLatestReleaseImage(): Promise<string> {
-  const token = getFlyApiToken();
-  if (!token) {
-    throw new Error('FLY_API_TOKEN is not configured');
-  }
-
   const appName = getServerAppName();
-  const query = `query { app(name: "${appName}") { currentRelease { imageRef } } }`;
-
-  const response = await fetch(FLY_GRAPHQL_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Fly GraphQL API error: ${response.status}`);
-  }
-
-  const data = (await response.json()) as {
-    data?: { app?: { currentRelease?: { imageRef?: string } } };
-  };
-
-  const imageRef = data.data?.app?.currentRelease?.imageRef;
-  if (!imageRef) {
-    throw new Error(`No current release found for app ${appName}`);
-  }
-
-  console.log(`[FlyService] Latest release image: ${imageRef}`);
+  const imageRef = `registry.fly.io/${appName}:latest`;
+  console.log(`[FlyService] Using image: ${imageRef}`);
   return imageRef;
 }
 
