@@ -1405,10 +1405,10 @@ export async function reprovisionRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  // Check access - need owner permission to reprovision
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  // Check access - need owner or admin permission to reprovision
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner can reprovision' };
+    return { success: false, error: 'Only server owner or admin can reprovision' };
   }
 
   if (!isAnyProviderConfigured()) {
