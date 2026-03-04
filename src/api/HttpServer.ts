@@ -3002,17 +3002,14 @@ export function createHttpApp() {
           }
         }
 
-        // If no machine exists, reprovision one
+        // If no machine exists, kick off reprovisioning in background and return immediately
         if (needsProvision) {
-          console.log(`[HttpServer] No machine for server ${serverId}, reprovisioning...`);
-          const provisionResult = await ServerService.reprovisionRemoteServer(serverId, userId);
-          if (!provisionResult.success) {
-            console.error(`[HttpServer] Failed to reprovision: ${provisionResult.error}`);
-            return c.json({ error: provisionResult.error || 'Failed to provision server', serverName: server.name }, 503);
-          }
-          console.log(`[HttpServer] Reprovisioned server, waiting for server to initialize...`);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          needsRefetch = true;
+          console.log(`[HttpServer] No machine for server ${serverId}, starting background reprovision...`);
+          await ServerService.setServerStatus(serverId, 'provisioning');
+          ServerService.reprovisionRemoteServer(serverId, userId).catch(err => {
+            console.error(`[HttpServer] Background reprovision failed for ${serverId}:`, err);
+          });
+          return c.json({ error: 'Server is provisioning. Please try again shortly.', serverName: server.name }, 503);
         } else {
           // Machine exists, wake it if needed (using internal version to skip redundant access/fetch)
           console.log(`[HttpServer] Waking machine for server ${serverId} before session...`);
@@ -3026,14 +3023,12 @@ export function createHttpApp() {
                 console.log(`[HttpServer] No payment method for user ${userId}, blocking reprovision of server ${serverId}`);
                 return c.json({ error: 'Payment method required before provisioning', needsPayment: true }, 402);
               }
-              console.log(`[HttpServer] Machine was destroyed, reprovisioning...`);
-              const provisionResult = await ServerService.reprovisionRemoteServer(serverId, userId);
-              if (!provisionResult.success) {
-                console.error(`[HttpServer] Failed to reprovision: ${provisionResult.error}`);
-                return c.json({ error: provisionResult.error || 'Failed to provision server', serverName: server.name }, 503);
-              }
-              await new Promise(resolve => setTimeout(resolve, 5000));
-              needsRefetch = true;
+              console.log(`[HttpServer] Machine was destroyed, starting background reprovision...`);
+              await ServerService.setServerStatus(serverId, 'provisioning');
+              ServerService.reprovisionRemoteServer(serverId, userId).catch(err => {
+                console.error(`[HttpServer] Background reprovision failed for ${serverId}:`, err);
+              });
+              return c.json({ error: 'Server is provisioning. Please try again shortly.', serverName: server.name }, 503);
             } else {
               console.error(`[HttpServer] Failed to wake machine: ${wakeResult.error}`);
               return c.json({ error: wakeResult.error || 'Failed to wake server', serverName: server.name }, 503);
