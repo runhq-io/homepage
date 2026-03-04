@@ -1852,7 +1852,8 @@ export async function changeTier(
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info, set new tier and token
+    // Clear old machine info, set new tier and token.
+    // Keep volumeId pointing to the volume we'll use so recovery is possible if provisioning fails.
     await db
       .update(servers)
       .set({
@@ -1860,7 +1861,7 @@ export async function changeTier(
         tier: newTier,
         machineId: null,
         machineName: null,
-        volumeId: null,
+        volumeId: volumeIdForNewMachine,
         serverUrl: null,
         tunnelToken: null,
         updatedAt: new Date(),
@@ -1884,9 +1885,10 @@ export async function changeTier(
   } catch (error) {
     console.error(`[ServerService] Failed to change tier:`, error);
 
+    // Preserve volumeId so reprovision can recover by reusing the existing volume
     await db
       .update(servers)
-      .set({ status: 'error', updatedAt: new Date() })
+      .set({ status: 'error', volumeId: oldVolumeId, updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
     return { success: false, error: 'Failed to change tier' };
