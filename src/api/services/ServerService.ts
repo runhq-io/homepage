@@ -1751,32 +1751,33 @@ export async function changeTier(
     .set({ status: 'provisioning', updatedAt: new Date() })
     .where(eq(servers.id, serverId));
 
+  const oldMachineId = server.machineId;
+  const oldVolumeId = server.volumeId;
+  const region = server.region || 'ash';
+
   try {
-    // Stop and delete old machine
-    if (server.machineId) {
+    // Fork volume to preserve all data (same region, potentially larger size for new tier)
+    let forkedVolumeId: string | undefined;
+    if (oldVolumeId) {
+      const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+      const volumeName = `data_${sanitizedId}`;
+      const tierId = flyTierToTierId(newTier);
+      const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
+      const newSizeGb = tierSpec?.diskGb || 1;
+
+      const forkedVolume = await provider.forkVolume(oldVolumeId, volumeName, region, newSizeGb);
+      forkedVolumeId = forkedVolume.id;
+      console.log(`[ServerService] Forked volume ${oldVolumeId} -> ${forkedVolumeId} (${newSizeGb}GB)`);
+    }
+
+    // Stop old machine (don't delete yet — volume fork may still be hydrating)
+    if (oldMachineId) {
       try {
-        await provider.stopMachine(server.machineId);
+        await provider.stopMachine(oldMachineId);
       } catch {
         // Machine may already be stopped
       }
-      await provider.deleteMachine(server.machineId);
-      console.log(`[ServerService] Deleted old machine ${server.machineId}`);
-    }
-
-    // Snapshot old volume before deletion
-    if (server.volumeId) {
-      try {
-        const snapshot = await provider.createSnapshot(server.volumeId);
-        console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${server.volumeId} before tier change`);
-      } catch (snapshotError) {
-        console.error(`[ServerService] Failed to snapshot volume before tier change:`, snapshotError);
-      }
-    }
-
-    // Delete old volume
-    if (server.volumeId) {
-      await provider.deleteVolume(server.volumeId);
-      console.log(`[ServerService] Deleted old volume ${server.volumeId}`);
+      console.log(`[ServerService] Stopped old machine ${oldMachineId}`);
     }
 
     // Generate new server token
@@ -1798,20 +1799,38 @@ export async function changeTier(
       })
       .where(eq(servers.id, serverId));
 
-    // Create new machine with new tier in same region
-    const region = server.region || 'ash';
+    // Create new machine with new tier, reusing forked volume
     const result = await provisionNewMachine(
       server.id,
       serverToken,
       region,
       newTier,
       server.autoSuspendEnabled ?? true,
-      undefined,
+      forkedVolumeId,
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
     );
 
     console.log(`[ServerService] Tier changed to ${newTier}, new machine at ${result.url}`);
+
+    // Clean up old infrastructure after new machine is healthy
+    if (oldMachineId) {
+      try {
+        await provider.deleteMachine(oldMachineId);
+        console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
+      } catch (cleanupError) {
+        console.error(`[ServerService] Failed to delete old machine ${oldMachineId}:`, cleanupError);
+      }
+    }
+    if (oldVolumeId) {
+      try {
+        await provider.deleteVolume(oldVolumeId);
+        console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
+      } catch (cleanupError) {
+        console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
+      }
+    }
+
     return { success: true, tier: newTier, status: 'online' };
   } catch (error) {
     console.error(`[ServerService] Failed to change tier:`, error);
