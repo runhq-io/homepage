@@ -1709,7 +1709,7 @@ export async function validateChangeTier(
     return { success: false, error: 'Server is already being provisioned' };
   }
 
-  // Check if downsizing volume would cause data loss
+  // Block downgrades — Fly.io doesn't support shrinking volumes
   const provider = getProvider((server.provider || 'fly') as ProviderId);
   const newTierId = flyTierToTierId(newTier as ServerTier);
   const newTierSpec = provider.getTierSpecs().find(t => t.tierId === newTierId);
@@ -1719,40 +1719,8 @@ export async function validateChangeTier(
   const currentTierSpec = provider.getTierSpecs().find(t => t.tierId === currentTierId);
   const currentDiskGb = currentTierSpec?.diskGb || 1;
 
-  if (newDiskGb < currentDiskGb && server.serverUrl && server.machineId) {
-    // Query the running machine for actual disk usage
-    try {
-      const routing = provider.getRoutingInfo(server.machineId);
-      const headers: Record<string, string> = { 'cache-control': 'no-cache' };
-      if (routing.requiresRoutingHeaders && routing.routingToken) {
-        headers['fly-force-instance-id'] = routing.routingToken;
-      }
-      const params = routing.requiresRoutingHeaders && routing.routingToken
-        ? `?fly_instance_id=${encodeURIComponent(routing.routingToken)}`
-        : '';
-      const res = await fetch(`${server.serverUrl}/api/disk-usage${params}`, {
-        method: 'GET',
-        headers,
-        signal: AbortSignal.timeout(10000),
-      });
-      if (res.ok) {
-        const data = await res.json() as { success: boolean; data?: { usedBytes: number; totalBytes: number } };
-        if (data.success && data.data) {
-          const newSizeBytes = newDiskGb * 1024 * 1024 * 1024;
-          if (data.data.usedBytes > newSizeBytes) {
-            const usedGb = (data.data.usedBytes / (1024 * 1024 * 1024)).toFixed(1);
-            return {
-              success: false,
-              error: `Cannot downgrade: current disk usage (${usedGb} GB) exceeds target size (${newDiskGb} GB). Free up space first.`,
-              diskUsage: data.data,
-            };
-          }
-        }
-      }
-    } catch (err) {
-      console.warn(`[ServerService] Could not check disk usage for ${serverId}:`, err);
-      // Don't block the tier change if we can't reach the machine
-    }
+  if (newDiskGb < currentDiskGb) {
+    return { success: false, error: 'Downgrading to a smaller tier is not supported. Please contact support if you need to downgrade.' };
   }
 
   return { success: true };
@@ -1823,28 +1791,37 @@ export async function changeTier(
       console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
     }
 
-    // Snapshot volume and recreate at target size (consistent for both upgrade and downgrade)
+    // Handle volume: upgrade via snapshot, same size reuses existing volume
+    // Downgrades are blocked in validateChangeTier
     let volumeIdForNewMachine = oldVolumeId;
     if (oldVolumeId) {
       const tierId = flyTierToTierId(newTier);
       const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
       const newSizeGb = tierSpec?.diskGb || 1;
 
-      const snapshot = await provider.createSnapshot(oldVolumeId);
-      console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${oldVolumeId}`);
+      const currentVolume = await provider.getVolume(oldVolumeId);
+      const currentSizeGb = currentVolume?.sizeGb || 0;
 
-      const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
-      const volumeName = `data_${sanitizedId}`;
-      const newVolume = await provider.createVolumeFromSnapshot(snapshot.id, volumeName, region, newSizeGb);
-      volumeIdForNewMachine = newVolume.id;
-      console.log(`[ServerService] Created volume ${newVolume.id} (${newSizeGb}GB) from snapshot`);
+      if (newSizeGb > currentSizeGb) {
+        // Upgrade: snapshot and create larger volume
+        console.log(`[ServerService] Upgrading volume from ${currentSizeGb}GB to ${newSizeGb}GB via snapshot`);
+        const snapshot = await provider.createSnapshot(oldVolumeId);
+        console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${oldVolumeId}`);
 
-      // Delete old volume
-      try {
-        await provider.deleteVolume(oldVolumeId);
-        console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
-      } catch (cleanupError) {
-        console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
+        const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+        const volumeName = `data_${sanitizedId}`;
+        const newVolume = await provider.createVolumeFromSnapshot(snapshot.id, volumeName, region, newSizeGb);
+        volumeIdForNewMachine = newVolume.id;
+        console.log(`[ServerService] Created volume ${newVolume.id} (${newSizeGb}GB) from snapshot`);
+
+        try {
+          await provider.deleteVolume(oldVolumeId);
+          console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
+        } catch (cleanupError) {
+          console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
+        }
+      } else {
+        console.log(`[ServerService] Reusing existing volume ${oldVolumeId} (${currentSizeGb}GB)`);
       }
     }
 
