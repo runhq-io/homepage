@@ -586,6 +586,7 @@ export async function createMachine(
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.fishtank.bot',
         SERVER_SESSION_SECRET: process.env.SERVER_SESSION_SECRET || '',
         PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN || 'tank.fish',
+        NODE_ENV: 'development',
         PORT: '3001',
         HOST: '0.0.0.0',
       },
