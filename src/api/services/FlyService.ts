@@ -392,7 +392,9 @@ export async function deleteVolume(volumeId: string): Promise<void> {
 }
 
 /**
- * Create an on-demand snapshot of a volume (safety net before destructive operations)
+ * Create an on-demand snapshot of a volume and wait for it to be ready.
+ * Fly.io snapshot creation is async — the API returns a graph_id immediately
+ * but the snapshot isn't usable until it appears in the snapshots list.
  */
 export async function createSnapshot(volumeId: string): Promise<{ id: string }> {
   const result = await flyRequest<{ Msg: { backup: { graph_id: string } } }>(
@@ -400,7 +402,27 @@ export async function createSnapshot(volumeId: string): Promise<{ id: string }> 
     `/apps/${getServerAppName()}/volumes/${volumeId}/snapshots`
   );
   const snapshotId = result.Msg?.backup?.graph_id || 'unknown';
-  console.log(`[FlyService] Created snapshot ${snapshotId} for volume ${volumeId}`);
+  console.log(`[FlyService] Created snapshot ${snapshotId} for volume ${volumeId}, waiting for it to be ready...`);
+
+  // Poll until the snapshot appears in the list (ready to use)
+  const maxWaitMs = 120_000; // 2 minutes
+  const pollIntervalMs = 3_000; // 3 seconds
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    try {
+      const snapshots = await listSnapshots(volumeId);
+      if (snapshots.some(s => s.id === snapshotId)) {
+        console.log(`[FlyService] Snapshot ${snapshotId} is ready (waited ${Math.round((Date.now() - start) / 1000)}s)`);
+        return { id: snapshotId };
+      }
+    } catch {
+      // List call failed, keep polling
+    }
+  }
+
+  // Timed out but still return the ID — createVolumeFromSnapshot will fail with a clear error if it's not ready
+  console.warn(`[FlyService] Snapshot ${snapshotId} not confirmed ready after ${maxWaitMs / 1000}s, proceeding anyway`);
   return { id: snapshotId };
 }
 
