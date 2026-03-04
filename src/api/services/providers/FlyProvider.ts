@@ -221,6 +221,11 @@ export class FlyProvider implements IProvider {
     await FlyService.extendVolume(volumeId, newSizeGb);
   }
 
+  async createVolumeFromSnapshot(snapshotId: string, name: string, region: string, sizeGb: number): Promise<VolumeInfo> {
+    const vol = await FlyService.createVolumeFromSnapshot(snapshotId, name, region, sizeGb);
+    return { id: vol.id, name: vol.name, state: vol.state, sizeGb: vol.size_gb, region: vol.region };
+  }
+
   async forkVolume(sourceVolumeId: string, name: string, region: string, sizeGb?: number): Promise<VolumeInfo> {
     const vol = await FlyService.forkVolume(sourceVolumeId, name, region, sizeGb);
     return { id: vol.id, name: vol.name, state: vol.state, sizeGb: vol.size_gb, region: vol.region };

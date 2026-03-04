@@ -365,6 +365,25 @@ export async function extendVolume(volumeId: string, newSizeGb: number): Promise
 }
 
 /**
+ * Create a volume from a snapshot (used for downsizing volumes)
+ */
+export async function createVolumeFromSnapshot(
+  snapshotId: string,
+  name: string,
+  region: string,
+  sizeGb: number
+): Promise<FlyVolume> {
+  console.log(`[FlyService] Creating volume from snapshot ${snapshotId} in ${region} (${sizeGb}GB)`);
+  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName()}/volumes`, {
+    name,
+    region,
+    size_gb: sizeGb,
+    encrypted: true,
+    snapshot_id: snapshotId,
+  });
+}
+
+/**
  * Delete a volume
  */
 export async function deleteVolume(volumeId: string): Promise<void> {

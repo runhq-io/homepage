@@ -1777,7 +1777,8 @@ export async function changeTier(
       console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
     }
 
-    // Extend volume if new tier needs more disk (Fly only supports growing, not shrinking)
+    // Resize volume to match new tier
+    let volumeIdForNewMachine = oldVolumeId;
     if (oldVolumeId) {
       const tierId = flyTierToTierId(newTier);
       const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
@@ -1786,8 +1787,27 @@ export async function changeTier(
       const oldSizeGb = oldVolume?.sizeGb || 1;
 
       if (newSizeGb > oldSizeGb) {
+        // Upgrade: extend volume in-place
         await provider.extendVolume(oldVolumeId, newSizeGb);
         console.log(`[ServerService] Extended volume ${oldVolumeId} from ${oldSizeGb}GB to ${newSizeGb}GB`);
+      } else if (newSizeGb < oldSizeGb) {
+        // Downgrade: snapshot → create smaller volume from snapshot → delete old
+        const snapshot = await provider.createSnapshot(oldVolumeId);
+        console.log(`[ServerService] Created snapshot ${snapshot.id} for volume downsizing`);
+
+        const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+        const volumeName = `data_${sanitizedId}`;
+        const newVolume = await provider.createVolumeFromSnapshot(snapshot.id, volumeName, region, newSizeGb);
+        volumeIdForNewMachine = newVolume.id;
+        console.log(`[ServerService] Created downsized volume ${newVolume.id} (${newSizeGb}GB) from snapshot`);
+
+        // Delete old oversized volume
+        try {
+          await provider.deleteVolume(oldVolumeId);
+          console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
+        } catch (cleanupError) {
+          console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
+        }
       }
     }
 
@@ -1795,7 +1815,7 @@ export async function changeTier(
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info, set new tier and token (keep volumeId — reusing same volume)
+    // Clear old machine info, set new tier and token
     await db
       .update(servers)
       .set({
@@ -1803,20 +1823,21 @@ export async function changeTier(
         tier: newTier,
         machineId: null,
         machineName: null,
+        volumeId: volumeIdForNewMachine !== oldVolumeId ? null : undefined, // clear if volume changed
         serverUrl: null,
         tunnelToken: null,
         updatedAt: new Date(),
       })
       .where(eq(servers.id, serverId));
 
-    // Create new machine with new tier, reusing existing volume
+    // Create new machine with new tier, reusing volume
     const result = await provisionNewMachine(
       server.id,
       serverToken,
       region,
       newTier,
       server.autoSuspendEnabled ?? true,
-      oldVolumeId,
+      volumeIdForNewMachine,
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
     );
