@@ -405,7 +405,7 @@ export async function createSnapshot(volumeId: string): Promise<{ id: string }> 
   console.log(`[FlyService] Created snapshot ${snapshotId} for volume ${volumeId}, waiting for it to be ready...`);
 
   // Poll until the snapshot appears in the list (ready to use)
-  const maxWaitMs = 120_000; // 2 minutes
+  const maxWaitMs = 300_000; // 5 minutes
   const pollIntervalMs = 3_000; // 3 seconds
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
