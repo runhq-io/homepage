@@ -11,7 +11,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
-  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -38,8 +38,8 @@ export default function LoginPage() {
 
       const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
       const body: Record<string, string> = { email, password };
-      if (mode === 'register' && name.trim()) {
-        body.name = name.trim();
+      if (mode === 'register') {
+        body.username = username.trim().toLowerCase();
       }
 
       const res = await fetch(endpoint, {
@@ -112,17 +112,20 @@ export default function LoginPage() {
                 <form onSubmit={handleSubmit} className="space-y-4">
                   {mode === 'register' && (
                     <div>
-                      <label htmlFor="name" className="block text-sm font-medium text-slate-300 mb-1">
-                        Name
+                      <label htmlFor="username" className="block text-sm font-medium text-slate-300 mb-1">
+                        Username
                       </label>
                       <input
-                        id="name"
+                        id="username"
                         type="text"
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                        required
+                        minLength={3}
+                        maxLength={20}
                         className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="Your name"
-                        autoComplete="name"
+                        placeholder="Letters, numbers, underscores (3-20 chars)"
+                        autoComplete="username"
                       />
                     </div>
                   )}
