@@ -1407,9 +1407,9 @@ export async function updateRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
   if (!hasPermission) {
-    return { success: false, error: 'Only the server owner can update the server image' };
+    return { success: false, error: 'Only the server owner or admin can update the server image' };
   }
 
   return restartRemoteServer(serverId, userId);
