@@ -1400,6 +1400,22 @@ export async function restartRemoteServer(
 }
 
 /**
+ * Update a remote server's image to :latest (owner-only)
+ * Same as restart but restricted to owner permission level
+ */
+export async function updateRemoteServer(
+  serverId: string,
+  userId: string
+): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only the server owner can update the server image' };
+  }
+
+  return restartRemoteServer(serverId, userId);
+}
+
+/**
  * Reprovision a remote server (after machine was destroyed)
  * Generates a new token and creates a new machine
  */

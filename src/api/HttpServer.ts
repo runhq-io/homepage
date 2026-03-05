@@ -2772,6 +2772,39 @@ export function createHttpApp() {
     }
   });
 
+  // Update a remote server's image to latest (owner-only)
+  app.post('/api/servers/:serverId/server/update', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const result = await ServerService.updateRemoteServer(serverId, userId);
+
+      if (!result.success) {
+        const status = result.error === 'Only the server owner can update the server image' ? 403
+          : result.error === 'Access denied' ? 403 : 400;
+        return c.json({ error: result.error }, status);
+      }
+
+      return c.json({
+        success: true,
+        status: result.status,
+        url: result.url,
+      });
+    } catch (error) {
+      console.error('[HttpServer] Update server error:', error);
+      return c.json({ error: 'Failed to update server' }, 500);
+    }
+  });
+
   // Get remote server status
   app.get('/api/servers/:serverId/server/status', async (c) => {
     try {
