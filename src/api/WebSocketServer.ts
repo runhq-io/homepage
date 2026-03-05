@@ -176,24 +176,7 @@ export class FishtankWebSocketServer {
     let userId: string | null = null;
 
     if (message.token && message.token.length > 0) {
-      // Try JWT verification first (new format)
       userId = await verifyToken(message.token);
-
-      // Fallback: try legacy base64 JSON format for backwards compatibility
-      if (!userId) {
-        try {
-          const decoded = JSON.parse(Buffer.from(message.token, 'base64').toString('utf8'));
-          if (decoded.userId && decoded.exp && decoded.exp > Date.now()) {
-            console.warn('[WebSocket] Using legacy base64 token - client should update');
-            userId = decoded.userId;
-          } else if (decoded.userId && decoded.exp) {
-            console.warn('[WebSocket] Legacy token expired, rejecting');
-          }
-        } catch (e) {
-          // Token decode failed - reject
-          console.log('[WebSocket] Token decode failed, rejecting connection');
-        }
-      }
     }
 
     if (userId) {

@@ -46,24 +46,8 @@ export async function verifyToken(token: string): Promise<string | null> {
 }
 
 /**
- * Extract userId from a Bearer token (JWT or legacy base64 format).
- * Tries JWT first, then falls back to legacy format.
+ * Extract userId from a signed JWT Bearer token.
  */
 export async function extractUserIdFromToken(token: string): Promise<string | null> {
-  // Try JWT first
-  const userId = await verifyToken(token);
-  if (userId) return userId;
-
-  // Fallback: legacy base64 JSON format
-  try {
-    const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
-    if (decoded.userId && decoded.exp && decoded.exp > Date.now()) {
-      console.warn('[JWT] Using legacy base64 token - client should update');
-      return decoded.userId;
-    }
-  } catch {
-    // Token decode failed
-  }
-
-  return null;
+  return verifyToken(token);
 }
