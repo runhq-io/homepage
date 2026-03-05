@@ -68,12 +68,13 @@ export default async function middleware(req: NextRequest) {
   }
   const isLoggedIn = !!userId;
 
-  // Redirect logged-in users away from login/reset pages
+  // /login is now a public landing page (no login form) — always allow it
+  // Redirect logged-in users on /login to dashboard
   if (isLoginPage && isLoggedIn) {
     return NextResponse.redirect(new URL('/', req.url));
   }
 
-  // Redirect unauthenticated users to login (but allow public pages)
+  // Redirect unauthenticated users to /login (shows "go to app.fishtank.bot" page)
   if (!isPublicPage && !isLoggedIn) {
     return NextResponse.redirect(new URL('/login', req.url));
   }

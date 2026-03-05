@@ -3,6 +3,7 @@ import { getDb } from '@/db';
 import { users } from '@/db';
 import { eq } from 'drizzle-orm';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
+import { isAdmin } from '@/lib/adminPolicy';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -37,6 +38,8 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'User not found' }, { status: 401, headers: corsHeaders });
     }
 
+    const userIsAdmin = await isAdmin(user.id);
+
     return NextResponse.json({
       user: {
         id: user.id,
@@ -44,6 +47,7 @@ export async function GET(request: Request) {
         username: user.username,
         name: user.name,
         avatarUrl: user.avatarUrl,
+        isAdmin: userIsAdmin,
       },
     }, { headers: corsHeaders });
   } catch (err) {
