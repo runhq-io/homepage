@@ -21,7 +21,7 @@ import * as CloudflareTunnelService from './CloudflareTunnelService';
 // ============================================================================
 
 const MAX_PORTS_PER_SERVER = 5;
-const SERVER_PORT = 3001; // Reserved — must not be exposed
+const SERVER_PORT = 61987; // Reserved — must not be exposed
 const PUBLIC_PORTS_DOMAIN = process.env.PUBLIC_PORTS_DOMAIN || 'tank.fish';
 const RESERVED_SUBDOMAINS = ['www', 'api', 'app', 'mail', 'admin', 'console', 'status', 'fishtank', 'bot'];
 const SUBDOMAIN_REGEX = /^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$/;

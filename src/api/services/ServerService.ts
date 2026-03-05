@@ -164,10 +164,10 @@ async function provisionNewMachine(
     throw error;
   }
 
-  // Add server ingress rule + DNS record so the tunnel routes to localhost:3001
+  // Add server ingress rule + DNS record so the tunnel routes to localhost:61987
   if (tunnelId && provisionResult.machineId) {
     const serverSubdomain = `srv-${provisionResult.machineId}`;
-    await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 3001);
+    await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
     await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
   }
 
@@ -372,7 +372,7 @@ export async function ensureServerTunnelConnector(
     // Add server routing ingress rule + DNS record (backfill for existing servers)
     try {
       const serverSubdomain = `srv-${server.machineId}`;
-      await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 3001);
+      await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
       await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
     } catch (error) {
       console.warn(`[ServerService] Failed to add server ingress rule during backfill for ${server.machineId}:`, error);

@@ -184,7 +184,7 @@ describe('FlyService', () => {
       expect(body.config.env.SERVER_TOKEN).toBe('wst_test_token_123');
       expect(body.config.env.SERVER_ID).toBe('proj-id-123');
       expect(body.config.env.AUTH_MODE).toBe('cloud');
-      expect(body.config.services[0].internal_port).toBe(3001);
+      expect(body.config.services[0].internal_port).toBe(61987);
       expect(body.config.services[0].autostop).toBe('suspend');
       expect(body.config.services[0].autostart).toBe(true);
       expect(body.config.services[0].min_machines_running).toBe(0);
@@ -316,7 +316,7 @@ describe('FlyService', () => {
                   { port: 80, handlers: ['http'] },
                 ],
                 protocol: 'tcp',
-                internal_port: 3001,
+                internal_port: 61987,
                 autostop: 'suspend',
                 autostart: true,
                 min_machines_running: 0,

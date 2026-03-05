@@ -587,7 +587,7 @@ export async function createMachine(
         SERVER_SESSION_SECRET: process.env.SERVER_SESSION_SECRET || '',
         PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN || 'tank.fish',
         NODE_ENV: 'development',
-        PORT: '3001',
+        PORT: '61987',
         HOST: '0.0.0.0',
       },
       services: [
@@ -597,7 +597,7 @@ export async function createMachine(
             { port: 80, handlers: ['http'] },
           ],
           protocol: 'tcp',
-          internal_port: 3001,
+          internal_port: 61987,
           autostop,
           autostart,
           min_machines_running: minMachinesRunning,
@@ -616,7 +616,7 @@ export async function createMachine(
       checks: {
         httpget: {
           type: 'http',
-          port: 3001,
+          port: 61987,
           path: '/health',
           interval: '30s',
           timeout: '5s',
