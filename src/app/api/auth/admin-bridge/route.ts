@@ -37,7 +37,12 @@ export async function GET(request: NextRequest) {
   // Create a fresh token for the console cookie (don't reuse the one from the URL)
   const freshToken = await createToken(userId);
 
-  const response = NextResponse.redirect(new URL('/admin', request.url));
+  // Use x-forwarded-host/host header to build the redirect URL, since request.url
+  // behind a reverse proxy resolves to the internal URL (e.g. localhost:8080)
+  const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+  const proto = request.headers.get('x-forwarded-proto') || 'https';
+  const baseUrl = host ? `${proto}://${host}` : request.url;
+  const response = NextResponse.redirect(new URL('/admin', baseUrl));
   response.cookies.set('auth_token', freshToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
