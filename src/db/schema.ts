@@ -654,6 +654,7 @@ export const serverMembers = pgTable('server_members', {
   role: text('role').$type<ServerRole>().notNull().default('member'),
   invitedById: uuid('invited_by_id').references(() => users.id),
   joinedAt: timestamp('joined_at').defaultNow().notNull(),
+  sortOrder: integer('sort_order'),
 }, (t) => [
   unique('server_members_server_id_user_id_unique').on(t.serverId, t.userId),
 ]);

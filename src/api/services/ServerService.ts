@@ -386,13 +386,14 @@ export async function ensureServerTunnelConnector(
 /**
  * Get all servers a user is a member of
  */
-export async function getUserServers(userId: string): Promise<Array<Server & { role: ServerRole; memberCount: number }>> {
+export async function getUserServers(userId: string): Promise<Array<Server & { role: ServerRole; memberCount: number; sortOrder: number | null }>> {
   console.log(`[ServerService] getUserServers called for user: ${userId}`);
 
   const memberships = await db
     .select({
       server: servers,
       role: serverMembers.role,
+      sortOrder: serverMembers.sortOrder,
     })
     .from(serverMembers)
     .innerJoin(servers, eq(serverMembers.serverId, servers.id))
@@ -414,7 +415,7 @@ export async function getUserServers(userId: string): Promise<Array<Server & { r
         userId,
         role: 'owner',
       });
-      memberships.push({ server: owned, role: 'owner' });
+      memberships.push({ server: owned, role: 'owner', sortOrder: null });
     }
   }
 
@@ -437,7 +438,7 @@ export async function getUserServers(userId: string): Promise<Array<Server & { r
 
   // Ensure all servers have token (backfill if missing)
   // Also check for stale heartbeats and mark servers as offline
-  const results: Array<Server & { role: ServerRole; memberCount: number }> = [];
+  const results: Array<Server & { role: ServerRole; memberCount: number; sortOrder: number | null }> = [];
   const now = Date.now();
 
   for (const m of memberships) {
@@ -476,7 +477,7 @@ export async function getUserServers(userId: string): Promise<Array<Server & { r
     }
 
     const memberCount = memberCountMap.get(server.id) || 1;
-    results.push({ ...server, role: m.role, memberCount });
+    results.push({ ...server, role: m.role, memberCount, sortOrder: m.sortOrder });
   }
 
   return results;

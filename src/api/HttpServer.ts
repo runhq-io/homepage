@@ -28,7 +28,7 @@ import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@fishtank/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, systemSettings } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, systemSettings, serverMembers } from '../db/schema';
 import { eq, lt, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 
@@ -1595,6 +1595,8 @@ export function createHttpApp() {
           memberCount: w.memberCount,
           // Custom icon
           iconUrl: w.iconUrl || null,
+          // User-specific sort order
+          sortOrder: w.sortOrder ?? null,
         };
       });
 
@@ -1617,6 +1619,40 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Get servers error:', error);
       return c.json({ error: 'Failed to get servers' }, 500);
+    }
+  });
+
+  // Update server sort order for the authenticated user
+  app.put('/api/servers/order', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const body = await c.req.json() as { order: Array<{ serverId: string; sortOrder: number }> };
+      if (!Array.isArray(body.order)) {
+        return c.json({ error: 'order array is required' }, 400);
+      }
+
+      // Update sort_order for each server membership in parallel
+      await Promise.all(
+        body.order.map(({ serverId, sortOrder }) =>
+          db.update(serverMembers)
+            .set({ sortOrder })
+            .where(sql`${serverMembers.serverId} = ${serverId} AND ${serverMembers.userId} = ${userId}`)
+        )
+      );
+
+      return c.json({ success: true });
+    } catch (error) {
+      console.error('[HttpServer] Update server order error:', error);
+      return c.json({ error: 'Failed to update server order' }, 500);
     }
   });
 
