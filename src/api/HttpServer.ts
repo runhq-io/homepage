@@ -28,7 +28,7 @@ import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@fishtank/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, systemSettings } from '../db/schema';
 import { eq, lt, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 
@@ -41,8 +41,33 @@ type BuildInfo = {
 
 let cachedBuildInfo: BuildInfo | null | undefined;
 
-// Latest server version — set at runtime by deploy script via POST /api/admin/set-server-version
-let latestServerVersion: string | null = null;
+// Latest server version — persisted in system_settings, cached in memory
+let _cachedLatestServerVersion: string | null = null;
+let _versionCacheTime = 0;
+const VERSION_CACHE_TTL = 60_000; // 1 minute
+
+async function getLatestServerVersion(): Promise<string | null> {
+  if (_cachedLatestServerVersion && Date.now() - _versionCacheTime < VERSION_CACHE_TTL) {
+    return _cachedLatestServerVersion;
+  }
+  try {
+    const [row] = await db.select({ value: systemSettings.value }).from(systemSettings).where(eq(systemSettings.key, 'latest_server_version'));
+    _cachedLatestServerVersion = row?.value ?? null;
+    _versionCacheTime = Date.now();
+  } catch (err) {
+    console.error('[HttpServer] Failed to read latest_server_version:', err);
+  }
+  return _cachedLatestServerVersion;
+}
+
+async function setLatestServerVersion(version: string): Promise<void> {
+  await db.insert(systemSettings).values({ key: 'latest_server_version', value: version }).onConflictDoUpdate({
+    target: systemSettings.key,
+    set: { value: version, updatedAt: new Date() },
+  });
+  _cachedLatestServerVersion = version;
+  _versionCacheTime = Date.now();
+}
 
 function getBuildInfo(): BuildInfo | null {
   if (cachedBuildInfo !== undefined) return cachedBuildInfo;
@@ -1421,9 +1446,9 @@ export function createHttpApp() {
       if (!body.version || typeof body.version !== 'string') {
         return c.json({ error: 'Missing version' }, 400);
       }
-      latestServerVersion = body.version;
-      console.log(`[HttpServer] Latest server version set to: ${latestServerVersion}`);
-      return c.json({ success: true, version: latestServerVersion });
+      await setLatestServerVersion(body.version);
+      console.log(`[HttpServer] Latest server version set to: ${body.version}`);
+      return c.json({ success: true, version: body.version });
     } catch (error) {
       console.error('[HttpServer] Set server version error:', error);
       return c.json({ error: 'Failed to set server version' }, 500);
@@ -2946,7 +2971,10 @@ export function createHttpApp() {
         console.log(`[HttpServer] Fast-path session for server ${serverId} (lastSeen ${Math.round((Date.now() - server.lastSeen.getTime()) / 1000)}s ago)`);
         const provider = getProvider((server.provider || 'fly') as ProviderId);
         const routing = provider.getRoutingInfo(server.machineId);
-        const serverSessionToken = await ServerSessionService.generateServerSessionToken(userId, serverId, 3600, sessionTokenOpts);
+        const [serverSessionToken, latestServerVersion] = await Promise.all([
+          ServerSessionService.generateServerSessionToken(userId, serverId, 3600, sessionTokenOpts),
+          getLatestServerVersion(),
+        ]);
         return c.json({
           success: true,
           serverSessionToken,
@@ -3087,7 +3115,10 @@ export function createHttpApp() {
       }
 
       // Generate a server-scoped session token (1 hour validity)
-      const serverSessionToken = await ServerSessionService.generateServerSessionToken(userId, serverId, 3600, sessionTokenOpts);
+      const [serverSessionToken, latestServerVersion] = await Promise.all([
+        ServerSessionService.generateServerSessionToken(userId, serverId, 3600, sessionTokenOpts),
+        getLatestServerVersion(),
+      ]);
 
       return c.json({
         success: true,
