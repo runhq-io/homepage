@@ -1738,10 +1738,19 @@ export function createHttpApp() {
         return c.json({ error: `Provider '${requestedProvider}' is not available` }, 400);
       }
 
-      // Validate tier (accepts both generic TierId names and legacy Fly tier names)
-      const validTiers = ['micro', 'small', 'medium', 'large', 'xlarge', 'xxlarge', 'shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
+      // Validate tier (accepts both new tier names and legacy Fly tier names)
+      const validTiers = [
+        // New tiers
+        'shared-4x-1gb', 'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+        'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
+        'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
+        'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',
+        // Legacy tiers
+        'micro', 'small', 'medium', 'large', 'xlarge', 'xxlarge',
+        'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x',
+      ];
       if (tier && !validTiers.includes(tier)) {
-        return c.json({ error: `Invalid tier. Must be one of: micro, small, medium, large, xlarge, xxlarge` }, 400);
+        return c.json({ error: `Invalid tier. Must be one of: ${validTiers.join(', ')}` }, 400);
       }
 
       // Enforce server limit per plan (admins bypass)

@@ -29,6 +29,7 @@ import type { ServerTier } from '../../../db/schema';
 
 // New tier IDs map 1:1 to ServerTier (same string)
 const TIER_TO_FLY: Record<TierId, ServerTier> = {
+  'shared-4x-1gb': 'shared-4x-1gb',
   'shared-4x-2gb': 'shared-4x-2gb',
   'shared-4x-4gb': 'shared-4x-4gb',
   'shared-4x-8gb': 'shared-4x-8gb',
@@ -157,6 +158,7 @@ export class FlyProvider implements IProvider {
   getTierSpecs(): TierSpec[] {
     return [
       // Shared 4x
+      { tierId: 'shared-4x-1gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 1024,  diskGb: 3,  label: 'Shared 4x / 1 GB' },
       { tierId: 'shared-4x-2gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 2048,  diskGb: 5,  label: 'Shared 4x / 2 GB' },
       { tierId: 'shared-4x-4gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 4096,  diskGb: 10, label: 'Shared 4x / 4 GB' },
       { tierId: 'shared-4x-8gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 8192,  diskGb: 10, label: 'Shared 4x / 8 GB' },

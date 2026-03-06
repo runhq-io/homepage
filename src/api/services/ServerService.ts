@@ -1699,7 +1699,7 @@ export async function validateChangeTier(
 ): Promise<{ success: boolean; error?: string; diskUsage?: { usedBytes: number; totalBytes: number } }> {
   const VALID_TIERS = [
     // New tiers
-    'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+    'shared-4x-1gb', 'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
     'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
     'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
     'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',
@@ -1766,7 +1766,7 @@ export async function changeTier(
 ): Promise<{ success: boolean; tier?: ServerTier; status?: ServerStatusType; error?: string }> {
   const VALID_TIERS: ServerTier[] = [
     // New tiers
-    'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+    'shared-4x-1gb', 'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
     'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
     'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
     'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',

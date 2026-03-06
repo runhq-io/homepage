@@ -21,6 +21,7 @@ const providers = new Map<ProviderId, IProvider>();
 
 const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
   fly: {
+    'shared-4x-1gb': 1,
     'shared-4x-2gb': 3,
     'shared-4x-4gb': 4,
     'shared-4x-8gb': 8,

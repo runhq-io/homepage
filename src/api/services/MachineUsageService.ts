@@ -27,7 +27,7 @@ const LEGACY_TIER_MAP: Record<string, TierId> = {
 };
 
 const NEW_TIER_IDS = new Set<string>([
-  'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+  'shared-4x-1gb', 'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
   'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
   'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
   'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',
