@@ -1965,13 +1965,17 @@ export function createHttpApp() {
         return c.json({ error: 'Name must be a non-empty string' }, 400);
       }
 
-      // Validate iconUrl if provided
+      // Validate iconUrl if provided (can be an emoji string or a data:image/ URL)
       if (iconUrl !== undefined && iconUrl !== null) {
-        if (typeof iconUrl !== 'string' || !iconUrl.startsWith('data:image/')) {
-          return c.json({ error: 'iconUrl must be a data:image/ URL or null' }, 400);
+        if (typeof iconUrl !== 'string') {
+          return c.json({ error: 'iconUrl must be a string or null' }, 400);
         }
-        if (iconUrl.length > 256 * 1024) {
-          return c.json({ error: 'iconUrl exceeds maximum size of 256KB' }, 400);
+        if (iconUrl.startsWith('data:image/')) {
+          if (iconUrl.length > 256 * 1024) {
+            return c.json({ error: 'iconUrl exceeds maximum size of 256KB' }, 400);
+          }
+        } else if (iconUrl.length > 32) {
+          return c.json({ error: 'iconUrl emoji must be 32 characters or fewer' }, 400);
         }
       }
 
