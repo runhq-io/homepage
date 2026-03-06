@@ -41,6 +41,9 @@ type BuildInfo = {
 
 let cachedBuildInfo: BuildInfo | null | undefined;
 
+// Latest server version — set at runtime by deploy script via POST /api/admin/set-server-version
+let latestServerVersion: string | null = null;
+
 function getBuildInfo(): BuildInfo | null {
   if (cachedBuildInfo !== undefined) return cachedBuildInfo;
 
@@ -1403,6 +1406,30 @@ export function createHttpApp() {
     }
   });
 
+  // Admin: Set the latest server version (called by deploy script)
+  app.post('/api/admin/set-server-version', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const body = await c.req.json() as { version?: string };
+      if (!body.version || typeof body.version !== 'string') {
+        return c.json({ error: 'Missing version' }, 400);
+      }
+      latestServerVersion = body.version;
+      console.log(`[HttpServer] Latest server version set to: ${latestServerVersion}`);
+      return c.json({ success: true, version: latestServerVersion });
+    } catch (error) {
+      console.error('[HttpServer] Set server version error:', error);
+      return c.json({ error: 'Failed to set server version' }, 500);
+    }
+  });
+
   // ==========================================================================
   // Server Invite Links -- Public Routes
   // ==========================================================================
@@ -1651,9 +1678,9 @@ export function createHttpApp() {
       }
 
       // Validate tier (accepts both generic TierId names and legacy Fly tier names)
-      const validTiers = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
+      const validTiers = ['micro', 'small', 'medium', 'large', 'xlarge', 'xxlarge', 'shared-cpu-1x', 'shared-cpu-2x', 'performance-cpu-2x', 'performance-cpu-4x'];
       if (tier && !validTiers.includes(tier)) {
-        return c.json({ error: `Invalid tier. Must be one of: micro, small, medium, large` }, 400);
+        return c.json({ error: `Invalid tier. Must be one of: micro, small, medium, large, xlarge, xxlarge` }, 400);
       }
 
       // Enforce server limit per plan (admins bypass)
@@ -2929,6 +2956,7 @@ export function createHttpApp() {
           serverName: server.name,
           serverStatus: server.status,
           deploymentType: server.deploymentType,
+          latestServerVersion,
         });
       }
 
@@ -3070,6 +3098,7 @@ export function createHttpApp() {
         serverName: latestServer.name,
         serverStatus: latestServer.status,
         deploymentType: latestServer.deploymentType,
+        latestServerVersion,
       });
     } catch (error) {
       console.error('[HttpServer] Generate server session error:', error);
