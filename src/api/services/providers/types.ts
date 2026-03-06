@@ -29,10 +29,15 @@ export type MachineState =
 // Tiers (provider-agnostic)
 // ---------------------------------------------------------------------------
 
-export type TierId = 'micro' | 'small' | 'medium' | 'large';
+export type TierId =
+  | 'shared-4x-2gb' | 'shared-4x-4gb' | 'shared-4x-8gb'
+  | 'shared-8x-4gb' | 'shared-8x-8gb' | 'shared-8x-16gb'
+  | 'perf-2x-4gb' | 'perf-2x-8gb' | 'perf-2x-16gb'
+  | 'perf-4x-8gb' | 'perf-4x-16gb' | 'perf-4x-32gb';
 
 export interface TierSpec {
   tierId: TierId;
+  cpuKind: 'shared' | 'performance';
   cpus: number;
   memoryMb: number;
   diskGb: number;

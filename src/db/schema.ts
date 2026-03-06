@@ -584,7 +584,16 @@ export const organizationInvitesRelations = relations(organizationInvites, ({ on
 
 export type DeploymentType = 'local' | 'remote';
 export type ServerStatusType = 'online' | 'offline' | 'suspended' | 'provisioning' | 'error';
-export type ServerTier = 'shared-cpu-1x' | 'shared-cpu-2x' | 'shared-cpu-4x' | 'performance-cpu-2x' | 'performance-cpu-4x' | 'micro' | 'small' | 'medium' | 'large';
+export type ServerTier =
+  // New descriptive tier IDs
+  | 'shared-4x-2gb' | 'shared-4x-4gb' | 'shared-4x-8gb'
+  | 'shared-8x-4gb' | 'shared-8x-8gb' | 'shared-8x-16gb'
+  | 'perf-2x-4gb' | 'perf-2x-8gb' | 'perf-2x-16gb'
+  | 'perf-4x-8gb' | 'perf-4x-16gb' | 'perf-4x-32gb'
+  // Legacy tier IDs (kept for existing DB rows)
+  | 'shared-cpu-1x' | 'shared-cpu-2x' | 'shared-cpu-4x'
+  | 'performance-cpu-2x' | 'performance-cpu-4x'
+  | 'micro' | 'small' | 'medium' | 'large' | 'xlarge' | 'xxlarge';
 
 export const servers = pgTable('servers', {
   id: text('id').primaryKey(), // Uses server ID format (e.g., ws_xxx)

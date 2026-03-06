@@ -13,21 +13,34 @@ import type { ProviderId, TierId } from './providers/types';
 
 // Legacy tier name → TierId mapping (for backward compat during transition)
 const LEGACY_TIER_MAP: Record<string, TierId> = {
-  'shared-cpu-1x': 'micro',
-  'shared-cpu-2x': 'small',
-  'performance-cpu-2x': 'medium',
-  'performance-cpu-4x': 'large',
+  'shared-cpu-1x': 'shared-4x-2gb',
+  'shared-cpu-2x': 'shared-4x-4gb',
+  'shared-cpu-4x': 'shared-4x-4gb',
+  'performance-cpu-2x': 'perf-2x-4gb',
+  'performance-cpu-4x': 'perf-4x-8gb',
+  'micro': 'shared-4x-2gb',
+  'small': 'shared-4x-4gb',
+  'medium': 'shared-4x-4gb',
+  'large': 'perf-4x-8gb',
+  'xlarge': 'shared-8x-16gb',
+  'xxlarge': 'perf-4x-32gb',
 };
+
+const NEW_TIER_IDS = new Set<string>([
+  'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+  'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
+  'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
+  'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',
+]);
 
 /**
  * Resolve a tier string (could be old Fly name or new TierId) to a TierId.
  */
 function resolveTierId(tier: string | null): TierId {
-  if (!tier) return 'micro';
+  if (!tier) return 'shared-4x-2gb';
+  if (NEW_TIER_IDS.has(tier)) return tier as TierId;
   if (tier in LEGACY_TIER_MAP) return LEGACY_TIER_MAP[tier];
-  // Already a new TierId
-  if (['micro', 'small', 'medium', 'large'].includes(tier)) return tier as TierId;
-  return 'micro';
+  return 'shared-4x-2gb';
 }
 
 /**

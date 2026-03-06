@@ -27,31 +27,47 @@ import type { ServerTier } from '../../../db/schema';
 // Tier mapping: TierId ↔ Fly's ServerTier
 // ---------------------------------------------------------------------------
 
+// New tier IDs map 1:1 to ServerTier (same string)
 const TIER_TO_FLY: Record<TierId, ServerTier> = {
-  micro: 'shared-cpu-1x',
-  small: 'shared-cpu-2x',
-  medium: 'shared-cpu-4x',
-  large: 'shared-cpu-4x',
+  'shared-4x-2gb': 'shared-4x-2gb',
+  'shared-4x-4gb': 'shared-4x-4gb',
+  'shared-4x-8gb': 'shared-4x-8gb',
+  'shared-8x-4gb': 'shared-8x-4gb',
+  'shared-8x-8gb': 'shared-8x-8gb',
+  'shared-8x-16gb': 'shared-8x-16gb',
+  'perf-2x-4gb': 'perf-2x-4gb',
+  'perf-2x-8gb': 'perf-2x-8gb',
+  'perf-2x-16gb': 'perf-2x-16gb',
+  'perf-4x-8gb': 'perf-4x-8gb',
+  'perf-4x-16gb': 'perf-4x-16gb',
+  'perf-4x-32gb': 'perf-4x-32gb',
 };
 
-const TIER_ID_SET: Set<string> = new Set(['micro', 'small', 'medium', 'large']);
+const TIER_ID_SET: Set<string> = new Set(Object.keys(TIER_TO_FLY));
 
+// Map legacy ServerTier values (from existing DB rows) to closest new TierId
 const FLY_TO_TIER: Partial<Record<ServerTier, TierId>> = {
-  'shared-cpu-1x': 'micro',
-  'shared-cpu-2x': 'small',
-  'shared-cpu-4x': 'medium',
-  'performance-cpu-2x': 'medium',
-  'performance-cpu-4x': 'large',
+  'shared-cpu-1x': 'shared-4x-2gb',
+  'shared-cpu-2x': 'shared-4x-4gb',
+  'shared-cpu-4x': 'shared-4x-4gb',
+  'performance-cpu-2x': 'perf-2x-4gb',
+  'performance-cpu-4x': 'perf-4x-8gb',
+  'micro': 'shared-4x-2gb',
+  'small': 'shared-4x-4gb',
+  'medium': 'shared-4x-4gb',
+  'large': 'perf-4x-8gb',
+  'xlarge': 'shared-8x-16gb',
+  'xxlarge': 'perf-4x-32gb',
 };
 
 export function flyTierToTierId(tier: ServerTier): TierId {
-  // Pass through if already a generic TierId
+  // Pass through if already a new TierId
   if (TIER_ID_SET.has(tier)) return tier as TierId;
-  return FLY_TO_TIER[tier] ?? 'micro';
+  return FLY_TO_TIER[tier] ?? 'shared-4x-2gb';
 }
 
 export function tierIdToFlyTier(tierId: TierId): ServerTier {
-  return TIER_TO_FLY[tierId] ?? 'shared-cpu-1x';
+  return TIER_TO_FLY[tierId] ?? 'shared-4x-2gb';
 }
 
 // ---------------------------------------------------------------------------
@@ -140,10 +156,22 @@ export class FlyProvider implements IProvider {
 
   getTierSpecs(): TierSpec[] {
     return [
-      { tierId: 'micro', cpus: 1, memoryMb: 2048, diskGb: 1, label: 'Micro (1 vCPU / 2GB)' },
-      { tierId: 'small', cpus: 2, memoryMb: 4096, diskGb: 5, label: 'Small (2 vCPU / 4GB)' },
-      { tierId: 'medium', cpus: 4, memoryMb: 4096, diskGb: 10, label: 'Medium (4 vCPU / 4GB)' },
-      { tierId: 'large', cpus: 4, memoryMb: 8192, diskGb: 20, label: 'Large (4 vCPU / 8GB)' },
+      // Shared 4x
+      { tierId: 'shared-4x-2gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 2048,  diskGb: 5,  label: 'Shared 4x / 2 GB' },
+      { tierId: 'shared-4x-4gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 4096,  diskGb: 10, label: 'Shared 4x / 4 GB' },
+      { tierId: 'shared-4x-8gb',  cpuKind: 'shared',      cpus: 4, memoryMb: 8192,  diskGb: 10, label: 'Shared 4x / 8 GB' },
+      // Shared 8x
+      { tierId: 'shared-8x-4gb',  cpuKind: 'shared',      cpus: 8, memoryMb: 4096,  diskGb: 10, label: 'Shared 8x / 4 GB' },
+      { tierId: 'shared-8x-8gb',  cpuKind: 'shared',      cpus: 8, memoryMb: 8192,  diskGb: 15, label: 'Shared 8x / 8 GB' },
+      { tierId: 'shared-8x-16gb', cpuKind: 'shared',      cpus: 8, memoryMb: 16384, diskGb: 20, label: 'Shared 8x / 16 GB' },
+      // Performance 2x
+      { tierId: 'perf-2x-4gb',    cpuKind: 'performance', cpus: 2, memoryMb: 4096,  diskGb: 10, label: 'Perf 2x / 4 GB' },
+      { tierId: 'perf-2x-8gb',    cpuKind: 'performance', cpus: 2, memoryMb: 8192,  diskGb: 15, label: 'Perf 2x / 8 GB' },
+      { tierId: 'perf-2x-16gb',   cpuKind: 'performance', cpus: 2, memoryMb: 16384, diskGb: 20, label: 'Perf 2x / 16 GB' },
+      // Performance 4x
+      { tierId: 'perf-4x-8gb',    cpuKind: 'performance', cpus: 4, memoryMb: 8192,  diskGb: 15, label: 'Perf 4x / 8 GB' },
+      { tierId: 'perf-4x-16gb',   cpuKind: 'performance', cpus: 4, memoryMb: 16384, diskGb: 25, label: 'Perf 4x / 16 GB' },
+      { tierId: 'perf-4x-32gb',   cpuKind: 'performance', cpus: 4, memoryMb: 32768, diskGb: 40, label: 'Perf 4x / 32 GB' },
     ];
   }
 

@@ -21,10 +21,18 @@ const providers = new Map<ProviderId, IProvider>();
 
 const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
   fly: {
-    micro: 2,   // $0.02/hr — shared-cpu-1x / 2GB
-    small: 3,   // $0.03/hr — shared-cpu-2x / 4GB
-    medium: 4,  // $0.04/hr — shared-cpu-4x / 4GB
-    large: 6,   // $0.06/hr — shared-cpu-4x / 8GB
+    'shared-4x-2gb': 3,
+    'shared-4x-4gb': 4,
+    'shared-4x-8gb': 8,
+    'shared-8x-4gb': 5,
+    'shared-8x-8gb': 8,
+    'shared-8x-16gb': 15,
+    'perf-2x-4gb': 11,
+    'perf-2x-8gb': 15,
+    'perf-2x-16gb': 22,
+    'perf-4x-8gb': 22,
+    'perf-4x-16gb': 29,
+    'perf-4x-32gb': 43,
   },
 };
 
@@ -68,7 +76,7 @@ export function getDefaultProviderId(): ProviderId {
  * Falls back to Fly micro rate if lookup fails.
  */
 export function getHourlyRate(providerId: ProviderId, tierId: TierId): number {
-  return HOURLY_RATES[providerId]?.[tierId] ?? HOURLY_RATES.fly.micro;
+  return HOURLY_RATES[providerId]?.[tierId] ?? HOURLY_RATES.fly['shared-4x-2gb'];
 }
 
 /**

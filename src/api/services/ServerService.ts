@@ -143,7 +143,7 @@ async function provisionNewMachine(
   let provisionResult;
 
   try {
-    const tierId = tier ? flyTierToTierId(tier) : 'micro';
+    const tierId = tier ? flyTierToTierId(tier) : ('shared-4x-2gb' as const);
     provisionResult = await provider.createMachine({
       serverId,
       serverToken,
@@ -1696,7 +1696,16 @@ export async function validateChangeTier(
   userId: string,
   newTier: string
 ): Promise<{ success: boolean; error?: string; diskUsage?: { usedBytes: number; totalBytes: number } }> {
-  const VALID_TIERS = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x'];
+  const VALID_TIERS = [
+    // New tiers
+    'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+    'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
+    'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
+    'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',
+    // Legacy tiers (still accepted for backward compat)
+    'micro', 'small', 'medium', 'large', 'xlarge', 'xxlarge',
+    'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x',
+  ];
   if (!VALID_TIERS.includes(newTier)) {
     return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
@@ -1754,9 +1763,18 @@ export async function changeTier(
   userId: string,
   newTier: ServerTier
 ): Promise<{ success: boolean; tier?: ServerTier; status?: ServerStatusType; error?: string }> {
-  const VALID_TIERS: ServerTier[] = ['micro', 'small', 'medium', 'large', 'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x'];
+  const VALID_TIERS: ServerTier[] = [
+    // New tiers
+    'shared-4x-2gb', 'shared-4x-4gb', 'shared-4x-8gb',
+    'shared-8x-4gb', 'shared-8x-8gb', 'shared-8x-16gb',
+    'perf-2x-4gb', 'perf-2x-8gb', 'perf-2x-16gb',
+    'perf-4x-8gb', 'perf-4x-16gb', 'perf-4x-32gb',
+    // Legacy tiers (still accepted for backward compat)
+    'micro', 'small', 'medium', 'large', 'xlarge', 'xxlarge',
+    'shared-cpu-1x', 'shared-cpu-2x', 'shared-cpu-4x', 'performance-cpu-2x', 'performance-cpu-4x',
+  ];
   if (!VALID_TIERS.includes(newTier)) {
-    return { success: false, error: `Invalid tier. Must be one of: micro, small, medium, large` };
+    return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
 
   const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
