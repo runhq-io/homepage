@@ -1010,6 +1010,8 @@ export async function checkServerPermission(serverId: string, userId: string, al
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
     .limit(1);
 
+  console.log(`[checkServerPermission] serverId=${serverId} userId=${userId} allowedRoles=${allowedRoles} membership=${JSON.stringify(membership)}`);
+
   if (membership) {
     return allowedRoles.includes(membership.role);
   }
