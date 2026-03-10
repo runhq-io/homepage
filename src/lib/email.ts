@@ -43,6 +43,34 @@ export async function sendActivationEmail(to: string, activateUrl: string): Prom
   });
 }
 
+export async function sendInviteEmail(to: string, inviterName: string, serverName: string, acceptUrl: string): Promise<void> {
+  const resend = getResend();
+
+  await resend.emails.send({
+    from: FROM(),
+    to,
+    subject: `You've been invited to ${serverName} on Fishtank`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <h2 style="color: #1e293b; margin-bottom: 16px;">You're invited!</h2>
+        <p style="color: #475569; line-height: 1.6;">
+          <strong>${inviterName}</strong> has invited you to join <strong>${serverName}</strong> on Fishtank.
+        </p>
+        <a href="${acceptUrl}" style="display: inline-block; margin: 24px 0; padding: 12px 32px; background-color: #2563eb; color: #ffffff; text-decoration: none; border-radius: 8px; font-weight: 500;">
+          Accept Invite
+        </a>
+        <p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
+          This invite expires in 7 days. If you don't have a Fishtank account, you'll be prompted to create one.
+        </p>
+        <p style="color: #94a3b8; font-size: 14px; margin-top: 32px;">
+          If the button doesn't work, copy and paste this URL into your browser:<br/>
+          <span style="color: #64748b; word-break: break-all;">${acceptUrl}</span>
+        </p>
+      </div>
+    `,
+  });
+}
+
 export async function sendPasswordResetEmail(to: string, resetUrl: string): Promise<void> {
   const resend = getResend();
 

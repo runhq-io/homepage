@@ -30,6 +30,8 @@ import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, systemSettings, serverMembers } from '../db/schema';
 import { eq, lt, sql } from 'drizzle-orm';
+import { getUserByUsername } from '../db/services';
+import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 
 type BuildInfo = {
@@ -2207,16 +2209,43 @@ export function createHttpApp() {
 
       const serverId = c.req.param('serverId');
       const body = await c.req.json();
-      const { email, role, serverName } = body;
+      const { role, serverName } = body;
+      let { email, username } = body;
+
+      // Resolve username to email if needed
+      if (!email && username) {
+        const user = await getUserByUsername(username);
+        if (!user?.email) {
+          return c.json({ error: 'User not found' }, 404);
+        }
+        email = user.email;
+      }
 
       if (!email) {
-        return c.json({ error: 'Email is required' }, 400);
+        return c.json({ error: 'Email or username is required' }, 400);
       }
 
       // Ensure server exists in cloud (create if not)
-      await ServerService.ensureServer(serverId, userId, serverName || 'Untitled Server');
+      const resolvedServerName = serverName || 'Untitled Server';
+      await ServerService.ensureServer(serverId, userId, resolvedServerName);
 
       const invite = await ServerService.createInvite(serverId, userId, email, role || 'member');
+      if (!invite) {
+        return c.json({ error: 'Failed to create invite. User may already be a member.' }, 400);
+      }
+
+      // Send invite email
+      try {
+        const [inviter] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+        const inviterName = inviter?.name || inviter?.email || 'Someone';
+        const CLIENT_URL = process.env.CLIENT_URL || 'https://app.fishtank.bot';
+        const acceptUrl = `${CLIENT_URL}/invite/accept?token=${invite.token}`;
+        await sendInviteEmail(email, inviterName, resolvedServerName, acceptUrl);
+      } catch (emailErr) {
+        console.error('[HttpServer] Failed to send invite email:', emailErr);
+        // Invite was created successfully, just email failed - don't fail the request
+      }
+
       return c.json({ success: true, invite });
     } catch (error) {
       console.error('[HttpServer] Invite member error:', error);
@@ -2386,6 +2415,21 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Get pending invites error:', error);
       return c.json({ error: 'Failed to get invites' }, 500);
+    }
+  });
+
+  // Get invite info by token (public, no auth required)
+  app.get('/api/servers/invites/:token/info', async (c) => {
+    try {
+      const inviteToken = c.req.param('token');
+      const info = await ServerService.getInviteInfo(inviteToken);
+      if (!info) {
+        return c.json({ error: 'Invite not found' }, 404);
+      }
+      return c.json(info);
+    } catch (error) {
+      console.error('[HttpServer] Get invite info error:', error);
+      return c.json({ error: 'Failed to get invite info' }, 500);
     }
   });
 

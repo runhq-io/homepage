@@ -790,6 +790,47 @@ export async function getServerInvites(
 }
 
 /**
+ * Get invite info by token (public, no auth required)
+ */
+export async function getInviteInfo(token: string): Promise<{
+  serverName: string;
+  email: string;
+  role: ServerRole;
+  expiresAt: Date;
+  valid: boolean;
+} | null> {
+  const [invite] = await db
+    .select({
+      email: serverInvites.email,
+      role: serverInvites.role,
+      expiresAt: serverInvites.expiresAt,
+      usedAt: serverInvites.usedAt,
+      serverId: serverInvites.serverId,
+    })
+    .from(serverInvites)
+    .where(eq(serverInvites.token, token))
+    .limit(1);
+
+  if (!invite) return null;
+
+  const [server] = await db
+    .select({ name: servers.name })
+    .from(servers)
+    .where(eq(servers.id, invite.serverId))
+    .limit(1);
+
+  const valid = !invite.usedAt && invite.expiresAt > new Date();
+
+  return {
+    serverName: server?.name || 'Unknown Server',
+    email: invite.email,
+    role: invite.role,
+    expiresAt: invite.expiresAt,
+    valid,
+  };
+}
+
+/**
  * Accept an invitation
  */
 export async function acceptInvite(token: string, userId: string): Promise<{ success: boolean; serverId?: string; error?: string }> {
