@@ -60,8 +60,15 @@ export async function POST(request: NextRequest) {
     .where(eq(users.email, email.toLowerCase().trim()))
     .limit(1);
 
-  if (!user || !user.passwordHash) {
+  if (!user) {
     return NextResponse.json({ error: 'Invalid email or password' }, { status: 401, headers });
+  }
+
+  if (!user.passwordHash) {
+    return NextResponse.json(
+      { error: 'This account was created with Google. Use "Forgot password" to set a password.' },
+      { status: 401, headers },
+    );
   }
 
   const valid = await verifyPassword(password, user.passwordHash);

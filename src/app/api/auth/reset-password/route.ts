@@ -68,6 +68,7 @@ export async function POST(request: NextRequest) {
   await db.update(users).set({
     passwordHash: newPasswordHash,
     authProvider: 'email',
+    emailVerifiedAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(users.id, resetToken.userId));
 
