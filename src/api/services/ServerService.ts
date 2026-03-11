@@ -2077,12 +2077,12 @@ export async function checkServerAccess(
 // Bans
 // ============================================================================
 
-export async function banMember(serverId: string, requesterId: string, targetUserId: string, reason?: string): Promise<boolean> {
+export async function banMember(serverId: string, requesterId: string, targetUserId: string, reason?: string, deleteMessageHours?: number): Promise<boolean> {
   const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
   if (!hasPermission) return false;
 
   const server = await getServer(serverId);
-  if (server?.ownerId === targetUserId) return false;
+  if (!server || server.ownerId === targetUserId) return false;
 
   const requesterRole = await getMemberRole(serverId, requesterId);
   const targetRole = await getMemberRole(serverId, targetUserId);
@@ -2101,7 +2101,22 @@ export async function banMember(serverId: string, requesterId: string, targetUse
     .delete(serverMembers)
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, targetUserId)));
 
-  console.log(`[ServerService] Banned user ${targetUserId} from server ${serverId}`);
+  // Purge messages on the fishtank server if requested
+  if (deleteMessageHours && deleteMessageHours > 0) {
+    try {
+      const { url, headers } = await buildServerFetchHeaders(server, requesterId);
+      const since = new Date(Date.now() - deleteMessageHours * 60 * 60 * 1000).toISOString();
+      await fetch(`${url}/api/chat/purge-user-messages`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId: targetUserId, since }),
+      });
+    } catch (err) {
+      console.error(`[ServerService] Failed to purge messages for banned user ${targetUserId}:`, err);
+    }
+  }
+
+  console.log(`[ServerService] Banned user ${targetUserId} from server ${serverId}${deleteMessageHours ? ` (purging ${deleteMessageHours}h of messages)` : ''}`);
   return true;
 }
 

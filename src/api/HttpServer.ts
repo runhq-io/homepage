@@ -2325,13 +2325,13 @@ export function createHttpApp() {
 
       const serverId = c.req.param('serverId');
       const body = await c.req.json();
-      const { userId: targetUserId, reason } = body;
+      const { userId: targetUserId, reason, deleteMessageHours } = body;
 
       if (!targetUserId) {
         return c.json({ error: 'userId is required' }, 400);
       }
 
-      const success = await ServerService.banMember(serverId, userId, targetUserId, reason);
+      const success = await ServerService.banMember(serverId, userId, targetUserId, reason, deleteMessageHours);
       if (!success) {
         return c.json({ error: 'Failed to ban member' }, 403);
       }
