@@ -8,5 +8,4 @@
 import dotenv from 'dotenv';
 import * as path from 'node:path';
 
-dotenv.config({ path: path.resolve(import.meta.dirname ?? '.', '.env') });
-dotenv.config({ path: path.resolve(import.meta.dirname ?? '.', '../.env') });
+dotenv.config({ path: path.resolve(import.meta.dirname ?? '.', '../.env'), override: true });

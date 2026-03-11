@@ -110,25 +110,35 @@ export async function POST(request: NextRequest) {
     })
     .returning();
 
-  // Generate email verification token
-  const rawToken = randomBytes(32).toString('hex');
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const hasEmailService = !!process.env.RESEND_API_KEY;
+  let needsVerification = true;
 
-  await db.insert(emailVerificationTokens).values({
-    userId: newUser.id,
-    tokenHash,
-    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-  });
+  if (hasEmailService) {
+    // Generate email verification token
+    const rawToken = randomBytes(32).toString('hex');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
 
-  // Build verification URL
-  const appUrl = process.env.APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:8080';
-  const clientOrigin = origin || 'http://localhost:5180';
-  const verifyUrl = `${appUrl}/api/auth/verify-email?token=${rawToken}&redirect=${encodeURIComponent(clientOrigin)}`;
+    await db.insert(emailVerificationTokens).values({
+      userId: newUser.id,
+      tokenHash,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+    });
 
-  try {
-    await sendActivationEmail(normalizedEmail, verifyUrl);
-  } catch (err) {
-    console.error('[register] Failed to send verification email:', err);
+    // Build verification URL
+    const appUrl = process.env.APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:8080';
+    const clientOrigin = origin || 'http://localhost:5180';
+    const verifyUrl = `${appUrl}/api/auth/verify-email?token=${rawToken}&redirect=${encodeURIComponent(clientOrigin)}`;
+
+    try {
+      await sendActivationEmail(normalizedEmail, verifyUrl);
+    } catch (err) {
+      console.error('[register] Failed to send verification email:', err);
+    }
+  } else {
+    // No email service — auto-verify for local dev
+    await db.update(users).set({ emailVerifiedAt: new Date() }).where(eq(users.id, newUser.id));
+    needsVerification = false;
+    console.log(`[register] No RESEND_API_KEY — auto-verified ${normalizedEmail}`);
   }
 
   const token = await createToken(newUser.id);
@@ -141,10 +151,10 @@ export async function POST(request: NextRequest) {
   };
 
   if (returnToken) {
-    return NextResponse.json({ token, user: userInfo, needsVerification: true }, { status: 201, headers });
+    return NextResponse.json({ token, user: userInfo, needsVerification }, { status: 201, headers });
   }
 
-  const response = NextResponse.json({ success: true, user: userInfo, needsVerification: true }, { status: 201, headers });
+  const response = NextResponse.json({ success: true, user: userInfo, needsVerification }, { status: 201, headers });
   response.cookies.set('auth_token', token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
