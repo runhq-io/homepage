@@ -180,20 +180,20 @@ export interface FlyVolume {
 // Machine specs per server tier
 const TIER_CONFIGS: Partial<Record<ServerTier, { cpu_kind: string; cpus: number; memory_mb: number; volume_gb: number }>> = {
   // New tiers: shared CPU
-  'shared-4x-1gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 1024,  volume_gb: 3 },
-  'shared-4x-2gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 2048,  volume_gb: 5 },
-  'shared-4x-4gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 4096,  volume_gb: 10 },
-  'shared-4x-8gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 8192,  volume_gb: 10 },
-  'shared-8x-4gb':   { cpu_kind: 'shared',      cpus: 8, memory_mb: 4096,  volume_gb: 10 },
-  'shared-8x-8gb':   { cpu_kind: 'shared',      cpus: 8, memory_mb: 8192,  volume_gb: 15 },
-  'shared-8x-16gb':  { cpu_kind: 'shared',      cpus: 8, memory_mb: 16384, volume_gb: 20 },
+  'shared-4x-1gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 1024,  volume_gb: 6 },
+  'shared-4x-2gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 2048,  volume_gb: 10 },
+  'shared-4x-4gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 4096,  volume_gb: 20 },
+  'shared-4x-8gb':   { cpu_kind: 'shared',      cpus: 4, memory_mb: 8192,  volume_gb: 20 },
+  'shared-8x-4gb':   { cpu_kind: 'shared',      cpus: 8, memory_mb: 4096,  volume_gb: 20 },
+  'shared-8x-8gb':   { cpu_kind: 'shared',      cpus: 8, memory_mb: 8192,  volume_gb: 30 },
+  'shared-8x-16gb':  { cpu_kind: 'shared',      cpus: 8, memory_mb: 16384, volume_gb: 40 },
   // New tiers: performance CPU
-  'perf-2x-4gb':     { cpu_kind: 'performance', cpus: 2, memory_mb: 4096,  volume_gb: 10 },
-  'perf-2x-8gb':     { cpu_kind: 'performance', cpus: 2, memory_mb: 8192,  volume_gb: 15 },
-  'perf-2x-16gb':    { cpu_kind: 'performance', cpus: 2, memory_mb: 16384, volume_gb: 20 },
-  'perf-4x-8gb':     { cpu_kind: 'performance', cpus: 4, memory_mb: 8192,  volume_gb: 15 },
-  'perf-4x-16gb':    { cpu_kind: 'performance', cpus: 4, memory_mb: 16384, volume_gb: 25 },
-  'perf-4x-32gb':    { cpu_kind: 'performance', cpus: 4, memory_mb: 32768, volume_gb: 40 },
+  'perf-2x-4gb':     { cpu_kind: 'performance', cpus: 2, memory_mb: 4096,  volume_gb: 20 },
+  'perf-2x-8gb':     { cpu_kind: 'performance', cpus: 2, memory_mb: 8192,  volume_gb: 30 },
+  'perf-2x-16gb':    { cpu_kind: 'performance', cpus: 2, memory_mb: 16384, volume_gb: 40 },
+  'perf-4x-8gb':     { cpu_kind: 'performance', cpus: 4, memory_mb: 8192,  volume_gb: 30 },
+  'perf-4x-16gb':    { cpu_kind: 'performance', cpus: 4, memory_mb: 16384, volume_gb: 50 },
+  'perf-4x-32gb':    { cpu_kind: 'performance', cpus: 4, memory_mb: 32768, volume_gb: 80 },
   // Legacy tiers (kept for existing machines)
   'shared-cpu-1x':       { cpu_kind: 'shared',      cpus: 1, memory_mb: 2048,  volume_gb: 1 },
   'shared-cpu-2x':       { cpu_kind: 'shared',      cpus: 2, memory_mb: 4096,  volume_gb: 5 },
