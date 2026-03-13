@@ -79,7 +79,7 @@ export default async function UserDetailPage({ params }: { params: Promise<{ id:
   ]);
 
   return (
-    <div className="max-w-5xl">
+    <div className="max-w-5xl w-full overflow-x-hidden">
       <Link href="/admin/users" className="text-blue-400 hover:text-blue-300 text-sm mb-3 inline-block">
         ← Back
       </Link>
@@ -87,15 +87,15 @@ export default async function UserDetailPage({ params }: { params: Promise<{ id:
       {/* User Info Header - Compact */}
       <div className="flex items-center gap-3 mb-6">
         {user.avatarUrl ? (
-          <img src={user.avatarUrl} alt="" className="h-12 w-12 rounded-full" />
+          <img src={user.avatarUrl} alt="" className="h-12 w-12 rounded-full flex-shrink-0" />
         ) : (
-          <div className="h-12 w-12 rounded-full bg-slate-700 flex items-center justify-center text-xl text-slate-300">
+          <div className="h-12 w-12 rounded-full bg-slate-700 flex items-center justify-center text-xl text-slate-300 flex-shrink-0">
             {user.name?.charAt(0) || '?'}
           </div>
         )}
-        <div>
-          <h1 className="text-xl font-bold text-white">{user.name || 'Unknown'}</h1>
-          <p className="text-slate-400 text-sm">{user.email} · {user.authProvider} · {new Date(user.createdAt).toLocaleDateString()}</p>
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold text-white truncate">{user.name || 'Unknown'}</h1>
+          <p className="text-slate-400 text-sm truncate">{user.email} · {user.authProvider} · {new Date(user.createdAt).toLocaleDateString()}</p>
         </div>
       </div>
 

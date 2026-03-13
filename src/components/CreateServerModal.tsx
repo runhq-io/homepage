@@ -249,12 +249,12 @@ export function CreateServerModal({ isOpen, onClose, onSuccess }: CreateServerMo
 
         {/* Step: Type Selection */}
         {step === 'select-type' && (
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <h2 id="modal-title" className="text-xl font-semibold text-white mb-6">
               Create Server
             </h2>
 
-            <div className="grid grid-cols-2 gap-4 mb-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
               {/* Local option */}
               <button
                 type="button"
@@ -349,7 +349,7 @@ export function CreateServerModal({ isOpen, onClose, onSuccess }: CreateServerMo
 
         {/* Step: Configuration */}
         {step === 'configure' && (
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <h2 id="modal-title" className="text-xl font-semibold text-white mb-1">
               Create Remote Server
             </h2>

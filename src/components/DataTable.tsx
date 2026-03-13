@@ -259,7 +259,7 @@ export function DataTable<T extends Record<string, any>>({
   return (
     <div className={className ?? ''}>
       <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden">
-        <div ref={scrollContainerRef} className="overflow-x-auto">
+        <div ref={scrollContainerRef} className="overflow-x-auto relative scroll-shadow">
           <table className="min-w-full">
             <thead className="bg-slate-700">
               <tr>
@@ -325,7 +325,7 @@ export function DataTable<T extends Record<string, any>>({
                   <React.Fragment key={rowId}>
                     <tr
                       className={[
-                        'transition-colors',
+                        'transition-colors min-h-[44px]',
                         hasRowClick ? 'cursor-pointer hover:bg-slate-700/40' : 'hover:bg-slate-700/20',
                       ].join(' ')}
                       tabIndex={hasRowClick ? 0 : -1}
@@ -346,7 +346,7 @@ export function DataTable<T extends Record<string, any>>({
                         <td
                           key={col.id}
                           className={[
-                            'px-4 py-3 text-sm',
+                            'px-4 py-3 text-sm min-h-[44px]',
                             alignToClass(col.align),
                             hideBelowToClass(col.hideBelow),
                             col.cellClassName ?? '',
