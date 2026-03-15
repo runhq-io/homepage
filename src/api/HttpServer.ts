@@ -25,7 +25,7 @@ import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
 import type { ProviderId } from './services/providers/types';
-import type { Screenshot, TokenUsage } from '@fishtank/server-protocol';
+import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, systemSettings, serverMembers } from '../db/schema';
@@ -2238,7 +2238,7 @@ export function createHttpApp() {
       try {
         const [inviter] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
         const inviterName = inviter?.name || inviter?.email || 'Someone';
-        const CLIENT_URL = process.env.CLIENT_URL || 'https://app.fishtank.bot';
+        const CLIENT_URL = process.env.CLIENT_URL || 'https://app.runhq.io';
         const acceptUrl = `${CLIENT_URL}/invite/accept?token=${invite.token}`;
         await sendInviteEmail(email, inviterName, resolvedServerName, acceptUrl);
       } catch (emailErr) {

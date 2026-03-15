@@ -15,6 +15,7 @@ const FLY_API_URL = 'https://api.machines.dev/v1';
 
 // Read env vars at runtime via getters (not module load time, to ensure dotenv has loaded)
 function getFlyAppName(): string {
+  // TODO: Rename Fly app from fishtank-workspaces to runhq-workspaces
   return process.env.FLY_APP_NAME || 'fishtank-workspaces';
 }
 
@@ -601,9 +602,9 @@ export async function createMachine(
         SERVER_ID: serverId,
         SERVER_NAME: machineName,
         AUTH_MODE: 'cloud',
-        CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.fishtank.bot',
+        CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
         SERVER_SESSION_SECRET: process.env.SERVER_SESSION_SECRET || '',
-        PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN || 'tank.fish',
+        PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN || 'runhq.io',
         NODE_ENV: 'development',
         PORT: '61987',
         HOST: '0.0.0.0',

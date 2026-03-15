@@ -10,9 +10,9 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: 'Fishtank: Console',
-  description: 'Fishtank: Console Application',
-  applicationName: 'Fishtank Console',
+  title: 'RunHQ: Console',
+  description: 'RunHQ: Console Application',
+  applicationName: 'RunHQ Console',
   manifest: '/site.webmanifest',
   icons: {
     icon: [

@@ -8,28 +8,28 @@ export function LoginFooter() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
         <div className="flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <span className="text-lg font-bold text-white">Fishtank</span>
+            <span className="text-lg font-bold text-white">RunHQ</span>
             <span className="text-slate-500 text-sm">End The Mundane</span>
           </div>
 
           <nav className="flex items-center gap-6">
-            <Link href="https://fishtank.bot/" className="text-slate-400 hover:text-white text-sm transition-colors">
+            <Link href="https://runhq.io/" className="text-slate-400 hover:text-white text-sm transition-colors">
               Home
             </Link>
             <Link
-              href="https://fishtank.bot/downloads"
+              href="https://runhq.io/downloads"
               className="text-slate-400 hover:text-white text-sm transition-colors"
             >
               Downloads
             </Link>
             <Link
-              href="https://fishtank.bot/pricing"
+              href="https://runhq.io/pricing"
               className="text-slate-400 hover:text-white text-sm transition-colors"
             >
               Pricing
             </Link>
             <Link
-              href="https://fishtank.bot/about"
+              href="https://runhq.io/about"
               className="text-slate-400 hover:text-white text-sm transition-colors"
             >
               About
@@ -37,7 +37,7 @@ export function LoginFooter() {
           </nav>
 
           <p className="text-slate-500 text-sm">
-            &copy; {new Date().getFullYear()} Fishtank. All rights reserved.
+            &copy; {new Date().getFullYear()} RunHQ. All rights reserved.
           </p>
         </div>
       </div>

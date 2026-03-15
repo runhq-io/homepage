@@ -1,7 +1,7 @@
 import { db, agentTasks, agents, users, conversations, messages, tasks } from '../../db/index';
 import { eq, and, desc, asc } from 'drizzle-orm';
 import type { AgentTask, NewAgentTask, Message, Task, NewTask } from '../../db/schema';
-import type { TaskData, TaskStatus, TaskBrowserState } from '@fishtank/server-protocol';
+import type { TaskData, TaskStatus, TaskBrowserState } from '@runhq/server-protocol';
 
 // Default agent for ad-hoc tasks
 const DEFAULT_AGENT_NAME = 'Custom Task';

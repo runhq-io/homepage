@@ -15,7 +15,7 @@ function corsHeaders(origin: string | null) {
   ];
 
   // In production, you'd check against actual allowed origins
-  const isAllowed = origin && (allowedOrigins.includes(origin) || origin.endsWith('.fishtank.bot') || origin.endsWith('.tank.fish'));
+  const isAllowed = origin && (allowedOrigins.includes(origin) || origin.endsWith('.runhq.io'));
 
   return {
     'Access-Control-Allow-Origin': isAllowed ? origin : '',
@@ -74,7 +74,7 @@ export default async function middleware(req: NextRequest) {
     return NextResponse.redirect(new URL('/', req.url));
   }
 
-  // Redirect unauthenticated users to /login (shows "go to app.fishtank.bot" page)
+  // Redirect unauthenticated users to /login (shows "go to app.runhq.io" page)
   if (!isPublicPage && !isLoggedIn) {
     return NextResponse.redirect(new URL('/login', req.url));
   }

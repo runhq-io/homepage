@@ -22,7 +22,7 @@ import * as path from 'node:path';
 import { db } from './db/index';
 import { runSeeds } from './db/seed';
 import { createHttpApp } from './api/HttpServer';
-import { FishtankWebSocketServer } from './api/WebSocketServer';
+import { RunHQWebSocketServer } from './api/WebSocketServer';
 import { registerWsHandlers } from './api/wsHandlers';
 import { initProviders } from './api/services/providers/registry';
 import * as MachineUsageService from './api/services/MachineUsageService';
@@ -65,7 +65,7 @@ async function main() {
   const nextHandler = nextApp.getRequestHandler();
 
   // ── WebSocket server (noServer mode) ─────────────────────────────────
-  const wsServer = new FishtankWebSocketServer({ noServer: true });
+  const wsServer = new RunHQWebSocketServer({ noServer: true });
   registerWsHandlers(wsServer);
 
   // ── HTTP server with routing ─────────────────────────────────────────

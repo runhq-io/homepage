@@ -12,7 +12,7 @@ import type {
   StartAgentMessage,
   StopAgentMessage,
   SessionId,
-	} from '@fishtank/server-protocol';
+	} from '@runhq/server-protocol';
 
 interface ConnectedClient {
   ws: WebSocket;
@@ -29,7 +29,7 @@ interface ConnectedClient {
 
 type MessageHandler = (client: ConnectedClient, message: DesktopToCloudMessage) => void;
 
-export class FishtankWebSocketServer {
+export class RunHQWebSocketServer {
   private wss: WSServer;
   private clients: Map<SessionId, ConnectedClient> = new Map();
   private messageHandlers: Map<string, MessageHandler> = new Map();

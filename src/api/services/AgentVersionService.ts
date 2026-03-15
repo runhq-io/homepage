@@ -8,7 +8,7 @@
 import { db } from '../../db/index';
 import { agents, agentVersions, adminUsers, type AgentVersionReason } from '../../db/schema';
 import { eq, and, desc } from 'drizzle-orm';
-import type { AgentVersionData } from '@fishtank/server-protocol';
+import type { AgentVersionData } from '@runhq/server-protocol';
 
 // ============================================================================
 // Permission Helpers

@@ -40,7 +40,7 @@ export function DashboardChrome({ children, user }: { children: React.ReactNode;
             >
               <Menu className="h-6 w-6" />
             </button>
-            <span className="text-sm font-semibold text-white">Fishtank</span>
+            <span className="text-sm font-semibold text-white">RunHQ</span>
           </div>
         </div>
 

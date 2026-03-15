@@ -19,7 +19,7 @@ import {
   type UsageRecord,
   type Plan,
 } from '../../db/schema';
-import type { TokenUsage } from '@fishtank/server-protocol';
+import type { TokenUsage } from '@runhq/server-protocol';
 
 // ============================================================================
 // Types

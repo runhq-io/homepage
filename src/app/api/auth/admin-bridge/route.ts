@@ -13,7 +13,7 @@ const corsHeaders = {
  * GET /api/auth/admin-bridge?token=<jwt>
  *
  * Bridge endpoint for cross-domain admin access.
- * The app client (app.fishtank.bot) redirects admins here with their JWT token.
+ * The app client (app.runhq.io) redirects admins here with their JWT token.
  * This endpoint verifies the token, checks admin status, sets an HttpOnly cookie
  * on the console domain, and redirects to /admin.
  */
@@ -58,7 +58,7 @@ export async function OPTIONS(request: NextRequest) {
   const origin = request.headers.get('origin');
   const headers = { ...corsHeaders };
   if (origin) {
-    const isAllowed = origin.endsWith('.fishtank.bot') || origin.endsWith('.tank.fish') ||
+    const isAllowed = origin.endsWith('.runhq.io') ||
       origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:');
     headers['Access-Control-Allow-Origin'] = isAllowed ? origin : '';
   }

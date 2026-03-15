@@ -11,7 +11,7 @@ function isAllowedMarketingOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
     if (url.protocol !== 'https:') return false;
-    return url.hostname === 'fishtank.bot' || url.hostname === 'www.fishtank.bot' || url.hostname === 'tank.fish' || url.hostname === 'www.tank.fish';
+    return url.hostname === 'runhq.io' || url.hostname === 'www.runhq.io';
   } catch {
     return false;
   }

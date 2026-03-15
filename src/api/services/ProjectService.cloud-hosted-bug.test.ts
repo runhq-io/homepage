@@ -7,7 +7,7 @@
  *
  * ROOT CAUSE: The dev script uses `--env-file=../.env` which loads the ROOT .env file,
  * but the Fly.io variables (FLY_API_TOKEN, FLY_APP_NAME) are only in the API's own
- * .env file (D:\www\fishtank\api\.env), NOT in the root .env (D:\www\fishtank\.env).
+ * .env file (D:\www\runhq\api\.env), NOT in the root .env (D:\www\runhq\.env).
  *
  * As a result:
  * - FlyService.isConfigured() returns FALSE (no token)

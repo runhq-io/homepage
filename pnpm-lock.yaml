@@ -11,15 +11,15 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.71.2
         version: 0.71.2
-      '@fishtank/server-protocol':
-        specifier: workspace:*
-        version: link:packages/protocol
       '@hono/node-server':
         specifier: ^1.19.9
         version: 1.19.9(hono@4.12.3)
       '@neondatabase/serverless':
         specifier: ^0.10.4
         version: 0.10.4
+      '@runhq/server-protocol':
+        specifier: workspace:*
+        version: link:packages/protocol
       '@xyflow/react':
         specifier: ^12.10.0
         version: 12.10.1(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)

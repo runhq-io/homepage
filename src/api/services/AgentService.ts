@@ -1,7 +1,7 @@
 import { db } from '../../db/index';
 import { agents, userAgents, conversations, messages, agentTasks, type Agent, type NewAgent } from '../../db/schema';
 import { eq, or, isNull, desc } from 'drizzle-orm';
-import type { AgentData } from '@fishtank/server-protocol';
+import type { AgentData } from '@runhq/server-protocol';
 import * as AgentVersionService from './AgentVersionService';
 
 /**

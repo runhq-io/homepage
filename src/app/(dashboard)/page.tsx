@@ -34,7 +34,7 @@ export default async function DashboardPage() {
       <div className="bg-slate-800 rounded-lg p-6">
         <h2 className="text-lg font-semibold text-white mb-2">Welcome, {user?.name}</h2>
         <p className="text-slate-400">
-	          This is your Fishtank dashboard. View your conversations and agent activity here.
+	          This is your RunHQ dashboard. View your conversations and agent activity here.
         </p>
       </div>
     </div>

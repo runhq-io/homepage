@@ -3,7 +3,7 @@
  *
  * Manages public port mappings that expose server services via custom subdomains.
  * Each mapping connects a subdomain (e.g., "my-app") to a server port,
- * allowing access via https://my-app.tank.fish/
+ * allowing access via a custom subdomain URL
  *
  * Uses Cloudflare Named Tunnels: each server has a tunnel running inside
  * the container (cloudflared). Port mappings add ingress rules to the tunnel
@@ -22,8 +22,8 @@ import * as CloudflareTunnelService from './CloudflareTunnelService';
 
 const MAX_PORTS_PER_SERVER = 5;
 const SERVER_PORT = 61987; // Reserved — must not be exposed
-const PUBLIC_PORTS_DOMAIN = process.env.PUBLIC_PORTS_DOMAIN || 'tank.fish';
-const RESERVED_SUBDOMAINS = ['www', 'api', 'app', 'mail', 'admin', 'console', 'status', 'fishtank', 'bot'];
+const PUBLIC_PORTS_DOMAIN = process.env.PUBLIC_PORTS_DOMAIN || 'runhq.io';
+const RESERVED_SUBDOMAINS = ['www', 'api', 'app', 'mail', 'admin', 'console', 'status', 'runhq'];
 const SUBDOMAIN_REGEX = /^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$/;
 
 // ============================================================================

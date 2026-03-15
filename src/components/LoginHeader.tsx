@@ -4,7 +4,7 @@ import { Menu, X } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 
-const MARKETING_ORIGIN = 'https://fishtank.bot';
+const MARKETING_ORIGIN = 'https://runhq.io';
 
 const navLinks = [
   { href: `${MARKETING_ORIGIN}/`, label: 'Home' },
@@ -43,7 +43,7 @@ export function LoginHeader() {
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
           <a href={MARKETING_ORIGIN} className="flex items-center gap-2">
-            <span className="text-xl font-bold text-white">Fishtank</span>
+            <span className="text-xl font-bold text-white">RunHQ</span>
           </a>
 
           {/* Desktop Navigation */}

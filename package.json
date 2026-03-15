@@ -1,12 +1,12 @@
 {
-  "name": "@fishtank/be",
+  "name": "@runhq/be",
   "version": "0.1.0",
   "private": true,
-  "description": "Fishtank Backend - Unified API + Dashboard",
+  "description": "RunHQ Backend - Unified API + Dashboard",
   "type": "module",
   "scripts": {
     "dev": "tsx watch --clear-screen=false --exclude \"node_modules/**\" --exclude \"dist/**\" --exclude \".next/**\" src/server.ts",
-    "build": "pnpm --filter @fishtank/server-protocol build && next build && tsc -p tsconfig.server.json",
+    "build": "pnpm --filter @runhq/server-protocol build && next build && tsc -p tsconfig.server.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
-    "@fishtank/server-protocol": "workspace:*",
+    "@runhq/server-protocol": "workspace:*",
     "@hono/node-server": "^1.19.9",
     "@neondatabase/serverless": "^0.10.4",
     "@xyflow/react": "^12.10.0",

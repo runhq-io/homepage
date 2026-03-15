@@ -23,7 +23,7 @@ function getPublicPortsZoneId(): string | undefined {
   return process.env.CLOUDFLARE_PUBLIC_PORTS_ZONE_ID || getZoneId();
 }
 
-const PUBLIC_PORTS_DOMAIN = process.env.PUBLIC_PORTS_DOMAIN || 'tank.fish';
+const PUBLIC_PORTS_DOMAIN = process.env.PUBLIC_PORTS_DOMAIN || 'runhq.io';
 
 // ============================================================================
 // Types
@@ -261,7 +261,7 @@ export async function removeIngressRule(tunnelId: string, subdomain: string): Pr
 }
 
 /**
- * Create a DNS CNAME record pointing subdomain.tank.fish → tunnelId.cfargotunnel.com
+ * Create a DNS CNAME record pointing subdomain.runhq.io → tunnelId.cfargotunnel.com
  */
 export async function createDnsRecord(subdomain: string, tunnelId: string): Promise<string> {
   if (!isConfigured()) {

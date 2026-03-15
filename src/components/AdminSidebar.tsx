@@ -90,7 +90,7 @@ export function AdminSidebar({ user, isOpen = false, onClose }: AdminSidebarProp
           </div>
           <div className="flex items-center gap-2">
             <a
-              href="https://fishtank.bot/docs/"
+              href="https://runhq.io/docs/"
               target="_blank"
               rel="noopener noreferrer"
               className="text-slate-400 hover:text-white"

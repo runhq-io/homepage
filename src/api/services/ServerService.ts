@@ -2101,7 +2101,7 @@ export async function banMember(serverId: string, requesterId: string, targetUse
     .delete(serverMembers)
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, targetUserId)));
 
-  // Purge messages on the fishtank server if requested
+  // Purge messages on the RunHQ server if requested
   if (deleteMessageHours && deleteMessageHours > 0) {
     try {
       const { url, headers } = await buildServerFetchHeaders(server, requesterId);
@@ -2471,7 +2471,7 @@ export async function acceptInviteLink(
 // ============================================================================
 
 /**
- * Build fetch headers for a fishtank server request.
+ * Build fetch headers for a RunHQ server request.
  * Generates a server session token and adds Fly routing headers if needed.
  */
 async function buildServerFetchHeaders(

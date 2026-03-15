@@ -2,7 +2,7 @@
  * WebSocket message handler registrations.
  * Extracted from api/src/index.ts — registers all 40+ message handlers.
  */
-import type { FishtankWebSocketServer } from './WebSocketServer';
+import type { RunHQWebSocketServer } from './WebSocketServer';
 import type {
   GetAgentsMessage,
   CreateAgentMessage,
@@ -64,7 +64,7 @@ import type {
   TaskRemoteInputRelayMessage,
   TaskFileRequestRelayMessage,
   TaskFileWriteRelayMessage,
-} from '@fishtank/server-protocol';
+} from '@runhq/server-protocol';
 import * as AgentService from './services/AgentService';
 import * as TaskService from './services/TaskService';
 import * as OrganizationService from './services/OrganizationService';
@@ -73,7 +73,7 @@ import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
 
-export function registerWsHandlers(wsServer: FishtankWebSocketServer): void {
+export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
   // Handle get_agents request from desktop
   wsServer.onMessage('get_agents', async (client, message) => {
     const request = message as GetAgentsMessage;

@@ -142,7 +142,7 @@ function DeviceAuthContent() {
             </svg>
           </div>
           <h1 className="text-2xl font-bold text-white mb-2">Device Authorized</h1>
-          <p className="text-slate-400">You can now close this window and return to the Fishtank app.</p>
+          <p className="text-slate-400">You can now close this window and return to the RunHQ app.</p>
         </div>
       </div>
     );
@@ -152,8 +152,8 @@ function DeviceAuthContent() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
         <div className="max-w-md w-full p-8 bg-slate-800 rounded-xl">
-          <h1 className="text-2xl font-bold text-white mb-4 text-center">Sign in to Fishtank</h1>
-          <p className="text-slate-400 mb-6 text-center">Sign in to authorize the Fishtank desktop app.</p>
+          <h1 className="text-2xl font-bold text-white mb-4 text-center">Sign in to RunHQ</h1>
+          <p className="text-slate-400 mb-6 text-center">Sign in to authorize the RunHQ desktop app.</p>
 
           {code && (
             <div className="mb-6 p-4 bg-slate-700 rounded-lg text-center">
@@ -185,7 +185,7 @@ function DeviceAuthContent() {
           </div>
           <h1 className="text-2xl font-bold text-white mb-2 text-center">Enter Invite Code</h1>
           <p className="text-slate-400 mb-6 text-center">
-            Fishtank is currently invite-only. Enter an invite code from an existing user to activate your account.
+            RunHQ is currently invite-only. Enter an invite code from an existing user to activate your account.
           </p>
 
           <div className="mb-6">
@@ -226,9 +226,9 @@ function DeviceAuthContent() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
         <div className="max-w-md w-full p-8 bg-slate-800 rounded-xl">
-          <h1 className="text-2xl font-bold text-white mb-4 text-center">Authorize Fishtank App</h1>
+          <h1 className="text-2xl font-bold text-white mb-4 text-center">Authorize RunHQ App</h1>
           <p className="text-slate-400 mb-6 text-center">
-            Authorize the Fishtank desktop app to sign in as:
+            Authorize the RunHQ desktop app to sign in as:
           </p>
 
           <div className="mb-6 p-4 bg-slate-700 rounded-lg text-center">
@@ -263,8 +263,8 @@ function DeviceAuthContent() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-900">
       <div className="max-w-md w-full p-8 bg-slate-800 rounded-xl">
-        <h1 className="text-2xl font-bold text-white mb-4 text-center">Authorize Fishtank App</h1>
-        <p className="text-slate-400 mb-6 text-center">Enter the code shown in the Fishtank desktop app to sign in.</p>
+        <h1 className="text-2xl font-bold text-white mb-4 text-center">Authorize RunHQ App</h1>
+        <p className="text-slate-400 mb-6 text-center">Enter the code shown in the RunHQ desktop app to sign in.</p>
 
         <div className="mb-6">
           <label className="block text-sm text-slate-400 mb-2">Device Code</label>
