@@ -48,6 +48,7 @@ export async function GET(request: Request) {
         name: user.name,
         avatarUrl: user.avatarUrl,
         isAdmin: userIsAdmin,
+        approved: !!user.isActivated,
       },
     }, { headers: corsHeaders });
   } catch (err) {
