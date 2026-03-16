@@ -1140,7 +1140,8 @@ export async function getServerByToken(serverToken: string): Promise<Server | nu
  */
 export async function registerServer(
   serverToken: string,
-  serverUrl: string
+  serverUrl: string,
+  machineId?: string
 ): Promise<{ success: boolean; server?: Server; error?: string }> {
   const server = await getServerByToken(serverToken);
 
@@ -1148,18 +1149,25 @@ export async function registerServer(
     return { success: false, error: 'Invalid server token' };
   }
 
+  const updates: Record<string, unknown> = {
+    serverUrl,
+    status: 'online',
+    lastSeen: new Date(),
+    updatedAt: new Date(),
+  };
+
+  // Update machineId if provided (e.g. after Fly migration creates a new machine)
+  if (machineId && typeof machineId === 'string') {
+    updates.machineId = machineId;
+  }
+
   const [updated] = await db
     .update(servers)
-    .set({
-      serverUrl,
-      status: 'online',
-      lastSeen: new Date(),
-      updatedAt: new Date(),
-    })
+    .set(updates)
     .where(eq(servers.id, server.id))
     .returning();
 
-  console.log(`[ServerService] Server registered for server ${server.id} at ${serverUrl}`);
+  console.log(`[ServerService] Server registered for server ${server.id} at ${serverUrl}${machineId ? ` (machineId: ${machineId})` : ''}`);
   return { success: true, server: updated };
 }
 

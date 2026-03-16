@@ -2763,7 +2763,7 @@ export function createHttpApp() {
   app.post('/api/server/register', async (c) => {
     try {
       const body = await c.req.json();
-      const { serverToken, serverUrl } = body;
+      const { serverToken, serverUrl, machineId } = body;
 
       if (!serverToken || typeof serverToken !== 'string') {
         return c.json({ error: 'serverToken is required' }, 400);
@@ -2772,7 +2772,7 @@ export function createHttpApp() {
         return c.json({ error: 'serverUrl is required' }, 400);
       }
 
-      const result = await ServerService.registerServer(serverToken, serverUrl);
+      const result = await ServerService.registerServer(serverToken, serverUrl, machineId);
 
       if (!result.success) {
         return c.json({ error: result.error }, 401);
