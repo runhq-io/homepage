@@ -1851,10 +1851,19 @@ export function createHttpApp() {
 
       // Return server with server info (don't expose hash)
       let serverUrl = server.serverUrl;
+      let volumeSizeGb: number | null = null;
       if (server.machineId) {
         const provider = getProvider((server.provider || 'fly') as ProviderId);
         const routingUrl = provider.getRoutingInfo(server.machineId).serverUrl;
         if (routingUrl) serverUrl = routingUrl;
+
+        // Fetch current volume size if volume exists
+        if (server.volumeId) {
+          try {
+            const volume = await provider.getVolume(server.volumeId);
+            if (volume) volumeSizeGb = volume.sizeGb;
+          } catch { /* ignore - volume info is optional */ }
+        }
       }
       return c.json({
         server: {
@@ -1870,6 +1879,8 @@ export function createHttpApp() {
           provider: server.provider || 'fly',
           tier: server.tier || 'shared-cpu-1x',
           iconUrl: server.iconUrl || null,
+          volumeId: server.volumeId || null,
+          volumeSizeGb,
           autoSuspendEnabled: server.autoSuspendEnabled ?? true,
           autoSuspendIdleMinutes: server.autoSuspendIdleMinutes ?? 15,
           machineStartedAt: server.machineStartedAt?.toISOString() || null,
@@ -2195,6 +2206,39 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Change tier error:', error);
       return c.json({ error: 'Failed to change tier' }, 500);
+    }
+  });
+
+  // Extend server volume (disk) size
+  app.post('/api/servers/:serverId/extend-volume', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const body = await c.req.json();
+      const { sizeGb } = body;
+
+      if (!sizeGb || typeof sizeGb !== 'number') {
+        return c.json({ error: 'sizeGb is required and must be a number' }, 400);
+      }
+
+      const result = await ServerService.extendServerVolume(serverId, userId, sizeGb);
+      if (!result.success) {
+        return c.json({ error: result.error }, 400);
+      }
+
+      return c.json({ success: true, newSizeGb: result.newSizeGb });
+    } catch (error) {
+      console.error('[HttpServer] Extend volume error:', error);
+      return c.json({ error: 'Failed to extend volume' }, 500);
     }
   });
 

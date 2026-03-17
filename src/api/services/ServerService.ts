@@ -1947,6 +1947,62 @@ export async function changeTier(
 }
 
 /**
+ * Extend a server's volume to a new size (owner/admin only, cannot shrink)
+ */
+export async function extendServerVolume(
+  serverId: string,
+  userId: string,
+  newSizeGb: number
+): Promise<{ success: boolean; error?: string; newSizeGb?: number }> {
+  const hasAccess = await canAccessServer(serverId, userId);
+  if (!hasAccess) {
+    return { success: false, error: 'Access denied' };
+  }
+
+  // Check owner/admin
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only server owner or admin can extend the volume' };
+  }
+
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  if (!server.volumeId) {
+    return { success: false, error: 'Server has no volume' };
+  }
+
+  if (server.provider !== 'fly') {
+    return { success: false, error: 'Volume extension is only supported for Fly.io servers' };
+  }
+
+  if (!Number.isInteger(newSizeGb) || newSizeGb < 1 || newSizeGb > 500) {
+    return { success: false, error: 'Invalid size. Must be between 1 and 500 GB.' };
+  }
+
+  const provider = getProvider(server.provider as ProviderId);
+  const currentVolume = await provider.getVolume(server.volumeId);
+  if (!currentVolume) {
+    return { success: false, error: 'Volume not found' };
+  }
+
+  if (newSizeGb <= currentVolume.sizeGb) {
+    return { success: false, error: `New size must be larger than current size (${currentVolume.sizeGb} GB). Volumes cannot be shrunk.` };
+  }
+
+  try {
+    await provider.extendVolume(server.volumeId, newSizeGb);
+    console.log(`[ServerService] Extended volume for server ${serverId} from ${currentVolume.sizeGb}GB to ${newSizeGb}GB`);
+    return { success: true, newSizeGb };
+  } catch (err) {
+    console.error(`[ServerService] Failed to extend volume for server ${serverId}:`, err);
+    return { success: false, error: 'Failed to extend volume' };
+  }
+}
+
+/**
  * Get remote server status from Fly.io
  */
 export async function getRemoteServerStatus(
