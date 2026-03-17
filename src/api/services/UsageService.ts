@@ -376,8 +376,6 @@ export async function trackUsage(
   return { costCents, newBalanceCents: newBalance };
 }
 
-// Legacy alias
-export const trackTokenUsage = trackUsage;
 
 /**
  * Track task execution (for analytics)
@@ -425,8 +423,6 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
   };
 }
 
-// Legacy alias
-export const getUsage = getCreditBalance;
 
 /**
  * Check if user has enough credits
@@ -473,8 +469,6 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
   };
 }
 
-// Legacy alias
-export const checkUsageLimit = checkCreditBalance;
 
 /**
  * Get usage records for a time period
@@ -680,22 +674,3 @@ export async function listUsersWithUsage(limit = 50, offset = 0): Promise<Array<
   return result;
 }
 
-// ============================================================================
-// Legacy Compatibility
-// ============================================================================
-
-export function clearUsageCache(): void {
-  // No-op: database-backed now
-}
-
-export function clearUsageRecords(): void {
-  // No-op: database-backed now
-}
-
-// Legacy type alias
-export type UsageSummary = CreditBalance;
-export type UsageLimitResult = CreditCheckResult & {
-  currentUsage?: number;
-  limit?: number;
-  upgradeOptions?: PlanId[];
-};

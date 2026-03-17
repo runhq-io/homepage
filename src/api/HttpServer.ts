@@ -514,7 +514,7 @@ export function createHttpApp() {
       };
 
       // Track usage (async, don't wait)
-      UsageService.trackTokenUsage(token, tokenUsage).catch(err => {
+      UsageService.trackUsage(token, tokenUsage).catch(err => {
         console.error('[HttpServer] Failed to track usage:', err);
       });
 
@@ -864,7 +864,7 @@ export function createHttpApp() {
       }
 
       const token = authHeader.substring(7);
-      const usage = await UsageService.getUsage(token);
+      const usage = await UsageService.getCreditBalance(token);
 
       return c.json(usage);
     } catch (error) {
