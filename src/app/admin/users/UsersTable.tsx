@@ -9,6 +9,7 @@ import { UserActions } from './UserActions';
 export type AdminUserRow = {
   id: string;
   name: string | null;
+  username: string | null;
   email: string | null;
   avatarUrl: string | null;
   isActivated: boolean | null;
@@ -57,6 +58,7 @@ export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
     return rows.filter(
       (r) =>
         (r.name && r.name.toLowerCase().includes(q)) ||
+        (r.username && r.username.toLowerCase().includes(q)) ||
         (r.email && r.email.toLowerCase().includes(q))
     );
   }, [rows, search]);
@@ -69,23 +71,26 @@ export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
       disableAutoHide: true,
       minWidth: 260,
       sortable: true,
-      sortValue: (r) => r.name ?? 'Unknown',
-      cell: (r) => (
+      sortValue: (r) => r.name || r.username || 'Unknown',
+      cell: (r) => {
+        const displayName = r.name || r.username || 'Unknown';
+        return (
         <Link href={`/admin/users/${r.id}`} className="flex items-center gap-2 min-w-0 hover:opacity-80">
           {r.avatarUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={r.avatarUrl} alt="" className="h-7 w-7 rounded-full flex-shrink-0" />
           ) : (
             <div className="h-7 w-7 rounded-full bg-slate-600 flex items-center justify-center text-xs text-slate-200 flex-shrink-0">
-              {(r.name ?? '?').charAt(0)}
+              {displayName.charAt(0)}
             </div>
           )}
           <div className="min-w-0">
-            <span className="text-white text-sm font-medium truncate block">{r.name || 'Unknown'}</span>
+            <span className="text-white text-sm font-medium truncate block">{displayName}</span>
             {r.email && <span className="text-slate-500 text-xs truncate block">{r.email}</span>}
           </div>
         </Link>
-      ),
+        );
+      },
     },
     {
       id: 'email',
@@ -220,7 +225,7 @@ export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
       align: 'right',
       cell: (r) => (
         <div className="flex justify-end" data-row-click="ignore">
-          <UserActions userId={r.id} isActivated={r.isActivated ?? false} userName={r.name} />
+          <UserActions userId={r.id} isActivated={r.isActivated ?? false} userName={r.name || r.username} />
         </div>
       ),
     },
@@ -234,7 +239,7 @@ export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
       <div className="mb-4">
         <input
           type="text"
-          placeholder="Search by name or email..."
+          placeholder="Search by username or email..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-sm px-3 py-2 bg-slate-800 border border-slate-700 rounded-md text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
