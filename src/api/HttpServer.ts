@@ -1928,6 +1928,10 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
       const members = await ServerService.getServerMembers(serverId);
       return c.json({ members });
     } catch (error) {
@@ -2383,6 +2387,10 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
       const bans = await ServerService.getServerBans(serverId);
       return c.json({ bans });
     } catch (error) {
@@ -2519,6 +2527,10 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner', 'admin']);
+      if (!hasPermission) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
       const invites = await ServerService.getServerInvites(serverId);
       return c.json({ invites });
     } catch (error) {
@@ -2598,6 +2610,10 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner', 'admin']);
+      if (!hasPermission) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
       const inviteLinks = await ServerService.getInviteLinks(serverId);
       return c.json({ success: true, inviteLinks });
     } catch (error) {
@@ -2652,6 +2668,10 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
       const portMappings = await PublicPortService.listPortMappings(serverId);
       return c.json({ success: true, portMappings });
     } catch (error) {
