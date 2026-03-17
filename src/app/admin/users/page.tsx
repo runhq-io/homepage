@@ -55,8 +55,6 @@ export default async function UsersPage() {
 
   return (
     <div>
-	      <h1 className="text-xl font-bold text-white mb-4">Users ({allUsers.length})</h1>
-
 	      <UsersTable
 	        rows={allUsers.map(
 	          (u) =>
@@ -72,6 +70,7 @@ export default async function UsersPage() {
 	              totalPurchasedCents: u.totalPurchasedCents,
 	              isAdmin: Boolean(u.isAdmin),
 	              lastLoginAt: u.lastLoginAt,
+	              createdAt: u.createdAt,
 	              authProvider: u.authProvider,
 	            }) satisfies AdminUserRow
 	        )}

@@ -18,6 +18,7 @@ export type AdminUserRow = {
   totalPurchasedCents: number;
   isAdmin: boolean;
   lastLoginAt: Date | string | null;
+  createdAt: Date | string;
   authProvider: string | null;
 };
 
@@ -48,6 +49,18 @@ function planBadgeClass(planName: string) {
 }
 
 export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
+  const [search, setSearch] = React.useState('');
+
+  const filteredRows = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        (r.name && r.name.toLowerCase().includes(q)) ||
+        (r.email && r.email.toLowerCase().includes(q))
+    );
+  }, [rows, search]);
+
   const columns: Array<DataTableColumn<AdminUserRow>> = [
     {
       id: 'user',
@@ -167,6 +180,21 @@ export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
         ),
     },
     {
+      id: 'signedUp',
+      label: 'Signed Up',
+      header: 'Signed Up',
+      minWidth: 130,
+      collapsePriority: 32,
+      sortable: true,
+      sortValue: (r) => new Date(r.createdAt),
+      align: 'right',
+      cell: (r) => (
+        <span className="text-xs text-slate-500 whitespace-nowrap">
+          {formatRelativeTime(new Date(r.createdAt))}
+        </span>
+      ),
+    },
+    {
       id: 'lastLogin',
       label: 'Last Login',
       header: 'Last Login',
@@ -199,13 +227,27 @@ export function UsersTable({ rows }: { rows: AdminUserRow[] }) {
   ];
 
   return (
+    <div>
+      <h1 className="text-xl font-bold text-white mb-4">
+        Users ({filteredRows.length}{search ? ` of ${rows.length}` : ''})
+      </h1>
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="Search by name or email..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full max-w-sm px-3 py-2 bg-slate-800 border border-slate-700 rounded-md text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+        />
+      </div>
     <DataTable
-      data={rows}
+      data={filteredRows}
       columns={columns}
       rowHref={(r) => `/admin/users/${r.id}`}
-      defaultSort={{ columnId: 'lastLogin', direction: 'desc' }}
+      defaultSort={{ columnId: 'signedUp', direction: 'desc' }}
       emptyState={<p>No users found</p>}
       minVisibleColumns={2}
     />
+    </div>
   );
 }
