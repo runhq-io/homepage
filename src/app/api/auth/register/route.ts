@@ -103,7 +103,7 @@ export async function POST(request: NextRequest) {
     .values({
       email: normalizedEmail,
       username: normalizedUsername,
-      name: name?.trim() || null,
+      name: name?.trim() || normalizedUsername,
       passwordHash,
       authProvider: 'email',
       lastLoginAt: new Date(),
