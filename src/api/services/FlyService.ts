@@ -770,12 +770,8 @@ export async function updateMachineImage(machineId: string): Promise<void> {
     getLatestReleaseImage(),
   ]);
 
-  if (machine.config.image === latestImage) {
-    console.log(`[FlyService] Machine ${machineId} already on latest image, restarting in-place`);
-    await restartMachine(machineId);
-    return;
-  }
-
+  // Always use machine update (not restart) to force an image pull,
+  // even when the tag is the same — the underlying image may have changed.
   console.log(`[FlyService] Updating machine ${machineId} image: ${machine.config.image} → ${latestImage}`);
 
   await flyRequest<FlyMachine>(
