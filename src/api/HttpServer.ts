@@ -2857,13 +2857,17 @@ export function createHttpApp() {
   app.post('/api/server/heartbeat', async (c) => {
     try {
       const body = await c.req.json();
-      const { serverToken } = body;
+      const { serverToken, machineId, isIdle } = body;
 
       if (!serverToken || typeof serverToken !== 'string') {
         return c.json({ error: 'serverToken is required' }, 400);
       }
 
-      const success = await ServerService.updateServerHeartbeat(serverToken);
+      const success = await ServerService.updateServerHeartbeat(
+        serverToken,
+        machineId,
+        typeof isIdle === 'boolean' ? isIdle : undefined,
+      );
 
       if (!success) {
         return c.json({ error: 'Invalid server token' }, 401);

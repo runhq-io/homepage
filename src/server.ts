@@ -26,6 +26,7 @@ import { RunHQWebSocketServer } from './api/WebSocketServer';
 import { registerWsHandlers } from './api/wsHandlers';
 import { initProviders } from './api/services/providers/registry';
 import * as MachineUsageService from './api/services/MachineUsageService';
+import * as ServerService from './api/services/ServerService';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -49,6 +50,11 @@ async function main() {
     MachineUsageService.tickBilling().catch(console.error);
   }, 5 * 60 * 1000);
   MachineUsageService.tickBilling().catch(console.error);
+
+  // ── Auto-suspend check (every 1 min) ──────────────────────────────────
+  setInterval(() => {
+    ServerService.checkAutoSuspend().catch(console.error);
+  }, 60 * 1000);
 
   // ── Hono app (API routes) ────────────────────────────────────────────
   const honoApp = createHttpApp();

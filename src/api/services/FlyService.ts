@@ -35,9 +35,13 @@ type FlyMachineLifecyclePolicy = {
 };
 
 function getMachineLifecyclePolicy(autoSuspendEnabled: boolean): FlyMachineLifecyclePolicy {
+  // When auto-suspend is enabled, the backend manages suspension timing via
+  // heartbeat idle tracking + checkAutoSuspend() cron. Fly proxy autostop is
+  // disabled so it doesn't race with our timeout. autostart remains true so
+  // Fly proxy still wakes stopped/suspended machines on incoming requests.
   if (autoSuspendEnabled) {
     return {
-      autostop: 'stop',
+      autostop: 'off',
       autostart: true,
       minMachinesRunning: 0,
     };

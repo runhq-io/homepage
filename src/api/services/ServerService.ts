@@ -22,7 +22,7 @@ import {
   type ServerStatusType,
   type ServerTier,
 } from '../../db/schema';
-import { eq, and, gt, isNull, inArray, sql } from 'drizzle-orm';
+import { eq, and, gt, lte, isNull, isNotNull, inArray, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { createHash } from 'crypto';
 import * as CloudflareTunnelService from './CloudflareTunnelService';
@@ -1143,7 +1143,25 @@ export async function registerServer(
   serverUrl: string,
   machineId?: string
 ): Promise<{ success: boolean; server?: Server; error?: string }> {
-  const server = await getServerByToken(serverToken);
+  // When machineId is provided, try to match by both token AND machineId first.
+  // This prevents the wrong server from being updated when multiple servers
+  // share the same token (e.g. after a machine clone operation).
+  const tokenHash = hashServerToken(serverToken);
+  let server: Server | null = null;
+
+  if (machineId) {
+    const [byMachine] = await db
+      .select()
+      .from(servers)
+      .where(and(eq(servers.tokenHash, tokenHash), eq(servers.machineId, machineId)))
+      .limit(1);
+    server = byMachine || null;
+  }
+
+  // Fall back to token-only lookup (original behavior for local/self-hosted servers)
+  if (!server) {
+    server = await getServerByToken(serverToken);
+  }
 
   if (!server) {
     return { success: false, error: 'Invalid server token' };
@@ -1174,19 +1192,47 @@ export async function registerServer(
 /**
  * Update server heartbeat (keep-alive)
  */
-export async function updateServerHeartbeat(serverToken: string): Promise<boolean> {
-  const server = await getServerByToken(serverToken);
+export async function updateServerHeartbeat(serverToken: string, machineId?: string, isIdle?: boolean): Promise<boolean> {
+  // When machineId is provided, match by both token AND machineId to avoid
+  // updating the wrong server when multiple servers share the same token.
+  const tokenHash = hashServerToken(serverToken);
+  let server: Server | null = null;
+
+  if (machineId) {
+    const [byMachine] = await db
+      .select()
+      .from(servers)
+      .where(and(eq(servers.tokenHash, tokenHash), eq(servers.machineId, machineId)))
+      .limit(1);
+    server = byMachine || null;
+  }
+
+  if (!server) {
+    server = await getServerByToken(serverToken);
+  }
 
   if (!server) {
     return false;
   }
 
+  // Track idle state for app-managed auto-suspend.
+  // idleSince = when the server first started reporting idle continuously.
+  // - If isIdle transitions to true → set idleSince to now (if not already set)
+  // - If isIdle transitions to false → clear idleSince
+  const updateData: Record<string, unknown> = {
+    status: 'online',
+    lastSeen: new Date(),
+  };
+
+  if (isIdle === true && !server.idleSince) {
+    updateData.idleSince = new Date();
+  } else if (isIdle === false && server.idleSince) {
+    updateData.idleSince = null;
+  }
+
   await db
     .update(servers)
-    .set({
-      status: 'online',
-      lastSeen: new Date(),
-    })
+    .set(updateData)
     .where(eq(servers.id, server.id));
 
   // Ensure billing is tracking this machine
@@ -1213,6 +1259,71 @@ export async function markServerOffline(serverId: string): Promise<void> {
     .where(eq(servers.id, serverId));
 
   console.log(`[ServerService] Server marked offline for server ${serverId}`);
+}
+
+/**
+ * Check all online servers with auto-suspend enabled and suspend those
+ * that have been idle for longer than their configured timeout.
+ *
+ * Called on a 1-minute interval from server.ts.
+ */
+export async function checkAutoSuspend(): Promise<void> {
+  if (!isAnyProviderConfigured()) return;
+
+  const now = new Date();
+
+  // Find online remote servers with auto-suspend enabled that have been idle
+  const candidates = await db
+    .select()
+    .from(servers)
+    .where(
+      and(
+        eq(servers.status, 'online'),
+        eq(servers.autoSuspendEnabled, true),
+        eq(servers.deploymentType, 'remote'),
+        isNotNull(servers.machineId),
+        isNotNull(servers.idleSince),
+      )
+    );
+
+  for (const server of candidates) {
+    const idleMs = now.getTime() - server.idleSince!.getTime();
+    const timeoutMs = (server.autoSuspendIdleMinutes ?? 15) * 60_000;
+
+    if (idleMs < timeoutMs) continue;
+
+    const idleMinutes = Math.round(idleMs / 60_000);
+    console.log(
+      `[ServerService] Auto-suspending server ${server.id} (${server.name}) — idle for ${idleMinutes}m, timeout ${server.autoSuspendIdleMinutes}m`
+    );
+
+    try {
+      const provider = getProvider((server.provider || 'fly') as ProviderId);
+      await provider.suspendMachine(server.machineId!);
+
+      // Stop billing and mark offline
+      await MachineUsageService.onMachineStopped(server.id);
+
+      await db
+        .update(servers)
+        .set({
+          status: 'offline',
+          idleSince: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(servers.id, server.id));
+
+      console.log(`[ServerService] Server ${server.id} suspended successfully`);
+    } catch (error) {
+      // If suspension fails (e.g. machine already stopped), just log and continue
+      console.error(`[ServerService] Failed to auto-suspend server ${server.id}:`, error);
+      // Clear idleSince so we don't retry every tick — next heartbeat will re-set it
+      await db
+        .update(servers)
+        .set({ idleSince: null })
+        .where(eq(servers.id, server.id));
+    }
+  }
 }
 
 /**
@@ -1295,12 +1406,13 @@ export async function wakeRemoteServerInternal(
       await provider.waitForState(server.machineId, ['running'], 90000);
       await provider.waitForHealthy(server.machineId, 60000);
 
-      // Update status
+      // Update status — clear idleSince so fresh idle tracking starts
       await db
         .update(servers)
         .set({
           status: 'online',
           lastSeen: new Date(),
+          idleSince: null,
           updatedAt: new Date(),
         })
         .where(eq(servers.id, serverId));
@@ -1332,12 +1444,13 @@ export async function wakeRemoteServerInternal(
       await provider.waitForState(server.machineId, ['running'], 90000);
       await provider.waitForHealthy(server.machineId, 60000);
 
-      // Update status
+      // Update status — clear idleSince so fresh idle tracking starts
       await db
         .update(servers)
         .set({
           status: 'online',
           lastSeen: new Date(),
+          idleSince: null,
           updatedAt: new Date(),
         })
         .where(eq(servers.id, serverId));

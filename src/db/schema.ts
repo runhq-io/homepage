@@ -617,6 +617,7 @@ export const servers = pgTable('servers', {
   // Auto-suspend settings
   autoSuspendEnabled: boolean('auto_suspend_enabled').notNull().default(true), // If true, suspend when idle
   autoSuspendIdleMinutes: integer('auto_suspend_idle_minutes').default(15),
+  idleSince: timestamp('idle_since'), // When server first started reporting idle (null = not idle)
   // Machine billing
   machineStartedAt: timestamp('machine_started_at'), // When the machine last started (for billing ticks)
   // Cloudflare Tunnel fields (for public port routing)
