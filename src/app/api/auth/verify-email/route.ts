@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
 
   const tokenHash = createHash('sha256').update(token).digest('hex');
 
-  // Find the token
+  // Find a valid, unused token that hasn't expired
   const [verificationToken] = await db
     .select()
     .from(emailVerificationTokens)
@@ -42,6 +42,26 @@ export async function GET(request: NextRequest) {
     .limit(1);
 
   if (!verificationToken) {
+    // Token may have been consumed by an email client link prefetch.
+    // Check if this token exists and the user's email is already verified.
+    const [usedToken] = await db
+      .select()
+      .from(emailVerificationTokens)
+      .where(eq(emailVerificationTokens.tokenHash, tokenHash))
+      .limit(1);
+
+    if (usedToken) {
+      const [user] = await db
+        .select({ emailVerifiedAt: users.emailVerifiedAt })
+        .from(users)
+        .where(eq(users.id, usedToken.userId))
+        .limit(1);
+
+      if (user?.emailVerifiedAt) {
+        return redirectWithMessage(redirect, 'success', 'Email verified! You can now sign in.');
+      }
+    }
+
     return redirectWithMessage(redirect, 'error', 'Invalid or expired verification link');
   }
 
