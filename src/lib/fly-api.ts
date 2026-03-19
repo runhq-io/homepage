@@ -12,7 +12,7 @@ function getFlyApiToken(): string | undefined {
 }
 
 function getServerAppName(): string {
-  return process.env.SERVER_APP || process.env.FLY_APP_NAME || 'fishtank-workspaces';
+  return process.env.SERVER_APP || process.env.FLY_APP_NAME || 'runhq-servers';
 }
 
 export interface FlyMachine {
