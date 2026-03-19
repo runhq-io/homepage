@@ -1444,13 +1444,21 @@ export function createHttpApp() {
       if (authHeader !== `Bearer ${deploySecret}`) {
         return c.json({ error: 'Unauthorized' }, 401);
       }
-      const body = await c.req.json() as { version?: string };
+      const body = await c.req.json() as { version?: string; imageRef?: string };
       if (!body.version || typeof body.version !== 'string') {
         return c.json({ error: 'Missing version' }, 400);
       }
       await setLatestServerVersion(body.version);
+      // Store the full image ref so new machines use the exact deployed image
+      if (body.imageRef && typeof body.imageRef === 'string') {
+        await db.insert(systemSettings).values({ key: 'latest_server_image', value: body.imageRef }).onConflictDoUpdate({
+          target: systemSettings.key,
+          set: { value: body.imageRef, updatedAt: new Date() },
+        });
+        console.log(`[HttpServer] Latest server image set to: ${body.imageRef}`);
+      }
       console.log(`[HttpServer] Latest server version set to: ${body.version}`);
-      return c.json({ success: true, version: body.version });
+      return c.json({ success: true, version: body.version, imageRef: body.imageRef });
     } catch (error) {
       console.error('[HttpServer] Set server version error:', error);
       return c.json({ error: 'Failed to set server version' }, 500);

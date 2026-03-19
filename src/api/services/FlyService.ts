@@ -8,14 +8,17 @@
  */
 
 import { nanoid } from 'nanoid';
+import { eq } from 'drizzle-orm';
 import type { ServerTier } from '../../db/schema';
+import { db } from '../../db/index';
+import { systemSettings } from '../../db/schema';
 
 // Fly.io Machines API base URL
 const FLY_API_URL = 'https://api.machines.dev/v1';
 
 // Read env vars at runtime via getters (not module load time, to ensure dotenv has loaded)
 function getFlyAppName(): string {
-  return process.env.FLY_APP_NAME || 'runhq-workspaces';
+  return process.env.FLY_APP_NAME || 'fishtank-workspaces';
 }
 
 // Server machines are created in a separate app from the API
@@ -274,16 +277,26 @@ async function flyRequest<T>(
 // ============================================================================
 
 /**
- * Get the latest server image.
- *
- * The deploy script tags the latest build as `:latest` in the Fly registry
- * after each deploy. We simply reference that well-known tag.
+ * Get the latest server image from the DB (set by deploy script via set-server-version).
+ * Falls back to registry.fly.io/APP:latest if no image ref is stored.
  */
 async function getLatestReleaseImage(): Promise<string> {
+  try {
+    const [row] = await db.select({ value: systemSettings.value })
+      .from(systemSettings)
+      .where(eq(systemSettings.key, 'latest_server_image'));
+    if (row?.value) {
+      console.log(`[FlyService] Using image from DB: ${row.value}`);
+      return row.value;
+    }
+  } catch (err) {
+    console.error('[FlyService] Failed to read latest_server_image from DB:', err);
+  }
+  // Fallback (should not happen after first deploy with imageRef)
   const appName = getServerAppName();
-  const imageRef = `registry.fly.io/${appName}:latest`;
-  console.log(`[FlyService] Using image: ${imageRef}`);
-  return imageRef;
+  const fallback = `registry.fly.io/${appName}:latest`;
+  console.log(`[FlyService] WARNING: No image in DB, falling back to ${fallback}`);
+  return fallback;
 }
 
 // ============================================================================
