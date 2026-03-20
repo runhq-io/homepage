@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
   // Block unverified email accounts
   if (user.authProvider === 'email' && !user.emailVerifiedAt) {
     return NextResponse.json(
-      { error: 'Please verify your email before signing in. Check your inbox for the verification link.' },
+      { error: 'Please verify your email before signing in. Check your inbox for the verification link.', needsVerification: true },
       { status: 403, headers },
     );
   }
