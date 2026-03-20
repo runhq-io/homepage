@@ -97,7 +97,8 @@ export async function POST(request: NextRequest) {
     await sendActivationEmail(normalizedEmail, verifyUrl);
   } catch (err) {
     console.error('[resend-verification] Failed to send email:', err);
-    return NextResponse.json({ error: 'Failed to send verification email. Please try again.' }, { status: 500, headers });
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: `Failed to send verification email: ${errMsg}` }, { status: 500, headers });
   }
 
   return NextResponse.json({ success: true }, { headers });
