@@ -133,6 +133,15 @@ export async function POST(request: NextRequest) {
       await sendActivationEmail(normalizedEmail, verifyUrl);
     } catch (err) {
       console.error('[register] Failed to send verification email:', err);
+      // Account was created but email failed — tell the user so they can resend
+      const token = await createToken(newUser.id);
+      const userInfo = { id: newUser.id, email: newUser.email, username: newUser.username, name: newUser.name, avatarUrl: newUser.avatarUrl };
+      if (returnToken) {
+        return NextResponse.json({ token, user: userInfo, needsVerification: true, emailError: 'Verification email failed to send. You can resend it from the login page.' }, { status: 201, headers });
+      }
+      const response = NextResponse.json({ success: true, user: userInfo, needsVerification: true, emailError: 'Verification email failed to send.' }, { status: 201, headers });
+      response.cookies.set('auth_token', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: 30 * 24 * 60 * 60 });
+      return response;
     }
   } else {
     // No email service — auto-verify for local dev

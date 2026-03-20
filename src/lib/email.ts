@@ -18,7 +18,7 @@ const FROM = () => process.env.EMAIL_FROM || 'RunHQ <noreply@runhq.io>';
 export async function sendActivationEmail(to: string, activateUrl: string): Promise<void> {
   const resend = getResend();
 
-  await resend.emails.send({
+  const { data, error } = await resend.emails.send({
     from: FROM(),
     to,
     subject: 'Verify your RunHQ email',
@@ -41,12 +41,18 @@ export async function sendActivationEmail(to: string, activateUrl: string): Prom
       </div>
     `,
   });
+
+  if (error) {
+    console.error('[email] sendActivationEmail failed:', error);
+    throw new Error(`Failed to send verification email: ${error.message}`);
+  }
+  console.log(`[email] Verification email sent to ${to}, id=${data?.id}`);
 }
 
 export async function sendInviteEmail(to: string, inviterName: string, serverName: string, acceptUrl: string): Promise<void> {
   const resend = getResend();
 
-  await resend.emails.send({
+  const { data, error } = await resend.emails.send({
     from: FROM(),
     to,
     subject: `You've been invited to ${serverName} on RunHQ`,
@@ -69,12 +75,18 @@ export async function sendInviteEmail(to: string, inviterName: string, serverNam
       </div>
     `,
   });
+
+  if (error) {
+    console.error('[email] sendInviteEmail failed:', error);
+    throw new Error(`Failed to send invite email: ${error.message}`);
+  }
+  console.log(`[email] Invite email sent to ${to}, id=${data?.id}`);
 }
 
 export async function sendPasswordResetEmail(to: string, resetUrl: string): Promise<void> {
   const resend = getResend();
 
-  await resend.emails.send({
+  const { data, error } = await resend.emails.send({
     from: FROM(),
     to,
     subject: 'Reset your RunHQ password',
@@ -97,4 +109,10 @@ export async function sendPasswordResetEmail(to: string, resetUrl: string): Prom
       </div>
     `,
   });
+
+  if (error) {
+    console.error('[email] sendPasswordResetEmail failed:', error);
+    throw new Error(`Failed to send password reset email: ${error.message}`);
+  }
+  console.log(`[email] Password reset email sent to ${to}, id=${data?.id}`);
 }
