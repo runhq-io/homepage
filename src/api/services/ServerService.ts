@@ -125,6 +125,7 @@ async function provisionNewMachine(
   existingVolumeId?: string | null,
   existingTunnelId?: string | null,
   providerId?: ProviderId,
+  tokenHash?: string,
 ): Promise<{ machineId: string; machineName: string; url: string; region: string; volumeId: string }> {
   const resolvedProviderId = providerId || getDefaultProviderId();
   const provider = getProvider(resolvedProviderId);
@@ -171,19 +172,25 @@ async function provisionNewMachine(
     await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
   }
 
-  // Save machine details immediately to prevent orphaned machines if wait times out
+  // Save machine details immediately to prevent orphaned machines if wait times out.
+  // Also atomically update tokenHash here (not before provisioning) so the old machine
+  // can still register if provisioning fails — prevents orphaned-token mismatches.
+  const machineUpdate: Record<string, unknown> = {
+    serverUrl: provisionResult.serverUrl,
+    machineId: provisionResult.machineId,
+    machineName: provisionResult.machineName,
+    region: provisionResult.region,
+    volumeId: provisionResult.volumeId,
+    tunnelId,
+    tunnelToken: null,
+    updatedAt: new Date(),
+  };
+  if (tokenHash) {
+    machineUpdate.tokenHash = tokenHash;
+  }
   await db
     .update(servers)
-    .set({
-      serverUrl: provisionResult.serverUrl,
-      machineId: provisionResult.machineId,
-      machineName: provisionResult.machineName,
-      region: provisionResult.region,
-      volumeId: provisionResult.volumeId,
-      tunnelId,
-      tunnelToken: null,
-      updatedAt: new Date(),
-    })
+    .set(machineUpdate)
     .where(eq(servers.id, serverId));
 
   // Wait for machine to start
@@ -1581,8 +1588,9 @@ export async function updateRemoteServer(
 }
 
 /**
- * Reprovision a remote server (after machine was destroyed)
- * Generates a new token and creates a new machine
+ * Reprovision a remote server (after machine was destroyed).
+ * Token hash is only updated in the DB once the new machine is created,
+ * so the old machine can still register if provisioning fails.
  */
 export async function reprovisionRemoteServer(
   serverId: string,
@@ -1625,14 +1633,15 @@ export async function reprovisionRemoteServer(
   console.log(`[ServerService] Reprovisioning remote server for server ${serverId}`);
 
   try {
-    // Generate new token and clear old machine refs
+    // Generate new token but don't update the DB hash yet — provisionNewMachine
+    // writes it atomically once the machine is created. This way, if provisioning
+    // fails, the old machine (if still alive) can still register with the old token.
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
     await db
       .update(servers)
       .set({
-        tokenHash,
         status: 'provisioning',
         machineId: null,
         machineName: null,
@@ -1652,6 +1661,7 @@ export async function reprovisionRemoteServer(
       server.volumeId,
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
+      tokenHash,
     );
 
     return { success: true, status: 'online', url: result.url };
@@ -1789,15 +1799,14 @@ export async function changeRegion(
       console.log(`[ServerService] Stopped old machine ${oldMachineId}`);
     }
 
-    // Generate new server token
+    // Generate new token but defer DB hash update until machine is created
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info and set new token
+    // Clear old machine info (tokenHash updated atomically by provisionNewMachine)
     await db
       .update(servers)
       .set({
-        tokenHash,
         machineId: null,
         machineName: null,
         volumeId: null,
@@ -1818,6 +1827,7 @@ export async function changeRegion(
       forkedVolumeId,
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
+      tokenHash,
     );
 
     console.log(`[ServerService] Region changed to ${region}, new machine at ${result.url}`);
@@ -2012,16 +2022,15 @@ export async function changeTier(
       }
     }
 
-    // Generate new server token
+    // Generate new token but defer DB hash update until machine is created
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info, set new tier and token.
+    // Clear old machine info, set new tier (tokenHash updated atomically by provisionNewMachine).
     // Keep volumeId pointing to the volume we'll use so recovery is possible if provisioning fails.
     await db
       .update(servers)
       .set({
-        tokenHash,
         tier: newTier,
         machineId: null,
         machineName: null,
@@ -2042,6 +2051,7 @@ export async function changeTier(
       volumeIdForNewMachine,
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
+      tokenHash,
     );
 
     console.log(`[ServerService] Tier changed to ${newTier}, new machine at ${result.url}`);
