@@ -1468,18 +1468,13 @@ export function createHttpApp() {
   // Backfill tunnel DNS records for all remote servers
   app.post('/api/admin/backfill-tunnel-dns', async (c) => {
     try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
       const authHeader = c.req.header('Authorization');
-      if (!authHeader?.startsWith('Bearer ')) {
+      if (authHeader !== `Bearer ${deploySecret}`) {
         return c.json({ error: 'Unauthorized' }, 401);
-      }
-      const token = authHeader.substring(7);
-      const userId = await extractUserIdFromToken(token);
-      if (!userId) {
-        return c.json({ error: 'Invalid token' }, 401);
-      }
-      const isAdminUser = await UsageService.isAdmin(userId);
-      if (!isAdminUser) {
-        return c.json({ error: 'Admin access required' }, 403);
       }
 
       // Find all remote servers with machineIds
