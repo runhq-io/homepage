@@ -675,8 +675,9 @@ export async function createMachine(
     machineConfig
   );
 
-  // Construct the public URL (app-level URL, use Fly-Force-Instance-Id header for per-machine routing)
-  const url = `https://${getServerAppName()}.fly.dev`;
+  // Construct the public URL via per-machine Cloudflare Tunnel
+  const domain = process.env.PUBLIC_PORTS_DOMAIN || 'runhq.io';
+  const url = `https://srv-${machine.id}.${domain}`;
 
   console.log(`[FlyService] Created machine ${machine.id} (${machineName}) at ${url}`);
 
@@ -857,30 +858,51 @@ export async function waitForMachineHealthy(
 
   console.log(`[FlyService] Waiting for machine ${machineId} to be healthy`);
 
-  // Directly poll the machine's health endpoint through Fly.io routing
-  const healthUrl = `https://${getServerAppName()}.fly.dev/health?fly_instance_id=${machineId}`;
+  // Poll the machine's health endpoint through its Cloudflare Tunnel.
+  // This confirms both the Node process AND the tunnel are up before we return.
+  const domain = process.env.PUBLIC_PORTS_DOMAIN || 'runhq.io';
+  const tunnelHealthUrl = `https://srv-${machineId}.${domain}/health`;
+
+  // Also keep the Fly proxy URL as fallback for the first few seconds
+  // (tunnel may take longer to connect than the Fly proxy)
+  const flyHealthUrl = `https://${getServerAppName()}.fly.dev/health?fly_instance_id=${machineId}`;
+
+  let tunnelReachable = false;
 
   while (Date.now() - start < timeoutMs) {
+    // Try tunnel URL first (this is what clients will use)
     try {
-      const response = await fetch(healthUrl, {
+      const response = await fetch(tunnelHealthUrl, {
         method: 'GET',
-        headers: {
-          // Force routing to specific machine
-          'Fly-Force-Instance-Id': machineId,
-        },
-        signal: AbortSignal.timeout(10000), // 10s timeout per health check
+        signal: AbortSignal.timeout(10000),
       });
 
       if (response.ok) {
-        console.log(`[FlyService] Machine ${machineId} is healthy (status ${response.status})`);
+        console.log(`[FlyService] Machine ${machineId} is healthy via tunnel (status ${response.status})`);
         return await getMachine(machineId);
       }
 
-      console.log(`[FlyService] Machine ${machineId} health check returned ${response.status}`);
+      console.log(`[FlyService] Machine ${machineId} tunnel health check returned ${response.status}`);
     } catch (error) {
-      // Connection refused, timeout, etc. - machine not ready yet
       const msg = error instanceof Error ? error.message : String(error);
-      console.log(`[FlyService] Machine ${machineId} health check failed: ${msg}`);
+      console.log(`[FlyService] Machine ${machineId} tunnel health check failed: ${msg}`);
+    }
+
+    // If tunnel isn't up yet, also check via Fly proxy to know if the Node process is at least running
+    if (!tunnelReachable) {
+      try {
+        const flyRes = await fetch(flyHealthUrl, {
+          method: 'GET',
+          headers: { 'Fly-Force-Instance-Id': machineId },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (flyRes.ok) {
+          console.log(`[FlyService] Machine ${machineId} is healthy via Fly proxy, waiting for tunnel...`);
+          tunnelReachable = false; // Node is up but tunnel isn't — keep polling tunnel
+        }
+      } catch {
+        // Fly proxy also not ready — machine still booting
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, pollInterval));

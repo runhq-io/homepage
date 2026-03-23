@@ -284,11 +284,14 @@ export class FlyProvider implements IProvider {
   // ---- Routing ----
 
   getRoutingInfo(machineId: string): RoutingInfo {
-    const serverUrl = `https://${FlyService.getServerAppNamePublic()}.fly.dev`;
+    // Route client traffic through per-machine Cloudflare Tunnel, bypassing Fly's shared proxy.
+    // Each machine has its own tunnel at srv-{machineId}.{PUBLIC_PORTS_DOMAIN}.
+    const domain = process.env.PUBLIC_PORTS_DOMAIN || 'runhq.io';
+    const tunnelUrl = `https://srv-${machineId}.${domain}`;
     return {
-      serverUrl,
-      routingToken: machineId,
-      requiresRoutingHeaders: true,
+      serverUrl: tunnelUrl,
+      routingToken: null,
+      requiresRoutingHeaders: false,
     };
   }
 
