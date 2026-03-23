@@ -3261,10 +3261,14 @@ export function createHttpApp() {
             ? `?fly_instance_id=${encodeURIComponent(routing.routingToken)}`
             : '';
           const infoUrl = `${serverUrl}/info${infoParams}`;
+          const infoAbort = new AbortController();
+          const infoTimeout = setTimeout(() => infoAbort.abort(), 5000);
           const infoRes = await fetch(infoUrl, {
             method: 'GET',
             headers: routingHeaders,
+            signal: infoAbort.signal,
           });
+          clearTimeout(infoTimeout);
 
           if (infoRes.ok) {
             const info = await infoRes.json().catch(() => ({})) as { serverId?: string };
