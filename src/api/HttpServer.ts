@@ -1465,6 +1465,62 @@ export function createHttpApp() {
     }
   });
 
+  // Backfill tunnel DNS records for all remote servers
+  app.post('/api/admin/backfill-tunnel-dns', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+      const isAdminUser = await UsageService.isAdmin(userId);
+      if (!isAdminUser) {
+        return c.json({ error: 'Admin access required' }, 403);
+      }
+
+      // Find all remote servers with machineIds
+      const remoteServers = await db
+        .select({ id: servers.id, machineId: servers.machineId, name: servers.name })
+        .from(servers)
+        .where(eq(servers.deploymentType, 'remote'));
+
+      const withMachine = remoteServers.filter(s => s.machineId);
+      console.log(`[HttpServer] Backfilling tunnel DNS for ${withMachine.length} remote servers (${remoteServers.length} total remote)`);
+
+      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string }> = [];
+      for (const server of withMachine) {
+        try {
+          const result = await ServerService.ensureServerTunnelConnector(server.id);
+          results.push({
+            serverId: server.id,
+            machineId: server.machineId!,
+            name: server.name,
+            status: result ? `ok (tunnel=${result.tunnelId})` : 'skipped',
+          });
+          console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): ${result ? 'ok' : 'skipped'}`);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          results.push({
+            serverId: server.id,
+            machineId: server.machineId!,
+            name: server.name,
+            status: `error: ${msg}`,
+          });
+          console.error(`[HttpServer] Backfill ${server.id} failed:`, error);
+        }
+      }
+
+      return c.json({ success: true, total: withMachine.length, results });
+    } catch (error) {
+      console.error('[HttpServer] Backfill tunnel DNS error:', error);
+      return c.json({ error: 'Failed to backfill' }, 500);
+    }
+  });
+
   // ==========================================================================
   // Server Invite Links -- Public Routes
   // ==========================================================================
