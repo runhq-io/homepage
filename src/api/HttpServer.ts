@@ -3248,6 +3248,7 @@ export function createHttpApp() {
 
       // Verify machine identity to detect stale routing.
       // If mismatch, return error — the correct fix is reprovisioning, not scanning all machines.
+      let machineUnresponsive = false;
       if (latestServer.deploymentType === 'remote' && routingMachineId) {
         try {
           const provider = getProvider((latestServer.provider || 'fly') as ProviderId);
@@ -3281,9 +3282,13 @@ export function createHttpApp() {
                 .where(eq(servers.id, serverId));
               return c.json({ error: 'Server routing mismatch detected. Reprovisioning will happen on next connect.' }, 503);
             }
+          } else {
+            console.warn(`[HttpServer] Machine /info check returned ${infoRes.status} for server ${serverId}`);
+            machineUnresponsive = true;
           }
         } catch {
-          // Machine unreachable — let the request continue, the proxy will handle it
+          console.warn(`[HttpServer] Machine unreachable during /info check for server ${serverId}`);
+          machineUnresponsive = true;
         }
       }
 
@@ -3303,6 +3308,7 @@ export function createHttpApp() {
         serverStatus: latestServer.status,
         deploymentType: latestServer.deploymentType,
         latestServerVersion,
+        ...(machineUnresponsive ? { machineUnresponsive: true } : {}),
       });
     } catch (error) {
       console.error('[HttpServer] Generate server session error:', error);
