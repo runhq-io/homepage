@@ -1122,6 +1122,55 @@ export async function canEditServer(serverId: string, userId: string): Promise<b
   return checkServerPermission(serverId, userId, ['owner', 'admin', 'member']);
 }
 
+/**
+ * Check if user has a specific permission in the server's RBAC system.
+ * Calls the running server's /permissions/check endpoint with a signed JWT.
+ * Falls back to cloud-level role check if the server is unreachable.
+ */
+export async function checkServerRBACPermission(
+  serverId: string,
+  userId: string,
+  permission: string = 'administrator',
+): Promise<boolean> {
+  // Owner always has permission
+  const [server] = await db
+    .select({ ownerId: servers.ownerId, serverUrl: servers.serverUrl })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+
+  if (!server) return false;
+  if (server.ownerId === userId) return true;
+  if (!server.serverUrl) return false;
+
+  try {
+    // Generate a short-lived token to authenticate with the server
+    const token = await ServerSessionService.generateServerSessionToken(
+      userId, serverId, 30, // 30 seconds — just for this single check
+    );
+
+    const url = new URL('/permissions/check', server.serverUrl);
+    url.searchParams.set('userId', userId);
+    url.searchParams.set('permission', permission);
+
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!res.ok) {
+      console.warn(`[ServerService] RBAC check failed for ${serverId}: HTTP ${res.status}`);
+      return false;
+    }
+
+    const data = await res.json() as { success: boolean; hasPermission?: boolean };
+    return data.success && data.hasPermission === true;
+  } catch (error) {
+    console.warn(`[ServerService] RBAC check unreachable for ${serverId}:`, error);
+    return false;
+  }
+}
+
 // ============================================================================
 // Server Registration
 // ============================================================================
@@ -1518,15 +1567,19 @@ export async function wakeRemoteServer(
 
 /**
  * Restart a remote server (stop + start the Fly.io machine)
+ * Requires cloud-level owner/admin OR server RBAC administrator permission.
  */
 export async function restartRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  // Check access
-  const hasAccess = await canAccessServer(serverId, userId);
-  if (!hasAccess) {
-    return { success: false, error: 'Access denied' };
+  // Check cloud-level permission first (owner/admin), then fall back to server RBAC
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  if (!hasCloudPerm) {
+    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
+    if (!hasRBACPerm) {
+      return { success: false, error: 'Access denied' };
+    }
   }
 
   const server = await getServer(serverId);
@@ -1572,16 +1625,19 @@ export async function restartRemoteServer(
 }
 
 /**
- * Update a remote server's image to :latest (owner-only)
- * Same as restart but restricted to owner permission level
+ * Update a remote server's image to :latest
+ * Requires cloud-level owner/admin OR server RBAC administrator permission.
  */
 export async function updateRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only the server owner or admin can update the server image' };
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  if (!hasCloudPerm) {
+    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
+    if (!hasRBACPerm) {
+      return { success: false, error: 'Only administrators can update the server image' };
+    }
   }
 
   return restartRemoteServer(serverId, userId);
