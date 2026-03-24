@@ -20,7 +20,7 @@ You have access to a browser and terminal to perform real online work autonomous
 function getDefaults(): SystemSettings {
   return {
     claudeApiKey: process.env.ANTHROPIC_API_KEY || '',
-    claudeModel: 'claude-sonnet-4-6-20250514',
+    claudeModel: 'claude-sonnet-4-6',
     systemPrompt: DEFAULT_GLOBAL_SYSTEM_PROMPT,
   };
 }
