@@ -1132,55 +1132,48 @@ export async function checkServerRBACPermission(
   userId: string,
   permission: string = 'administrator',
 ): Promise<boolean> {
-  // Owner always has permission
-  const [server] = await db
-    .select({ ownerId: servers.ownerId, serverUrl: servers.serverUrl, machineId: servers.machineId, provider: servers.provider })
-    .from(servers)
-    .where(eq(servers.id, serverId))
-    .limit(1);
-
+  const server = await getServer(serverId);
   if (!server) return false;
   if (server.ownerId === userId) return true;
   if (!server.serverUrl) return false;
 
   try {
-    // Generate a short-lived token to authenticate with the server
-    const token = await ServerSessionService.generateServerSessionToken(
-      userId, serverId, 30, // 30 seconds — just for this single check
+    const data = await fetchFromServer<{ success: boolean; hasPermission?: boolean }>(
+      server, userId, `/permissions/check?userId=${encodeURIComponent(userId)}&permission=${encodeURIComponent(permission)}`,
     );
-
-    // Use provider routing to reach the correct machine (Fly shared proxy needs fly-force-instance-id)
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-    let baseUrl = server.serverUrl;
-    if (server.machineId) {
-      const provider = getProvider((server.provider || 'fly') as ProviderId);
-      const routing = provider.getRoutingInfo(server.machineId);
-      baseUrl = routing.serverUrl;
-      if (routing.routingToken && routing.requiresRoutingHeaders) {
-        headers['fly-force-instance-id'] = routing.routingToken;
-      }
-    }
-
-    const url = new URL('/permissions/check', baseUrl);
-    url.searchParams.set('userId', userId);
-    url.searchParams.set('permission', permission);
-
-    const res = await fetch(url.toString(), {
-      headers,
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!res.ok) {
-      console.warn(`[ServerService] RBAC check failed for ${serverId}: HTTP ${res.status}`);
-      return false;
-    }
-
-    const data = await res.json() as { success: boolean; hasPermission?: boolean };
     return data.success && data.hasPermission === true;
   } catch (error) {
     console.warn(`[ServerService] RBAC check unreachable for ${serverId}:`, error);
     return false;
   }
+}
+
+/**
+ * Fetch from a running server machine with proper authentication and routing.
+ * Generates a short-lived JWT and adds Fly machine routing headers automatically.
+ * Use this for all BE→server API calls to avoid routing issues.
+ */
+export async function fetchFromServer<T = unknown>(
+  server: Server,
+  userId: string,
+  path: string,
+  options?: { method?: string; body?: unknown; timeoutMs?: number },
+): Promise<T> {
+  const { url: baseUrl, headers } = await buildServerFetchHeaders(server, userId);
+  const url = new URL(path, baseUrl);
+
+  const res = await fetch(url.toString(), {
+    method: options?.method || 'GET',
+    headers,
+    body: options?.body ? JSON.stringify(options.body) : undefined,
+    signal: AbortSignal.timeout(options?.timeoutMs ?? 5000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Server responded with HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<T>;
 }
 
 // ============================================================================
