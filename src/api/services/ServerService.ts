@@ -1134,7 +1134,7 @@ export async function checkServerRBACPermission(
 ): Promise<boolean> {
   // Owner always has permission
   const [server] = await db
-    .select({ ownerId: servers.ownerId, serverUrl: servers.serverUrl })
+    .select({ ownerId: servers.ownerId, serverUrl: servers.serverUrl, machineId: servers.machineId, provider: servers.provider })
     .from(servers)
     .where(eq(servers.id, serverId))
     .limit(1);
@@ -1149,12 +1149,24 @@ export async function checkServerRBACPermission(
       userId, serverId, 30, // 30 seconds — just for this single check
     );
 
-    const url = new URL('/permissions/check', server.serverUrl);
+    // Use provider routing to reach the correct machine (Fly shared proxy needs fly-force-instance-id)
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    let baseUrl = server.serverUrl;
+    if (server.machineId) {
+      const provider = getProvider((server.provider || 'fly') as ProviderId);
+      const routing = provider.getRoutingInfo(server.machineId);
+      baseUrl = routing.serverUrl;
+      if (routing.routingToken && routing.requiresRoutingHeaders) {
+        headers['fly-force-instance-id'] = routing.routingToken;
+      }
+    }
+
+    const url = new URL('/permissions/check', baseUrl);
     url.searchParams.set('userId', userId);
     url.searchParams.set('permission', permission);
 
     const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${token}` },
+      headers,
       signal: AbortSignal.timeout(5000),
     });
 
