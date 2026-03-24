@@ -445,7 +445,7 @@ export function createHttpApp() {
       const client = new Anthropic({ apiKey: settings.claudeApiKey });
 
       // Build system prompt
-      const model = body.config?.model || settings.claudeModel || 'claude-sonnet-4-20250514';
+      const model = resolveModel(body.config?.model || settings.claudeModel || 'claude-sonnet-4-6-20250514');
       const maxTokens = body.config?.maxTokens || 1024;
 
       // The full orchestration prompt from the client contains:
@@ -697,7 +697,7 @@ export function createHttpApp() {
       // Create Anthropic client
       const client = new Anthropic({ apiKey: settings.claudeApiKey });
 
-      const model = body.model || settings.claudeModel || 'claude-sonnet-4-20250514';
+      const model = resolveModel(body.model || settings.claudeModel || 'claude-sonnet-4-6-20250514');
       const maxTokens = body.max_tokens || 4096;
 
       // Filter out messages with empty content (Claude API rejects these)
@@ -3522,6 +3522,16 @@ export function createHttpApp() {
 // Helper Functions
 // ============================================================================
 
+// Upgrade legacy model IDs to their latest equivalents
+const MODEL_UPGRADES: Record<string, string> = {
+  'claude-sonnet-4-20250514': 'claude-sonnet-4-6-20250514',
+  'claude-opus-4-20250514': 'claude-opus-4-6-20250501',
+};
+
+function resolveModel(model: string): string {
+  return MODEL_UPGRADES[model] || model;
+}
+
 function calculateCost(model: string, inputTokens: number, outputTokens: number): number {
   // Prices per 1M tokens in dollars
   const pricing: Record<string, { input: number; output: number }> = {
@@ -3531,8 +3541,11 @@ function calculateCost(model: string, inputTokens: number, outputTokens: number)
     'claude-3-5-haiku-latest': { input: 0.8, output: 4 },
     'claude-3-opus-20240229': { input: 15, output: 75 },
     'claude-3-opus-latest': { input: 15, output: 75 },
+    'claude-sonnet-4-6-20250514': { input: 3, output: 15 },
     'claude-sonnet-4-20250514': { input: 3, output: 15 },
-    'claude-opus-4-20250514': { input: 15, output: 75 },
+    'claude-opus-4-6-20250501': { input: 5, output: 25 },
+    'claude-opus-4-20250514': { input: 5, output: 25 },
+    'claude-haiku-4-5-20251001': { input: 1, output: 5 },
   };
 
   const price = pricing[model] || { input: 3, output: 15 };
