@@ -3192,7 +3192,7 @@ export function createHttpApp() {
         const provider = getProvider((server.provider || 'fly') as ProviderId);
         const routing = provider.getRoutingInfo(server.machineId);
         const [serverSessionToken, latestServerVersion] = await Promise.all([
-          ServerSessionService.generateServerSessionToken(userId, serverId, 3600, sessionTokenOpts),
+          ServerSessionService.generateServerSessionToken(userId, serverId, 86400, sessionTokenOpts),
           getLatestServerVersion(),
         ]);
         return c.json({
@@ -3343,9 +3343,9 @@ export function createHttpApp() {
         }
       }
 
-      // Generate a server-scoped session token (1 hour validity)
+      // Generate a server-scoped session token (24 hour validity)
       const [serverSessionToken, latestServerVersion] = await Promise.all([
-        ServerSessionService.generateServerSessionToken(userId, serverId, 3600, sessionTokenOpts),
+        ServerSessionService.generateServerSessionToken(userId, serverId, 86400, sessionTokenOpts),
         getLatestServerVersion(),
       ]);
 
