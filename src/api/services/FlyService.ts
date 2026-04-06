@@ -620,7 +620,7 @@ export async function createMachine(
         AUTH_MODE: 'cloud',
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
         SERVER_SESSION_SECRET: process.env.SERVER_SESSION_SECRET || '',
-        PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN || 'tank.fish',
+        PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
         NODE_ENV: 'development',
         PORT: '61987',
         HOST: '0.0.0.0',
