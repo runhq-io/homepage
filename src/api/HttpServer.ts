@@ -2672,6 +2672,29 @@ export function createHttpApp() {
   // Create an invite link
   app.post('/api/servers/:serverId/invite-links', async (c) => {
     try {
+      const serverId = c.req.param('serverId');
+      const body = await c.req.json() as { expiresIn?: number; maxUses?: number; createdBy?: string; serverToken?: string };
+
+      // Support server-token auth: the server has already verified permissions locally
+      // Check header first, fall back to body (some proxies strip custom headers)
+      const serverToken = c.req.header('X-Server-Token') || body.serverToken;
+      if (serverToken) {
+        const server = await ServerService.getServerByToken(serverToken);
+        if (!server || server.id !== serverId) {
+          return c.json({ error: 'Invalid server token' }, 401);
+        }
+        const result = await ServerService.createInviteLink(serverId, body.createdBy || server.ownerId, {
+          expiresIn: body.expiresIn,
+          maxUses: body.maxUses,
+          skipPermissionCheck: true,
+        });
+        if (!result.success) {
+          return c.json({ error: result.error }, 400);
+        }
+        return c.json({ success: true, inviteLink: result.inviteLink });
+      }
+
+      // Standard user-token auth with cloud-level permission check
       const authHeader = c.req.header('Authorization');
       if (!authHeader?.startsWith('Bearer ')) {
         return c.json({ error: 'Unauthorized' }, 401);
@@ -2682,8 +2705,6 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid token' }, 401);
       }
 
-      const serverId = c.req.param('serverId');
-      const body = await c.req.json() as { expiresIn?: number; maxUses?: number };
       const result = await ServerService.createInviteLink(serverId, userId, {
         expiresIn: body.expiresIn,
         maxUses: body.maxUses,
@@ -2702,6 +2723,19 @@ export function createHttpApp() {
   // List active invite links
   app.get('/api/servers/:serverId/invite-links', async (c) => {
     try {
+      const serverId = c.req.param('serverId');
+
+      // Support server-token auth (header or query param — some proxies strip custom headers)
+      const serverToken = c.req.header('X-Server-Token') || c.req.query('serverToken');
+      if (serverToken) {
+        const server = await ServerService.getServerByToken(serverToken);
+        if (!server || server.id !== serverId) {
+          return c.json({ error: 'Invalid server token' }, 401);
+        }
+        const inviteLinks = await ServerService.getInviteLinks(serverId);
+        return c.json({ success: true, inviteLinks });
+      }
+
       const authHeader = c.req.header('Authorization');
       if (!authHeader?.startsWith('Bearer ')) {
         return c.json({ error: 'Unauthorized' }, 401);
@@ -2712,7 +2746,6 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid token' }, 401);
       }
 
-      const serverId = c.req.param('serverId');
       const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner', 'admin']);
       if (!hasPermission) {
         return c.json({ error: 'Access denied' }, 403);
@@ -2728,6 +2761,24 @@ export function createHttpApp() {
   // Revoke an invite link
   app.delete('/api/servers/:serverId/invite-links/:linkId', async (c) => {
     try {
+      const serverId = c.req.param('serverId');
+      const linkId = c.req.param('linkId');
+
+      // Support server-token auth (header or query param — some proxies strip custom headers)
+      const serverToken = c.req.header('X-Server-Token') || c.req.query('serverToken');
+      if (serverToken) {
+        const server = await ServerService.getServerByToken(serverToken);
+        if (!server || server.id !== serverId) {
+          return c.json({ error: 'Invalid server token' }, 401);
+        }
+        // Server has already verified permissions — use owner as requester to bypass cloud permission check
+        const result = await ServerService.revokeInviteLink(serverId, server.ownerId, linkId);
+        if (!result.success) {
+          return c.json({ error: result.error }, 400);
+        }
+        return c.json({ success: true });
+      }
+
       const authHeader = c.req.header('Authorization');
       if (!authHeader?.startsWith('Bearer ')) {
         return c.json({ error: 'Unauthorized' }, 401);
@@ -2738,8 +2789,6 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid token' }, 401);
       }
 
-      const serverId = c.req.param('serverId');
-      const linkId = c.req.param('linkId');
       const result = await ServerService.revokeInviteLink(serverId, userId, linkId);
 
       if (!result.success) {
