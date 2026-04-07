@@ -2376,7 +2376,10 @@ export function createHttpApp() {
       const serverId = c.req.param('serverId');
       const memberId = c.req.param('memberId');
 
-      const success = await ServerService.removeMember(serverId, userId, memberId);
+      // Self-removal (Leave Server) vs admin kick
+      const success = memberId === userId
+        ? await ServerService.leaveServer(serverId, userId)
+        : await ServerService.removeMember(serverId, userId, memberId);
       return c.json({ success });
     } catch (error) {
       console.error('[HttpServer] Remove member error:', error);
