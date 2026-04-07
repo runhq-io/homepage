@@ -2363,6 +2363,21 @@ export function createHttpApp() {
   // Remove member from server
   app.delete('/api/servers/:serverId/members/:memberId', async (c) => {
     try {
+      const serverId = c.req.param('serverId');
+      const memberId = c.req.param('memberId');
+
+      // Support server-token auth (fishtank server proxying leave/kick requests)
+      const serverToken = c.req.header('X-Server-Token');
+      if (serverToken) {
+        const server = await ServerService.getServerByToken(serverToken);
+        if (!server || server.id !== serverId) {
+          return c.json({ error: 'Invalid server token' }, 401);
+        }
+        const success = await ServerService.leaveServer(serverId, memberId);
+        return c.json({ success });
+      }
+
+      // User-token auth (direct API calls)
       const authHeader = c.req.header('Authorization');
       if (!authHeader?.startsWith('Bearer ')) {
         return c.json({ error: 'Unauthorized' }, 401);
@@ -2372,9 +2387,6 @@ export function createHttpApp() {
       if (!userId) {
         return c.json({ error: 'Invalid token' }, 401);
       }
-
-      const serverId = c.req.param('serverId');
-      const memberId = c.req.param('memberId');
 
       // Self-removal (Leave Server) vs admin kick
       const success = memberId === userId
