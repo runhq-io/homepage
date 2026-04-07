@@ -1465,6 +1465,26 @@ export function createHttpApp() {
     }
   });
 
+  // Admin: Get the latest server version and image ref
+  app.get('/api/admin/server-version', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const version = await getLatestServerVersion();
+      const [imageRow] = await db.select({ value: systemSettings.value }).from(systemSettings).where(eq(systemSettings.key, 'latest_server_image'));
+      return c.json({ version, imageRef: imageRow?.value ?? null });
+    } catch (error) {
+      console.error('[HttpServer] Get server version error:', error);
+      return c.json({ error: 'Failed to get server version' }, 500);
+    }
+  });
+
   // Backfill tunnel DNS records for all remote servers
   app.post('/api/admin/backfill-tunnel-dns', async (c) => {
     try {
