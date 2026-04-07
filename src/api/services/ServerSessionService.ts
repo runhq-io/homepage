@@ -20,7 +20,7 @@ export interface ServerSessionPayload extends JWTPayload {
   scope: 'server:connect';
   userName?: string;
   userEmail?: string;
-  serverRole?: 'owner' | 'admin' | 'member' | 'viewer';
+  serverRole?: 'owner' | 'member';
 }
 
 // Get secret from environment (should be set in production)
@@ -43,7 +43,7 @@ export async function generateServerSessionToken(
   userId: string,
   serverId: string,
   expiresInSeconds: number = 3600, // 1 hour default
-  options?: { userName?: string; userEmail?: string; serverRole?: 'owner' | 'admin' | 'member' | 'viewer' },
+  options?: { userName?: string; userEmail?: string; serverRole?: 'owner' | 'member' },
 ): Promise<string> {
   const token = await new SignJWT({
     userId,

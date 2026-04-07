@@ -99,10 +99,10 @@ export async function createPortMapping(
     return { success: false, error: portError };
   }
 
-  // Check permission (owner or admin)
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  // Check permission (owner only)
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner or admin can manage port mappings' };
+    return { success: false, error: 'Only the server owner can manage port mappings' };
   }
 
   // Check limit
@@ -170,10 +170,10 @@ export async function deletePortMapping(
   userId: string,
   portMappingId: string
 ): Promise<{ success: boolean; error?: string }> {
-  // Check permission
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  // Check permission (owner only)
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner or admin can manage port mappings' };
+    return { success: false, error: 'Only the server owner can manage port mappings' };
   }
 
   // Find the mapping

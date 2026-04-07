@@ -2399,39 +2399,6 @@ export function createHttpApp() {
     }
   });
 
-  // Update member role
-  app.patch('/api/servers/:serverId/members/:memberId', async (c) => {
-    try {
-      const authHeader = c.req.header('Authorization');
-      if (!authHeader?.startsWith('Bearer ')) {
-        return c.json({ error: 'Unauthorized' }, 401);
-      }
-      const token = authHeader.substring(7);
-      const userId = await extractUserIdFromToken(token);
-      if (!userId) {
-        return c.json({ error: 'Invalid token' }, 401);
-      }
-
-      const serverId = c.req.param('serverId');
-      const memberId = c.req.param('memberId');
-      const body = await c.req.json();
-      const { role } = body;
-
-      if (!role || !['admin', 'member', 'viewer'].includes(role)) {
-        return c.json({ error: 'Invalid role' }, 400);
-      }
-
-      const success = await ServerService.updateMemberRole(serverId, userId, memberId, role);
-      if (!success) {
-        return c.json({ error: 'Failed to update member role' }, 403);
-      }
-      return c.json({ success: true });
-    } catch (error) {
-      console.error('[HttpServer] Update member role error:', error);
-      return c.json({ error: 'Failed to update member role' }, 500);
-    }
-  });
-
   // Ban a member from server
   app.post('/api/servers/:serverId/bans', async (c) => {
     try {
@@ -2645,7 +2612,7 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner', 'admin']);
+      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
       if (!hasPermission) {
         return c.json({ error: 'Access denied' }, 403);
       }
@@ -2761,7 +2728,7 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid token' }, 401);
       }
 
-      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner', 'admin']);
+      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
       if (!hasPermission) {
         return c.json({ error: 'Access denied' }, 403);
       }

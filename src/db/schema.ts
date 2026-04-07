@@ -646,7 +646,7 @@ export type NewServer = typeof servers.$inferInsert;
 // Server Members (team membership with roles)
 // ============================================================================
 
-export type ServerRole = 'owner' | 'admin' | 'member' | 'viewer';
+export type ServerRole = 'owner' | 'member';
 
 export const serverMembers = pgTable('server_members', {
   id: uuid('id').primaryKey().defaultRandom(),

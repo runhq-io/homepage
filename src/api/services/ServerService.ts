@@ -498,8 +498,8 @@ export async function updateServer(
   userId: string,
   data: { name?: string; iconUrl?: string | null; autoSuspendEnabled?: boolean; autoSuspendIdleMinutes?: number }
 ): Promise<Server | null> {
-  // Check if user has permission (owner or admin)
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  // Check if user has permission (owner only)
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
     return null;
   }
@@ -635,40 +635,11 @@ export async function getServerMembers(
 }
 
 /**
- * Update member role
- */
-export async function updateMemberRole(
-  serverId: string,
-  requesterId: string,
-  targetUserId: string,
-  newRole: ServerRole
-): Promise<boolean> {
-  // Only owner can change roles
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
-  if (!hasPermission) {
-    return false;
-  }
-
-  // Can't change owner's role
-  const server = await getServer(serverId);
-  if (server?.ownerId === targetUserId && newRole !== 'owner') {
-    return false;
-  }
-
-  await db
-    .update(serverMembers)
-    .set({ role: newRole })
-    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, targetUserId)));
-
-  return true;
-}
-
-/**
  * Remove member from server
  */
 export async function removeMember(serverId: string, requesterId: string, targetUserId: string): Promise<boolean> {
-  // Owner or admin can remove members
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  // Only owner can remove members
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
   if (!hasPermission) {
     return false;
   }
@@ -676,13 +647,6 @@ export async function removeMember(serverId: string, requesterId: string, target
   // Can't remove owner
   const server = await getServer(serverId);
   if (server?.ownerId === targetUserId) {
-    return false;
-  }
-
-  // Admin can't remove other admins
-  const requesterRole = await getMemberRole(serverId, requesterId);
-  const targetRole = await getMemberRole(serverId, targetUserId);
-  if (requesterRole === 'admin' && targetRole === 'admin') {
     return false;
   }
 
@@ -727,8 +691,8 @@ export async function createInvite(
   email: string,
   role: ServerRole = 'member'
 ): Promise<{ token: string; expiresAt: Date } | null> {
-  // Check permission (owner or admin)
-  const hasPermission = await checkServerPermission(serverId, inviterId, ['owner', 'admin']);
+  // Check permission (owner only)
+  const hasPermission = await checkServerPermission(serverId, inviterId, ['owner']);
   if (!hasPermission) {
     return null;
   }
@@ -901,7 +865,7 @@ export async function acceptInvite(token: string, userId: string): Promise<{ suc
  * Cancel/revoke an invitation
  */
 export async function cancelInvite(serverId: string, requesterId: string, email: string): Promise<boolean> {
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
   if (!hasPermission) {
     return false;
   }
@@ -1112,14 +1076,14 @@ export async function getMemberRole(serverId: string, userId: string): Promise<S
  * Check if user can access a server
  */
 export async function canAccessServer(serverId: string, userId: string): Promise<boolean> {
-  return checkServerPermission(serverId, userId, ['owner', 'admin', 'member', 'viewer']);
+  return checkServerPermission(serverId, userId, ['owner', 'member']);
 }
 
 /**
  * Check if user can edit a server
  */
 export async function canEditServer(serverId: string, userId: string): Promise<boolean> {
-  return checkServerPermission(serverId, userId, ['owner', 'admin', 'member']);
+  return checkServerPermission(serverId, userId, ['owner', 'member']);
 }
 
 /**
@@ -1578,8 +1542,8 @@ export async function restartRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  // Check cloud-level permission first (owner/admin), then fall back to server RBAC
-  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  // Check cloud-level permission first (owner only), then fall back to server RBAC
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasCloudPerm) {
     const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
     if (!hasRBACPerm) {
@@ -1637,7 +1601,7 @@ export async function updateRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasCloudPerm) {
     const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
     if (!hasRBACPerm) {
@@ -1657,10 +1621,10 @@ export async function reprovisionRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  // Check access - need owner or admin permission to reprovision
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  // Check access - only owner can reprovision
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner or admin can reprovision' };
+    return { success: false, error: 'Only the server owner can reprovision' };
   }
 
   if (!isAnyProviderConfigured()) {
@@ -1946,9 +1910,9 @@ export async function validateChangeTier(
     return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
 
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner or admin can change tier' };
+    return { success: false, error: 'Only the server owner can change tier' };
   }
 
   if (!isAnyProviderConfigured()) {
@@ -2013,9 +1977,9 @@ export async function changeTier(
     return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
 
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner or admin can change tier' };
+    return { success: false, error: 'Only the server owner can change tier' };
   }
 
   if (!isAnyProviderConfigured()) {
@@ -2143,10 +2107,10 @@ export async function extendServerVolume(
     return { success: false, error: 'Access denied' };
   }
 
-  // Check owner/admin
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner', 'admin']);
+  // Check owner only
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only server owner or admin can extend the volume' };
+    return { success: false, error: 'Only the server owner can extend the volume' };
   }
 
   const server = await getServer(serverId);
@@ -2326,15 +2290,12 @@ export async function checkServerAccess(
 // ============================================================================
 
 export async function banMember(serverId: string, requesterId: string, targetUserId: string, reason?: string, deleteMessageHours?: number): Promise<boolean> {
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  // Only owner can ban members
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
   if (!hasPermission) return false;
 
   const server = await getServer(serverId);
   if (!server || server.ownerId === targetUserId) return false;
-
-  const requesterRole = await getMemberRole(serverId, requesterId);
-  const targetRole = await getMemberRole(serverId, targetUserId);
-  if (requesterRole === 'admin' && targetRole === 'admin') return false;
 
   // Insert ban record
   await db.insert(serverBans).values({
@@ -2369,7 +2330,7 @@ export async function banMember(serverId: string, requesterId: string, targetUse
 }
 
 export async function unbanMember(serverId: string, requesterId: string, targetUserId: string): Promise<boolean> {
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
   if (!hasPermission) return false;
 
   await db
@@ -2498,10 +2459,10 @@ export async function transferOwnership(
     });
   }
 
-  // 3. Demote old owner to admin
+  // 3. Demote old owner to member
   await db
     .update(serverMembers)
-    .set({ role: 'admin' })
+    .set({ role: 'member' })
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, currentOwnerId)));
 
   console.log(`[ServerService] Transferred ownership of server ${serverId} from ${currentOwnerId} to ${recipient.id} (${newOwnerEmail})`);
@@ -2518,11 +2479,13 @@ export async function transferOwnership(
 export async function createInviteLink(
   serverId: string,
   createdById: string,
-  options: { expiresIn?: number; maxUses?: number }
+  options: { expiresIn?: number; maxUses?: number; skipPermissionCheck?: boolean }
 ): Promise<{ success: boolean; inviteLink?: any; error?: string }> {
-  const hasPermission = await checkServerPermission(serverId, createdById, ['owner', 'admin']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only owners and admins can create invite links' };
+  if (!options.skipPermissionCheck) {
+    const hasPermission = await checkServerPermission(serverId, createdById, ['owner']);
+    if (!hasPermission) {
+      return { success: false, error: 'Only the server owner can create invite links' };
+    }
   }
 
   const code = nanoid(10);
@@ -2597,9 +2560,9 @@ export async function revokeInviteLink(
   requesterId: string,
   linkId: string
 ): Promise<{ success: boolean; error?: string }> {
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner', 'admin']);
+  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
   if (!hasPermission) {
-    return { success: false, error: 'Only owners and admins can revoke invite links' };
+    return { success: false, error: 'Only the server owner can revoke invite links' };
   }
 
   await db

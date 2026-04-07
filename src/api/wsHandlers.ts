@@ -1190,42 +1190,6 @@ export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
     wsServer.send(client, response);
   });
 
-  // Update member role
-  wsServer.onMessage('update_workspace_member_role', async (client, message) => {
-    const request = message as UpdateOrgMemberRoleMessage;
-    console.log(`[Servers] Update member role request from ${client.sessionId}:`, request.userId);
-
-    let success = false;
-    let error: string | undefined;
-
-    try {
-      const requesterId = client.userId || 'anonymous';
-      success = await ServerService.updateMemberRole(
-        request.orgId,
-        requesterId,
-        request.userId,
-        request.role
-      );
-      if (!success) {
-        error = 'Not authorized to update this member\'s role';
-      }
-    } catch (err) {
-      console.error(`[Servers] Failed to update member role:`, err);
-      error = err instanceof Error ? err.message : 'Unknown error';
-    }
-
-    const response: OrgMemberRoleUpdatedMessage = {
-      type: 'org_member_role_updated',
-      orgId: request.orgId,
-      userId: request.userId,
-      role: request.role,
-      success,
-      error,
-      timestamp: Date.now(),
-    };
-    wsServer.send(client, response);
-  });
-
   // Leave server
   wsServer.onMessage('leave_workspace', async (client, message) => {
     const request = message as LeaveOrgMessage;
