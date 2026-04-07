@@ -787,6 +787,7 @@ export async function updateMachineImage(machineId: string): Promise<void> {
   // even when the tag is the same — the underlying image may have changed.
   console.log(`[FlyService] Updating machine ${machineId} image: ${machine.config.image} → ${latestImage}`);
 
+  const existingEnv = (machine.config.env as Record<string, string>) || {};
   await flyRequest<FlyMachine>(
     'POST',
     `/apps/${getServerAppName()}/machines/${machineId}`,
@@ -794,6 +795,11 @@ export async function updateMachineImage(machineId: string): Promise<void> {
       config: {
         ...machine.config,
         image: latestImage,
+        env: {
+          ...existingEnv,
+          PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
+          CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
+        },
       },
     }
   );
