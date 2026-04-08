@@ -1287,6 +1287,40 @@ export async function markServerOffline(serverId: string): Promise<void> {
 }
 
 /**
+ * Update session token expiry for a server.
+ * Validates range [900, 259200].
+ */
+export async function updateSessionTokenExpiry(
+  serverId: string,
+  expirySeconds: number,
+): Promise<number> {
+  const MIN_EXPIRY = 900;    // 15 minutes
+  const MAX_EXPIRY = 259200; // 3 days
+
+  if (!Number.isInteger(expirySeconds) || expirySeconds < MIN_EXPIRY || expirySeconds > MAX_EXPIRY) {
+    throw new Error(`sessionTokenExpirySeconds must be an integer between ${MIN_EXPIRY} and ${MAX_EXPIRY}`);
+  }
+
+  await db
+    .update(servers)
+    .set({ sessionTokenExpirySeconds: expirySeconds, updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  return expirySeconds;
+}
+
+/**
+ * Get session token expiry for a server (null = default 86400).
+ */
+export async function getSessionTokenExpiry(serverId: string): Promise<number> {
+  const [server] = await db.select({ sessionTokenExpirySeconds: servers.sessionTokenExpirySeconds })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  return server?.sessionTokenExpirySeconds ?? 86400;
+}
+
+/**
  * Check all online servers with auto-suspend enabled and suspend those
  * that have been idle for longer than their configured timeout.
  *

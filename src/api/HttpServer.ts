@@ -3459,6 +3459,37 @@ export function createHttpApp() {
     }
   });
 
+  // Update session token expiry settings (proxied from server, authenticated by server token)
+  app.patch('/api/servers/:serverId/session-settings', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+
+      // Authenticate via server token (server proxies this request)
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) {
+        return c.json({ error: 'X-Server-Token required' }, 401);
+      }
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) {
+        return c.json({ error: 'Invalid server token' }, 401);
+      }
+
+      const body = await c.req.json() as { sessionTokenExpirySeconds?: number };
+      if (body.sessionTokenExpirySeconds === undefined || body.sessionTokenExpirySeconds === null) {
+        return c.json({ error: 'sessionTokenExpirySeconds is required' }, 400);
+      }
+
+      const expirySeconds = await ServerService.updateSessionTokenExpiry(serverId, body.sessionTokenExpirySeconds);
+      return c.json({ success: true, sessionTokenExpirySeconds: expirySeconds });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('must be an integer between')) {
+        return c.json({ error: error.message }, 400);
+      }
+      console.error('[HttpServer] Update session settings error:', error);
+      return c.json({ error: 'Failed to update session settings' }, 500);
+    }
+  });
+
   // ==========================================================================
   // Browserbase Session Creation (authenticated)
   // ==========================================================================
