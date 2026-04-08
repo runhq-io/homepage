@@ -3229,6 +3229,8 @@ export function createHttpApp() {
         return c.json({ error: 'Server not found' }, 404);
       }
 
+      const tokenExpirySeconds = server.sessionTokenExpirySeconds ?? 86400; // default 24h
+
       // Fast-path: if server is remote, online, has a machine, and heartbeat is recent,
       // skip the entire wake + identity verification flow. This saves ~1-3s per switch.
       const FAST_PATH_HEARTBEAT_THRESHOLD_MS = 30_000;
@@ -3243,7 +3245,7 @@ export function createHttpApp() {
         const provider = getProvider((server.provider || 'fly') as ProviderId);
         const routing = provider.getRoutingInfo(server.machineId);
         const [serverSessionToken, latestServerVersion] = await Promise.all([
-          ServerSessionService.generateServerSessionToken(userId, serverId, 86400, sessionTokenOpts),
+          ServerSessionService.generateServerSessionToken(userId, serverId, tokenExpirySeconds, sessionTokenOpts),
           getLatestServerVersion(),
         ]);
         return c.json({
@@ -3251,7 +3253,7 @@ export function createHttpApp() {
           serverSessionToken,
           machineId: server.machineId,
           serverUrl: routing.serverUrl || server.serverUrl,
-          expiresIn: 3600,
+          expiresIn: tokenExpirySeconds,
           serverName: server.name,
           serverStatus: server.status,
           deploymentType: server.deploymentType,
@@ -3394,9 +3396,10 @@ export function createHttpApp() {
         }
       }
 
-      // Generate a server-scoped session token (24 hour validity)
+      // Generate a server-scoped session token with configured expiry
+      const latestTokenExpiry = latestServer.sessionTokenExpirySeconds ?? tokenExpirySeconds;
       const [serverSessionToken, latestServerVersion] = await Promise.all([
-        ServerSessionService.generateServerSessionToken(userId, serverId, 86400, sessionTokenOpts),
+        ServerSessionService.generateServerSessionToken(userId, serverId, latestTokenExpiry, sessionTokenOpts),
         getLatestServerVersion(),
       ]);
 
@@ -3405,7 +3408,7 @@ export function createHttpApp() {
         serverSessionToken,
         machineId: routingMachineId,
         serverUrl,
-        expiresIn: 3600, // seconds
+        expiresIn: latestTokenExpiry,
         serverName: latestServer.name,
         serverStatus: latestServer.status,
         deploymentType: latestServer.deploymentType,
