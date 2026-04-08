@@ -1310,17 +1310,6 @@ export async function updateSessionTokenExpiry(
 }
 
 /**
- * Get session token expiry for a server (null = default 86400).
- */
-export async function getSessionTokenExpiry(serverId: string): Promise<number> {
-  const [server] = await db.select({ sessionTokenExpirySeconds: servers.sessionTokenExpirySeconds })
-    .from(servers)
-    .where(eq(servers.id, serverId))
-    .limit(1);
-  return server?.sessionTokenExpirySeconds ?? 86400;
-}
-
-/**
  * Check all online servers with auto-suspend enabled and suspend those
  * that have been idle for longer than their configured timeout.
  *
