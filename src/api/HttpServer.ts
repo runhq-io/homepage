@@ -3460,6 +3460,25 @@ export function createHttpApp() {
   });
 
   // Update session token expiry settings (proxied from server, authenticated by server token)
+  // Get session token expiry settings
+  app.get('/api/servers/:serverId/session-settings', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) {
+        return c.json({ error: 'X-Server-Token required' }, 401);
+      }
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) {
+        return c.json({ error: 'Invalid server token' }, 401);
+      }
+      return c.json({ sessionTokenExpirySeconds: server.sessionTokenExpirySeconds ?? 86400 });
+    } catch (error) {
+      console.error('[HttpServer] Get session settings error:', error);
+      return c.json({ error: 'Failed to get session settings' }, 500);
+    }
+  });
+
   app.patch('/api/servers/:serverId/session-settings', async (c) => {
     try {
       const serverId = c.req.param('serverId');
