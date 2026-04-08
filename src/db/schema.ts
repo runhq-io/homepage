@@ -617,6 +617,8 @@ export const servers = pgTable('servers', {
   // Auto-suspend settings
   autoSuspendEnabled: boolean('auto_suspend_enabled').notNull().default(true), // If true, suspend when idle
   autoSuspendIdleMinutes: integer('auto_suspend_idle_minutes').default(15),
+  // Session token expiry in seconds (null = default 86400 / 24 hours)
+  sessionTokenExpirySeconds: integer('session_token_expiry_seconds'),
   idleSince: timestamp('idle_since'), // When server first started reporting idle (null = not idle)
   // Machine billing
   machineStartedAt: timestamp('machine_started_at'), // When the machine last started (for billing ticks)
