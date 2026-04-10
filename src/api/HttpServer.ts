@@ -33,6 +33,7 @@ import { eq, lt, sql } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
+import { createHmac, createHash } from 'node:crypto';
 
 type BuildInfo = {
   gitSha?: string;
@@ -3507,6 +3508,44 @@ export function createHttpApp() {
       console.error('[HttpServer] Update session settings error:', error);
       return c.json({ error: 'Failed to update session settings' }, 500);
     }
+  });
+
+  // ==========================================================================
+  // GitVote Widget Token (authenticated)
+  // ==========================================================================
+
+  app.get('/api/gitvote/widget-token', async (c) => {
+    const gvKey = process.env.GITVOTE_WIDGET_KEY;
+    if (!gvKey) {
+      return c.json({ error: 'GitVote widget not configured' }, 503);
+    }
+
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    const token = authHeader.substring(7);
+    const userId = await extractUserIdFromToken(token);
+    if (!userId) {
+      return c.json({ error: 'Invalid token' }, 401);
+    }
+
+    const user = await db.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, userId)).limit(1);
+    if (!user.length) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    const fp = createHash('sha256').update(gvKey).digest('hex').slice(0, 16);
+    const payload = Buffer.from(JSON.stringify({
+      sub: user[0].id,
+      name: user[0].name ?? undefined,
+      fp,
+      iat: Math.floor(Date.now() / 1000),
+    })).toString('base64url');
+    const sig = createHmac('sha256', gvKey).update(payload).digest('base64url');
+
+    return c.json({ token: `${payload}.${sig}` });
   });
 
   // ==========================================================================
