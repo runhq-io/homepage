@@ -13,7 +13,7 @@
 import { db } from '../../db/index';
 import { publicPorts, type PublicPort } from '../../db/schema';
 import { eq, and } from 'drizzle-orm';
-import { checkServerPermission, ensureServerTunnelConnector, getServer } from './ServerService';
+import { checkServerPermission, checkServerRBACPermission, ensureServerTunnelConnector, getServer } from './ServerService';
 import * as CloudflareTunnelService from './CloudflareTunnelService';
 
 // ============================================================================
@@ -99,10 +99,13 @@ export async function createPortMapping(
     return { success: false, error: portError };
   }
 
-  // Check permission (owner only)
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only the server owner can manage port mappings' };
+  // Check permission (owner or administrator)
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasCloudPerm) {
+    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
+    if (!hasRBACPerm) {
+      return { success: false, error: 'Only server owners and administrators can manage port mappings' };
+    }
   }
 
   // Check limit
@@ -170,10 +173,13 @@ export async function deletePortMapping(
   userId: string,
   portMappingId: string
 ): Promise<{ success: boolean; error?: string }> {
-  // Check permission (owner only)
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only the server owner can manage port mappings' };
+  // Check permission (owner or administrator)
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasCloudPerm) {
+    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
+    if (!hasRBACPerm) {
+      return { success: false, error: 'Only server owners and administrators can manage port mappings' };
+    }
   }
 
   // Find the mapping
