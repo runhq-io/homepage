@@ -11,6 +11,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import Anthropic from '@anthropic-ai/sdk';
+import oauth from './oauth/index';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createToken, verifyToken, extractUserIdFromToken } from './auth/jwt';
@@ -3657,6 +3658,9 @@ export function createHttpApp() {
       return c.json({ error: 'Failed to create browser session' }, 500);
     }
   });
+
+  // Mount OAuth routes
+  app.route('/oauth', oauth);
 
   return app;
 }

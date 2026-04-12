@@ -35,9 +35,10 @@ export default async function middleware(req: NextRequest) {
   const isAuthRoute = pathname.startsWith('/auth/'); // All auth routes (device auth, etc.)
   const isAdminRoute = pathname.startsWith('/admin');
   const isHealthCheck = pathname === '/health' || pathname === '/health/';
+  const isOAuthRoute = pathname.startsWith('/oauth');
 
-  // Handle CORS preflight requests for API routes
-  if (isApiRoute && req.method === 'OPTIONS') {
+  // Handle CORS preflight requests for API and OAuth routes
+  if ((isApiRoute || isOAuthRoute) && req.method === 'OPTIONS') {
     const origin = req.headers.get('origin');
     return new NextResponse(null, {
       status: 204,
@@ -49,8 +50,9 @@ export default async function middleware(req: NextRequest) {
   // - API routes handle auth (and return JSON/401) themselves.
   // - /auth/* routes handle their own auth flows (device auth, etc.)
   // - /health is used for uptime monitoring and must not redirect.
-  if (isApiRoute || isAuthRoute || isHealthCheck) {
-    // Add CORS headers to API responses
+  // - /oauth/* routes handle their own auth flows (OAuth 2.0).
+  if (isApiRoute || isAuthRoute || isHealthCheck || isOAuthRoute) {
+    // Add CORS headers to API and OAuth responses
     const origin = req.headers.get('origin');
     const response = NextResponse.next();
     const headers = corsHeaders(origin);

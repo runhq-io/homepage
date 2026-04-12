@@ -9,6 +9,7 @@
  *   /api/*                → Hono (80+ REST endpoints)
  *   /health               → Hono
  *   /billing/*            → Hono
+ *   /oauth/*              → Hono (OAuth 2.0 endpoints)
  *   ws:// (upgrade)       → WebSocket server
  *   /*                    → Next.js (pages, SSR)
  */
@@ -90,8 +91,9 @@ async function main() {
     //   /api/* (except /api/auth/*)
     //   /health
     //   /billing/*
+    //   /oauth/*
     const isHonoApiRoute = url.startsWith('/api/') && !isNextAuthRoute;
-    const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/');
+    const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/') || url.startsWith('/oauth/');
 
     if (isHonoRoute) {
       // Convert Node.js IncomingMessage to a Fetch API Request for Hono
