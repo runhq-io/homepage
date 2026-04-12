@@ -1,5 +1,7 @@
 import { randomBytes, createHash, timingSafeEqual } from 'crypto';
 import bcrypt from 'bcryptjs';
+import { getDb, oauthTokens } from '@/db';
+import { eq } from 'drizzle-orm';
 
 // Generate a cryptographically random token (URL-safe base64, 32 bytes)
 export function generateToken(): string {
@@ -49,4 +51,12 @@ export function getFirstPartyClientIds(): string[] {
 
 export function isFirstPartyClient(clientId: string): boolean {
   return getFirstPartyClientIds().includes(clientId);
+}
+
+// Revoke all active OAuth tokens for a user (e.g. on account deletion)
+export async function revokeAllUserOAuthTokens(userId: string): Promise<void> {
+  await getDb()
+    .update(oauthTokens)
+    .set({ revokedAt: new Date() })
+    .where(eq(oauthTokens.userId, userId));
 }

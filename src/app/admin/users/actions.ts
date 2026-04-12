@@ -4,6 +4,7 @@ import { db, users, adminUsers, subscriptions, usageRecords, payments, inviteCod
 import { eq, inArray } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { auth } from '@/lib/auth';
+import { revokeAllUserOAuthTokens } from '@/lib/oauth';
 
 // Verify the current user is an admin.
 //
@@ -69,6 +70,7 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
     db.delete(inviteCodes).where(eq(inviteCodes.createdByUserId, userId)),
     db.delete(servers).where(eq(servers.ownerId, userId)),
     db.delete(deviceCodes).where(eq(deviceCodes.userId, userId)),
+    revokeAllUserOAuthTokens(userId),
   ]);
 
   // 3. Subscriptions (after payments which reference them)
