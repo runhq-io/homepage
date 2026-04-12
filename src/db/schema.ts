@@ -883,3 +883,90 @@ export const emailVerificationTokensRelations = relations(emailVerificationToken
 
 export type EmailVerificationToken = typeof emailVerificationTokens.$inferSelect;
 export type NewEmailVerificationToken = typeof emailVerificationTokens.$inferInsert;
+
+// ============================================================================
+// OAuth 2.0 Clients
+// ============================================================================
+
+export const oauthClients = pgTable("oauth_clients", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  secretHash: text("secret_hash").notNull(),
+  redirectUris: text("redirect_uris").array().notNull(),
+  scopes: text("scopes").array().notNull(),
+  isConfidential: boolean("is_confidential").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type OauthClient = typeof oauthClients.$inferSelect;
+export type NewOauthClient = typeof oauthClients.$inferInsert;
+
+// ============================================================================
+// OAuth 2.0 Authorization Codes
+// ============================================================================
+
+export const authorizationCodes = pgTable("authorization_codes", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  code: text("code").notNull().unique(),
+  clientId: uuid("client_id")
+    .notNull()
+    .references(() => oauthClients.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  redirectUri: text("redirect_uri").notNull(),
+  scope: text("scope").notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const authorizationCodesRelations = relations(authorizationCodes, ({ one }) => ({
+  client: one(oauthClients, {
+    fields: [authorizationCodes.clientId],
+    references: [oauthClients.id],
+  }),
+  user: one(users, {
+    fields: [authorizationCodes.userId],
+    references: [users.id],
+  }),
+}));
+
+export type AuthorizationCode = typeof authorizationCodes.$inferSelect;
+export type NewAuthorizationCode = typeof authorizationCodes.$inferInsert;
+
+// ============================================================================
+// OAuth 2.0 Tokens
+// ============================================================================
+
+export const oauthTokens = pgTable("oauth_tokens", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tokenHash: text("token_hash").notNull(),
+  type: text("type").notNull(), // "access" or "refresh"
+  clientId: uuid("client_id")
+    .notNull()
+    .references(() => oauthClients.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  scope: text("scope").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const oauthTokensRelations = relations(oauthTokens, ({ one }) => ({
+  client: one(oauthClients, {
+    fields: [oauthTokens.clientId],
+    references: [oauthClients.id],
+  }),
+  user: one(users, {
+    fields: [oauthTokens.userId],
+    references: [users.id],
+  }),
+}));
+
+export type OauthToken = typeof oauthTokens.$inferSelect;
+export type NewOauthToken = typeof oauthTokens.$inferInsert;
