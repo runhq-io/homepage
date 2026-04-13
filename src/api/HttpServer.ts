@@ -133,6 +133,16 @@ export function createHttpApp() {
     allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control'],
   }));
 
+  // Serve widget.js as static file
+  app.get('/widget.js', (c) => {
+    const filePath = path.join(process.cwd(), 'public', 'widget.js');
+    const content = fs.readFileSync(filePath, 'utf-8');
+    c.header('Content-Type', 'application/javascript');
+    c.header('Cache-Control', 'public, max-age=3600');
+    c.header('Access-Control-Allow-Origin', '*');
+    return c.body(content);
+  });
+
   // Health check endpoint
   app.get('/health', (c) => {
     const start = Date.now();
