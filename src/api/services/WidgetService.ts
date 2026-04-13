@@ -546,6 +546,7 @@ export async function getWidgetSettings(serverId: string) {
       widgetPosition: widgetProjects.widgetPosition,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       isPublic: widgetProjects.isPublic,
+      slug: widgetProjects.slug,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.serverId, serverId))
@@ -558,6 +559,7 @@ export async function getWidgetSettings(serverId: string) {
     widget_position: project.widgetPosition,
     voting_period_hours: project.votingPeriodHours,
     is_public: project.isPublic,
+    slug: project.slug,
   };
 }
 
@@ -568,6 +570,7 @@ export async function updateWidgetSettings(
     widget_position?: string;
     voting_period_hours?: number;
     is_public?: boolean;
+    slug?: string;
   }
 ) {
   await db
@@ -577,6 +580,7 @@ export async function updateWidgetSettings(
       ...(settings.widget_position !== undefined && { widgetPosition: settings.widget_position }),
       ...(settings.voting_period_hours !== undefined && { votingPeriodHours: settings.voting_period_hours }),
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
+      ...(settings.slug !== undefined && { slug: settings.slug }),
       updatedAt: new Date(),
     })
     .where(eq(widgetProjects.serverId, serverId));

@@ -3865,10 +3865,10 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId, auto_approve, widget_position, voting_period_hours, is_public } = await c.req.json();
+    const { serverId, auto_approve, widget_position, voting_period_hours, is_public, slug } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    await WidgetService.updateWidgetSettings(serverId, { auto_approve, widget_position, voting_period_hours, is_public });
+    await WidgetService.updateWidgetSettings(serverId, { auto_approve, widget_position, voting_period_hours, is_public, slug });
     return c.json({ success: true });
   });
 
