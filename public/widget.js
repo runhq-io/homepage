@@ -823,11 +823,11 @@
   }
 
   function renderMySubmissions(tickets) {
-    if (!proposals || proposals.length === 0) {
+    if (!tickets || tickets.length === 0) {
       return renderEmpty("You haven't submitted any tickets yet.");
     }
     var container = h("div", null);
-    proposals.forEach(function (p) {
+    tickets.forEach(function (p) {
       var statusText, statusColor;
       if (p.moderationStatus === "PENDING") {
         statusText = "Awaiting review"; statusColor = "#f59e0b";
