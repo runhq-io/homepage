@@ -3834,7 +3834,7 @@ export function createHttpApp() {
   // Secret is server-side config — never accepted from the client.
   // Uses FEEDBACK_WIDGET_SECRET env var, falling back to staging secret.
   const FEEDBACK_WIDGET_SECRET = process.env.FEEDBACK_WIDGET_SECRET
-    || 'K_oMhpiM3zXEU0i6877sALfg0XPF9cJDPRwTnbT2r2o';
+    || 'N21HtPoGxGBRPd_emBv-poLK8G2rlQsrv42ZjAClWPs';
 
   app.get('/api/widget/user-token', async (c) => {
     if (!FEEDBACK_WIDGET_SECRET) return c.json({ error: 'Feedback widget not configured' }, 503);
