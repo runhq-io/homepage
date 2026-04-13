@@ -439,6 +439,18 @@ export async function disableWidget(serverId: string) {
     .where(eq(widgetProjects.serverId, serverId));
 }
 
+export async function regenerateSecret(serverId: string) {
+  const newSecret = randomBytes(32).toString('base64url');
+  const [project] = await db
+    .update(widgetProjects)
+    .set({ apiSecretHash: newSecret, updatedAt: new Date() })
+    .where(eq(widgetProjects.serverId, serverId))
+    .returning({ id: widgetProjects.id });
+
+  if (!project) throw new Error('Widget project not found');
+  return { apiSecret: newSecret };
+}
+
 export async function getWidgetIntegration(serverId: string) {
   const [project] = await db
     .select()

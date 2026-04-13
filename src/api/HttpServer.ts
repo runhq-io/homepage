@@ -3792,6 +3792,21 @@ export function createHttpApp() {
     return c.json({ success: true });
   });
 
+  app.post('/api/widget/secret/regenerate', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const { serverId } = await c.req.json();
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    try {
+      const result = await WidgetService.regenerateSecret(serverId);
+      return c.json({ success: true, data: result });
+    } catch (err) {
+      return c.json({ error: String(err) }, 400);
+    }
+  });
+
   app.get('/api/widget/settings', async (c) => {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
