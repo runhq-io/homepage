@@ -130,7 +130,7 @@ export function createHttpApp() {
   app.use('*', cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control'],
+    allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-RW-Project', 'X-Server-Token'],
   }));
 
   // Serve widget.js as static file
