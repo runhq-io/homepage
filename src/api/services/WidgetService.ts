@@ -74,12 +74,12 @@ export async function authenticateWidget(
   // ---- Mode 1: Public slug (no auth header) ----
   if (!authHeader && projectSlugHeader) {
     const [project] = await db
-      .select({ id: widgetProjects.id, slug: widgetProjects.slug, enabled: widgetProjects.enabled })
+      .select({ id: widgetProjects.id, slug: widgetProjects.slug, enabled: widgetProjects.enabled, isPublic: widgetProjects.isPublic })
       .from(widgetProjects)
       .where(eq(widgetProjects.slug, projectSlugHeader))
       .limit(1);
 
-    if (!project || !project.enabled) return null;
+    if (!project || !project.enabled || !project.isPublic) return null;
     return { projectId: project.id, projectSlug: project.slug };
   }
 
@@ -453,6 +453,7 @@ export async function getWidgetSettings(serverId: string) {
       autoApprove: widgetProjects.autoApprove,
       widgetPosition: widgetProjects.widgetPosition,
       votingPeriodHours: widgetProjects.votingPeriodHours,
+      isPublic: widgetProjects.isPublic,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.serverId, serverId))
@@ -464,6 +465,7 @@ export async function getWidgetSettings(serverId: string) {
     auto_approve: project.autoApprove,
     widget_position: project.widgetPosition,
     voting_period_hours: project.votingPeriodHours,
+    is_public: project.isPublic,
   };
 }
 
@@ -473,6 +475,7 @@ export async function updateWidgetSettings(
     auto_approve?: boolean;
     widget_position?: string;
     voting_period_hours?: number;
+    is_public?: boolean;
   }
 ) {
   await db
@@ -481,6 +484,7 @@ export async function updateWidgetSettings(
       ...(settings.auto_approve !== undefined && { autoApprove: settings.auto_approve }),
       ...(settings.widget_position !== undefined && { widgetPosition: settings.widget_position }),
       ...(settings.voting_period_hours !== undefined && { votingPeriodHours: settings.voting_period_hours }),
+      ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
       updatedAt: new Date(),
     })
     .where(eq(widgetProjects.serverId, serverId));
