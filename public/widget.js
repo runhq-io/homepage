@@ -600,15 +600,17 @@
 
       /* Inline feedback form */
       ".rw-inline-form { padding: 0 12px 8px; }",
+      ".rw-inline-title { margin-bottom: 6px; font-size: 13px; height: 36px; }",
       ".rw-inline-textarea { min-height: 64px; resize: none; }",
-      ".rw-inline-bottom { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }",
+      ".rw-inline-bottom { display: flex; align-items: center; gap: 8px; margin-top: 6px; }",
+      ".rw-inline-bottom-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }",
       ".rw-attach-btn { background: none; border: none; cursor: pointer; font-size: 16px; padding: 4px 6px; border-radius: 4px; color: " + textMuted + "; transition: color 0.15s; }",
       ".rw-attach-btn:hover { color: " + text + "; }",
       ".rw-inline-submit { padding: 5px 14px; background: " + accent + "; color: #fff; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; transition: opacity 0.15s; }",
       ".rw-inline-submit:hover { opacity: 0.9; }",
       ".rw-inline-submit:disabled { opacity: 0.5; cursor: not-allowed; }",
-      ".rw-private-label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: " + textMuted + "; cursor: pointer; user-select: none; }",
-      ".rw-private-label input { margin: 0; cursor: pointer; accent-color: " + accent + "; }",
+      ".rw-private-label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: " + textMuted + "; cursor: pointer; user-select: none; }",
+      ".rw-private-label input { width: 13px; height: 13px; margin: 0; cursor: pointer; accent-color: " + accent + "; }",
 
 
       /* Stats banner */
@@ -920,6 +922,13 @@
   function renderInlineForm(onSubmit) {
     var noticeContainer = h("div", null);
 
+    var titleInput = h("input", {
+      className: "rw-input rw-inline-title",
+      placeholder: "Title (optional)",
+      maxlength: "200",
+      type: "text",
+    });
+
     var descInput = h("textarea", {
       className: "rw-input rw-textarea rw-inline-textarea",
       placeholder: "Write your feedback, proposal, or bug report here\u2026",
@@ -1005,12 +1014,15 @@
         locale: navigator.language,
       };
 
+      var titleVal = titleInput.value.trim();
       onSubmit({
+        title: titleVal || undefined,
         description: description,
         type: "feedback",
         context: context,
-        private: privateCheckbox.checked,
+        isPrivate: privateCheckbox.checked,
       }).then(function () {
+        titleInput.value = "";
         descInput.value = "";
         privateCheckbox.checked = false;
         attachedFiles.length = 0;
@@ -1036,13 +1048,17 @@
       h("span", null, "private"),
     ]);
 
-    var bottomRow = h("div", { className: "rw-inline-bottom" }, [
-      attachBtn,
+    var bottomRight = h("div", { className: "rw-inline-bottom-right" }, [
       privateLabel,
       submitBtn,
     ]);
 
-    var formChildren = [noticeContainer, descInput, previewContainer, bottomRow, fileInput];
+    var bottomRow = h("div", { className: "rw-inline-bottom" }, [
+      attachBtn,
+      bottomRight,
+    ]);
+
+    var formChildren = [noticeContainer, titleInput, descInput, previewContainer, bottomRow, fileInput];
 
     var form = h("div", { className: "rw-inline-form" }, formChildren);
 
