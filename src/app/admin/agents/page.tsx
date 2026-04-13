@@ -11,7 +11,11 @@ async function getAgentTemplates() {
       description: agentTemplates.description,
       systemPrompt: agentTemplates.systemPrompt,
       character: agentTemplates.character,
+      model: agentTemplates.model,
       enabledTools: agentTemplates.enabledTools,
+      startingCommand: agentTemplates.startingCommand,
+      jobStartCommand: agentTemplates.jobStartCommand,
+      autoStartTasks: agentTemplates.autoStartTasks,
       sortOrder: agentTemplates.sortOrder,
       createdAt: agentTemplates.createdAt,
     })

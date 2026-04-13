@@ -9,28 +9,41 @@ interface AgentTemplateRow {
   description: string | null;
   systemPrompt: string | null;
   character: string | null;
+  model: string | null;
   enabledTools: string[] | null;
+  startingCommand: string | null;
+  jobStartCommand: string | null;
+  autoStartTasks: boolean | null;
   sortOrder: number | null;
   createdAt: Date;
 }
 
 const CHARACTERS = ['bot', 'dog', 'fish', 'lobster', 'man', 'witch', 'woman', 'worker'] as const;
 const TOOL_OPTIONS = ['terminal', 'files', 'browser'] as const;
+const MODEL_OPTIONS = [
+  { value: '', label: 'Default (Sonnet 4.6)' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
+] as const;
 
 export function AgentTemplatesManager({ templates }: { templates: AgentTemplateRow[] }) {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selectedTools, setSelectedTools] = useState<string[]>(['terminal', 'files']);
+  const [autoStart, setAutoStart] = useState(true);
 
   async function handleAdd(formData: FormData) {
     setError(null);
     formData.set('enabledTools', JSON.stringify(selectedTools));
+    formData.set('autoStartTasks', String(autoStart));
     const result = await addAgentTemplate(formData);
     if (!result.success) {
       setError(result.error || 'Failed to add template');
     } else {
       setSelectedTools(['terminal', 'files']);
+      setAutoStart(true);
     }
   }
 
@@ -57,6 +70,7 @@ export function AgentTemplatesManager({ templates }: { templates: AgentTemplateR
               <tr>
                 <th className="text-left px-4 py-3 font-medium">Name</th>
                 <th className="text-left px-4 py-3 font-medium">Character</th>
+                <th className="text-left px-4 py-3 font-medium">Model</th>
                 <th className="text-left px-4 py-3 font-medium">Tools</th>
                 <th className="text-left px-4 py-3 font-medium">Order</th>
                 <th className="text-right px-4 py-3 font-medium">Actions</th>
@@ -76,9 +90,20 @@ export function AgentTemplatesManager({ templates }: { templates: AgentTemplateR
                           {t.systemPrompt}
                         </p>
                       )}
+                      {t.startingCommand && (
+                        <p className="text-slate-500 text-xs mt-0.5 truncate max-w-xs">
+                          Start: <code className="text-slate-400">{t.startingCommand}</code>
+                        </p>
+                      )}
+                      {t.jobStartCommand && (
+                        <p className="text-slate-500 text-xs mt-0.5 truncate max-w-xs">
+                          Job: <code className="text-slate-400">{t.jobStartCommand}</code>
+                        </p>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-slate-300 capitalize">{t.character || '—'}</td>
+                  <td className="px-4 py-3 text-slate-300 text-xs">{t.model || 'default'}</td>
                   <td className="px-4 py-3">
                     <div className="flex gap-1 flex-wrap">
                       {(t.enabledTools || []).map((tool) => (
@@ -173,6 +198,34 @@ export function AgentTemplatesManager({ templates }: { templates: AgentTemplateR
             />
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-1">
+                Model
+              </label>
+              <select
+                name="model"
+                className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {MODEL_OPTIONS.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center">
+              <label className="flex items-center gap-3 cursor-pointer mt-5">
+                <button
+                  type="button"
+                  className={`w-9 h-5 rounded-full transition-colors relative shrink-0 ${autoStart ? 'bg-blue-600' : 'bg-slate-600'}`}
+                  onClick={() => setAutoStart(!autoStart)}
+                >
+                  <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${autoStart ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </button>
+                <span className="text-sm text-slate-300">Auto-start agent on assignment</span>
+              </label>
+            </div>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1">
               Enabled Tools
@@ -190,6 +243,34 @@ export function AgentTemplatesManager({ templates }: { templates: AgentTemplateR
                 </label>
               ))}
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">
+              Starting Command
+            </label>
+            <input
+              name="startingCommand"
+              type="text"
+              placeholder="e.g., npm run dev"
+              className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="text-xs text-slate-500 mt-1">Runs every time a terminal opens for this agent</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-1">
+              On Job Start, Run Command
+            </label>
+            <textarea
+              name="jobStartCommand"
+              rows={2}
+              placeholder={'e.g., claude {{ALL_TASK_DETAILS}} --dangerously-skip-permissions --name {{TASK_ID}}'}
+              className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none font-mono"
+            />
+            <p className="text-xs text-slate-500 mt-1">
+              Runs once when a job is created. Variables: {'{{TASK_ID}}'} {'{{TASK_TITLE}}'} {'{{TASK_DESCRIPTION}}'} {'{{ALL_TASK_DETAILS}}'} {'{{PROJECT_PATH}}'} {'{{JOB_ID}}'} {'{{AGENT_NAME}}'}
+            </p>
           </div>
 
           <div className="w-32">

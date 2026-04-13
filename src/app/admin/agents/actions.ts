@@ -25,7 +25,11 @@ export async function addAgentTemplate(formData: FormData): Promise<{ success: b
   const description = formData.get('description') as string;
   const systemPrompt = formData.get('systemPrompt') as string;
   const character = formData.get('character') as string;
+  const model = formData.get('model') as string;
   const enabledToolsRaw = formData.get('enabledTools') as string;
+  const startingCommand = formData.get('startingCommand') as string;
+  const jobStartCommand = formData.get('jobStartCommand') as string;
+  const autoStartTasks = formData.get('autoStartTasks') === 'true';
   const sortOrder = parseInt(formData.get('sortOrder') as string || '0', 10);
 
   if (!name) {
@@ -39,7 +43,11 @@ export async function addAgentTemplate(formData: FormData): Promise<{ success: b
     description: description || null,
     systemPrompt: systemPrompt || null,
     character: character || null,
+    model: model || null,
     enabledTools,
+    startingCommand: startingCommand || null,
+    jobStartCommand: jobStartCommand || null,
+    autoStartTasks,
     sortOrder: isNaN(sortOrder) ? 0 : sortOrder,
   });
 
@@ -58,7 +66,11 @@ export async function removeAgentTemplate(templateId: string): Promise<{ success
 
 export async function updateAgentTemplate(
   templateId: string,
-  data: { name?: string; description?: string; systemPrompt?: string; character?: string; enabledTools?: string[]; sortOrder?: number },
+  data: {
+    name?: string; description?: string; systemPrompt?: string; character?: string;
+    model?: string; enabledTools?: string[]; startingCommand?: string; jobStartCommand?: string;
+    autoStartTasks?: boolean; sortOrder?: number;
+  },
 ): Promise<{ success: boolean }> {
   await verifyAdmin();
 
@@ -67,7 +79,11 @@ export async function updateAgentTemplate(
   if (data.description !== undefined) updates.description = data.description || null;
   if (data.systemPrompt !== undefined) updates.systemPrompt = data.systemPrompt || null;
   if (data.character !== undefined) updates.character = data.character || null;
+  if (data.model !== undefined) updates.model = data.model || null;
   if (data.enabledTools !== undefined) updates.enabledTools = data.enabledTools;
+  if (data.startingCommand !== undefined) updates.startingCommand = data.startingCommand || null;
+  if (data.jobStartCommand !== undefined) updates.jobStartCommand = data.jobStartCommand || null;
+  if (data.autoStartTasks !== undefined) updates.autoStartTasks = data.autoStartTasks;
   if (data.sortOrder !== undefined) updates.sortOrder = data.sortOrder;
 
   await db.update(agentTemplates).set(updates).where(eq(agentTemplates.id, templateId));
