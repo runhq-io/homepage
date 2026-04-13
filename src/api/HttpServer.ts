@@ -3821,18 +3821,17 @@ export function createHttpApp() {
   });
 
   // Generate a signed widget JWT for the authenticated user.
-  // Any authenticated server member can get a token (not admin-only).
+  // Any authenticated user can get a token — used for global feedback widget.
   app.get('/api/widget/user-token', async (c) => {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const serverId = c.req.query('serverId');
-    if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    // Look up user name
+    const apiKey = c.req.query('apiKey');
+    if (!apiKey) return c.json({ error: 'apiKey required' }, 400);
     const [user] = await db.select({ name: users.name }).from(users).where(eq(users.id, userId)).limit(1);
-    const result = await WidgetService.generateUserToken(serverId, userId, user?.name || undefined);
-    if (!result) return c.json({ error: 'Widget not enabled for this server' }, 404);
+    const result = await WidgetService.generateUserTokenByApiKey(apiKey, userId, user?.name || undefined);
+    if (!result) return c.json({ error: 'Widget not found or not enabled' }, 404);
     return c.json({ success: true, data: result });
   });
 

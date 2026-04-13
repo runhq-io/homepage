@@ -489,6 +489,43 @@ export async function generateUserToken(
   return { token: `${payloadB64}.${signature}` };
 }
 
+/**
+ * Generate a signed widget JWT by API key (not serverId).
+ * Used for global widget embedding where the caller knows the API key
+ * but not necessarily which server it belongs to.
+ */
+export async function generateUserTokenByApiKey(
+  apiKey: string,
+  userId: string,
+  userName?: string,
+) {
+  const [project] = await db
+    .select({
+      apiKey: widgetProjects.apiKey,
+      apiSecretHash: widgetProjects.apiSecretHash,
+      enabled: widgetProjects.enabled,
+    })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.apiKey, apiKey), eq(widgetProjects.enabled, true)))
+    .limit(1);
+
+  if (!project) return null;
+
+  const payload = {
+    sub: userId,
+    name: userName || undefined,
+    fp: project.apiKey,
+    iat: Math.floor(Date.now() / 1000),
+  };
+
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = createHmac('sha256', project.apiSecretHash)
+    .update(payloadB64)
+    .digest('base64url');
+
+  return { token: `${payloadB64}.${signature}` };
+}
+
 export async function getWidgetIntegration(serverId: string) {
   const [project] = await db
     .select()
