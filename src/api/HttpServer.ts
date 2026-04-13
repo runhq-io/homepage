@@ -3766,6 +3766,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
+    if (!hasPermission) return c.json({ error: 'Forbidden' }, 403);
     const integration = await WidgetService.getWidgetIntegration(serverId);
     return c.json({ success: true, data: integration });
   });
@@ -3777,6 +3779,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const { serverId, name, channelId } = await c.req.json();
     if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
+    const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
+    if (!hasPermission) return c.json({ error: 'Forbidden' }, 403);
     const result = await WidgetService.enableWidget(serverId, { name, channelId });
     return c.json({ success: true, data: result });
   });
@@ -3788,6 +3792,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
+    if (!hasPermission) return c.json({ error: 'Forbidden' }, 403);
     await WidgetService.disableWidget(serverId);
     return c.json({ success: true });
   });
@@ -3799,6 +3805,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const { serverId } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
+    if (!hasPermission) return c.json({ error: 'Forbidden' }, 403);
     try {
       const result = await WidgetService.regenerateSecret(serverId);
       return c.json({ success: true, data: result });
@@ -3814,6 +3822,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
+    if (!hasPermission) return c.json({ error: 'Forbidden' }, 403);
     const settings = await WidgetService.getWidgetSettings(serverId);
     return c.json({ success: true, data: settings });
   });
@@ -3825,6 +3835,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const { serverId, auto_approve, widget_position, voting_period_hours, is_public } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
+    if (!hasPermission) return c.json({ error: 'Forbidden' }, 403);
     await WidgetService.updateWidgetSettings(serverId, { auto_approve, widget_position, voting_period_hours, is_public });
     return c.json({ success: true });
   });
