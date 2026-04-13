@@ -24,6 +24,7 @@ import * as ServerService from './services/ServerService';
 import * as ServerSessionService from './services/ServerSessionService';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
+import * as WidgetService from './services/WidgetService';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
@@ -3679,6 +3680,128 @@ export function createHttpApp() {
       console.error('[HttpServer] Browser session error:', error);
       return c.json({ error: 'Failed to create browser session' }, 500);
     }
+  });
+
+  // ==========================================================================
+  // Widget Public API (called by widget.js from customer websites)
+  // ==========================================================================
+
+  app.options('/api/widget/*', (c) => {
+    c.header('Access-Control-Allow-Origin', '*');
+    c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project');
+    return c.body(null, 204);
+  });
+
+  app.get('/api/widget/tickets', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const result = await WidgetService.listTickets(auth.projectId, auth.widgetUserId);
+    return c.json(result);
+  });
+
+  app.post('/api/widget/tickets', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json();
+    try {
+      const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
+      return c.json({ ticket }, 201);
+    } catch (err) {
+      return c.json({ error: String(err) }, 400);
+    }
+  });
+
+  app.get('/api/widget/tickets/mine', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    const tickets = await WidgetService.listMyTickets(auth.projectId, auth.widgetUserId);
+    return c.json({ tickets });
+  });
+
+  app.get('/api/widget/tickets/stats', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const stats = await WidgetService.getTicketStats(auth.projectId);
+    return c.json(stats);
+  });
+
+  app.post('/api/widget/tickets/:id/vote', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    const { value } = await c.req.json();
+    try {
+      await WidgetService.castVote(c.req.param('id'), auth.widgetUserId, value);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err) }, 400);
+    }
+  });
+
+  app.delete('/api/widget/tickets/:id/vote', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    await WidgetService.retractVote(c.req.param('id'), auth.widgetUserId);
+    return c.json({ ok: true });
+  });
+
+  // ==========================================================================
+  // Widget Management API (called by RunHQ frontend UI)
+  // ==========================================================================
+
+  app.get('/api/widget/integration', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const integration = await WidgetService.getWidgetIntegration(serverId);
+    return c.json({ success: true, data: integration });
+  });
+
+  app.post('/api/widget/enable', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const { serverId, name, channelId } = await c.req.json();
+    if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
+    const result = await WidgetService.enableWidget(serverId, { name, channelId });
+    return c.json({ success: true, data: result });
+  });
+
+  app.delete('/api/widget/disable', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    await WidgetService.disableWidget(serverId);
+    return c.json({ success: true });
+  });
+
+  app.get('/api/widget/settings', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const settings = await WidgetService.getWidgetSettings(serverId);
+    return c.json({ success: true, data: settings });
+  });
+
+  app.put('/api/widget/settings', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const { serverId, auto_approve, widget_position, voting_period_hours } = await c.req.json();
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    await WidgetService.updateWidgetSettings(serverId, { auto_approve, widget_position, voting_period_hours });
+    return c.json({ success: true });
   });
 
   // Mount OAuth routes
