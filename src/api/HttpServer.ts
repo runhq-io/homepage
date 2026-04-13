@@ -3826,10 +3826,9 @@ export function createHttpApp() {
 
   // Generate a signed widget JWT for the RunHQ feedback widget.
   // API key is server-side config — never accepted from the client.
+  // Uses FEEDBACK_WIDGET_API_KEY env var, falling back to staging key.
   const FEEDBACK_WIDGET_API_KEY = process.env.FEEDBACK_WIDGET_API_KEY
-    || (process.env.NODE_ENV === 'production'
-      ? '' // TODO: set production widget API key
-      : 'rw_e2966c25c8ef31953287040130e4c597');
+    || 'rw_e2966c25c8ef31953287040130e4c597';
 
   app.get('/api/widget/user-token', async (c) => {
     if (!FEEDBACK_WIDGET_API_KEY) return c.json({ error: 'Feedback widget not configured' }, 503);
