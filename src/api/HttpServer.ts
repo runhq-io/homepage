@@ -3814,6 +3814,47 @@ export function createHttpApp() {
     return c.json({ success: true });
   });
 
+  // ── Widget Sync Endpoints (Fly server ↔ BE) ──────────────────────
+  // Auth: server token (same pattern as heartbeat/register)
+
+  app.get('/api/widget/tickets/unsynced', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const serverId = server.id;
+    const tickets = await WidgetService.getUnsyncedTickets(serverId);
+    return c.json({ tickets });
+  });
+
+  app.post('/api/widget/tickets/mark-synced', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const { ticketIds, flyTodoIds } = await c.req.json();
+    if (!Array.isArray(ticketIds)) return c.json({ error: 'ticketIds required' }, 400);
+
+    await WidgetService.markTicketsSynced(ticketIds, flyTodoIds || {});
+    return c.json({ success: true });
+  });
+
+  app.patch('/api/widget/tickets/:id/status', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const ticketId = c.req.param('id');
+    const { status } = await c.req.json();
+    if (!status) return c.json({ error: 'status required' }, 400);
+
+    await WidgetService.updateTicketStatus(ticketId, status);
+    return c.json({ success: true });
+  });
+
   // Mount OAuth routes
   app.route('/oauth', oauth);
 

@@ -14,6 +14,8 @@ import {
   widgetVotes,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray } from 'drizzle-orm';
+import { servers } from '../../db/schema';
+import { fetchFromServer } from './ServerService';
 
 // ============================================================================
 // Types
@@ -278,6 +280,11 @@ export async function createTicket(
     })
     .returning();
 
+  // Best-effort push to Fly server as a todo
+  syncTicketToServer(ticket.id, projectId, title, opts.description).catch((err) => {
+    console.warn('[WidgetService] Failed to sync ticket to server:', err);
+  });
+
   return ticket;
 }
 
@@ -528,4 +535,125 @@ export async function generateTitle(description: string): Promise<string> {
   } catch {
     return fallback;
   }
+}
+
+// ============================================================================
+// Ticket Sync (BE ↔ Fly Server)
+// ============================================================================
+
+/**
+ * Best-effort push: create a todo on the Fly server for a new widget ticket.
+ * If the server is down, the ticket stays syncStatus='pending' and will be
+ * picked up on the next server wake via the unsynced tickets endpoint.
+ */
+async function syncTicketToServer(
+  ticketId: string,
+  projectId: string,
+  title: string,
+  description?: string,
+) {
+  // Look up the widget project to get serverId and channelId
+  const [wp] = await db
+    .select({
+      serverId: widgetProjects.serverId,
+      channelId: widgetProjects.channelId,
+      slug: widgetProjects.slug,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+
+  if (!wp?.channelId) return;
+
+  // Look up the server record
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, wp.serverId))
+    .limit(1);
+
+  if (!server?.ownerId) return;
+
+  const result = await fetchFromServer<{ success: boolean; data?: { id: string } }>(
+    server,
+    server.ownerId,
+    '/api/todos',
+    {
+      method: 'POST',
+      body: {
+        title,
+        description: description || undefined,
+        channelId: wp.channelId,
+        sourceType: 'widget',
+        sourceId: ticketId,
+        sourceUrl: `https://runhq.io/project/${wp.slug}`,
+      },
+    },
+  );
+
+  if (result.success && result.data?.id) {
+    await db
+      .update(widgetTickets)
+      .set({ syncStatus: 'synced', flyTodoId: result.data.id })
+      .where(eq(widgetTickets.id, ticketId));
+  }
+}
+
+/**
+ * Get all pending-sync tickets for widget projects belonging to a given server.
+ * Called by the Fly server on wake to pull tickets it missed while sleeping.
+ */
+export async function getUnsyncedTickets(serverId: string) {
+  const rows = await db
+    .select({
+      id: widgetTickets.id,
+      title: widgetTickets.title,
+      description: widgetTickets.description,
+      projectId: widgetTickets.projectId,
+      channelId: widgetProjects.channelId,
+      slug: widgetProjects.slug,
+    })
+    .from(widgetTickets)
+    .innerJoin(widgetProjects, eq(widgetTickets.projectId, widgetProjects.id))
+    .where(
+      and(
+        eq(widgetProjects.serverId, serverId),
+        eq(widgetTickets.syncStatus, 'pending'),
+      ),
+    )
+    .limit(200);
+
+  return rows;
+}
+
+/**
+ * Mark tickets as synced and store their Fly-side todo IDs.
+ */
+export async function markTicketsSynced(
+  ticketIds: string[],
+  flyTodoIds: Record<string, string>,
+) {
+  for (const ticketId of ticketIds) {
+    await db
+      .update(widgetTickets)
+      .set({
+        syncStatus: 'synced',
+        flyTodoId: flyTodoIds[ticketId] || null,
+        updatedAt: new Date(),
+      })
+      .where(eq(widgetTickets.id, ticketId));
+  }
+}
+
+/**
+ * Update a ticket's status (called by Fly server when todo status changes).
+ */
+export async function updateTicketStatus(
+  ticketId: string,
+  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled',
+) {
+  await db
+    .update(widgetTickets)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(widgetTickets.id, ticketId));
 }
