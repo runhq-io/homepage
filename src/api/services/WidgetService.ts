@@ -25,6 +25,8 @@ export interface WidgetAuthResult {
   projectId: string;
   projectSlug: string;
   widgetUserId?: string;
+  /** True when the request was authenticated via a signed JWT (customer's server vouched for it) */
+  authenticated: boolean;
 }
 
 interface HonoRequest {
@@ -82,7 +84,7 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled || !project.isPublic) return null;
-    return { projectId: project.id, projectSlug: project.slug };
+    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
   }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -99,21 +101,21 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled) return null;
-    return { projectId: project.id, projectSlug: project.slug };
+    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
   }
 
   // ---- Mode 3: Signed JWT {payload}.{signature} ----
   const payloadB64 = token.slice(0, dotIndex);
   const sigB64 = token.slice(dotIndex + 1);
 
-  let payload: { sub: string; name?: string; fp: string; iat?: number };
+  let payload: { sub?: string; name?: string; fp: string; iat?: number };
   try {
     payload = JSON.parse(base64urlDecode(payloadB64));
   } catch {
     return null;
   }
 
-  if (!payload.sub || !payload.fp) return null;
+  if (!payload.fp) return null;
 
   const [project] = await db
     .select({
@@ -144,41 +146,42 @@ export async function authenticateWidget(
   }
   if (!sigValid) return null;
 
-  // Upsert widgetUser
-  const [existing] = await db
-    .select({ id: widgetUsers.id })
-    .from(widgetUsers)
-    .where(
-      and(
-        eq(widgetUsers.projectId, project.id),
-        eq(widgetUsers.externalUserId, payload.sub)
+  // If sub is provided, upsert a widgetUser for identified submissions
+  let widgetUserId: string | undefined;
+  if (payload.sub) {
+    const [existing] = await db
+      .select({ id: widgetUsers.id })
+      .from(widgetUsers)
+      .where(
+        and(
+          eq(widgetUsers.projectId, project.id),
+          eq(widgetUsers.externalUserId, payload.sub)
+        )
       )
-    )
-    .limit(1);
+      .limit(1);
 
-  let widgetUserId: string;
-  if (existing) {
-    // Update name if provided
-    if (payload.name) {
-      await db
-        .update(widgetUsers)
-        .set({ name: payload.name })
-        .where(eq(widgetUsers.id, existing.id));
+    if (existing) {
+      if (payload.name) {
+        await db
+          .update(widgetUsers)
+          .set({ name: payload.name })
+          .where(eq(widgetUsers.id, existing.id));
+      }
+      widgetUserId = existing.id;
+    } else {
+      const [inserted] = await db
+        .insert(widgetUsers)
+        .values({
+          projectId: project.id,
+          externalUserId: payload.sub,
+          name: payload.name,
+        })
+        .returning({ id: widgetUsers.id });
+      widgetUserId = inserted.id;
     }
-    widgetUserId = existing.id;
-  } else {
-    const [inserted] = await db
-      .insert(widgetUsers)
-      .values({
-        projectId: project.id,
-        externalUserId: payload.sub,
-        name: payload.name,
-      })
-      .returning({ id: widgetUsers.id });
-    widgetUserId = inserted.id;
   }
 
-  return { projectId: project.id, projectSlug: project.slug, widgetUserId };
+  return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
 }
 
 // ============================================================================

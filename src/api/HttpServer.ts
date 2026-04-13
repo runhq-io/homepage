@@ -3712,7 +3712,7 @@ export function createHttpApp() {
 
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth?.authenticated) return c.json({ error: 'Unauthorized — signed token required' }, 401);
     const body = await c.req.json();
     try {
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
