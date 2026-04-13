@@ -667,6 +667,29 @@ async function syncTicketToServer(
 
   if (!server?.ownerId) return;
 
+  // Look up ticket vote counts and submitter name
+  const [ticket] = await db
+    .select({ yesVotes: widgetTickets.yesVotes, noVotes: widgetTickets.noVotes, widgetUserId: widgetTickets.widgetUserId })
+    .from(widgetTickets)
+    .where(eq(widgetTickets.id, ticketId))
+    .limit(1);
+
+  let submitterName: string | undefined;
+  if (ticket?.widgetUserId) {
+    const [wu] = await db
+      .select({ name: widgetUsers.name })
+      .from(widgetUsers)
+      .where(eq(widgetUsers.id, ticket.widgetUserId))
+      .limit(1);
+    submitterName = wu?.name || undefined;
+  }
+
+  const sourceVoteData = JSON.stringify({
+    yes: ticket?.yesVotes ?? 0,
+    no: ticket?.noVotes ?? 0,
+    submittedBy: submitterName || 'Anonymous',
+  });
+
   const result = await fetchFromServer<{ success: boolean; data?: { id: string } }>(
     server,
     server.ownerId,
@@ -680,6 +703,7 @@ async function syncTicketToServer(
         sourceType: 'widget',
         sourceId: ticketId,
         sourceUrl: `https://runhq.io/project/${wp.slug}`,
+        sourceVoteData,
       },
     },
   );
@@ -705,6 +729,9 @@ export async function getUnsyncedTickets(serverId: string) {
       projectId: widgetTickets.projectId,
       channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
+      yesVotes: widgetTickets.yesVotes,
+      noVotes: widgetTickets.noVotes,
+      widgetUserId: widgetTickets.widgetUserId,
     })
     .from(widgetTickets)
     .innerJoin(widgetProjects, eq(widgetTickets.projectId, widgetProjects.id))
@@ -716,7 +743,29 @@ export async function getUnsyncedTickets(serverId: string) {
     )
     .limit(200);
 
-  return rows;
+  // Resolve submitter names
+  const result = [];
+  for (const row of rows) {
+    let submittedBy = 'Anonymous';
+    if (row.widgetUserId) {
+      const [wu] = await db
+        .select({ name: widgetUsers.name })
+        .from(widgetUsers)
+        .where(eq(widgetUsers.id, row.widgetUserId))
+        .limit(1);
+      if (wu?.name) submittedBy = wu.name;
+    }
+    result.push({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      channelId: row.channelId,
+      slug: row.slug,
+      sourceVoteData: JSON.stringify({ yes: row.yesVotes, no: row.noVotes, submittedBy }),
+    });
+  }
+
+  return result;
 }
 
 /**
