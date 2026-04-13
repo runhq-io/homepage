@@ -994,3 +994,78 @@ export const oauthTokensRelations = relations(oauthTokens, ({ one }) => ({
 
 export type OauthToken = typeof oauthTokens.$inferSelect;
 export type NewOauthToken = typeof oauthTokens.$inferInsert;
+
+// ============================================================================
+// Widget — Embeddable voting/feedback widget
+// ============================================================================
+
+export const widgetProjects = pgTable('widget_projects', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').notNull(),
+  name: text('name').notNull(),
+  slug: text('slug').notNull().unique(),
+  apiKey: text('api_key').notNull().unique(),
+  apiSecretHash: text('api_secret_hash').notNull(),
+  enabled: boolean('enabled').default(true).notNull(),
+  autoApprove: boolean('auto_approve').default(false).notNull(),
+  widgetPosition: text('widget_position'),
+  votingPeriodHours: integer('voting_period_hours'),
+  channelId: text('channel_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const widgetUsers = pgTable('widget_users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  externalUserId: text('external_user_id').notNull(),
+  name: text('name'),
+  username: text('username'),
+  avatarUrl: text('avatar_url'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
+]);
+
+export const widgetTickets = pgTable('widget_tickets', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  description: text('description'),
+  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled'>().default('pending'),
+  moderationStatus: text('moderation_status').notNull().$type<'pending' | 'approved' | 'rejected'>().default('pending'),
+  isPrivate: boolean('is_private').default(false).notNull(),
+  source: text('source').default('widget').notNull(),
+  widgetUserId: uuid('widget_user_id').references(() => widgetUsers.id),
+  yesVotes: integer('yes_votes').default(0).notNull(),
+  noVotes: integer('no_votes').default(0).notNull(),
+  votingEndsAt: timestamp('voting_ends_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const widgetVotes = pgTable('widget_votes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  ticketId: uuid('ticket_id').notNull().references(() => widgetTickets.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  value: boolean('value').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  { name: 'widget_votes_ticket_user_unique', columns: [t.ticketId, t.widgetUserId], unique: true },
+]);
+
+export const widgetComments = pgTable('widget_comments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  ticketId: uuid('ticket_id').notNull().references(() => widgetTickets.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  body: text('body').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export type WidgetProject = typeof widgetProjects.$inferSelect;
+export type NewWidgetProject = typeof widgetProjects.$inferInsert;
+export type WidgetTicket = typeof widgetTickets.$inferSelect;
+export type WidgetUser = typeof widgetUsers.$inferSelect;
+export type WidgetVote = typeof widgetVotes.$inferSelect;
+export type WidgetComment = typeof widgetComments.$inferSelect;
