@@ -3698,8 +3698,8 @@ export function createHttpApp() {
 
   app.options('/api/widget/*', (c) => {
     c.header('Access-Control-Allow-Origin', '*');
-    c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project');
+    c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project, X-Server-Token');
     return c.body(null, 204);
   });
 
@@ -3849,7 +3849,8 @@ export function createHttpApp() {
 
     const ticketId = c.req.param('id');
     const { status } = await c.req.json();
-    if (!status) return c.json({ error: 'status required' }, 400);
+    const validStatuses = ['pending', 'planned', 'in_progress', 'needs_review', 'done', 'cancelled'];
+    if (!status || !validStatuses.includes(status)) return c.json({ error: 'Invalid status' }, 400);
 
     await WidgetService.updateTicketStatus(ticketId, status);
     return c.json({ success: true });

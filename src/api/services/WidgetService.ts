@@ -633,16 +633,18 @@ export async function markTicketsSynced(
   ticketIds: string[],
   flyTodoIds: Record<string, string>,
 ) {
-  for (const ticketId of ticketIds) {
-    await db
-      .update(widgetTickets)
-      .set({
-        syncStatus: 'synced',
-        flyTodoId: flyTodoIds[ticketId] || null,
-        updatedAt: new Date(),
-      })
-      .where(eq(widgetTickets.id, ticketId));
-  }
+  await db.transaction(async (tx) => {
+    for (const ticketId of ticketIds) {
+      await tx
+        .update(widgetTickets)
+        .set({
+          syncStatus: 'synced',
+          flyTodoId: flyTodoIds[ticketId] || null,
+          updatedAt: new Date(),
+        })
+        .where(eq(widgetTickets.id, ticketId));
+    }
+  });
 }
 
 /**
