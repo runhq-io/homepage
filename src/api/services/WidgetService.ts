@@ -5,7 +5,7 @@
  * project management, and AI title generation.
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { db } from '../../db/index';
 import {
   widgetProjects,
@@ -378,8 +378,9 @@ export async function retractVote(ticketId: string, widgetUserId: string) {
 // Project Management (for RunHQ UI)
 // ============================================================================
 
-function generateApiKey(): string {
-  return 'rw_' + randomBytes(16).toString('hex');
+/** Derive a fingerprint from the secret for JWT fp field / project lookup. */
+function deriveFingerprint(secret: string): string {
+  return createHash('sha256').update(secret).digest('hex').slice(0, 32);
 }
 
 function generateSlug(name: string, suffix: string): string {
@@ -402,8 +403,8 @@ export async function enableWidget(
     .where(eq(widgetProjects.serverId, serverId))
     .limit(1);
 
-  const apiKey = generateApiKey();
   const apiSecret = randomBytes(32).toString('base64url');
+  const apiKey = deriveFingerprint(apiSecret);
   const slugSuffix = randomBytes(4).toString('hex'); // used only when no existing slug
   // Reuse existing slug on re-enable so URLs don't change; generate new one otherwise
   const slug = existing?.slug ?? generateSlug(opts.name, slugSuffix);
@@ -444,9 +445,10 @@ export async function disableWidget(serverId: string) {
 
 export async function regenerateSecret(serverId: string) {
   const newSecret = randomBytes(32).toString('base64url');
+  const newFingerprint = deriveFingerprint(newSecret);
   const [project] = await db
     .update(widgetProjects)
-    .set({ apiSecretHash: newSecret, updatedAt: new Date() })
+    .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
     .where(eq(widgetProjects.serverId, serverId))
     .returning({ id: widgetProjects.id });
 
@@ -489,14 +491,16 @@ export async function listPublicProjects() {
 }
 
 /**
- * Generate a signed widget JWT for an identified user, given an API key.
- * Used server-side only — the API key comes from env config, never from the client.
+ * Generate a signed widget JWT for an identified user, given the API secret.
+ * Derives a fingerprint from the secret to look up the project.
+ * Used server-side only — the secret comes from env config, never from the client.
  */
-export async function generateUserTokenByApiKey(
-  apiKey: string,
+export async function generateUserTokenBySecret(
+  secret: string,
   userId: string,
   userName?: string,
 ) {
+  const fingerprint = deriveFingerprint(secret);
   const [project] = await db
     .select({
       apiKey: widgetProjects.apiKey,
@@ -504,7 +508,7 @@ export async function generateUserTokenByApiKey(
       enabled: widgetProjects.enabled,
     })
     .from(widgetProjects)
-    .where(and(eq(widgetProjects.apiKey, apiKey), eq(widgetProjects.enabled, true)))
+    .where(and(eq(widgetProjects.apiKey, fingerprint), eq(widgetProjects.enabled, true)))
     .limit(1);
 
   if (!project) return null;
