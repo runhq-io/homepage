@@ -3820,6 +3820,25 @@ export function createHttpApp() {
     }
   });
 
+  // Generate a signed widget JWT for the RunHQ feedback widget.
+  // API key is server-side config — never accepted from the client.
+  const FEEDBACK_WIDGET_API_KEY = process.env.FEEDBACK_WIDGET_API_KEY
+    || (process.env.NODE_ENV === 'production'
+      ? '' // TODO: set production widget API key
+      : 'rw_e2966c25c8ef31953287040130e4c597');
+
+  app.get('/api/widget/user-token', async (c) => {
+    if (!FEEDBACK_WIDGET_API_KEY) return c.json({ error: 'Feedback widget not configured' }, 503);
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const [user] = await db.select({ name: users.name }).from(users).where(eq(users.id, userId)).limit(1);
+    const result = await WidgetService.generateUserTokenByApiKey(FEEDBACK_WIDGET_API_KEY, userId, user?.name || undefined);
+    if (!result) return c.json({ error: 'Feedback widget not enabled' }, 404);
+    return c.json({ success: true, data: result });
+  });
+
   app.get('/api/widget/settings', async (c) => {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
