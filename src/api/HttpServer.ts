@@ -29,7 +29,7 @@ import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, systemSettings, serverMembers } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers } from '../db/schema';
 import { eq, lt, sql } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 import { sendInviteEmail } from '../lib/email';
@@ -1758,6 +1758,28 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Get templates error:', error);
       return c.json({ error: 'Failed to get templates' }, 500);
+    }
+  });
+
+  // ── Agent Templates (global agent blueprints) ────────────────────────
+  app.get('/api/agent-templates', async (c) => {
+    try {
+      const templates = await db
+        .select({
+          id: agentTemplates.id,
+          name: agentTemplates.name,
+          description: agentTemplates.description,
+          systemPrompt: agentTemplates.systemPrompt,
+          character: agentTemplates.character,
+          enabledTools: agentTemplates.enabledTools,
+          sortOrder: agentTemplates.sortOrder,
+        })
+        .from(agentTemplates)
+        .orderBy(agentTemplates.sortOrder);
+      return c.json({ success: true, templates });
+    } catch (error) {
+      console.error('[HttpServer] Get agent templates error:', error);
+      return c.json({ error: 'Failed to get agent templates' }, 500);
     }
   });
 

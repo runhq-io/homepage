@@ -823,6 +823,25 @@ export type ServerTemplate = typeof serverTemplates.$inferSelect;
 export type NewServerTemplate = typeof serverTemplates.$inferInsert;
 
 // ============================================================================
+// Agent Templates (admin-managed global agent blueprints)
+// ============================================================================
+
+export const agentTemplates = pgTable('agent_templates', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  description: text('description'),
+  systemPrompt: text('system_prompt'),
+  character: text('character'),
+  enabledTools: jsonb('enabled_tools').default(['terminal', 'files']),
+  sortOrder: integer('sort_order').default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export type AgentTemplate = typeof agentTemplates.$inferSelect;
+export type NewAgentTemplate = typeof agentTemplates.$inferInsert;
+
+// ============================================================================
 // Device Auth Codes (for desktop app OAuth flow)
 // ============================================================================
 
