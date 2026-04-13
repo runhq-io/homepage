@@ -455,6 +455,40 @@ export async function regenerateSecret(serverId: string) {
 }
 
 /**
+ * List all public, enabled widget projects with ticket counts.
+ */
+export async function listPublicProjects() {
+  const projects = await db
+    .select({
+      name: widgetProjects.name,
+      slug: widgetProjects.slug,
+      createdAt: widgetProjects.createdAt,
+    })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.enabled, true), eq(widgetProjects.isPublic, true)))
+    .orderBy(desc(widgetProjects.createdAt));
+
+  // Get ticket counts per project
+  const result = [];
+  for (const p of projects) {
+    const [countRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(widgetTickets)
+      .innerJoin(widgetProjects, eq(widgetTickets.projectId, widgetProjects.id))
+      .where(
+        and(
+          eq(widgetProjects.slug, p.slug),
+          ne(widgetTickets.moderationStatus, 'rejected'),
+          eq(widgetTickets.isPrivate, false),
+        )
+      );
+    result.push({ ...p, ticketCount: countRow?.count ?? 0 });
+  }
+
+  return result;
+}
+
+/**
  * Generate a signed widget JWT for an identified user, given an API key.
  * Used server-side only — the API key comes from env config, never from the client.
  */

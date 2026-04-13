@@ -3707,6 +3707,12 @@ export function createHttpApp() {
     return c.body(null, 204);
   });
 
+  // Public: list all public widget projects (no auth needed)
+  app.get('/api/widget/projects', async (c) => {
+    const projects = await WidgetService.listPublicProjects();
+    return c.json({ projects });
+  });
+
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
