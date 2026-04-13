@@ -1007,6 +1007,7 @@ export const widgetProjects = pgTable('widget_projects', {
   apiKey: text('api_key').notNull().unique(),
   apiSecretHash: text('api_secret_hash').notNull(),
   enabled: boolean('enabled').default(true).notNull(),
+  isPublic: boolean('is_public').default(false).notNull(),
   autoApprove: boolean('auto_approve').default(false).notNull(),
   widgetPosition: text('widget_position'),
   votingPeriodHours: integer('voting_period_hours'),
@@ -1040,6 +1041,8 @@ export const widgetTickets = pgTable('widget_tickets', {
   yesVotes: integer('yes_votes').default(0).notNull(),
   noVotes: integer('no_votes').default(0).notNull(),
   votingEndsAt: timestamp('voting_ends_at'),
+  syncStatus: text('sync_status').$type<'synced' | 'pending'>().default('pending').notNull(),
+  flyTodoId: text('fly_todo_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
