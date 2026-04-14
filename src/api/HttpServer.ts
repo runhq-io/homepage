@@ -4013,6 +4013,14 @@ export function createHttpApp() {
     return c.json(result);
   });
 
+  app.get('/api/widget/tickets/:id', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'));
+    if (!detail) return c.json({ error: 'Ticket not found' }, 404);
+    return c.json(detail);
+  });
+
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.authenticated) return c.json({ error: 'Unauthorized — signed token required' }, 401);

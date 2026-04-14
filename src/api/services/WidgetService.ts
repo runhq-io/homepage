@@ -12,11 +12,13 @@ import {
   widgetUsers,
   widgetTickets,
   widgetVotes,
+  widgetComments,
   workspaceTasks,
   servers,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull } from 'drizzle-orm';
 import { fetchFromServer } from './ServerService';
+import * as WorkspaceTaskService from './WorkspaceTaskService';
 
 // ============================================================================
 // Types
@@ -61,6 +63,39 @@ type CombinedWidgetTicket = {
   updatedAt: Date;
   userVote: boolean | null;
   canVote: boolean;
+};
+
+export type PublicTicketDetail = {
+  ticket: CombinedWidgetTicket;
+  comments: Array<{
+    id: string;
+    body: string;
+    authorName: string | null;
+    createdAt: string;
+    updatedAt?: string | null;
+    attachments?: Array<{
+      id?: string;
+      filename?: string;
+      originalName?: string | null;
+      mimeType?: string;
+      url?: string | null;
+    }> | null;
+  }>;
+  activity: Array<{
+    id: string;
+    type: string;
+    content?: string | null;
+    createdByName?: string | null;
+    createdAt: string;
+    metadata?: Record<string, unknown> | null;
+    attachments?: Array<{
+      id?: string;
+      filename?: string;
+      originalName?: string | null;
+      mimeType?: string;
+      url?: string | null;
+    }> | null;
+  }>;
 };
 
 // ============================================================================
@@ -357,6 +392,111 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     position: project?.widgetPosition ?? null,
     isIdentified: !!widgetUserId,
     tickets,
+  };
+}
+
+export async function getPublicTicketDetail(projectId: string, ticketId: string): Promise<PublicTicketDetail | null> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+
+  const [widgetRow] = await db
+    .select()
+    .from(widgetTickets)
+    .where(and(
+      eq(widgetTickets.id, ticketId),
+      eq(widgetTickets.projectId, projectId),
+      ne(widgetTickets.moderationStatus, 'rejected'),
+      eq(widgetTickets.isPrivate, false),
+    ))
+    .limit(1);
+
+  if (widgetRow) {
+    const comments = await db
+      .select({
+        id: widgetComments.id,
+        body: widgetComments.body,
+        createdAt: widgetComments.createdAt,
+        updatedAt: widgetComments.updatedAt,
+        authorName: widgetUsers.name,
+      })
+      .from(widgetComments)
+      .leftJoin(widgetUsers, eq(widgetComments.widgetUserId, widgetUsers.id))
+      .where(eq(widgetComments.ticketId, widgetRow.id))
+      .orderBy(widgetComments.createdAt);
+
+    return {
+      ticket: {
+        ...widgetRow,
+        userVote: null,
+        canVote: false,
+      },
+      comments: comments.map((comment) => ({
+        id: comment.id,
+        body: comment.body,
+        authorName: comment.authorName ?? null,
+        createdAt: comment.createdAt.toISOString(),
+        updatedAt: comment.updatedAt.toISOString(),
+        attachments: null,
+      })),
+      activity: [],
+    };
+  }
+
+  const [workspaceRow] = await db
+    .select({
+      id: workspaceTasks.id,
+      title: workspaceTasks.title,
+      description: workspaceTasks.description,
+      status: workspaceTasks.status,
+      upvoteCount: workspaceTasks.upvoteCount,
+      createdAt: workspaceTasks.createdAt,
+      updatedAt: workspaceTasks.updatedAt,
+    })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      buildPublicWorkspaceTaskFilter(project),
+    ))
+    .limit(1);
+
+  if (!workspaceRow) return null;
+
+  const task = await WorkspaceTaskService.getTaskById(project.serverId, workspaceRow.id, { includeAttachments: true });
+  if (!task) return null;
+  const comments = await WorkspaceTaskService.listComments(task.id);
+  const activity = await WorkspaceTaskService.listActivity(task.id);
+
+  return {
+    ticket: mapWorkspaceTaskToWidgetTicket(projectId, workspaceRow),
+    comments: comments.map((comment) => ({
+      id: comment.id,
+      body: comment.content,
+      authorName: comment.createdByName ?? null,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      attachments: (comment.attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        filename: attachment.storageKey.split('/').pop(),
+        originalName: attachment.originalName ?? null,
+        mimeType: attachment.mimeType,
+        url: attachment.url ?? null,
+      })),
+    })),
+    activity: activity.map((entry) => ({
+      id: entry.id,
+      type: entry.type,
+      content: entry.content ?? null,
+      createdByName: entry.createdByName ?? null,
+      createdAt: entry.createdAt,
+      metadata: entry.metadata ?? null,
+      attachments: (entry.attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        filename: attachment.storageKey.split('/').pop(),
+        originalName: attachment.originalName ?? null,
+        mimeType: attachment.mimeType,
+        url: attachment.url ?? null,
+      })),
+    })),
   };
 }
 
