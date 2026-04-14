@@ -969,7 +969,12 @@ async function syncTicketToServer(
 
   // Look up ticket vote counts and submitter name
   const [ticket] = await db
-    .select({ yesVotes: widgetTickets.yesVotes, noVotes: widgetTickets.noVotes, widgetUserId: widgetTickets.widgetUserId })
+    .select({
+      yesVotes: widgetTickets.yesVotes,
+      noVotes: widgetTickets.noVotes,
+      widgetUserId: widgetTickets.widgetUserId,
+      isPrivate: widgetTickets.isPrivate,
+    })
     .from(widgetTickets)
     .where(eq(widgetTickets.id, ticketId))
     .limit(1);
@@ -1000,6 +1005,7 @@ async function syncTicketToServer(
         title,
         description: description || undefined,
         channelId: wp.channelId,
+        visibility: ticket?.isPrivate ? 'private' : 'public',
         sourceType: 'widget',
         sourceId: ticketId,
         sourceUrl: `https://runhq.io/project/${wp.slug}`,
@@ -1026,6 +1032,7 @@ export async function getUnsyncedTickets(serverId: string) {
       id: widgetTickets.id,
       title: widgetTickets.title,
       description: widgetTickets.description,
+      isPrivate: widgetTickets.isPrivate,
       projectId: widgetTickets.projectId,
       channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
@@ -1059,6 +1066,7 @@ export async function getUnsyncedTickets(serverId: string) {
       id: row.id,
       title: row.title,
       description: row.description,
+      isPrivate: row.isPrivate,
       channelId: row.channelId,
       slug: row.slug,
       sourceVoteData: JSON.stringify({ yes: row.yesVotes, no: row.noVotes, submittedBy }),
