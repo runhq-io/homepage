@@ -700,8 +700,8 @@
   // ---------------------------------------------------------------------------
 
   function renderTicket(proposal) {
-    var isActive = proposal.status === "ACTIVE" || proposal.status === "VOTING";
-    var isClosed = !isActive;
+    var isClosed = proposal.status === "done" || proposal.status === "cancelled";
+    var isActive = !isClosed;
 
     var yes = parseInt(proposal.yesVotes, 10) || 0;
     var no = parseInt(proposal.noVotes, 10) || 0;
@@ -829,20 +829,20 @@
     var container = h("div", null);
     tickets.forEach(function (p) {
       var statusText, statusColor;
-      if (p.moderationStatus === "PENDING") {
+      if (p.moderationStatus === "pending") {
         statusText = "Awaiting review"; statusColor = "#f59e0b";
-      } else if (p.status === "ACTIVE" || p.status === "VOTING") {
-        statusText = "Active"; statusColor = "#10b981";
-      } else if (p.status === "PASSED" || p.status === "EXECUTED") {
-        statusText = "Passed"; statusColor = "#10b981";
-      } else if (p.status === "REJECTED") {
-        statusText = "Rejected"; statusColor = "#ef4444";
-      } else if (p.status === "CANCELLED") {
+      } else if (p.status === "pending") {
+        statusText = "Pending"; statusColor = "#f59e0b";
+      } else if (p.status === "planned") {
+        statusText = "Planned"; statusColor = "#3b82f6";
+      } else if (p.status === "in_progress") {
+        statusText = "In Progress"; statusColor = "#8b5cf6";
+      } else if (p.status === "needs_review") {
+        statusText = "Needs Review"; statusColor = "#f59e0b";
+      } else if (p.status === "done") {
+        statusText = "Done"; statusColor = "#10b981";
+      } else if (p.status === "cancelled") {
         statusText = "Cancelled"; statusColor = "#6b7280";
-      } else if (p.status === "EXPIRED") {
-        statusText = "Expired"; statusColor = "#6b7280";
-      } else if (p.status === "QUORUM_FAILED") {
-        statusText = "Quorum not met"; statusColor = "#6b7280";
       } else {
         statusText = p.status; statusColor = "#6b7280";
       }
@@ -852,7 +852,7 @@
       }, statusText);
       var dateStr = p.createdAt ? new Date(p.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
       var metaItems = [badge];
-      if (p.moderationStatus !== "PENDING") {
+      if (p.moderationStatus !== "pending") {
         metaItems.push(h("span", { className: "rw-vote-counts" }, p.yesVotes + " yes / " + p.noVotes + " no"));
       }
       if (dateStr) {
@@ -895,7 +895,7 @@
       container.appendChild(renderEmpty("No tickets yet."));
     } else {
       var open = proposals.filter(function (p) {
-        return p.status === "ACTIVE" || p.status === "VOTING";
+        return p.status !== "done" && p.status !== "cancelled";
       });
 
       if (open.length > 0) {
