@@ -26,6 +26,7 @@ import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
+import { TaskAttachmentStorageService } from './services/TaskAttachmentStorageService';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
@@ -3553,6 +3554,8 @@ export function createHttpApp() {
   // Canonical Workspace/Public Tasks
   // ==========================================================================
 
+  const taskAttachmentStorage = new TaskAttachmentStorageService();
+
   async function requireAuthenticatedUser(c: any): Promise<string | null> {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return null;
@@ -3568,9 +3571,16 @@ export function createHttpApp() {
     if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
 
     const visibility = c.req.query('visibility');
+    const includeDeleted = c.req.query('includeDeleted') === 'true';
+    const workspaceProjectId = c.req.query('workspaceProjectId') ?? undefined;
+    const workspaceChannelId = c.req.query('workspaceChannelId') ?? undefined;
+    const includeAttachments = c.req.query('includeAttachments') === 'true';
     const tasks = await WorkspaceTaskService.listTasksByServer(serverId, {
       visibility: visibility === 'public' || visibility === 'private' ? visibility : undefined,
-      includeDeleted: c.req.query('includeDeleted') === 'true',
+      includeDeleted,
+      workspaceProjectId,
+      workspaceChannelId,
+      includeAttachments,
     });
     return c.json({ success: true, data: tasks });
   });
@@ -3610,7 +3620,7 @@ export function createHttpApp() {
     const hasAccess = await ServerService.canAccessServer(serverId, userId);
     if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
 
-    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'), { includeAttachments: true });
     if (!task) return c.json({ error: 'Task not found' }, 404);
     const comments = await WorkspaceTaskService.listComments(task.id);
     return c.json({ success: true, data: comments });
@@ -3645,6 +3655,21 @@ export function createHttpApp() {
     return c.json({ success: true, data: activity });
   });
 
+  app.post('/api/servers/:serverId/workspace-tasks/:taskId/activity', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const canEdit = await ServerService.canEditServer(serverId, userId);
+    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const body = await c.req.json();
+    const activity = await WorkspaceTaskService.addActivity(serverId, task.id, body);
+    return c.json({ success: true, data: activity }, 201);
+  });
+
   app.post('/api/server/workspace-tasks', async (c) => {
     const serverToken = c.req.header('X-Server-Token');
     if (!serverToken) return c.json({ error: 'Server token required' }, 401);
@@ -3654,6 +3679,76 @@ export function createHttpApp() {
     const body = await c.req.json();
     const task = await WorkspaceTaskService.createTask(server.id, body);
     return c.json({ success: true, data: task }, 201);
+  });
+
+  app.post('/api/server/workspace-task-attachments/upload', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+    if (!taskAttachmentStorage.isConfigured()) {
+      return c.json({ error: 'Task attachment object storage is not configured' }, 503);
+    }
+
+    const formData = await c.req.raw.formData();
+    const file = formData.get('file');
+    if (!file || typeof (file as any).arrayBuffer !== 'function') {
+      return c.json({ error: 'file field is required' }, 400);
+    }
+
+    const inputFile = file as globalThis.File;
+    const filename = String(formData.get('filename') || inputFile.name || 'attachment.bin');
+    const mimeType = String(formData.get('mimeType') || inputFile.type || 'application/octet-stream');
+    const originalNameValue = formData.get('originalName');
+    const modeValue = formData.get('mode');
+    const ownerTypeValue = formData.get('ownerType');
+    const ownerLegacyIdValue = formData.get('ownerLegacyId');
+
+    const storedAttachment = await taskAttachmentStorage.storeUpload({
+      serverId: server.id,
+      body: Buffer.from(await inputFile.arrayBuffer()),
+      filename,
+      mimeType,
+      originalName: typeof originalNameValue === 'string' ? originalNameValue : inputFile.name,
+      mode: modeValue === 'migration' ? 'migration' : 'upload',
+      ownerType: ownerTypeValue === 'task' || ownerTypeValue === 'comment' || ownerTypeValue === 'activity'
+        ? ownerTypeValue
+        : undefined,
+      ownerLegacyId: typeof ownerLegacyIdValue === 'string' ? ownerLegacyIdValue : null,
+    });
+    return c.json({ success: true, data: storedAttachment }, 201);
+  });
+
+  app.get('/api/server/workspace-tasks', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const visibility = c.req.query('visibility');
+    const includeDeleted = c.req.query('includeDeleted') === 'true';
+    const workspaceProjectId = c.req.query('workspaceProjectId') ?? undefined;
+    const workspaceChannelId = c.req.query('workspaceChannelId') ?? undefined;
+    const includeAttachments = c.req.query('includeAttachments') === 'true';
+    const tasks = await WorkspaceTaskService.listTasksByServer(server.id, {
+      visibility: visibility === 'public' || visibility === 'private' ? visibility : undefined,
+      includeDeleted,
+      workspaceProjectId,
+      workspaceChannelId,
+      includeAttachments,
+    });
+    return c.json({ success: true, data: tasks });
+  });
+
+  app.get('/api/server/workspace-tasks/:taskId', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'), { includeAttachments: true });
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
   });
 
   app.patch('/api/server/workspace-tasks/:taskId', async (c) => {
@@ -3679,6 +3774,43 @@ export function createHttpApp() {
     const body = await c.req.json();
     const comment = await WorkspaceTaskService.addComment(server.id, task.id, body);
     return c.json({ success: true, data: comment }, 201);
+  });
+
+  app.get('/api/server/workspace-tasks/:taskId/comments', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const comments = await WorkspaceTaskService.listComments(task.id);
+    return c.json({ success: true, data: comments });
+  });
+
+  app.get('/api/server/workspace-tasks/:taskId/activity', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const activity = await WorkspaceTaskService.listActivity(task.id);
+    return c.json({ success: true, data: activity });
+  });
+
+  app.post('/api/server/workspace-tasks/:taskId/activity', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const body = await c.req.json();
+    const activity = await WorkspaceTaskService.addActivity(server.id, task.id, body);
+    return c.json({ success: true, data: activity }, 201);
   });
 
   app.post('/api/server/workspace-tasks/migrate', async (c) => {

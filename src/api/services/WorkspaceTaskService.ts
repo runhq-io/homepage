@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import {
   workspaceTasks,
@@ -9,6 +9,8 @@ import {
 } from '../../db/schema';
 import type {
   ActivityType,
+  CanonicalTaskAttachment,
+  CanonicalTaskAttachmentInput,
   CanonicalTask,
   CanonicalTaskActivityEntry,
   CanonicalTaskComment,
@@ -20,6 +22,7 @@ import type {
   CanonicalTaskType,
   CanonicalTaskStatus,
 } from '@runhq/server-protocol';
+import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
 type CreateWorkspaceTaskInput = {
   workspaceProjectId?: string | null;
@@ -42,9 +45,12 @@ type CreateWorkspaceTaskInput = {
   deletedAt?: string | Date | null;
   upvoteCount?: number;
   legacyWorkspaceTodoId?: string | null;
+  attachments?: CanonicalTaskAttachmentInput[] | null;
 };
 
 type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput>;
+
+const attachmentStorage = new TaskAttachmentStorageService();
 
 function toIso(value?: Date | string | null): string | null {
   if (!value) return null;
@@ -56,7 +62,64 @@ function fromEpochMs(value?: number | null): Date | null {
   return new Date(value);
 }
 
-function toCanonicalTask(row: WorkspaceTask): CanonicalTask {
+async function toCanonicalAttachment(row: typeof workspaceTaskAttachments.$inferSelect): Promise<CanonicalTaskAttachment> {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
+    storageProvider: row.storageProvider,
+    storageKey: row.storageKey,
+    mimeType: row.mimeType,
+    originalName: row.originalName,
+    legacyWorkspaceAttachmentKey: row.legacyWorkspaceAttachmentKey,
+    url: await attachmentStorage.createDownloadUrl({
+      storageProvider: row.storageProvider,
+      storageKey: row.storageKey,
+      originalName: row.originalName,
+    }),
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+type TaskAttachmentGroup = {
+  task: CanonicalTaskAttachment[];
+  byOwnerId: Map<string, CanonicalTaskAttachment[]>;
+};
+
+async function loadTaskAttachmentGroups(taskIds: string[]): Promise<Map<string, TaskAttachmentGroup>> {
+  if (taskIds.length === 0) return new Map();
+
+  const rows = await db
+    .select()
+    .from(workspaceTaskAttachments)
+    .where(inArray(workspaceTaskAttachments.taskId, taskIds))
+    .orderBy(asc(workspaceTaskAttachments.createdAt));
+
+  const canonicalRows = await Promise.all(rows.map((row) => toCanonicalAttachment(row)));
+  const groups = new Map<string, TaskAttachmentGroup>();
+
+  for (const attachment of canonicalRows) {
+    let group = groups.get(attachment.taskId);
+    if (!group) {
+      group = { task: [], byOwnerId: new Map() };
+      groups.set(attachment.taskId, group);
+    }
+
+    if (attachment.ownerType === 'task') {
+      group.task.push(attachment);
+      continue;
+    }
+
+    const ownerAttachments = group.byOwnerId.get(attachment.ownerId) ?? [];
+    ownerAttachments.push(attachment);
+    group.byOwnerId.set(attachment.ownerId, ownerAttachments);
+  }
+
+  return groups;
+}
+
+function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachment[] | null): CanonicalTask {
   return {
     id: row.id,
     serverId: row.serverId,
@@ -80,12 +143,16 @@ function toCanonicalTask(row: WorkspaceTask): CanonicalTask {
     deletedAt: toIso(row.deletedAt),
     legacyWorkspaceTodoId: row.legacyWorkspaceTodoId,
     upvoteCount: row.upvoteCount,
+    attachments: attachments ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
 }
 
-function toCanonicalComment(row: typeof workspaceTaskComments.$inferSelect): CanonicalTaskComment {
+function toCanonicalComment(
+  row: typeof workspaceTaskComments.$inferSelect,
+  attachments?: CanonicalTaskAttachment[] | null,
+): CanonicalTaskComment {
   return {
     id: row.id,
     taskId: row.taskId,
@@ -94,13 +161,17 @@ function toCanonicalComment(row: typeof workspaceTaskComments.$inferSelect): Can
     createdById: row.createdById,
     createdByName: row.createdByName,
     legacyWorkspaceCommentId: row.legacyWorkspaceCommentId,
+    attachments: attachments ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     deletedAt: toIso(row.deletedAt),
   };
 }
 
-function toCanonicalActivity(row: typeof workspaceTaskActivity.$inferSelect): CanonicalTaskActivityEntry {
+function toCanonicalActivity(
+  row: typeof workspaceTaskActivity.$inferSelect,
+  attachments?: CanonicalTaskAttachment[] | null,
+): CanonicalTaskActivityEntry {
   return {
     id: row.id,
     taskId: row.taskId,
@@ -111,32 +182,50 @@ function toCanonicalActivity(row: typeof workspaceTaskActivity.$inferSelect): Ca
     createdById: row.createdById,
     createdByName: row.createdByName,
     legacyWorkspaceActivityId: row.legacyWorkspaceActivityId,
+    attachments: attachments ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
 
 export async function listTasksByServer(
   serverId: string,
-  options?: { visibility?: CanonicalTaskVisibility; includeDeleted?: boolean },
+  options?: {
+    visibility?: CanonicalTaskVisibility;
+    includeDeleted?: boolean;
+    workspaceProjectId?: string;
+    workspaceChannelId?: string;
+    includeAttachments?: boolean;
+  },
 ): Promise<CanonicalTask[]> {
   const conditions = [eq(workspaceTasks.serverId, serverId)];
   if (options?.visibility) conditions.push(eq(workspaceTasks.visibility, options.visibility));
+  if (options?.workspaceProjectId) conditions.push(eq(workspaceTasks.workspaceProjectId, options.workspaceProjectId));
+  if (options?.workspaceChannelId) conditions.push(eq(workspaceTasks.workspaceChannelId, options.workspaceChannelId));
   if (!options?.includeDeleted) conditions.push(isNull(workspaceTasks.deletedAt));
   const rows = await db
     .select()
     .from(workspaceTasks)
     .where(and(...conditions))
     .orderBy(desc(workspaceTasks.updatedAt));
-  return rows.map(toCanonicalTask);
+  const attachmentGroups = options?.includeAttachments
+    ? await loadTaskAttachmentGroups(rows.map((row) => row.id))
+    : new Map<string, TaskAttachmentGroup>();
+  return rows.map((row) => toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null));
 }
 
-export async function getTaskById(serverId: string, taskId: string): Promise<CanonicalTask | null> {
+export async function getTaskById(
+  serverId: string,
+  taskId: string,
+  options?: { includeAttachments?: boolean },
+): Promise<CanonicalTask | null> {
   const [row] = await db
     .select()
     .from(workspaceTasks)
     .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
     .limit(1);
-  return row ? toCanonicalTask(row) : null;
+  if (!row) return null;
+  const attachmentGroups = options?.includeAttachments ? await loadTaskAttachmentGroups([row.id]) : null;
+  return toCanonicalTask(row, attachmentGroups?.get(row.id)?.task ?? null);
 }
 
 export async function createTask(serverId: string, input: CreateWorkspaceTaskInput): Promise<CanonicalTask> {
@@ -168,7 +257,11 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
       updatedAt: new Date(),
     })
     .returning();
-  return toCanonicalTask(row);
+  if (input.attachments?.length) {
+    await replaceTaskAttachments(serverId, row.id, input.attachments);
+  }
+  const attachmentGroups = input.attachments?.length ? await loadTaskAttachmentGroups([row.id]) : null;
+  return toCanonicalTask(row, attachmentGroups?.get(row.id)?.task ?? null);
 }
 
 export async function updateTask(
@@ -202,7 +295,12 @@ export async function updateTask(
     .set(updates)
     .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
     .returning();
-  return row ? toCanonicalTask(row) : null;
+  if (!row) return null;
+  if (input.attachments !== undefined) {
+    await replaceTaskAttachments(serverId, row.id, input.attachments ?? []);
+  }
+  const attachmentGroups = await loadTaskAttachmentGroups([row.id]);
+  return toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
 }
 
 export async function listComments(taskId: string): Promise<CanonicalTaskComment[]> {
@@ -211,7 +309,9 @@ export async function listComments(taskId: string): Promise<CanonicalTaskComment
     .from(workspaceTaskComments)
     .where(eq(workspaceTaskComments.taskId, taskId))
     .orderBy(workspaceTaskComments.createdAt);
-  return rows.map(toCanonicalComment);
+  const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  const group = attachmentGroups.get(taskId);
+  return rows.map((row) => toCanonicalComment(row, group?.byOwnerId.get(row.id) ?? null));
 }
 
 export async function addComment(
@@ -222,6 +322,7 @@ export async function addComment(
     createdByType?: 'member' | 'external' | 'system' | 'agent';
     createdById?: string | null;
     createdByName?: string | null;
+    attachments?: CanonicalTaskAttachmentInput[] | null;
   },
 ): Promise<CanonicalTaskComment> {
   const [row] = await db
@@ -236,7 +337,11 @@ export async function addComment(
       updatedAt: new Date(),
     })
     .returning();
-  return toCanonicalComment(row);
+  if (input.attachments?.length) {
+    await insertOwnerAttachments(serverId, taskId, 'comment', row.id, input.attachments);
+  }
+  const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  return toCanonicalComment(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 
 export async function listActivity(taskId: string): Promise<CanonicalTaskActivityEntry[]> {
@@ -245,7 +350,9 @@ export async function listActivity(taskId: string): Promise<CanonicalTaskActivit
     .from(workspaceTaskActivity)
     .where(eq(workspaceTaskActivity.taskId, taskId))
     .orderBy(workspaceTaskActivity.createdAt);
-  return rows.map(toCanonicalActivity);
+  const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  const group = attachmentGroups.get(taskId);
+  return rows.map((row) => toCanonicalActivity(row, group?.byOwnerId.get(row.id) ?? null));
 }
 
 export async function addActivity(
@@ -258,6 +365,7 @@ export async function addActivity(
     createdByType?: 'member' | 'external' | 'system' | 'agent';
     createdById?: string | null;
     createdByName?: string | null;
+    attachments?: CanonicalTaskAttachmentInput[] | null;
   },
 ): Promise<CanonicalTaskActivityEntry> {
   const [row] = await db
@@ -273,7 +381,51 @@ export async function addActivity(
       createdByName: input.createdByName ?? null,
     })
     .returning();
-  return toCanonicalActivity(row);
+  if (input.attachments?.length) {
+    await insertOwnerAttachments(serverId, taskId, 'activity', row.id, input.attachments);
+  }
+  const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
+}
+
+async function replaceTaskAttachments(
+  serverId: string,
+  taskId: string,
+  attachments: CanonicalTaskAttachmentInput[],
+): Promise<void> {
+  await db
+    .delete(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.serverId, serverId),
+      eq(workspaceTaskAttachments.taskId, taskId),
+      eq(workspaceTaskAttachments.ownerType, 'task'),
+    ));
+
+  if (!attachments.length) return;
+  await insertOwnerAttachments(serverId, taskId, 'task', taskId, attachments);
+}
+
+async function insertOwnerAttachments(
+  serverId: string,
+  taskId: string,
+  ownerType: 'task' | 'comment' | 'activity',
+  ownerId: string,
+  attachments: CanonicalTaskAttachmentInput[],
+): Promise<void> {
+  if (!attachments.length) return;
+  await db.insert(workspaceTaskAttachments).values(
+    attachments.map((attachment) => ({
+      serverId,
+      taskId,
+      ownerType,
+      ownerId,
+      storageProvider: attachment.storageProvider,
+      storageKey: attachment.storageKey,
+      mimeType: attachment.mimeType,
+      originalName: attachment.originalName ?? null,
+      legacyWorkspaceAttachmentKey: attachment.legacyWorkspaceAttachmentKey ?? null,
+    })),
+  );
 }
 
 export async function upsertMigratedTaskBundle(

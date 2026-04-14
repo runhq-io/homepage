@@ -18,9 +18,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
-    "@runhq/server-protocol": "workspace:*",
+    "@aws-sdk/client-s3": "^3.1030.0",
+    "@aws-sdk/s3-request-presigner": "^3.1030.0",
     "@hono/node-server": "^1.19.9",
     "@neondatabase/serverless": "^0.10.4",
+    "@runhq/server-protocol": "workspace:*",
     "@xyflow/react": "^12.10.0",
     "arctic": "^3.7.0",
     "bcryptjs": "^3.0.3",
