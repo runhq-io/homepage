@@ -1000,6 +1000,111 @@ export type OauthToken = typeof oauthTokens.$inferSelect;
 export type NewOauthToken = typeof oauthTokens.$inferInsert;
 
 // ============================================================================
+// Canonical Workspace/Public Tasks
+// ============================================================================
+
+export const workspaceTasks = pgTable('workspace_tasks', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  workspaceProjectId: text('workspace_project_id'),
+  workspaceChannelId: text('workspace_channel_id'),
+  title: text('title').notNull(),
+  description: text('description'),
+  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled'>().default('pending'),
+  visibility: text('visibility').notNull().$type<'public' | 'private'>().default('private'),
+  sourceType: text('source_type').notNull().$type<'workspace' | 'widget'>().default('workspace'),
+  createdByType: text('created_by_type').notNull().$type<'member' | 'external' | 'system' | 'agent'>().default('member'),
+  createdById: text('created_by_id'),
+  createdByName: text('created_by_name'),
+  commentsDisabled: boolean('comments_disabled').notNull().default(false),
+  taskType: text('task_type').notNull().$type<'regular' | 'delayed' | 'scheduled'>().default('regular'),
+  schedule: text('schedule'),
+  scheduledAt: bigint('scheduled_at', { mode: 'number' }),
+  timezone: text('timezone'),
+  completedAt: timestamp('completed_at'),
+  archivedAt: timestamp('archived_at'),
+  deletedAt: timestamp('deleted_at'),
+  upvoteCount: integer('upvote_count').notNull().default(0),
+  legacyWorkspaceTodoId: text('legacy_workspace_todo_id'),
+  lastMigratedAt: timestamp('last_migrated_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  unique('workspace_tasks_server_legacy_todo_unique').on(t.serverId, t.legacyWorkspaceTodoId),
+]);
+
+export const workspaceTaskComments = pgTable('workspace_task_comments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  content: text('content').notNull(),
+  createdByType: text('created_by_type').notNull().$type<'member' | 'external' | 'system' | 'agent'>().default('member'),
+  createdById: text('created_by_id'),
+  createdByName: text('created_by_name'),
+  legacyWorkspaceCommentId: text('legacy_workspace_comment_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  deletedAt: timestamp('deleted_at'),
+}, (t) => [
+  unique('workspace_task_comments_server_legacy_comment_unique').on(t.serverId, t.legacyWorkspaceCommentId),
+]);
+
+export const workspaceTaskActivity = pgTable('workspace_task_activity', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(),
+  content: text('content'),
+  metadata: jsonb('metadata').$type<Record<string, unknown> | null>(),
+  createdByType: text('created_by_type').notNull().$type<'member' | 'external' | 'system' | 'agent'>().default('member'),
+  createdById: text('created_by_id'),
+  createdByName: text('created_by_name'),
+  legacyWorkspaceActivityId: text('legacy_workspace_activity_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  unique('workspace_task_activity_server_legacy_activity_unique').on(t.serverId, t.legacyWorkspaceActivityId),
+]);
+
+export const workspaceTaskAttachments = pgTable('workspace_task_attachments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  ownerType: text('owner_type').notNull().$type<'task' | 'comment' | 'activity'>(),
+  ownerId: text('owner_id').notNull(),
+  storageProvider: text('storage_provider').notNull().$type<'workspace-local' | 'r2' | 's3'>().default('workspace-local'),
+  storageKey: text('storage_key').notNull(),
+  mimeType: text('mime_type').notNull(),
+  originalName: text('original_name'),
+  legacyWorkspaceAttachmentKey: text('legacy_workspace_attachment_key'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  unique('workspace_task_attachments_server_legacy_attachment_unique').on(t.serverId, t.legacyWorkspaceAttachmentKey),
+]);
+
+export const workspaceTaskVotes = pgTable('workspace_task_votes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  voterType: text('voter_type').notNull().$type<'member' | 'external'>().default('member'),
+  voterId: text('voter_id').notNull(),
+  value: boolean('value').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  unique('workspace_task_votes_task_voter_unique').on(t.taskId, t.voterId),
+]);
+
+export type WorkspaceTask = typeof workspaceTasks.$inferSelect;
+export type NewWorkspaceTask = typeof workspaceTasks.$inferInsert;
+export type WorkspaceTaskComment = typeof workspaceTaskComments.$inferSelect;
+export type NewWorkspaceTaskComment = typeof workspaceTaskComments.$inferInsert;
+export type WorkspaceTaskActivity = typeof workspaceTaskActivity.$inferSelect;
+export type NewWorkspaceTaskActivity = typeof workspaceTaskActivity.$inferInsert;
+export type WorkspaceTaskAttachment = typeof workspaceTaskAttachments.$inferSelect;
+export type NewWorkspaceTaskAttachment = typeof workspaceTaskAttachments.$inferInsert;
+export type WorkspaceTaskVote = typeof workspaceTaskVotes.$inferSelect;
+export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
+
+// ============================================================================
 // Widget — Embeddable voting/feedback widget
 // ============================================================================
 

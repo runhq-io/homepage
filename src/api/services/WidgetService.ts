@@ -12,9 +12,10 @@ import {
   widgetUsers,
   widgetTickets,
   widgetVotes,
+  workspaceTasks,
+  servers,
 } from '../../db/schema';
-import { eq, and, ne, desc, sql, inArray } from 'drizzle-orm';
-import { servers } from '../../db/schema';
+import { eq, and, ne, desc, sql, inArray, isNull } from 'drizzle-orm';
 import { fetchFromServer } from './ServerService';
 
 // ============================================================================
@@ -33,9 +34,107 @@ interface HonoRequest {
   header(name: string): string | undefined;
 }
 
+interface WidgetProjectContext {
+  id: string;
+  name: string;
+  widgetPosition: string | null;
+  serverId: string;
+  channelId: string | null;
+}
+
+type CombinedWidgetTicket = {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string | null;
+  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
+  moderationStatus: 'pending' | 'approved' | 'rejected';
+  isPrivate: boolean;
+  source: string;
+  widgetUserId: string | null;
+  yesVotes: number;
+  noVotes: number;
+  votingEndsAt: Date | null;
+  syncStatus: 'synced' | 'pending';
+  flyTodoId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  userVote: boolean | null;
+  canVote: boolean;
+};
+
 // ============================================================================
 // Helpers
 // ============================================================================
+
+async function getWidgetProjectContext(projectId: string): Promise<WidgetProjectContext | null> {
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      name: widgetProjects.name,
+      widgetPosition: widgetProjects.widgetPosition,
+      serverId: widgetProjects.serverId,
+      channelId: widgetProjects.channelId,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+
+  return project ?? null;
+}
+
+function buildPublicWorkspaceTaskFilter(project: WidgetProjectContext) {
+  if (project.channelId) {
+    return and(
+      eq(workspaceTasks.serverId, project.serverId),
+      eq(workspaceTasks.workspaceChannelId, project.channelId),
+      eq(workspaceTasks.visibility, 'public'),
+      eq(workspaceTasks.sourceType, 'workspace'),
+      isNull(workspaceTasks.deletedAt),
+    );
+  }
+
+  return and(
+    eq(workspaceTasks.serverId, project.serverId),
+    eq(workspaceTasks.visibility, 'public'),
+    eq(workspaceTasks.sourceType, 'workspace'),
+    isNull(workspaceTasks.deletedAt),
+  );
+}
+
+function mapWorkspaceTaskToWidgetTicket(
+  projectId: string,
+  task: {
+    id: string;
+    title: string;
+    description: string | null;
+    status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
+    upvoteCount: number;
+    createdAt: Date;
+    updatedAt: Date;
+  }
+): CombinedWidgetTicket {
+  return {
+    id: task.id,
+    projectId,
+    title: task.title,
+    description: task.description,
+    status: task.status,
+    moderationStatus: 'approved',
+    isPrivate: false,
+    source: 'workspace',
+    widgetUserId: null,
+    yesVotes: task.upvoteCount,
+    noVotes: 0,
+    votingEndsAt: null,
+    syncStatus: 'synced',
+    flyTodoId: null,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    userVote: null,
+    canVote: false,
+  };
+}
 
 function base64urlDecode(str: string): string {
   // Replace URL-safe chars and add padding
@@ -189,31 +288,42 @@ export async function authenticateWidget(
 // ============================================================================
 
 export async function listTickets(projectId: string, widgetUserId?: string) {
-  const [project] = await db
-    .select({
-      name: widgetProjects.name,
-      widgetPosition: widgetProjects.widgetPosition,
-    })
-    .from(widgetProjects)
-    .where(eq(widgetProjects.id, projectId))
-    .limit(1);
+  const project = await getWidgetProjectContext(projectId);
 
-  const tickets = await db
+  const widgetRows = await db
     .select()
     .from(widgetTickets)
     .where(
       and(
         eq(widgetTickets.projectId, projectId),
-        ne(widgetTickets.moderationStatus, 'rejected')
+        ne(widgetTickets.moderationStatus, 'rejected'),
+        eq(widgetTickets.isPrivate, false),
       )
     )
     .orderBy(desc(widgetTickets.createdAt))
     .limit(50);
 
+  const workspaceRows = project
+    ? await db
+        .select({
+          id: workspaceTasks.id,
+          title: workspaceTasks.title,
+          description: workspaceTasks.description,
+          status: workspaceTasks.status,
+          upvoteCount: workspaceTasks.upvoteCount,
+          createdAt: workspaceTasks.createdAt,
+          updatedAt: workspaceTasks.updatedAt,
+        })
+        .from(workspaceTasks)
+        .where(buildPublicWorkspaceTaskFilter(project))
+        .orderBy(desc(workspaceTasks.createdAt))
+        .limit(50)
+    : [];
+
   // Fetch votes for identified user
   let userVoteMap: Map<string, boolean> = new Map();
-  if (widgetUserId && tickets.length > 0) {
-    const ticketIds = tickets.map((t) => t.id);
+  if (widgetUserId && widgetRows.length > 0) {
+    const ticketIds = widgetRows.map((t) => t.id);
     const votes = await db
       .select({ ticketId: widgetVotes.ticketId, value: widgetVotes.value })
       .from(widgetVotes)
@@ -228,14 +338,25 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     }
   }
 
+  const widgetTicketsWithVotes: CombinedWidgetTicket[] = widgetRows.map((t) => ({
+    ...t,
+    userVote: userVoteMap.has(t.id) ? userVoteMap.get(t.id) ?? null : null,
+    canVote: true,
+  }));
+
+  const canonicalTickets = workspaceRows.map((task) =>
+    mapWorkspaceTaskToWidgetTicket(projectId, task)
+  );
+
+  const tickets = [...widgetTicketsWithVotes, ...canonicalTickets]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 50);
+
   return {
     projectName: project?.name ?? '',
     position: project?.widgetPosition ?? null,
     isIdentified: !!widgetUserId,
-    tickets: tickets.map((t) => ({
-      ...t,
-      userVote: userVoteMap.has(t.id) ? userVoteMap.get(t.id) : null,
-    })),
+    tickets,
   };
 }
 
@@ -309,17 +430,28 @@ export async function listMyTickets(
 }
 
 export async function getTicketStats(projectId: string) {
-  const [result] = await db
+  const [widgetResult] = await db
     .select({
-      totalOpen: sql<number>`count(*) filter (where ${widgetTickets.moderationStatus} = 'approved' and ${widgetTickets.status} not in ('done', 'cancelled'))`,
-      totalDone: sql<number>`count(*) filter (where ${widgetTickets.moderationStatus} = 'approved' and ${widgetTickets.status} = 'done')`,
+      totalOpen: sql<number>`count(*) filter (where ${widgetTickets.moderationStatus} = 'approved' and ${widgetTickets.isPrivate} = false and ${widgetTickets.status} not in ('done', 'cancelled'))`,
+      totalDone: sql<number>`count(*) filter (where ${widgetTickets.moderationStatus} = 'approved' and ${widgetTickets.isPrivate} = false and ${widgetTickets.status} = 'done')`,
     })
     .from(widgetTickets)
     .where(eq(widgetTickets.projectId, projectId));
 
+  const project = await getWidgetProjectContext(projectId);
+  const [workspaceResult] = project
+    ? await db
+        .select({
+          totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'cancelled'))`,
+          totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} = 'done')`,
+        })
+        .from(workspaceTasks)
+        .where(buildPublicWorkspaceTaskFilter(project))
+    : [{ totalOpen: 0, totalDone: 0 }];
+
   return {
-    totalOpen: Number(result?.totalOpen ?? 0),
-    totalDone: Number(result?.totalDone ?? 0),
+    totalOpen: Number(widgetResult?.totalOpen ?? 0) + Number(workspaceResult?.totalOpen ?? 0),
+    totalDone: Number(widgetResult?.totalDone ?? 0) + Number(workspaceResult?.totalDone ?? 0),
   };
 }
 
@@ -462,8 +594,11 @@ export async function regenerateSecret(serverId: string) {
 export async function listPublicProjects() {
   const projects = await db
     .select({
+      id: widgetProjects.id,
       name: widgetProjects.name,
       slug: widgetProjects.slug,
+      serverId: widgetProjects.serverId,
+      channelId: widgetProjects.channelId,
       createdAt: widgetProjects.createdAt,
     })
     .from(widgetProjects)
@@ -473,18 +608,43 @@ export async function listPublicProjects() {
   // Get ticket counts per project
   const result = [];
   for (const p of projects) {
-    const [countRow] = await db
+    const [widgetCountRow] = await db
       .select({ count: sql<number>`count(*)` })
       .from(widgetTickets)
-      .innerJoin(widgetProjects, eq(widgetTickets.projectId, widgetProjects.id))
       .where(
         and(
-          eq(widgetProjects.slug, p.slug),
+          eq(widgetTickets.projectId, p.id),
           ne(widgetTickets.moderationStatus, 'rejected'),
           eq(widgetTickets.isPrivate, false),
         )
       );
-    result.push({ ...p, ticketCount: countRow?.count ?? 0 });
+
+    const workspaceWhere = p.channelId
+      ? and(
+          eq(workspaceTasks.serverId, p.serverId),
+          eq(workspaceTasks.workspaceChannelId, p.channelId),
+          eq(workspaceTasks.visibility, 'public'),
+          eq(workspaceTasks.sourceType, 'workspace'),
+          isNull(workspaceTasks.deletedAt),
+        )
+      : and(
+          eq(workspaceTasks.serverId, p.serverId),
+          eq(workspaceTasks.visibility, 'public'),
+          eq(workspaceTasks.sourceType, 'workspace'),
+          isNull(workspaceTasks.deletedAt),
+        );
+
+    const [workspaceCountRow] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(workspaceTasks)
+      .where(workspaceWhere);
+
+    result.push({
+      name: p.name,
+      slug: p.slug,
+      createdAt: p.createdAt,
+      ticketCount: Number(widgetCountRow?.count ?? 0) + Number(workspaceCountRow?.count ?? 0),
+    });
   }
 
   return result;

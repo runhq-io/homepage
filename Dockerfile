@@ -37,6 +37,7 @@ ENV NODE_ENV=production
 # Copy full source + node_modules (tsx transpiles on-the-fly)
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages ./packages
+COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/pnpm-workspace.yaml ./

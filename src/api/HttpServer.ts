@@ -25,6 +25,7 @@ import * as ServerSessionService from './services/ServerSessionService';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
+import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
@@ -3546,6 +3547,166 @@ export function createHttpApp() {
       console.error('[HttpServer] Update session settings error:', error);
       return c.json({ error: 'Failed to update session settings' }, 500);
     }
+  });
+
+  // ==========================================================================
+  // Canonical Workspace/Public Tasks
+  // ==========================================================================
+
+  async function requireAuthenticatedUser(c: any): Promise<string | null> {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return null;
+    return extractUserIdFromToken(authHeader.substring(7));
+  }
+
+  app.get('/api/servers/:serverId/workspace-tasks', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const hasAccess = await ServerService.canAccessServer(serverId, userId);
+    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+
+    const visibility = c.req.query('visibility');
+    const tasks = await WorkspaceTaskService.listTasksByServer(serverId, {
+      visibility: visibility === 'public' || visibility === 'private' ? visibility : undefined,
+      includeDeleted: c.req.query('includeDeleted') === 'true',
+    });
+    return c.json({ success: true, data: tasks });
+  });
+
+  app.post('/api/servers/:serverId/workspace-tasks', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const canEdit = await ServerService.canEditServer(serverId, userId);
+    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+
+    const body = await c.req.json();
+    const task = await WorkspaceTaskService.createTask(serverId, body);
+    return c.json({ success: true, data: task }, 201);
+  });
+
+  app.patch('/api/servers/:serverId/workspace-tasks/:taskId', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const canEdit = await ServerService.canEditServer(serverId, userId);
+    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+
+    const body = await c.req.json();
+    const task = await WorkspaceTaskService.updateTask(serverId, c.req.param('taskId'), body);
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
+  });
+
+  app.get('/api/servers/:serverId/workspace-tasks/:taskId/comments', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const hasAccess = await ServerService.canAccessServer(serverId, userId);
+    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const comments = await WorkspaceTaskService.listComments(task.id);
+    return c.json({ success: true, data: comments });
+  });
+
+  app.post('/api/servers/:serverId/workspace-tasks/:taskId/comments', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const canEdit = await ServerService.canEditServer(serverId, userId);
+    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const body = await c.req.json();
+    const comment = await WorkspaceTaskService.addComment(serverId, task.id, body);
+    return c.json({ success: true, data: comment }, 201);
+  });
+
+  app.get('/api/servers/:serverId/workspace-tasks/:taskId/activity', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const hasAccess = await ServerService.canAccessServer(serverId, userId);
+    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const activity = await WorkspaceTaskService.listActivity(task.id);
+    return c.json({ success: true, data: activity });
+  });
+
+  app.post('/api/server/workspace-tasks', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json();
+    const task = await WorkspaceTaskService.createTask(server.id, body);
+    return c.json({ success: true, data: task }, 201);
+  });
+
+  app.patch('/api/server/workspace-tasks/:taskId', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json();
+    const task = await WorkspaceTaskService.updateTask(server.id, c.req.param('taskId'), body);
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
+  });
+
+  app.post('/api/server/workspace-tasks/:taskId/comments', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const body = await c.req.json();
+    const comment = await WorkspaceTaskService.addComment(server.id, task.id, body);
+    return c.json({ success: true, data: comment }, 201);
+  });
+
+  app.post('/api/server/workspace-tasks/migrate', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json() as { bundles?: any[] };
+    if (!Array.isArray(body.bundles) || body.bundles.length === 0) {
+      return c.json({ error: 'bundles array required' }, 400);
+    }
+
+    const results = [];
+    for (const bundle of body.bundles) {
+      results.push(await WorkspaceTaskService.upsertMigratedTaskBundle(server.id, bundle));
+    }
+    return c.json({ success: true, data: results });
+  });
+
+  app.get('/api/server/workspace-tasks/migration-summary', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const summary = await WorkspaceTaskService.getMigrationSummary(server.id);
+    return c.json({ success: true, data: summary });
   });
 
   // ==========================================================================

@@ -405,6 +405,7 @@
       ".rw-vote-arrow.rw-down:hover { color: " + noColor + "; background: " + noColor + "14; }",
       ".rw-vote-arrow.rw-voted { color: " + yesColor + "; }",
       ".rw-vote-arrow.rw-down.rw-voted { color: " + noColor + "; }",
+      ".rw-vote-arrow.rw-disabled { opacity: 0.45; cursor: default; pointer-events: none; }",
       ".rw-vote-count {",
       "  font-size: 13px;",
       "  font-weight: 700;",
@@ -702,6 +703,7 @@
   function renderTicket(proposal) {
     var isClosed = proposal.status === "done" || proposal.status === "cancelled";
     var isActive = !isClosed;
+    var canVote = proposal.canVote !== false && config.isIdentified && isActive;
 
     var yes = parseInt(proposal.yesVotes, 10) || 0;
     var no = parseInt(proposal.noVotes, 10) || 0;
@@ -713,7 +715,7 @@
     function handleVote(value, e) {
       e.preventDefault();
       e.stopPropagation();
-      if (!config.isIdentified || isClosed) return;
+      if (!canVote) return;
       var alreadyVoted = (value === true && upVoted) || (value === false && downVoted);
       var action = alreadyVoted
         ? retractVote(proposal.id)
@@ -728,16 +730,20 @@
 
     // Vote column: ▲ count ▼ in a row
     var upArrow = h("button", {
-      className: "rw-vote-arrow" + (upVoted ? " rw-voted" : ""),
+      className: "rw-vote-arrow" + (upVoted ? " rw-voted" : "") + (!canVote ? " rw-disabled" : ""),
       onClick: function (e) { handleVote(true, e); },
+      disabled: canVote ? undefined : true,
+      "aria-disabled": canVote ? undefined : "true",
     },
       h("svg", { width: "8", height: "6", viewBox: "0 0 14 10", fill: "currentColor" },
         h("path", { d: "M7 0L13.9282 9.75H0.0717969L7 0Z" })
       )
     );
     var downArrow = h("button", {
-      className: "rw-vote-arrow rw-down" + (downVoted ? " rw-voted" : ""),
+      className: "rw-vote-arrow rw-down" + (downVoted ? " rw-voted" : "") + (!canVote ? " rw-disabled" : ""),
       onClick: function (e) { handleVote(false, e); },
+      disabled: canVote ? undefined : true,
+      "aria-disabled": canVote ? undefined : "true",
     },
       h("svg", { width: "8", height: "6", viewBox: "0 0 14 10", fill: "currentColor" },
         h("path", { d: "M7 10L0.0717969 0.25H13.9282L7 10Z" })
