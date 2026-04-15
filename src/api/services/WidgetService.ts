@@ -66,7 +66,15 @@ type CombinedWidgetTicket = {
 };
 
 export type PublicTicketDetail = {
-  ticket: CombinedWidgetTicket;
+  ticket: CombinedWidgetTicket & {
+    attachments?: Array<{
+      id?: string;
+      filename?: string;
+      originalName?: string | null;
+      mimeType?: string;
+      url?: string | null;
+    }> | null;
+  };
   comments: Array<{
     id: string;
     body: string;
@@ -97,6 +105,32 @@ export type PublicTicketDetail = {
     }> | null;
   }>;
 };
+
+type PublicAttachmentSummary = {
+  id?: string;
+  filename?: string;
+  originalName?: string | null;
+  mimeType?: string;
+  url?: string | null;
+};
+
+type PublicAttachmentLike = {
+  id?: string;
+  storageKey: string;
+  originalName?: string | null;
+  mimeType: string;
+  url?: string | null;
+};
+
+function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmentSummary {
+  return {
+    id: attachment.id,
+    filename: attachment.storageKey.split('/').pop(),
+    originalName: attachment.originalName ?? null,
+    mimeType: attachment.mimeType,
+    url: attachment.url ?? null,
+  };
+}
 
 // ============================================================================
 // Helpers
@@ -467,20 +501,17 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string)
   const activity = await WorkspaceTaskService.listActivity(task.id);
 
   return {
-    ticket: mapWorkspaceTaskToWidgetTicket(projectId, workspaceRow),
+    ticket: {
+      ...mapWorkspaceTaskToWidgetTicket(projectId, workspaceRow),
+      attachments: (task.attachments ?? []).map(mapAttachmentSummary),
+    },
     comments: comments.map((comment) => ({
       id: comment.id,
       body: comment.content,
       authorName: comment.createdByName ?? null,
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,
-      attachments: (comment.attachments ?? []).map((attachment) => ({
-        id: attachment.id,
-        filename: attachment.storageKey.split('/').pop(),
-        originalName: attachment.originalName ?? null,
-        mimeType: attachment.mimeType,
-        url: attachment.url ?? null,
-      })),
+      attachments: (comment.attachments ?? []).map(mapAttachmentSummary),
     })),
     activity: activity.map((entry) => ({
       id: entry.id,
@@ -489,13 +520,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string)
       createdByName: entry.createdByName ?? null,
       createdAt: entry.createdAt,
       metadata: entry.metadata ?? null,
-      attachments: (entry.attachments ?? []).map((attachment) => ({
-        id: attachment.id,
-        filename: attachment.storageKey.split('/').pop(),
-        originalName: attachment.originalName ?? null,
-        mimeType: attachment.mimeType,
-        url: attachment.url ?? null,
-      })),
+      attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
   };
 }
