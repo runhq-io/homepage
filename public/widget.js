@@ -150,7 +150,7 @@
           el.setAttribute("class", attrs[k]);
         } else if (k.slice(0, 2) === "on") {
           el.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
-        } else {
+        } else if (attrs[k] != null) {
           el.setAttribute(k, attrs[k]);
         }
       });
@@ -749,7 +749,10 @@
         h("path", { d: "M7 10L0.0717969 0.25H13.9282L7 10Z" })
       )
     );
-    var voteCol = h("div", { className: "rw-vote-col" }, [
+    var voteCol = h("div", {
+      className: "rw-vote-col",
+      onClick: function (e) { e.preventDefault(); e.stopPropagation(); },
+    }, [
       upArrow,
       h("span", { className: "rw-vote-count" }, String(net)),
       downArrow,
@@ -775,7 +778,7 @@
     var slug = config.projectId || config.project;
     return h("a", {
       className: "rw-proposal",
-      href: RUNHQ_API + "/project/" + slug + "/proposals/" + proposal.id,
+      href: (config.homepageUrl || RUNHQ_API) + "/project/" + slug + "/proposals/" + proposal.id,
       target: "_blank",
       rel: "noopener noreferrer",
     }, [voteCol, contentCol]);
@@ -875,7 +878,7 @@
       cardChildren.push(meta);
       var card = h("a", {
         className: "rw-submission-card",
-        href: RUNHQ_API + "/project/" + slug + "/proposals/" + p.id,
+        href: (config.homepageUrl || RUNHQ_API) + "/project/" + slug + "/proposals/" + p.id,
         target: "_blank",
         rel: "noopener noreferrer",
       }, cardChildren);
@@ -916,7 +919,7 @@
     // --- Show more link ---
     var showMoreLink = h("a", {
       className: "rw-show-more",
-      href: RUNHQ_API + "/project/" + (config.projectId || config.project),
+      href: (config.homepageUrl || RUNHQ_API) + "/project/" + (config.projectId || config.project),
       target: "_blank",
       rel: "noopener noreferrer",
     }, "Show more \u2192");
@@ -1257,7 +1260,7 @@
     headerTitleEl = h("strong", null, "Help us improve " + (config.projectName || config.projectId || ""));
     var poweredByEl = h("span", { className: "rw-powered" }, [
       document.createTextNode("powered by "),
-      h("a", { href: RUNHQ_API + "/project/" + (config.projectId || config.project), target: "_blank", rel: "noopener noreferrer" }, "RunHQWidget"),
+      h("a", { href: (config.homepageUrl || RUNHQ_API) + "/project/" + (config.projectId || config.project), target: "_blank", rel: "noopener noreferrer" }, "RunHQWidget"),
     ]);
     var header = h("div", { className: "rw-header" }, [
       h("div", { className: "rw-header-title" }, [
@@ -1341,6 +1344,7 @@
       loadTickets().then(function (data) {
         ticketsCache = data.tickets || [];
         config.projectId = data.projectSlug || config.project;
+        config.homepageUrl = data.homepageUrl || RUNHQ_API;
         config.projectName = data.projectName || config.project;
         // Parse compound position like "middle-right", "bottom-right", "top-left"
         var pos = (data.position || "middle-right").split("-");

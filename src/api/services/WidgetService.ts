@@ -39,6 +39,7 @@ interface HonoRequest {
 interface WidgetProjectContext {
   id: string;
   name: string;
+  slug: string;
   widgetPosition: string | null;
   serverId: string;
   channelId: string | null;
@@ -141,6 +142,7 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
     .select({
       id: widgetProjects.id,
       name: widgetProjects.name,
+      slug: widgetProjects.slug,
       widgetPosition: widgetProjects.widgetPosition,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
@@ -150,6 +152,13 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
     .limit(1);
 
   return project ?? null;
+}
+
+function getHomepageUrl(): string {
+  const cloudApiUrl = process.env.CLOUD_API_URL || 'https://console.runhq.io';
+  return cloudApiUrl
+    .replace('console-staging.', 'staging.')
+    .replace('console.', 'www.');
 }
 
 function buildPublicWorkspaceTaskFilter(project: WidgetProjectContext) {
@@ -423,6 +432,8 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
 
   return {
     projectName: project?.name ?? '',
+    projectSlug: project?.slug ?? '',
+    homepageUrl: getHomepageUrl(),
     position: project?.widgetPosition ?? null,
     isIdentified: !!widgetUserId,
     tickets,
