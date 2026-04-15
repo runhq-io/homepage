@@ -388,6 +388,34 @@ export async function addActivity(
   return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 
+export async function updateAttachmentStorage(
+  serverId: string,
+  attachmentId: string,
+  input: {
+    storageProvider: 'r2' | 's3';
+    storageKey: string;
+    mimeType: string;
+    originalName?: string | null;
+  },
+): Promise<CanonicalTaskAttachment | null> {
+  const [row] = await db
+    .update(workspaceTaskAttachments)
+    .set({
+      storageProvider: input.storageProvider,
+      storageKey: input.storageKey,
+      mimeType: input.mimeType,
+      originalName: input.originalName ?? null,
+    })
+    .where(and(
+      eq(workspaceTaskAttachments.serverId, serverId),
+      eq(workspaceTaskAttachments.id, attachmentId),
+    ))
+    .returning();
+
+  if (!row) return null;
+  return toCanonicalAttachment(row);
+}
+
 async function replaceTaskAttachments(
   serverId: string,
   taskId: string,

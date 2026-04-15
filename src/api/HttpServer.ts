@@ -3703,6 +3703,7 @@ export function createHttpApp() {
     const modeValue = formData.get('mode');
     const ownerTypeValue = formData.get('ownerType');
     const ownerLegacyIdValue = formData.get('ownerLegacyId');
+    const promoteAttachmentIdValue = formData.get('promoteAttachmentId');
 
     const storedAttachment = await taskAttachmentStorage.storeUpload({
       serverId: server.id,
@@ -3716,6 +3717,19 @@ export function createHttpApp() {
         : undefined,
       ownerLegacyId: typeof ownerLegacyIdValue === 'string' ? ownerLegacyIdValue : null,
     });
+
+    if (typeof promoteAttachmentIdValue === 'string' && promoteAttachmentIdValue) {
+      const updatedAttachment = await WorkspaceTaskService.updateAttachmentStorage(server.id, promoteAttachmentIdValue, {
+        storageProvider: storedAttachment.storageProvider,
+        storageKey: storedAttachment.storageKey,
+        mimeType: storedAttachment.mimeType,
+        originalName: storedAttachment.originalName ?? null,
+      });
+      if (!updatedAttachment) {
+        return c.json({ error: 'Canonical attachment not found' }, 404);
+      }
+    }
+
     return c.json({ success: true, data: storedAttachment }, 201);
   });
 

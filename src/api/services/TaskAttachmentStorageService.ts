@@ -45,7 +45,8 @@ export class TaskAttachmentStorageService {
     if (!this.isConfigured()) return null;
 
     const bucket = process.env.TASK_ATTACHMENT_STORAGE_BUCKET!;
-    const expiresIn = Number(process.env.TASK_ATTACHMENT_STORAGE_PRESIGN_TTL_SECONDS || '86400');
+    const requestedTtl = Number(process.env.TASK_ATTACHMENT_STORAGE_PRESIGN_TTL_SECONDS || '604800');
+    const expiresIn = Math.max(60, Math.min(Number.isFinite(requestedTtl) ? requestedTtl : 604800, 604800));
     const disposition = attachment.originalName
       ? `inline; filename="${attachment.originalName.replace(/"/g, '')}"`
       : undefined;
