@@ -326,6 +326,9 @@ export interface CanonicalTask {
   deletedAt?: string | null;
   legacyWorkspaceTodoId?: string | null;
   upvoteCount: number;
+  downvoteCount?: number;
+  moderationStatus?: 'pending' | 'approved' | 'rejected';
+  votingEndsAt?: string | null;
   upvotedByMe?: boolean;
   attachments?: CanonicalTaskAttachment[] | null;
   createdAt: string;

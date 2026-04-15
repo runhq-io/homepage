@@ -45,6 +45,7 @@ type CreateWorkspaceTaskInput = {
   archivedAt?: string | Date | null;
   deletedAt?: string | Date | null;
   upvoteCount?: number;
+  moderationStatus?: 'pending' | 'approved' | 'rejected';
   legacyWorkspaceTodoId?: string | null;
   attachments?: CanonicalTaskAttachmentInput[] | null;
 };
@@ -144,6 +145,9 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     deletedAt: toIso(row.deletedAt),
     legacyWorkspaceTodoId: row.legacyWorkspaceTodoId,
     upvoteCount: row.upvoteCount,
+    downvoteCount: row.downvoteCount,
+    moderationStatus: row.moderationStatus as 'pending' | 'approved' | 'rejected',
+    votingEndsAt: toIso(row.votingEndsAt),
     upvotedByMe: false,
     attachments: attachments ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -327,6 +331,7 @@ export async function updateTask(
   if (input.archivedAt !== undefined) updates.archivedAt = input.archivedAt ? new Date(input.archivedAt) : null;
   if (input.deletedAt !== undefined) updates.deletedAt = input.deletedAt ? new Date(input.deletedAt) : null;
   if (input.upvoteCount !== undefined) updates.upvoteCount = input.upvoteCount;
+  if (input.moderationStatus !== undefined) updates.moderationStatus = input.moderationStatus;
 
   const [row] = await db
     .update(workspaceTasks)
