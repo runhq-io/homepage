@@ -3835,6 +3835,34 @@ export function createHttpApp() {
     return c.json({ success: true, data: tasks });
   });
 
+  app.post('/api/server/workspace-tasks/migrate', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json() as { bundles?: any[] };
+    if (!Array.isArray(body.bundles) || body.bundles.length === 0) {
+      return c.json({ error: 'bundles array required' }, 400);
+    }
+
+    const results = [];
+    for (const bundle of body.bundles) {
+      results.push(await WorkspaceTaskService.upsertMigratedTaskBundle(server.id, bundle));
+    }
+    return c.json({ success: true, data: results });
+  });
+
+  app.get('/api/server/workspace-tasks/migration-summary', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const summary = await WorkspaceTaskService.getMigrationSummary(server.id);
+    return c.json({ success: true, data: summary });
+  });
+
   app.get('/api/server/workspace-tasks/:taskId', async (c) => {
     const serverToken = c.req.header('X-Server-Token');
     if (!serverToken) return c.json({ error: 'Server token required' }, 401);
@@ -3961,34 +3989,6 @@ export function createHttpApp() {
     const body = await c.req.json();
     const activity = await WorkspaceTaskService.addActivity(server.id, task.id, body);
     return c.json({ success: true, data: activity }, 201);
-  });
-
-  app.post('/api/server/workspace-tasks/migrate', async (c) => {
-    const serverToken = c.req.header('X-Server-Token');
-    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
-    const server = await ServerService.getServerByToken(serverToken);
-    if (!server) return c.json({ error: 'Invalid server token' }, 401);
-
-    const body = await c.req.json() as { bundles?: any[] };
-    if (!Array.isArray(body.bundles) || body.bundles.length === 0) {
-      return c.json({ error: 'bundles array required' }, 400);
-    }
-
-    const results = [];
-    for (const bundle of body.bundles) {
-      results.push(await WorkspaceTaskService.upsertMigratedTaskBundle(server.id, bundle));
-    }
-    return c.json({ success: true, data: results });
-  });
-
-  app.get('/api/server/workspace-tasks/migration-summary', async (c) => {
-    const serverToken = c.req.header('X-Server-Token');
-    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
-    const server = await ServerService.getServerByToken(serverToken);
-    if (!server) return c.json({ error: 'Invalid server token' }, 401);
-
-    const summary = await WorkspaceTaskService.getMigrationSummary(server.id);
-    return c.json({ success: true, data: summary });
   });
 
   // ==========================================================================
