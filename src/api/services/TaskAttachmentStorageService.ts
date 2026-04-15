@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 type StorageProvider = 'workspace-local' | 'r2' | 's3';
@@ -124,5 +124,20 @@ export class TaskAttachmentStorageService {
       originalName: params.originalName ?? null,
       url: null,
     };
+  }
+
+  async deleteStoredObject(input: {
+    storageProvider: StorageProvider;
+    storageKey: string;
+  }): Promise<void> {
+    if (input.storageProvider === 'workspace-local') return;
+    if (!this.isConfigured()) {
+      throw new Error('Task attachment object storage is not configured');
+    }
+
+    await this.getClient().send(new DeleteObjectCommand({
+      Bucket: process.env.TASK_ATTACHMENT_STORAGE_BUCKET!,
+      Key: input.storageKey,
+    }));
   }
 }

@@ -3733,6 +3733,29 @@ export function createHttpApp() {
     return c.json({ success: true, data: storedAttachment }, 201);
   });
 
+  app.post('/api/server/workspace-task-attachments/:attachmentId/demote', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json();
+    if (!body?.filename || typeof body.filename !== 'string') {
+      return c.json({ error: 'filename is required' }, 400);
+    }
+
+    const attachment = await WorkspaceTaskService.demoteAttachmentToWorkspaceLocal(server.id, c.req.param('attachmentId'), {
+      filename: body.filename,
+      mimeType: typeof body.mimeType === 'string' ? body.mimeType : 'application/octet-stream',
+      originalName: typeof body.originalName === 'string' ? body.originalName : null,
+    });
+    if (!attachment) {
+      return c.json({ error: 'Canonical attachment not found' }, 404);
+    }
+
+    return c.json({ success: true, data: attachment });
+  });
+
   app.get('/api/server/workspace-tasks', async (c) => {
     const serverToken = c.req.header('X-Server-Token');
     if (!serverToken) return c.json({ error: 'Server token required' }, 401);
