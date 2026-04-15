@@ -4163,6 +4163,20 @@ export function createHttpApp() {
     return c.json(result);
   });
 
+  app.get('/api/widget/tickets/mine', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    const tickets = await WidgetService.listMyTickets(auth.projectId, auth.widgetUserId);
+    return c.json({ tickets });
+  });
+
+  app.get('/api/widget/tickets/stats', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const stats = await WidgetService.getTicketStats(auth.projectId);
+    return c.json(stats);
+  });
+
   app.get('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
@@ -4181,20 +4195,6 @@ export function createHttpApp() {
     } catch (err) {
       return c.json({ error: String(err) }, 400);
     }
-  });
-
-  app.get('/api/widget/tickets/mine', async (c) => {
-    const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    const tickets = await WidgetService.listMyTickets(auth.projectId, auth.widgetUserId);
-    return c.json({ tickets });
-  });
-
-  app.get('/api/widget/tickets/stats', async (c) => {
-    const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const stats = await WidgetService.getTicketStats(auth.projectId);
-    return c.json(stats);
   });
 
   app.post('/api/widget/tickets/:id/vote', async (c) => {
