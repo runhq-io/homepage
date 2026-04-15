@@ -15,7 +15,8 @@
     "declarationMap": true,
     "sourceMap": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@runhq/server-protocol": ["./packages/protocol/dist/index.d.ts"]
     }
   },
   "include": [

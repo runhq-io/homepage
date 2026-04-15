@@ -3581,6 +3581,8 @@ export function createHttpApp() {
       workspaceProjectId,
       workspaceChannelId,
       includeAttachments,
+      viewerId: userId,
+      viewerType: 'member',
     });
     return c.json({ success: true, data: tasks });
   });
@@ -3612,6 +3614,40 @@ export function createHttpApp() {
     return c.json({ success: true, data: task });
   });
 
+  app.post('/api/servers/:serverId/workspace-tasks/:taskId/upvote', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const hasAccess = await ServerService.canAccessServer(serverId, userId);
+    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.setTaskUpvote(serverId, c.req.param('taskId'), {
+      voterId: userId,
+      voterType: 'member',
+      value: true,
+    });
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
+  });
+
+  app.delete('/api/servers/:serverId/workspace-tasks/:taskId/upvote', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const hasAccess = await ServerService.canAccessServer(serverId, userId);
+    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.setTaskUpvote(serverId, c.req.param('taskId'), {
+      voterId: userId,
+      voterType: 'member',
+      value: false,
+    });
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
+  });
+
   app.get('/api/servers/:serverId/workspace-tasks/:taskId/comments', async (c) => {
     const userId = await requireAuthenticatedUser(c);
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
@@ -3620,7 +3656,11 @@ export function createHttpApp() {
     const hasAccess = await ServerService.canAccessServer(serverId, userId);
     if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
 
-    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'), { includeAttachments: true });
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'), {
+      includeAttachments: true,
+      viewerId: userId,
+      viewerType: 'member',
+    });
     if (!task) return c.json({ error: 'Task not found' }, 404);
     const comments = await WorkspaceTaskService.listComments(task.id);
     return c.json({ success: true, data: comments });
@@ -3639,6 +3679,22 @@ export function createHttpApp() {
     const body = await c.req.json();
     const comment = await WorkspaceTaskService.addComment(serverId, task.id, body);
     return c.json({ success: true, data: comment }, 201);
+  });
+
+  app.delete('/api/servers/:serverId/workspace-tasks/:taskId/comments/:commentId', async (c) => {
+    const userId = await requireAuthenticatedUser(c);
+    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+
+    const serverId = c.req.param('serverId');
+    const canEdit = await ServerService.canEditServer(serverId, userId);
+    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+
+    const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+
+    const deleted = await WorkspaceTaskService.deleteComment(serverId, task.id, c.req.param('commentId'));
+    if (!deleted) return c.json({ error: 'Comment not found' }, 404);
+    return c.json({ success: true });
   });
 
   app.get('/api/servers/:serverId/workspace-tasks/:taskId/activity', async (c) => {
@@ -3773,6 +3829,8 @@ export function createHttpApp() {
       workspaceProjectId,
       workspaceChannelId,
       includeAttachments,
+      viewerId: c.req.query('viewerId') ?? undefined,
+      viewerType: c.req.query('viewerType') === 'external' ? 'external' : 'member',
     });
     return c.json({ success: true, data: tasks });
   });
@@ -3782,8 +3840,11 @@ export function createHttpApp() {
     if (!serverToken) return c.json({ error: 'Server token required' }, 401);
     const server = await ServerService.getServerByToken(serverToken);
     if (!server) return c.json({ error: 'Invalid server token' }, 401);
-
-    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'), { includeAttachments: true });
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'), {
+      includeAttachments: true,
+      viewerId: c.req.query('viewerId') ?? undefined,
+      viewerType: c.req.query('viewerType') === 'external' ? 'external' : 'member',
+    });
     if (!task) return c.json({ error: 'Task not found' }, 404);
     return c.json({ success: true, data: task });
   });
@@ -3800,6 +3861,45 @@ export function createHttpApp() {
     return c.json({ success: true, data: task });
   });
 
+  app.post('/api/server/workspace-tasks/:taskId/upvote', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json();
+    if (!body?.voterId || typeof body.voterId !== 'string') {
+      return c.json({ error: 'voterId is required' }, 400);
+    }
+
+    const task = await WorkspaceTaskService.setTaskUpvote(server.id, c.req.param('taskId'), {
+      voterId: body.voterId,
+      voterType: body.voterType === 'external' ? 'external' : 'member',
+      value: true,
+    });
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
+  });
+
+  app.delete('/api/server/workspace-tasks/:taskId/upvote', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const voterId = c.req.query('voterId');
+    const voterType = c.req.query('voterType');
+    if (!voterId) return c.json({ error: 'voterId is required' }, 400);
+
+    const task = await WorkspaceTaskService.setTaskUpvote(server.id, c.req.param('taskId'), {
+      voterId,
+      voterType: voterType === 'external' ? 'external' : 'member',
+      value: false,
+    });
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    return c.json({ success: true, data: task });
+  });
+
   app.post('/api/server/workspace-tasks/:taskId/comments', async (c) => {
     const serverToken = c.req.header('X-Server-Token');
     if (!serverToken) return c.json({ error: 'Server token required' }, 401);
@@ -3811,6 +3911,19 @@ export function createHttpApp() {
     const body = await c.req.json();
     const comment = await WorkspaceTaskService.addComment(server.id, task.id, body);
     return c.json({ success: true, data: comment }, 201);
+  });
+
+  app.delete('/api/server/workspace-tasks/:taskId/comments/:commentId', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
+    if (!task) return c.json({ error: 'Task not found' }, 404);
+    const deleted = await WorkspaceTaskService.deleteComment(server.id, task.id, c.req.param('commentId'));
+    if (!deleted) return c.json({ error: 'Comment not found' }, 404);
+    return c.json({ success: true });
   });
 
   app.get('/api/server/workspace-tasks/:taskId/comments', async (c) => {

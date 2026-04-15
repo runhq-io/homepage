@@ -24,6 +24,9 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@runhq/server-protocol": [
+        "./packages/protocol/dist/index.d.ts"
       ]
     },
     "target": "ES2017"

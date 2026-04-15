@@ -5,6 +5,7 @@ import {
   workspaceTaskComments,
   workspaceTaskActivity,
   workspaceTaskAttachments,
+  workspaceTaskVotes,
   type WorkspaceTask,
 } from '../../db/schema';
 import type {
@@ -143,10 +144,33 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     deletedAt: toIso(row.deletedAt),
     legacyWorkspaceTodoId: row.legacyWorkspaceTodoId,
     upvoteCount: row.upvoteCount,
+    upvotedByMe: false,
     attachments: attachments ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+async function loadTaskVoteMap(
+  taskIds: string[],
+  viewerId?: string | null,
+  viewerType: 'member' | 'external' = 'member',
+): Promise<Map<string, boolean>> {
+  if (!viewerId || taskIds.length === 0) return new Map();
+
+  const rows = await db
+    .select({
+      taskId: workspaceTaskVotes.taskId,
+      value: workspaceTaskVotes.value,
+    })
+    .from(workspaceTaskVotes)
+    .where(and(
+      inArray(workspaceTaskVotes.taskId, taskIds),
+      eq(workspaceTaskVotes.voterId, viewerId),
+      eq(workspaceTaskVotes.voterType, viewerType),
+    ));
+
+  return new Map(rows.map((row) => [row.taskId, row.value]));
 }
 
 function toCanonicalComment(
@@ -195,6 +219,8 @@ export async function listTasksByServer(
     workspaceProjectId?: string;
     workspaceChannelId?: string;
     includeAttachments?: boolean;
+    viewerId?: string | null;
+    viewerType?: 'member' | 'external';
   },
 ): Promise<CanonicalTask[]> {
   const conditions = [eq(workspaceTasks.serverId, serverId)];
@@ -210,13 +236,21 @@ export async function listTasksByServer(
   const attachmentGroups = options?.includeAttachments
     ? await loadTaskAttachmentGroups(rows.map((row) => row.id))
     : new Map<string, TaskAttachmentGroup>();
-  return rows.map((row) => toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null));
+  const voteMap = await loadTaskVoteMap(rows.map((row) => row.id), options?.viewerId, options?.viewerType ?? 'member');
+  return rows.map((row) => ({
+    ...toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null),
+    upvotedByMe: voteMap.get(row.id) ?? false,
+  }));
 }
 
 export async function getTaskById(
   serverId: string,
   taskId: string,
-  options?: { includeAttachments?: boolean },
+  options?: {
+    includeAttachments?: boolean;
+    viewerId?: string | null;
+    viewerType?: 'member' | 'external';
+  },
 ): Promise<CanonicalTask | null> {
   const [row] = await db
     .select()
@@ -225,7 +259,11 @@ export async function getTaskById(
     .limit(1);
   if (!row) return null;
   const attachmentGroups = options?.includeAttachments ? await loadTaskAttachmentGroups([row.id]) : null;
-  return toCanonicalTask(row, attachmentGroups?.get(row.id)?.task ?? null);
+  const voteMap = await loadTaskVoteMap([row.id], options?.viewerId, options?.viewerType ?? 'member');
+  return {
+    ...toCanonicalTask(row, attachmentGroups?.get(row.id)?.task ?? null),
+    upvotedByMe: voteMap.get(row.id) ?? false,
+  };
 }
 
 export async function createTask(serverId: string, input: CreateWorkspaceTaskInput): Promise<CanonicalTask> {
@@ -307,7 +345,10 @@ export async function listComments(taskId: string): Promise<CanonicalTaskComment
   const rows = await db
     .select()
     .from(workspaceTaskComments)
-    .where(eq(workspaceTaskComments.taskId, taskId))
+    .where(and(
+      eq(workspaceTaskComments.taskId, taskId),
+      isNull(workspaceTaskComments.deletedAt),
+    ))
     .orderBy(workspaceTaskComments.createdAt);
   const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
   const group = attachmentGroups.get(taskId);
@@ -342,6 +383,142 @@ export async function addComment(
   }
   const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
   return toCanonicalComment(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
+}
+
+export async function deleteComment(
+  serverId: string,
+  taskId: string,
+  commentId: string,
+): Promise<boolean> {
+  const [comment] = await db
+    .select()
+    .from(workspaceTaskComments)
+    .where(and(
+      eq(workspaceTaskComments.serverId, serverId),
+      eq(workspaceTaskComments.taskId, taskId),
+      eq(workspaceTaskComments.id, commentId),
+      isNull(workspaceTaskComments.deletedAt),
+    ))
+    .limit(1);
+
+  if (!comment) return false;
+
+  const attachments = await db
+    .select()
+    .from(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.serverId, serverId),
+      eq(workspaceTaskAttachments.taskId, taskId),
+      eq(workspaceTaskAttachments.ownerType, 'comment'),
+      eq(workspaceTaskAttachments.ownerId, commentId),
+    ));
+
+  await db
+    .delete(workspaceTaskComments)
+    .where(and(
+      eq(workspaceTaskComments.serverId, serverId),
+      eq(workspaceTaskComments.taskId, taskId),
+      eq(workspaceTaskComments.id, commentId),
+    ));
+
+  await db
+    .delete(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.serverId, serverId),
+      eq(workspaceTaskAttachments.taskId, taskId),
+      eq(workspaceTaskAttachments.ownerType, 'comment'),
+      eq(workspaceTaskAttachments.ownerId, commentId),
+    ));
+
+  for (const attachment of attachments) {
+    try {
+      await attachmentStorage.deleteStoredObject({
+        storageProvider: attachment.storageProvider,
+        storageKey: attachment.storageKey,
+      });
+    } catch (error) {
+      console.warn(`[WorkspaceTaskService] Failed to delete stored object for comment ${commentId} attachment ${attachment.id}:`, error);
+    }
+  }
+
+  return true;
+}
+
+async function recountTaskUpvotes(taskId: string): Promise<number> {
+  const [row] = await db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(workspaceTaskVotes)
+    .where(and(
+      eq(workspaceTaskVotes.taskId, taskId),
+      eq(workspaceTaskVotes.value, true),
+    ));
+
+  const upvoteCount = Number(row?.count ?? 0);
+  await db
+    .update(workspaceTasks)
+    .set({
+      upvoteCount,
+      updatedAt: new Date(),
+    })
+    .where(eq(workspaceTasks.id, taskId));
+  return upvoteCount;
+}
+
+export async function setTaskUpvote(
+  serverId: string,
+  taskId: string,
+  input: {
+    voterId: string;
+    voterType?: 'member' | 'external';
+    value: boolean;
+  },
+): Promise<CanonicalTask | null> {
+  const voterType = input.voterType ?? 'member';
+  const [task] = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
+    .limit(1);
+
+  if (!task) return null;
+
+  const [existingVote] = await db
+    .select()
+    .from(workspaceTaskVotes)
+    .where(and(
+      eq(workspaceTaskVotes.taskId, taskId),
+      eq(workspaceTaskVotes.voterId, input.voterId),
+      eq(workspaceTaskVotes.voterType, voterType),
+    ))
+    .limit(1);
+
+  if (input.value) {
+    if (!existingVote) {
+      await db.insert(workspaceTaskVotes).values({
+        serverId,
+        taskId,
+        voterId: input.voterId,
+        voterType,
+        value: true,
+      });
+    } else if (!existingVote.value) {
+      await db
+        .update(workspaceTaskVotes)
+        .set({ value: true })
+        .where(eq(workspaceTaskVotes.id, existingVote.id));
+    }
+  } else if (existingVote) {
+    await db.delete(workspaceTaskVotes).where(eq(workspaceTaskVotes.id, existingVote.id));
+  }
+
+  await recountTaskUpvotes(taskId);
+  return getTaskById(serverId, taskId, {
+    includeAttachments: true,
+    viewerId: input.voterId,
+    viewerType: voterType,
+  });
 }
 
 export async function listActivity(taskId: string): Promise<CanonicalTaskActivityEntry[]> {
