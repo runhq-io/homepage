@@ -159,7 +159,7 @@ function buildWidgetVisibleFilter(project: WidgetProjectContext) {
   const baseConditions = [
     eq(workspaceTasks.serverId, project.serverId),
     isNull(workspaceTasks.deletedAt),
-    ne(workspaceTasks.moderationStatus, 'rejected'),
+    eq(workspaceTasks.moderationStatus, 'approved'),
   ];
 
   if (project.channelId) {
@@ -423,11 +423,13 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
 
   if (!task) return null;
 
+  const isCreator = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
+
+  // Pending moderation tickets are only visible to their creator
+  if (task.moderationStatus === 'pending' && !isCreator) return null;
+
   // Private tasks are only visible to their creator
-  if (task.visibility === 'private') {
-    const isCreator = widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
-    if (!isCreator) return null;
-  }
+  if (task.visibility === 'private' && !isCreator) return null;
 
   // Get comments
   const comments = await WorkspaceTaskService.listComments(task.id);
@@ -436,7 +438,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   // Get attachments
   const fullTask = await WorkspaceTaskService.getTaskById(project.serverId, task.id, { includeAttachments: true });
 
-  const isOwner = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
+  const isOwner = isCreator;
   const isEditable = isOwner
     && task.status === 'pending'
     && task.moderationStatus !== 'rejected'
@@ -798,7 +800,7 @@ export async function getTicketStats(projectId: string) {
   const conditions = [
     eq(workspaceTasks.serverId, project.serverId),
     eq(workspaceTasks.visibility, 'public'),
-    ne(workspaceTasks.moderationStatus, 'rejected'),
+    eq(workspaceTasks.moderationStatus, 'approved'),
     isNull(workspaceTasks.deletedAt),
     ...(channelCondition ? [channelCondition] : []),
   ];
@@ -1012,7 +1014,7 @@ export async function listPublicProjects() {
       .where(and(
         eq(workspaceTasks.serverId, p.serverId),
         eq(workspaceTasks.visibility, 'public'),
-        ne(workspaceTasks.moderationStatus, 'rejected'),
+        eq(workspaceTasks.moderationStatus, 'approved'),
         isNull(workspaceTasks.deletedAt),
         ...(channelCondition ? [channelCondition] : []),
       ));
