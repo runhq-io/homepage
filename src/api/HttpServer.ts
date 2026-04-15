@@ -4180,7 +4180,7 @@ export function createHttpApp() {
   app.get('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'));
+    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId);
     if (!detail) return c.json({ error: 'Ticket not found' }, 404);
     return c.json(detail);
   });
@@ -4214,6 +4214,87 @@ export function createHttpApp() {
     if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
     await WidgetService.retractVote(c.req.param('id'), auth.widgetUserId);
     return c.json({ ok: true });
+  });
+
+  app.patch('/api/widget/tickets/:id', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+    const body = await c.req.json();
+    try {
+      const ticket = await WidgetService.updateTicket(c.req.param('id'), auth.projectId, auth.widgetUserId, body);
+      return c.json({ ticket });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.delete('/api/widget/tickets/:id', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+    try {
+      await WidgetService.deleteTicket(c.req.param('id'), auth.projectId, auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.post('/api/widget/tickets/:id/attachments', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+
+    try {
+      const formData = await c.req.raw.formData();
+      const file = formData.get('file');
+      if (!file || typeof (file as any).arrayBuffer !== 'function') {
+        return c.json({ error: 'file field is required' }, 400);
+      }
+
+      const inputFile = file as globalThis.File;
+      const buffer = Buffer.from(await inputFile.arrayBuffer());
+      const mimeType = inputFile.type || 'application/octet-stream';
+      const filename = inputFile.name || 'attachment';
+
+      const attachment = await WidgetService.uploadTicketAttachment(
+        c.req.param('id'),
+        auth.projectId,
+        auth.widgetUserId,
+        { buffer, mimeType, filename, originalName: inputFile.name },
+      );
+      return c.json({ attachment }, 201);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.delete('/api/widget/tickets/:id/attachments/:attachmentId', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+
+    try {
+      await WidgetService.deleteTicketAttachment(
+        c.req.param('id'),
+        c.req.param('attachmentId'),
+        auth.projectId,
+        auth.widgetUserId,
+      );
+      return c.json({ ok: true });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
+      if (msg === 'Attachment not found') return c.json({ error: msg }, 404);
+      return c.json({ error: msg }, 400);
+    }
   });
 
   // ==========================================================================
@@ -4323,47 +4404,8 @@ export function createHttpApp() {
     return c.json({ success: true });
   });
 
-  // ── Widget Sync Endpoints (Fly server ↔ BE) ──────────────────────
-  // Auth: server token (same pattern as heartbeat/register)
-
-  app.get('/api/widget/tickets/unsynced', async (c) => {
-    const serverToken = c.req.header('X-Server-Token');
-    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
-    const server = await ServerService.getServerByToken(serverToken);
-    if (!server) return c.json({ error: 'Invalid server token' }, 401);
-
-    const serverId = server.id;
-    const tickets = await WidgetService.getUnsyncedTickets(serverId);
-    return c.json({ tickets });
-  });
-
-  app.post('/api/widget/tickets/mark-synced', async (c) => {
-    const serverToken = c.req.header('X-Server-Token');
-    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
-    const server = await ServerService.getServerByToken(serverToken);
-    if (!server) return c.json({ error: 'Invalid server token' }, 401);
-
-    const { ticketIds, flyTodoIds } = await c.req.json();
-    if (!Array.isArray(ticketIds)) return c.json({ error: 'ticketIds required' }, 400);
-
-    await WidgetService.markTicketsSynced(ticketIds, flyTodoIds || {});
-    return c.json({ success: true });
-  });
-
-  app.patch('/api/widget/tickets/:id/status', async (c) => {
-    const serverToken = c.req.header('X-Server-Token');
-    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
-    const server = await ServerService.getServerByToken(serverToken);
-    if (!server) return c.json({ error: 'Invalid server token' }, 401);
-
-    const ticketId = c.req.param('id');
-    const { status } = await c.req.json();
-    const validStatuses = ['pending', 'planned', 'in_progress', 'needs_review', 'done', 'cancelled'];
-    if (!status || !validStatuses.includes(status)) return c.json({ error: 'Invalid status' }, 400);
-
-    await WidgetService.updateTicketStatus(ticketId, status);
-    return c.json({ success: true });
-  });
+  // Legacy sync endpoints (unsynced, mark-synced, status) removed —
+  // workspace_tasks is now the single source of truth.
 
   // Mount OAuth routes
   app.route('/oauth', oauth);

@@ -1025,6 +1025,9 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   archivedAt: timestamp('archived_at'),
   deletedAt: timestamp('deleted_at'),
   upvoteCount: integer('upvote_count').notNull().default(0),
+  downvoteCount: integer('downvote_count').notNull().default(0),
+  moderationStatus: text('moderation_status').notNull().$type<'pending' | 'approved' | 'rejected'>().default('approved'),
+  votingEndsAt: timestamp('voting_ends_at'),
   legacyWorkspaceTodoId: text('legacy_workspace_todo_id'),
   lastMigratedAt: timestamp('last_migrated_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -1137,6 +1140,8 @@ export const widgetUsers = pgTable('widget_users', {
   { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
 ]);
 
+// Legacy widget tables — kept in schema to prevent db:push from dropping them.
+// Data will be migrated to workspace_tasks, then these can be removed.
 export const widgetTickets = pgTable('widget_tickets', {
   id: uuid('id').primaryKey().defaultRandom(),
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
@@ -1177,7 +1182,4 @@ export const widgetComments = pgTable('widget_comments', {
 
 export type WidgetProject = typeof widgetProjects.$inferSelect;
 export type NewWidgetProject = typeof widgetProjects.$inferInsert;
-export type WidgetTicket = typeof widgetTickets.$inferSelect;
 export type WidgetUser = typeof widgetUsers.$inferSelect;
-export type WidgetVote = typeof widgetVotes.$inferSelect;
-export type WidgetComment = typeof widgetComments.$inferSelect;

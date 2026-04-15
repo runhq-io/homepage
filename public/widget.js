@@ -133,6 +133,41 @@
     });
   }
 
+  function loadTicketDetail(ticketId) {
+    return api("/api/widget/tickets/" + ticketId);
+  }
+
+  function updateTicket(ticketId, data) {
+    return api("/api/widget/tickets/" + ticketId, { method: "PATCH", body: data });
+  }
+
+  function deleteTicket(ticketId) {
+    return api("/api/widget/tickets/" + ticketId, { method: "DELETE" });
+  }
+
+  function uploadAttachment(ticketId, file) {
+    var formData = new FormData();
+    formData.append("file", file);
+    var headers = {};
+    if (config.token) {
+      headers["Authorization"] = "Bearer " + config.token;
+    } else if (config.project) {
+      headers["X-RW-Project"] = config.project;
+    }
+    return fetch(RUNHQ_API + "/api/widget/tickets/" + ticketId + "/attachments", {
+      method: "POST",
+      headers: headers,
+      body: formData,
+    }).then(function (r) {
+      if (!r.ok) throw new Error("Upload failed: " + r.status);
+      return r.json();
+    });
+  }
+
+  function deleteAttachmentApi(ticketId, attachmentId) {
+    return api("/api/widget/tickets/" + ticketId + "/attachments/" + attachmentId, { method: "DELETE" });
+  }
+
   // ---------------------------------------------------------------------------
   // DOM helper
   // ---------------------------------------------------------------------------
@@ -638,6 +673,64 @@
       ".rw-submission-date{color:" + textFaint + ";font-size:10px}",
       ".rw-status-badge{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600}",
       ".rw-vote-counts{color:" + textMuted + "}",
+
+      /* Detail view */
+      ".rw-detail { padding: 0 12px; }",
+      ".rw-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }",
+      ".rw-detail-title { font-size: 16px; font-weight: 700; color: " + text + "; line-height: 1.3; word-break: break-word; }",
+      ".rw-detail-desc { font-size: 13px; color: " + textMuted + "; line-height: 1.5; white-space: pre-wrap; word-break: break-word; margin-bottom: 12px; }",
+      ".rw-detail-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: " + textFaint + "; margin-bottom: 16px; flex-wrap: wrap; }",
+      ".rw-detail-actions { display: flex; gap: 6px; margin-bottom: 16px; }",
+      ".rw-edit-btn { padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + text + "; font-family: inherit; transition: all 0.15s; }",
+      ".rw-edit-btn:hover { border-color: " + accent + "; color: " + accent + "; }",
+      ".rw-delete-btn { padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + noColor + "; font-family: inherit; transition: all 0.15s; }",
+      ".rw-delete-btn:hover { border-color: " + noColor + "; background: " + noColor + "14; }",
+      ".rw-delete-confirm { padding: 10px 12px; border-radius: 8px; background: " + noColor + "14; border: 1px solid " + noColor + "40; margin-bottom: 12px; }",
+      ".rw-delete-confirm p { font-size: 12px; color: " + noColor + "; margin: 0 0 8px; }",
+      ".rw-delete-confirm-actions { display: flex; gap: 6px; }",
+      ".rw-delete-yes { padding: 4px 12px; border-radius: 5px; font-size: 11px; font-weight: 600; cursor: pointer; border: none; background: " + noColor + "; color: #fff; font-family: inherit; }",
+      ".rw-delete-yes:hover { opacity: 0.9; }",
+      ".rw-delete-cancel { padding: 4px 12px; border-radius: 5px; font-size: 11px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + textMuted + "; font-family: inherit; }",
+
+      /* Timeline */
+      ".rw-timeline-label { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: " + textFaint + "; margin-bottom: 10px; }",
+      ".rw-timeline { position: relative; }",
+      ".rw-timeline-item { position: relative; padding-left: 28px; padding-bottom: 16px; }",
+      ".rw-timeline-item:last-child { padding-bottom: 0; }",
+      ".rw-timeline-line { position: absolute; left: 9px; top: 24px; bottom: 0; width: 1px; background: " + border + "; }",
+      ".rw-timeline-item:last-child .rw-timeline-line { display: none; }",
+      ".rw-timeline-dot { position: absolute; left: 3px; top: 4px; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid " + border + "; background: " + bg + "; display: flex; align-items: center; justify-content: center; font-size: 8px; }",
+      ".rw-timeline-dot-comment { border-color: " + accent + "; }",
+      ".rw-timeline-card { background: " + bgAlt + "; border: 1px solid " + border + "; border-radius: 8px; padding: 8px 10px; }",
+      ".rw-timeline-card-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }",
+      ".rw-timeline-author { font-size: 12px; font-weight: 600; color: " + text + "; }",
+      ".rw-timeline-date { font-size: 10px; color: " + textFaint + "; }",
+      ".rw-timeline-body { font-size: 12px; color: " + textMuted + "; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }",
+      ".rw-timeline-activity { font-size: 11px; color: " + textFaint + "; font-style: italic; }",
+
+      /* Edit form within detail */
+      ".rw-edit-form { margin-bottom: 12px; }",
+      ".rw-edit-form .rw-input { margin-bottom: 8px; }",
+      ".rw-edit-form-actions { display: flex; gap: 6px; }",
+      ".rw-save-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; border: none; background: " + accent + "; color: #fff; font-family: inherit; transition: opacity 0.15s; }",
+      ".rw-save-btn:hover { opacity: 0.9; }",
+      ".rw-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }",
+      ".rw-cancel-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + textMuted + "; font-family: inherit; }",
+
+      /* Open full page link */
+      ".rw-open-full { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: " + accent + "; text-decoration: none; margin-bottom: 12px; }",
+      ".rw-open-full:hover { text-decoration: underline; }",
+
+      /* Detail attachments */
+      ".rw-detail-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }",
+      ".rw-detail-attach-img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid " + border + "; cursor: pointer; transition: border-color 0.15s; }",
+      ".rw-detail-attach-img:hover { border-color: " + accent + "; }",
+
+      /* Edit attachments */
+      ".rw-edit-attachments { margin-bottom: 10px; }",
+      ".rw-edit-attach-item { display: inline-flex; position: relative; margin: 0 6px 6px 0; }",
+      ".rw-edit-attach-img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; border: 1px solid " + border + "; }",
+      ".rw-edit-attach-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; background: " + noColor + "; color: #fff; border: none; border-radius: 50%; font-size: 11px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }",
     ].join("\n");
 
     var style = document.createElement("style");
@@ -775,13 +868,404 @@
     ];
     var contentCol = h("div", { className: "rw-proposal-content" }, contentChildren);
 
-    var slug = config.projectId || config.project;
-    return h("a", {
+    return h("div", {
       className: "rw-proposal",
-      href: (config.homepageUrl || RUNHQ_API) + "/project/" + slug + "/proposals/" + proposal.id,
+      onClick: function (e) {
+        if (e.defaultPrevented) return;
+        showTicketDetail(proposal.id);
+      },
+    }, [voteCol, contentCol]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ticket detail view
+  // ---------------------------------------------------------------------------
+
+  function showTicketDetail(ticketId) {
+    setBodyContent(renderLoading());
+    loadTicketDetail(ticketId).then(function (data) {
+      setBodyContent(renderTicketDetail(data));
+    }).catch(function (err) {
+      setBodyContent(renderNotice("error", "Could not load ticket: " + err.message));
+    });
+  }
+
+  function renderActivityLabel(entry) {
+    var actor = entry.createdByName || "Someone";
+    switch (entry.type) {
+      case "task_created": return actor + " created this task";
+      case "status_change":
+        return actor + " changed status" + (entry.metadata && entry.metadata.to ? " to " + String(entry.metadata.to).replace(/_/g, " ") : "");
+      case "agent_assigned":
+        return actor + " assigned " + (entry.metadata && entry.metadata.agentName ? String(entry.metadata.agentName) : "an agent");
+      case "task_archived": return actor + " archived this task";
+      case "task_unarchived": return actor + " unarchived this task";
+      case "task_deleted": return actor + " deleted this task";
+      default: return entry.content || (actor + " updated this task");
+    }
+  }
+
+  function renderTicketDetail(data) {
+    var ticket = data.ticket;
+    var isOwner = data.isOwner;
+    var isEditable = data.isEditable;
+    var comments = data.comments || [];
+    var activity = data.activity || [];
+
+    var container = h("div", { className: "rw-detail" });
+
+    // Back button
+    var backBtn = h("button", {
+      className: "rw-back-btn",
+      onClick: function () {
+        ticketsCache = null;
+        mySubmissionsCountCache = null;
+        showPanelView();
+      },
+    }, [
+      h("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" }, [
+        h("path", { d: "M19 12H5" }),
+        h("path", { d: "M12 19l-7-7 7-7" }),
+      ]),
+      h("span", null, "Back"),
+    ]);
+    container.appendChild(backBtn);
+
+    // Open full page link
+    var slug = config.projectId || config.project;
+    var fullPageUrl = (config.homepageUrl || RUNHQ_API) + "/project/" + slug + "/proposals/" + ticket.id;
+    container.appendChild(h("a", {
+      className: "rw-open-full",
+      href: fullPageUrl,
       target: "_blank",
       rel: "noopener noreferrer",
-    }, [voteCol, contentCol]);
+    }, [
+      h("span", null, "Open full page"),
+      h("svg", { width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round" }, [
+        h("path", { d: "M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" }),
+        h("path", { d: "M15 3h6v6" }),
+        h("path", { d: "M10 14L21 3" }),
+      ]),
+    ]));
+
+    // Title + status
+    var statusText = ticket.status.replace(/_/g, " ");
+    statusText = statusText.charAt(0).toUpperCase() + statusText.slice(1);
+    var statusColor;
+    switch (ticket.status) {
+      case "pending": statusColor = "#f59e0b"; break;
+      case "planned": statusColor = "#3b82f6"; break;
+      case "in_progress": statusColor = "#8b5cf6"; break;
+      case "needs_review": statusColor = "#f59e0b"; break;
+      case "done": statusColor = "#10b981"; break;
+      case "cancelled": statusColor = "#6b7280"; break;
+      default: statusColor = "#6b7280";
+    }
+    if (ticket.moderationStatus === "pending") {
+      statusText = "Awaiting review";
+      statusColor = "#f59e0b";
+    }
+    var badge = h("span", {
+      className: "rw-status-badge",
+      style: "color:" + statusColor + ";background:" + statusColor + "1a",
+    }, statusText);
+
+    var headerRow = h("div", { className: "rw-detail-header" }, [
+      h("div", { className: "rw-detail-title" }, ticket.title),
+      badge,
+    ]);
+    container.appendChild(headerRow);
+
+    // Description
+    if (ticket.description) {
+      container.appendChild(h("div", { className: "rw-detail-desc" }, ticket.description));
+    }
+
+    // Attachments
+    if (ticket.attachments && ticket.attachments.length > 0) {
+      var attachContainer = h("div", { className: "rw-detail-attachments" });
+      ticket.attachments.forEach(function (att) {
+        if (att.url && att.mimeType && att.mimeType.indexOf("image/") === 0) {
+          var img = h("img", {
+            className: "rw-detail-attach-img",
+            src: att.url,
+            alt: att.originalName || "attachment",
+            onClick: function () { window.open(att.url, "_blank"); },
+          });
+          attachContainer.appendChild(img);
+        }
+      });
+      if (attachContainer.childNodes.length > 0) {
+        container.appendChild(attachContainer);
+      }
+    }
+
+    // Meta
+    var metaItems = [];
+    var yes = parseInt(ticket.yesVotes, 10) || 0;
+    var no = parseInt(ticket.noVotes, 10) || 0;
+    metaItems.push(h("span", null, yes + " upvotes"));
+    if (no > 0) metaItems.push(h("span", null, no + " downvotes"));
+    if (ticket.source) {
+      metaItems.push(h("span", null, ticket.source === "workspace" ? "Workspace" : "Widget"));
+    }
+    metaItems.push(h("span", null, formatDate(ticket.createdAt)));
+    container.appendChild(h("div", { className: "rw-detail-meta" }, metaItems));
+
+    // Edit/delete actions (only for owner of editable tickets)
+    if (isOwner && isEditable) {
+      var noticeArea = h("div", null);
+      container.appendChild(noticeArea);
+
+      var editBtn = h("button", {
+        className: "rw-edit-btn",
+        onClick: function () {
+          setBodyContent(renderTicketEdit(data));
+        },
+      }, "Edit");
+
+      var deleteBtn = h("button", {
+        className: "rw-delete-btn",
+        onClick: function () {
+          // Show confirmation inline
+          noticeArea.innerHTML = "";
+          var confirmBox = h("div", { className: "rw-delete-confirm" }, [
+            h("p", null, "Delete this ticket? This cannot be undone."),
+            h("div", { className: "rw-delete-confirm-actions" }, [
+              h("button", {
+                className: "rw-delete-yes",
+                onClick: function () {
+                  deleteTicket(ticket.id).then(function () {
+                    ticketsCache = null;
+                    mySubmissionsCountCache = null;
+                    showPanelView();
+                  }).catch(function (err) {
+                    noticeArea.innerHTML = "";
+                    noticeArea.appendChild(renderNotice("error", "Failed to delete: " + err.message));
+                  });
+                },
+              }, "Delete"),
+              h("button", {
+                className: "rw-delete-cancel",
+                onClick: function () { noticeArea.innerHTML = ""; },
+              }, "Cancel"),
+            ]),
+          ]);
+          noticeArea.appendChild(confirmBox);
+        },
+      }, "Delete");
+
+      container.appendChild(h("div", { className: "rw-detail-actions" }, [editBtn, deleteBtn]));
+    }
+
+    // Divider
+    container.appendChild(h("hr", { className: "rw-divider" }));
+
+    // Timeline
+    var timeline = [];
+    comments.forEach(function (c) {
+      timeline.push({ kind: "comment", id: c.id, authorName: c.authorName, body: c.body, createdAt: c.createdAt });
+    });
+    activity.forEach(function (a) {
+      timeline.push({ kind: "activity", id: a.id, type: a.type, content: a.content, createdByName: a.createdByName, createdAt: a.createdAt, metadata: a.metadata });
+    });
+    timeline.sort(function (a, b) { return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); });
+
+    container.appendChild(h("div", { className: "rw-timeline-label" }, "Timeline (" + timeline.length + ")"));
+
+    if (timeline.length === 0) {
+      container.appendChild(h("div", { className: "rw-empty", style: "padding: 12px 0;" }, "No activity yet."));
+    } else {
+      var timelineEl = h("div", { className: "rw-timeline" });
+      timeline.forEach(function (item) {
+        var dotClass = "rw-timeline-dot" + (item.kind === "comment" ? " rw-timeline-dot-comment" : "");
+        var cardHeader = h("div", { className: "rw-timeline-card-header" }, [
+          h("span", { className: "rw-timeline-author" },
+            item.kind === "comment" ? (item.authorName || "Anonymous") : (item.createdByName || "System")),
+          h("span", { className: "rw-timeline-date" }, formatDate(item.createdAt)),
+        ]);
+        var cardBody;
+        if (item.kind === "comment") {
+          cardBody = h("div", { className: "rw-timeline-body" }, item.body);
+        } else {
+          cardBody = h("div", { className: "rw-timeline-activity" }, renderActivityLabel(item));
+        }
+        var card = h("div", { className: "rw-timeline-card" }, [cardHeader, cardBody]);
+        var timelineItem = h("div", { className: "rw-timeline-item" }, [
+          h("div", { className: "rw-timeline-line" }),
+          h("div", { className: dotClass }),
+          card,
+        ]);
+        timelineEl.appendChild(timelineItem);
+      });
+      container.appendChild(timelineEl);
+    }
+
+    return container;
+  }
+
+  function renderTicketEdit(data) {
+    var ticket = data.ticket;
+    var container = h("div", { className: "rw-detail" });
+    var pendingDeletes = []; // attachment IDs to delete on save
+    var pendingUploads = []; // File objects to upload on save
+
+    // Back button (goes back to detail, not list)
+    var backBtn = h("button", {
+      className: "rw-back-btn",
+      onClick: function () { showTicketDetail(ticket.id); },
+    }, [
+      h("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" }, [
+        h("path", { d: "M19 12H5" }),
+        h("path", { d: "M12 19l-7-7 7-7" }),
+      ]),
+      h("span", null, "Cancel editing"),
+    ]);
+    container.appendChild(backBtn);
+
+    container.appendChild(h("div", { className: "rw-section-label", style: "padding-left: 0;" }, "Edit Ticket"));
+
+    var noticeArea = h("div", null);
+    container.appendChild(noticeArea);
+
+    // Title input
+    var titleInput = h("input", {
+      className: "rw-input",
+      type: "text",
+      value: ticket.title || "",
+      placeholder: "Title",
+      maxlength: "200",
+    });
+
+    // Description textarea
+    var descInput = h("textarea", {
+      className: "rw-input rw-textarea",
+      placeholder: "Description",
+      maxlength: "2000",
+    });
+    descInput.value = ticket.description || "";
+
+    // Existing attachments with remove buttons
+    var existingAttachEl = h("div", { className: "rw-edit-attachments" });
+    var existingAttachments = (ticket.attachments || []).slice();
+    function renderExistingAttachments() {
+      existingAttachEl.innerHTML = "";
+      existingAttachments.forEach(function (att) {
+        if (pendingDeletes.indexOf(att.id) !== -1) return;
+        if (!att.url || !att.mimeType || att.mimeType.indexOf("image/") !== 0) return;
+        var item = h("div", { className: "rw-edit-attach-item" }, [
+          h("img", { className: "rw-edit-attach-img", src: att.url, alt: att.originalName || "attachment" }),
+          h("button", {
+            className: "rw-edit-attach-remove",
+            onClick: function () {
+              pendingDeletes.push(att.id);
+              renderExistingAttachments();
+            },
+          }, "\u00d7"),
+        ]);
+        existingAttachEl.appendChild(item);
+      });
+    }
+    renderExistingAttachments();
+
+    // New file upload area
+    var newFileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
+    var newPreview = h("div", { className: "rw-attach-preview" });
+
+    function addNewFiles(files) {
+      var currentCount = existingAttachments.length - pendingDeletes.length + pendingUploads.length;
+      Array.prototype.forEach.call(files, function (file) {
+        if (!file.type.startsWith("image/")) return;
+        if (currentCount >= 5) return;
+        pendingUploads.push(file);
+        currentCount++;
+        var reader = new FileReader();
+        reader.onload = function (e) {
+          var thumb = h("div", { className: "rw-edit-attach-item" }, [
+            h("img", { className: "rw-edit-attach-img", src: e.target.result }),
+            h("button", {
+              className: "rw-edit-attach-remove",
+              onClick: function () {
+                var idx = pendingUploads.indexOf(file);
+                if (idx > -1) pendingUploads.splice(idx, 1);
+                thumb.remove();
+              },
+            }, "\u00d7"),
+          ]);
+          newPreview.appendChild(thumb);
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    var addBtn = h("button", {
+      className: "rw-edit-btn",
+      style: "margin-bottom: 10px;",
+      onClick: function () { newFileInput.click(); },
+    }, "+ Add images");
+    newFileInput.addEventListener("change", function () { addNewFiles(newFileInput.files); newFileInput.value = ""; });
+
+    var saveBtn = h("button", { className: "rw-save-btn" }, "Save changes");
+    var cancelBtn = h("button", {
+      className: "rw-cancel-btn",
+      onClick: function () { showTicketDetail(ticket.id); },
+    }, "Cancel");
+
+    saveBtn.addEventListener("click", function () {
+      var newTitle = titleInput.value.trim();
+      var newDesc = descInput.value.trim();
+      if (!newTitle && !newDesc) {
+        noticeArea.innerHTML = "";
+        noticeArea.appendChild(renderNotice("error", "Title or description is required."));
+        return;
+      }
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving\u2026";
+      noticeArea.innerHTML = "";
+
+      // 1. Update title/description
+      var chain = updateTicket(ticket.id, {
+        title: newTitle || undefined,
+        description: newDesc,
+      });
+
+      // 2. Delete removed attachments
+      pendingDeletes.forEach(function (attId) {
+        chain = chain.then(function () { return deleteAttachmentApi(ticket.id, attId); });
+      });
+
+      // 3. Upload new attachments
+      if (pendingUploads.length > 0) {
+        saveBtn.textContent = "Uploading\u2026";
+        pendingUploads.forEach(function (file) {
+          chain = chain.then(function () { return uploadAttachment(ticket.id, file); });
+        });
+      }
+
+      chain.then(function () {
+        ticketsCache = null;
+        mySubmissionsCountCache = null;
+        showTicketDetail(ticket.id);
+      }).catch(function (err) {
+        noticeArea.innerHTML = "";
+        noticeArea.appendChild(renderNotice("error", "Failed to save: " + err.message));
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save changes";
+      });
+    });
+
+    var form = h("div", { className: "rw-edit-form" }, [
+      titleInput,
+      descInput,
+      existingAttachEl,
+      newPreview,
+      addBtn,
+      newFileInput,
+      h("div", { className: "rw-edit-form-actions" }, [saveBtn, cancelBtn]),
+    ]);
+    container.appendChild(form);
+
+    return container;
   }
 
   // ---------------------------------------------------------------------------
@@ -868,7 +1352,6 @@
         metaItems.push(h("span", { className: "rw-submission-date" }, dateStr));
       }
       var meta = h("div", { className: "rw-submission-meta" }, metaItems);
-      var slug = config.projectId || config.project;
       var cardChildren = [
         h("div", { className: "rw-submission-title" }, p.title),
       ];
@@ -876,11 +1359,11 @@
         cardChildren.push(h("div", { className: "rw-submission-desc" }, p.description));
       }
       cardChildren.push(meta);
-      var card = h("a", {
+      var card = h("div", {
         className: "rw-submission-card",
-        href: (config.homepageUrl || RUNHQ_API) + "/project/" + slug + "/proposals/" + p.id,
-        target: "_blank",
-        rel: "noopener noreferrer",
+        onClick: (function (ticketId) {
+          return function () { showTicketDetail(ticketId); };
+        })(p.id),
       }, cardChildren);
       container.appendChild(card);
     });
@@ -1030,6 +1513,16 @@
         type: "feedback",
         context: context,
         isPrivate: privateCheckbox.checked,
+      }).then(function (result) {
+        var ticketId = result && result.ticket && result.ticket.id;
+        if (!ticketId || attachedFiles.length === 0) return result;
+        // Upload attachments sequentially
+        submitBtn.textContent = "Uploading files\u2026";
+        var chain = Promise.resolve();
+        attachedFiles.forEach(function (file) {
+          chain = chain.then(function () { return uploadAttachment(ticketId, file); });
+        });
+        return chain;
       }).then(function () {
         titleInput.value = "";
         descInput.value = "";

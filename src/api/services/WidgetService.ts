@@ -3,6 +3,9 @@
  *
  * Handles widget authentication (3 modes), ticket CRUD, voting,
  * project management, and AI title generation.
+ *
+ * All ticket data lives in the unified `workspace_tasks` table.
+ * Widget submissions use sourceType='widget' and createdByType='external'.
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -10,15 +13,18 @@ import { db } from '../../db/index';
 import {
   widgetProjects,
   widgetUsers,
-  widgetTickets,
-  widgetVotes,
-  widgetComments,
   workspaceTasks,
+  workspaceTaskVotes,
+  workspaceTaskComments,
+  workspaceTaskActivity,
+  workspaceTaskAttachments,
   servers,
 } from '../../db/schema';
-import { eq, and, ne, desc, sql, inArray, isNull } from 'drizzle-orm';
-import { fetchFromServer } from './ServerService';
+import { eq, and, ne, desc, sql, inArray, isNull, or } from 'drizzle-orm';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
+import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
+
+const attachmentStorage = new TaskAttachmentStorageService();
 
 // ============================================================================
 // Types
@@ -45,9 +51,8 @@ interface WidgetProjectContext {
   channelId: string | null;
 }
 
-type CombinedWidgetTicket = {
+type WidgetTicketResponse = {
   id: string;
-  projectId: string;
   title: string;
   description: string | null;
   status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
@@ -55,56 +60,14 @@ type CombinedWidgetTicket = {
   isPrivate: boolean;
   source: string;
   widgetUserId: string | null;
+  authorName: string | null;
   yesVotes: number;
   noVotes: number;
   votingEndsAt: Date | null;
-  syncStatus: 'synced' | 'pending';
-  flyTodoId: string | null;
   createdAt: Date;
   updatedAt: Date;
   userVote: boolean | null;
   canVote: boolean;
-};
-
-export type PublicTicketDetail = {
-  ticket: CombinedWidgetTicket & {
-    attachments?: Array<{
-      id?: string;
-      filename?: string;
-      originalName?: string | null;
-      mimeType?: string;
-      url?: string | null;
-    }> | null;
-  };
-  comments: Array<{
-    id: string;
-    body: string;
-    authorName: string | null;
-    createdAt: string;
-    updatedAt?: string | null;
-    attachments?: Array<{
-      id?: string;
-      filename?: string;
-      originalName?: string | null;
-      mimeType?: string;
-      url?: string | null;
-    }> | null;
-  }>;
-  activity: Array<{
-    id: string;
-    type: string;
-    content?: string | null;
-    createdByName?: string | null;
-    createdAt: string;
-    metadata?: Record<string, unknown> | null;
-    attachments?: Array<{
-      id?: string;
-      filename?: string;
-      originalName?: string | null;
-      mimeType?: string;
-      url?: string | null;
-    }> | null;
-  }>;
 };
 
 type PublicAttachmentSummary = {
@@ -113,6 +76,33 @@ type PublicAttachmentSummary = {
   originalName?: string | null;
   mimeType?: string;
   url?: string | null;
+};
+
+export type PublicTicketDetail = {
+  ticket: WidgetTicketResponse & {
+    attachments?: PublicAttachmentSummary[] | null;
+  };
+  /** Whether the requesting user owns this ticket */
+  isOwner: boolean;
+  /** Whether the ticket can be edited/deleted by its owner right now */
+  isEditable: boolean;
+  comments: Array<{
+    id: string;
+    body: string;
+    authorName: string | null;
+    createdAt: string;
+    updatedAt?: string | null;
+    attachments?: PublicAttachmentSummary[] | null;
+  }>;
+  activity: Array<{
+    id: string;
+    type: string;
+    content?: string | null;
+    createdByName?: string | null;
+    createdAt: string;
+    metadata?: Record<string, unknown> | null;
+    attachments?: PublicAttachmentSummary[] | null;
+  }>;
 };
 
 type PublicAttachmentLike = {
@@ -161,79 +151,83 @@ function getHomepageUrl(): string {
     .replace('console.', 'www.');
 }
 
-function buildPublicWorkspaceTaskFilter(project: WidgetProjectContext) {
+/**
+ * Build a filter for tasks visible in the widget for a given project.
+ * Includes both widget-submitted and workspace-created public tasks.
+ */
+function buildWidgetVisibleFilter(project: WidgetProjectContext) {
+  const baseConditions = [
+    eq(workspaceTasks.serverId, project.serverId),
+    isNull(workspaceTasks.deletedAt),
+    ne(workspaceTasks.moderationStatus, 'rejected'),
+  ];
+
   if (project.channelId) {
+    // Scoped to channel: widget tasks in this channel + public workspace tasks in this channel
     return and(
-      eq(workspaceTasks.serverId, project.serverId),
+      ...baseConditions,
       eq(workspaceTasks.workspaceChannelId, project.channelId),
-      eq(workspaceTasks.visibility, 'public'),
-      eq(workspaceTasks.sourceType, 'workspace'),
-      isNull(workspaceTasks.deletedAt),
+      or(
+        eq(workspaceTasks.sourceType, 'widget'),
+        and(eq(workspaceTasks.sourceType, 'workspace'), eq(workspaceTasks.visibility, 'public')),
+      ),
     );
   }
 
+  // No channel scope: all widget tasks + public workspace tasks for this server
   return and(
-    eq(workspaceTasks.serverId, project.serverId),
-    eq(workspaceTasks.visibility, 'public'),
-    eq(workspaceTasks.sourceType, 'workspace'),
-    isNull(workspaceTasks.deletedAt),
+    ...baseConditions,
+    or(
+      eq(workspaceTasks.sourceType, 'widget'),
+      and(eq(workspaceTasks.sourceType, 'workspace'), eq(workspaceTasks.visibility, 'public')),
+    ),
   );
 }
 
-function mapWorkspaceTaskToWidgetTicket(
-  projectId: string,
-  task: {
-    id: string;
-    title: string;
-    description: string | null;
-    status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
-    upvoteCount: number;
-    createdAt: Date;
-    updatedAt: Date;
-  }
-): CombinedWidgetTicket {
+function mapTaskToWidgetResponse(
+  task: typeof workspaceTasks.$inferSelect,
+  userVote: boolean | null = null,
+  canVote: boolean = true,
+): WidgetTicketResponse {
   return {
     id: task.id,
-    projectId,
     title: task.title,
     description: task.description,
     status: task.status,
-    moderationStatus: 'approved',
-    isPrivate: false,
-    source: 'workspace',
-    widgetUserId: null,
+    moderationStatus: task.moderationStatus,
+    isPrivate: task.visibility === 'private',
+    source: task.sourceType,
+    widgetUserId: task.createdByType === 'external' ? task.createdById : null,
+    authorName: task.createdByName ?? null,
     yesVotes: task.upvoteCount,
-    noVotes: 0,
-    votingEndsAt: null,
-    syncStatus: 'synced',
-    flyTodoId: null,
+    noVotes: task.downvoteCount,
+    votingEndsAt: task.votingEndsAt,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    userVote: null,
-    canVote: false,
+    userVote,
+    canVote,
   };
 }
 
 function base64urlDecode(str: string): string {
-  // Replace URL-safe chars and add padding
   const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
   const padded = base64 + '=='.slice(0, (4 - (base64.length % 4)) % 4);
   return Buffer.from(padded, 'base64').toString('utf-8');
 }
 
-async function recountVotes(ticketId: string): Promise<void> {
+async function recountVotes(taskId: string, serverId: string): Promise<void> {
   const votes = await db
-    .select({ value: widgetVotes.value })
-    .from(widgetVotes)
-    .where(eq(widgetVotes.ticketId, ticketId));
+    .select({ value: workspaceTaskVotes.value })
+    .from(workspaceTaskVotes)
+    .where(eq(workspaceTaskVotes.taskId, taskId));
 
-  const yesVotes = votes.filter((v) => v.value === true).length;
-  const noVotes = votes.filter((v) => v.value === false).length;
+  const upvoteCount = votes.filter((v) => v.value === true).length;
+  const downvoteCount = votes.filter((v) => v.value === false).length;
 
   await db
-    .update(widgetTickets)
-    .set({ yesVotes, noVotes, updatedAt: new Date() })
-    .where(eq(widgetTickets.id, ticketId));
+    .update(workspaceTasks)
+    .set({ upvoteCount, downvoteCount, updatedAt: new Date() })
+    .where(eq(workspaceTasks.id, taskId));
 }
 
 // ============================================================================
@@ -368,67 +362,39 @@ export async function authenticateWidget(
 export async function listTickets(projectId: string, widgetUserId?: string) {
   const project = await getWidgetProjectContext(projectId);
 
-  const widgetRows = await db
-    .select()
-    .from(widgetTickets)
-    .where(
-      and(
-        eq(widgetTickets.projectId, projectId),
-        ne(widgetTickets.moderationStatus, 'rejected'),
-        eq(widgetTickets.isPrivate, false),
-      )
-    )
-    .orderBy(desc(widgetTickets.createdAt))
-    .limit(50);
-
-  const workspaceRows = project
+  const rows = project
     ? await db
-        .select({
-          id: workspaceTasks.id,
-          title: workspaceTasks.title,
-          description: workspaceTasks.description,
-          status: workspaceTasks.status,
-          upvoteCount: workspaceTasks.upvoteCount,
-          createdAt: workspaceTasks.createdAt,
-          updatedAt: workspaceTasks.updatedAt,
-        })
+        .select()
         .from(workspaceTasks)
-        .where(buildPublicWorkspaceTaskFilter(project))
+        .where(and(
+          buildWidgetVisibleFilter(project),
+          eq(workspaceTasks.visibility, 'public'),
+        ))
         .orderBy(desc(workspaceTasks.createdAt))
         .limit(50)
     : [];
 
   // Fetch votes for identified user
   let userVoteMap: Map<string, boolean> = new Map();
-  if (widgetUserId && widgetRows.length > 0) {
-    const ticketIds = widgetRows.map((t) => t.id);
+  if (widgetUserId && rows.length > 0) {
+    const taskIds = rows.map((t) => t.id);
     const votes = await db
-      .select({ ticketId: widgetVotes.ticketId, value: widgetVotes.value })
-      .from(widgetVotes)
+      .select({ taskId: workspaceTaskVotes.taskId, value: workspaceTaskVotes.value })
+      .from(workspaceTaskVotes)
       .where(
         and(
-          inArray(widgetVotes.ticketId, ticketIds),
-          eq(widgetVotes.widgetUserId, widgetUserId)
+          inArray(workspaceTaskVotes.taskId, taskIds),
+          eq(workspaceTaskVotes.voterId, widgetUserId),
         )
       );
     for (const v of votes) {
-      userVoteMap.set(v.ticketId, v.value);
+      userVoteMap.set(v.taskId, v.value);
     }
   }
 
-  const widgetTicketsWithVotes: CombinedWidgetTicket[] = widgetRows.map((t) => ({
-    ...t,
-    userVote: userVoteMap.has(t.id) ? userVoteMap.get(t.id) ?? null : null,
-    canVote: true,
-  }));
-
-  const canonicalTickets = workspaceRows.map((task) =>
-    mapWorkspaceTaskToWidgetTicket(projectId, task)
+  const tickets: WidgetTicketResponse[] = rows.map((t) =>
+    mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)
   );
-
-  const tickets = [...widgetTicketsWithVotes, ...canonicalTickets]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 50);
 
   return {
     projectName: project?.name ?? '',
@@ -440,82 +406,50 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
   };
 }
 
-export async function getPublicTicketDetail(projectId: string, ticketId: string): Promise<PublicTicketDetail | null> {
+export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
-  const [widgetRow] = await db
+  const [task] = await db
     .select()
-    .from(widgetTickets)
-    .where(and(
-      eq(widgetTickets.id, ticketId),
-      eq(widgetTickets.projectId, projectId),
-      ne(widgetTickets.moderationStatus, 'rejected'),
-      eq(widgetTickets.isPrivate, false),
-    ))
-    .limit(1);
-
-  if (widgetRow) {
-    const comments = await db
-      .select({
-        id: widgetComments.id,
-        body: widgetComments.body,
-        createdAt: widgetComments.createdAt,
-        updatedAt: widgetComments.updatedAt,
-        authorName: widgetUsers.name,
-      })
-      .from(widgetComments)
-      .leftJoin(widgetUsers, eq(widgetComments.widgetUserId, widgetUsers.id))
-      .where(eq(widgetComments.ticketId, widgetRow.id))
-      .orderBy(widgetComments.createdAt);
-
-    return {
-      ticket: {
-        ...widgetRow,
-        userVote: null,
-        canVote: false,
-      },
-      comments: comments.map((comment) => ({
-        id: comment.id,
-        body: comment.body,
-        authorName: comment.authorName ?? null,
-        createdAt: comment.createdAt.toISOString(),
-        updatedAt: comment.updatedAt.toISOString(),
-        attachments: null,
-      })),
-      activity: [],
-    };
-  }
-
-  const [workspaceRow] = await db
-    .select({
-      id: workspaceTasks.id,
-      title: workspaceTasks.title,
-      description: workspaceTasks.description,
-      status: workspaceTasks.status,
-      upvoteCount: workspaceTasks.upvoteCount,
-      createdAt: workspaceTasks.createdAt,
-      updatedAt: workspaceTasks.updatedAt,
-    })
     .from(workspaceTasks)
     .where(and(
       eq(workspaceTasks.id, ticketId),
-      buildPublicWorkspaceTaskFilter(project),
+      eq(workspaceTasks.serverId, project.serverId),
+      ne(workspaceTasks.moderationStatus, 'rejected'),
+      isNull(workspaceTasks.deletedAt),
     ))
     .limit(1);
 
-  if (!workspaceRow) return null;
-
-  const task = await WorkspaceTaskService.getTaskById(project.serverId, workspaceRow.id, { includeAttachments: true });
   if (!task) return null;
+
+  // Private tasks are only visible to their creator
+  if (task.visibility === 'private') {
+    const isCreator = widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
+    if (!isCreator) return null;
+  }
+
+  // Get comments
   const comments = await WorkspaceTaskService.listComments(task.id);
+  // Get activity
   const activity = await WorkspaceTaskService.listActivity(task.id);
+  // Get attachments
+  const fullTask = await WorkspaceTaskService.getTaskById(project.serverId, task.id, { includeAttachments: true });
+
+  const isOwner = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
+  const isEditable = isOwner
+    && task.status === 'pending'
+    && task.moderationStatus !== 'rejected'
+    && comments.length === 0
+    && activity.length === 0;
 
   return {
     ticket: {
-      ...mapWorkspaceTaskToWidgetTicket(projectId, workspaceRow),
-      attachments: (task.attachments ?? []).map(mapAttachmentSummary),
+      ...mapTaskToWidgetResponse(task),
+      attachments: (fullTask?.attachments ?? []).map(mapAttachmentSummary),
     },
+    isOwner,
+    isEditable,
     comments: comments.map((comment) => ({
       id: comment.id,
       body: comment.content,
@@ -543,6 +477,8 @@ export async function createTicket(
 ) {
   const [project] = await db
     .select({
+      serverId: widgetProjects.serverId,
+      channelId: widgetProjects.channelId,
       autoApprove: widgetProjects.autoApprove,
       votingPeriodHours: widgetProjects.votingPeriodHours,
     })
@@ -567,119 +503,403 @@ export async function createTicket(
     );
   }
 
-  const [ticket] = await db
-    .insert(widgetTickets)
+  // Resolve widget user name
+  let createdByName: string | undefined;
+  if (widgetUserId) {
+    const [wu] = await db
+      .select({ name: widgetUsers.name })
+      .from(widgetUsers)
+      .where(eq(widgetUsers.id, widgetUserId))
+      .limit(1);
+    createdByName = wu?.name || undefined;
+  }
+
+  const [task] = await db
+    .insert(workspaceTasks)
     .values({
-      projectId,
+      serverId: project.serverId,
+      workspaceChannelId: project.channelId,
       title,
       description: opts.description,
-      isPrivate: opts.isPrivate ?? false,
-      widgetUserId: widgetUserId ?? null,
+      visibility: opts.isPrivate ? 'private' : 'public',
+      sourceType: 'widget',
+      createdByType: 'external',
+      createdById: widgetUserId ?? null,
+      createdByName: createdByName ?? null,
       moderationStatus,
       votingEndsAt,
     })
     .returning();
 
-  // Best-effort push to Fly server as a todo
-  syncTicketToServer(ticket.id, projectId, title, opts.description).catch((err) => {
-    console.warn('[WidgetService] Failed to sync ticket to server:', err);
+  return task;
+}
+
+/**
+ * Check if a task can be edited/deleted by a widget user.
+ * Returns the task row if editable, or throws with a reason.
+ */
+async function requireEditableTask(taskId: string, serverId: string, widgetUserId: string) {
+  const [task] = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, taskId),
+      eq(workspaceTasks.serverId, serverId),
+      isNull(workspaceTasks.deletedAt),
+    ))
+    .limit(1);
+
+  if (!task) throw new Error('Ticket not found');
+  if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
+    throw new Error('Not the ticket owner');
+  }
+  if (task.status !== 'pending') throw new Error('Ticket status is no longer pending');
+  if (task.moderationStatus === 'rejected') throw new Error('Ticket has been rejected');
+
+  const [commentCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskComments)
+    .where(and(
+      eq(workspaceTaskComments.taskId, taskId),
+      isNull(workspaceTaskComments.deletedAt),
+    ));
+  if (Number(commentCount.count) > 0) throw new Error('Ticket has comments and cannot be modified');
+
+  const [activityCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskActivity)
+    .where(eq(workspaceTaskActivity.taskId, taskId));
+  if (Number(activityCount.count) > 0) throw new Error('Ticket has activity and cannot be modified');
+
+  return task;
+}
+
+export async function updateTicket(
+  ticketId: string,
+  projectId: string,
+  widgetUserId: string,
+  opts: { title?: string; description?: string },
+) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new Error('Project not found');
+
+  await requireEditableTask(ticketId, project.serverId, widgetUserId);
+
+  const updates: Partial<typeof workspaceTasks.$inferInsert> = {
+    updatedAt: new Date(),
+  };
+  if (opts.title !== undefined) updates.title = opts.title.trim() || 'Untitled';
+  if (opts.description !== undefined) updates.description = opts.description;
+
+  const [updated] = await db
+    .update(workspaceTasks)
+    .set(updates)
+    .where(eq(workspaceTasks.id, ticketId))
+    .returning();
+
+  return updated;
+}
+
+export async function deleteTicket(
+  ticketId: string,
+  projectId: string,
+  widgetUserId: string,
+) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new Error('Project not found');
+
+  await requireEditableTask(ticketId, project.serverId, widgetUserId);
+
+  // Soft delete to be consistent with workspace task patterns
+  await db
+    .update(workspaceTasks)
+    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .where(eq(workspaceTasks.id, ticketId));
+}
+
+const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_ATTACHMENTS_PER_TICKET = 5;
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+
+export async function uploadTicketAttachment(
+  ticketId: string,
+  projectId: string,
+  widgetUserId: string,
+  file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
+) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new Error('Project not found');
+
+  if (!attachmentStorage.isConfigured()) {
+    throw new Error('Attachment storage is not configured');
+  }
+
+  // Validate image type
+  if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
+    throw new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)');
+  }
+
+  // Validate file size
+  if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
+    throw new Error('File size exceeds 5MB limit');
+  }
+
+  // Verify ownership — task must exist, belong to this user, and be on this server
+  const [task] = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+    ))
+    .limit(1);
+
+  if (!task) throw new Error('Ticket not found');
+  if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
+    throw new Error('Not the ticket owner');
+  }
+
+  // Check attachment count limit
+  const [countRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.taskId, ticketId),
+      eq(workspaceTaskAttachments.ownerType, 'task'),
+    ));
+  if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_TICKET) {
+    throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_TICKET} attachments per ticket`);
+  }
+
+  // Upload to R2
+  const stored = await attachmentStorage.storeUpload({
+    serverId: project.serverId,
+    body: file.buffer,
+    mimeType: file.mimeType,
+    filename: file.filename,
+    originalName: file.originalName ?? file.filename,
+    ownerType: 'task',
   });
 
-  return ticket;
+  // Insert attachment record
+  const [attachment] = await db
+    .insert(workspaceTaskAttachments)
+    .values({
+      serverId: project.serverId,
+      taskId: ticketId,
+      ownerType: 'task',
+      ownerId: ticketId,
+      storageProvider: stored.storageProvider,
+      storageKey: stored.storageKey,
+      mimeType: stored.mimeType,
+      originalName: stored.originalName ?? null,
+    })
+    .returning();
+
+  // Generate download URL
+  const url = await attachmentStorage.createDownloadUrl({
+    storageProvider: stored.storageProvider,
+    storageKey: stored.storageKey,
+    originalName: stored.originalName,
+  });
+
+  return {
+    id: attachment.id,
+    filename: stored.storageKey.split('/').pop(),
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    url,
+  };
+}
+
+export async function deleteTicketAttachment(
+  ticketId: string,
+  attachmentId: string,
+  projectId: string,
+  widgetUserId: string,
+) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new Error('Project not found');
+
+  // Verify ownership
+  const [task] = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+    ))
+    .limit(1);
+
+  if (!task) throw new Error('Ticket not found');
+  if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
+    throw new Error('Not the ticket owner');
+  }
+
+  // Find the attachment
+  const [attachment] = await db
+    .select()
+    .from(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.id, attachmentId),
+      eq(workspaceTaskAttachments.taskId, ticketId),
+    ))
+    .limit(1);
+
+  if (!attachment) throw new Error('Attachment not found');
+
+  // Delete from object storage
+  await attachmentStorage.deleteStoredObject({
+    storageProvider: attachment.storageProvider,
+    storageKey: attachment.storageKey,
+  });
+
+  // Delete DB record
+  await db
+    .delete(workspaceTaskAttachments)
+    .where(eq(workspaceTaskAttachments.id, attachmentId));
 }
 
 export async function listMyTickets(
   projectId: string,
   widgetUserId: string
-) {
-  return db
+): Promise<WidgetTicketResponse[]> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return [];
+
+  const rows = await db
     .select()
-    .from(widgetTickets)
+    .from(workspaceTasks)
     .where(
       and(
-        eq(widgetTickets.projectId, projectId),
-        eq(widgetTickets.widgetUserId, widgetUserId)
+        eq(workspaceTasks.serverId, project.serverId),
+        eq(workspaceTasks.createdByType, 'external'),
+        eq(workspaceTasks.createdById, widgetUserId),
+        eq(workspaceTasks.sourceType, 'widget'),
+        isNull(workspaceTasks.deletedAt),
       )
     )
-    .orderBy(desc(widgetTickets.createdAt))
+    .orderBy(desc(workspaceTasks.createdAt))
     .limit(50);
+
+  return rows.map((t) => mapTaskToWidgetResponse(t));
 }
 
 export async function getTicketStats(projectId: string) {
-  const [widgetResult] = await db
-    .select({
-      totalOpen: sql<number>`count(*) filter (where ${widgetTickets.moderationStatus} = 'approved' and ${widgetTickets.isPrivate} = false and ${widgetTickets.status} not in ('done', 'cancelled'))`,
-      totalDone: sql<number>`count(*) filter (where ${widgetTickets.moderationStatus} = 'approved' and ${widgetTickets.isPrivate} = false and ${widgetTickets.status} = 'done')`,
-    })
-    .from(widgetTickets)
-    .where(eq(widgetTickets.projectId, projectId));
-
   const project = await getWidgetProjectContext(projectId);
-  const [workspaceResult] = project
-    ? await db
-        .select({
-          totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'cancelled'))`,
-          totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} = 'done')`,
-        })
-        .from(workspaceTasks)
-        .where(buildPublicWorkspaceTaskFilter(project))
-    : [{ totalOpen: 0, totalDone: 0 }];
+  if (!project) return { totalOpen: 0, totalDone: 0, totalResolved: 0, avgResolutionMs: null };
+
+  const channelCondition = project.channelId
+    ? eq(workspaceTasks.workspaceChannelId, project.channelId)
+    : undefined;
+
+  const conditions = [
+    eq(workspaceTasks.serverId, project.serverId),
+    eq(workspaceTasks.visibility, 'public'),
+    ne(workspaceTasks.moderationStatus, 'rejected'),
+    isNull(workspaceTasks.deletedAt),
+    ...(channelCondition ? [channelCondition] : []),
+  ];
+
+  const [result] = await db
+    .select({
+      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'cancelled'))`,
+      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} = 'done')`,
+    })
+    .from(workspaceTasks)
+    .where(and(...conditions));
+
+  const totalDone = Number(result?.totalDone ?? 0);
+
+  // Calculate average resolution time for done tasks
+  let avgResolutionMs: number | null = null;
+  if (totalDone > 0) {
+    const [avgResult] = await db
+      .select({
+        avg: sql<number>`avg(extract(epoch from (${workspaceTasks.completedAt} - ${workspaceTasks.createdAt})) * 1000)`,
+      })
+      .from(workspaceTasks)
+      .where(and(
+        ...conditions,
+        eq(workspaceTasks.status, 'done'),
+        sql`${workspaceTasks.completedAt} is not null`,
+      ));
+    avgResolutionMs = avgResult?.avg ? Math.round(Number(avgResult.avg)) : null;
+  }
 
   return {
-    totalOpen: Number(widgetResult?.totalOpen ?? 0) + Number(workspaceResult?.totalOpen ?? 0),
-    totalDone: Number(widgetResult?.totalDone ?? 0) + Number(workspaceResult?.totalDone ?? 0),
+    totalOpen: Number(result?.totalOpen ?? 0),
+    totalDone,
+    totalResolved: totalDone,
+    avgResolutionMs,
   };
 }
-
-// ============================================================================
-// Vote Operations
-// ============================================================================
 
 export async function castVote(
   ticketId: string,
   widgetUserId: string,
   value: boolean
 ) {
-  const [ticket] = await db
+  const [task] = await db
     .select({
-      id: widgetTickets.id,
-      moderationStatus: widgetTickets.moderationStatus,
-      votingEndsAt: widgetTickets.votingEndsAt,
+      id: workspaceTasks.id,
+      serverId: workspaceTasks.serverId,
+      moderationStatus: workspaceTasks.moderationStatus,
+      votingEndsAt: workspaceTasks.votingEndsAt,
     })
-    .from(widgetTickets)
-    .where(eq(widgetTickets.id, ticketId))
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      isNull(workspaceTasks.deletedAt),
+    ))
     .limit(1);
 
-  if (!ticket) throw new Error('Ticket not found');
-  if (ticket.moderationStatus !== 'approved') {
+  if (!task) throw new Error('Ticket not found');
+  if (task.moderationStatus !== 'approved') {
     throw new Error('Voting is only allowed on approved tickets');
   }
-  if (ticket.votingEndsAt && new Date() > ticket.votingEndsAt) {
+  if (task.votingEndsAt && new Date() > task.votingEndsAt) {
     throw new Error('Voting period has ended');
   }
 
   await db
-    .insert(widgetVotes)
-    .values({ ticketId, widgetUserId, value })
+    .insert(workspaceTaskVotes)
+    .values({
+      serverId: task.serverId,
+      taskId: ticketId,
+      voterType: 'external',
+      voterId: widgetUserId,
+      value,
+    })
     .onConflictDoUpdate({
-      target: [widgetVotes.ticketId, widgetVotes.widgetUserId],
+      target: [workspaceTaskVotes.taskId, workspaceTaskVotes.voterId],
       set: { value },
     });
 
-  await recountVotes(ticketId);
+  await recountVotes(ticketId, task.serverId);
 }
 
 export async function retractVote(ticketId: string, widgetUserId: string) {
+  const [task] = await db
+    .select({ serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(eq(workspaceTasks.id, ticketId))
+    .limit(1);
+
   await db
-    .delete(widgetVotes)
+    .delete(workspaceTaskVotes)
     .where(
       and(
-        eq(widgetVotes.ticketId, ticketId),
-        eq(widgetVotes.widgetUserId, widgetUserId)
+        eq(workspaceTaskVotes.taskId, ticketId),
+        eq(workspaceTaskVotes.voterId, widgetUserId),
       )
     );
 
-  await recountVotes(ticketId);
+  if (task) {
+    await recountVotes(ticketId, task.serverId);
+  }
 }
 
 // ============================================================================
@@ -713,8 +933,7 @@ export async function enableWidget(
 
   const apiSecret = randomBytes(32).toString('base64url');
   const apiKey = deriveFingerprint(apiSecret);
-  const slugSuffix = randomBytes(4).toString('hex'); // used only when no existing slug
-  // Reuse existing slug on re-enable so URLs don't change; generate new one otherwise
+  const slugSuffix = randomBytes(4).toString('hex');
   const slug = existing?.slug ?? generateSlug(opts.name, slugSuffix);
 
   const [project] = await db
@@ -724,7 +943,7 @@ export async function enableWidget(
       name: opts.name,
       slug,
       apiKey,
-      apiSecretHash: apiSecret, // Store the raw secret for HMAC-SHA256 verification
+      apiSecretHash: apiSecret,
       enabled: true,
       channelId: opts.channelId,
     })
@@ -781,45 +1000,28 @@ export async function listPublicProjects() {
     .where(and(eq(widgetProjects.enabled, true), eq(widgetProjects.isPublic, true)))
     .orderBy(desc(widgetProjects.createdAt));
 
-  // Get ticket counts per project
   const result = [];
   for (const p of projects) {
-    const [widgetCountRow] = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(widgetTickets)
-      .where(
-        and(
-          eq(widgetTickets.projectId, p.id),
-          ne(widgetTickets.moderationStatus, 'rejected'),
-          eq(widgetTickets.isPrivate, false),
-        )
-      );
+    const channelCondition = p.channelId
+      ? eq(workspaceTasks.workspaceChannelId, p.channelId)
+      : undefined;
 
-    const workspaceWhere = p.channelId
-      ? and(
-          eq(workspaceTasks.serverId, p.serverId),
-          eq(workspaceTasks.workspaceChannelId, p.channelId),
-          eq(workspaceTasks.visibility, 'public'),
-          eq(workspaceTasks.sourceType, 'workspace'),
-          isNull(workspaceTasks.deletedAt),
-        )
-      : and(
-          eq(workspaceTasks.serverId, p.serverId),
-          eq(workspaceTasks.visibility, 'public'),
-          eq(workspaceTasks.sourceType, 'workspace'),
-          isNull(workspaceTasks.deletedAt),
-        );
-
-    const [workspaceCountRow] = await db
+    const [countRow] = await db
       .select({ count: sql<number>`count(*)` })
       .from(workspaceTasks)
-      .where(workspaceWhere);
+      .where(and(
+        eq(workspaceTasks.serverId, p.serverId),
+        eq(workspaceTasks.visibility, 'public'),
+        ne(workspaceTasks.moderationStatus, 'rejected'),
+        isNull(workspaceTasks.deletedAt),
+        ...(channelCondition ? [channelCondition] : []),
+      ));
 
     result.push({
       name: p.name,
       slug: p.slug,
       createdAt: p.createdAt,
-      ticketCount: Number(widgetCountRow?.count ?? 0) + Number(workspaceCountRow?.count ?? 0),
+      ticketCount: Number(countRow?.count ?? 0),
     });
   }
 
@@ -828,8 +1030,6 @@ export async function listPublicProjects() {
 
 /**
  * Generate a signed widget JWT for an identified user, given the API secret.
- * Derives a fingerprint from the secret to look up the project.
- * Used server-side only — the secret comes from env config, never from the client.
  */
 export async function generateUserTokenBySecret(
   secret: string,
@@ -964,184 +1164,4 @@ export async function generateTitle(description: string): Promise<string> {
   } catch {
     return fallback;
   }
-}
-
-// ============================================================================
-// Ticket Sync (BE ↔ Fly Server)
-// ============================================================================
-
-/**
- * Best-effort push: create a todo on the Fly server for a new widget ticket.
- * If the server is down, the ticket stays syncStatus='pending' and will be
- * picked up on the next server wake via the unsynced tickets endpoint.
- */
-async function syncTicketToServer(
-  ticketId: string,
-  projectId: string,
-  title: string,
-  description?: string,
-) {
-  // Look up the widget project to get serverId and channelId
-  const [wp] = await db
-    .select({
-      serverId: widgetProjects.serverId,
-      channelId: widgetProjects.channelId,
-      slug: widgetProjects.slug,
-    })
-    .from(widgetProjects)
-    .where(eq(widgetProjects.id, projectId))
-    .limit(1);
-
-  if (!wp?.channelId) return;
-
-  // Look up the server record
-  const [server] = await db
-    .select()
-    .from(servers)
-    .where(eq(servers.id, wp.serverId))
-    .limit(1);
-
-  if (!server?.ownerId) return;
-
-  // Look up ticket vote counts and submitter name
-  const [ticket] = await db
-    .select({
-      yesVotes: widgetTickets.yesVotes,
-      noVotes: widgetTickets.noVotes,
-      widgetUserId: widgetTickets.widgetUserId,
-      isPrivate: widgetTickets.isPrivate,
-    })
-    .from(widgetTickets)
-    .where(eq(widgetTickets.id, ticketId))
-    .limit(1);
-
-  let submitterName: string | undefined;
-  if (ticket?.widgetUserId) {
-    const [wu] = await db
-      .select({ name: widgetUsers.name })
-      .from(widgetUsers)
-      .where(eq(widgetUsers.id, ticket.widgetUserId))
-      .limit(1);
-    submitterName = wu?.name || undefined;
-  }
-
-  const sourceVoteData = JSON.stringify({
-    yes: ticket?.yesVotes ?? 0,
-    no: ticket?.noVotes ?? 0,
-    submittedBy: submitterName || 'Anonymous',
-  });
-
-  const result = await fetchFromServer<{ success: boolean; data?: { id: string } }>(
-    server,
-    server.ownerId,
-    '/api/todos',
-    {
-      method: 'POST',
-      body: {
-        title,
-        description: description || undefined,
-        channelId: wp.channelId,
-        visibility: ticket?.isPrivate ? 'private' : 'public',
-        sourceType: 'widget',
-        sourceId: ticketId,
-        sourceUrl: `https://runhq.io/project/${wp.slug}`,
-        sourceVoteData,
-      },
-    },
-  );
-
-  if (result.success && result.data?.id) {
-    await db
-      .update(widgetTickets)
-      .set({ syncStatus: 'synced', flyTodoId: result.data.id })
-      .where(eq(widgetTickets.id, ticketId));
-  }
-}
-
-/**
- * Get all pending-sync tickets for widget projects belonging to a given server.
- * Called by the Fly server on wake to pull tickets it missed while sleeping.
- */
-export async function getUnsyncedTickets(serverId: string) {
-  const rows = await db
-    .select({
-      id: widgetTickets.id,
-      title: widgetTickets.title,
-      description: widgetTickets.description,
-      isPrivate: widgetTickets.isPrivate,
-      projectId: widgetTickets.projectId,
-      channelId: widgetProjects.channelId,
-      slug: widgetProjects.slug,
-      yesVotes: widgetTickets.yesVotes,
-      noVotes: widgetTickets.noVotes,
-      widgetUserId: widgetTickets.widgetUserId,
-    })
-    .from(widgetTickets)
-    .innerJoin(widgetProjects, eq(widgetTickets.projectId, widgetProjects.id))
-    .where(
-      and(
-        eq(widgetProjects.serverId, serverId),
-        eq(widgetTickets.syncStatus, 'pending'),
-      ),
-    )
-    .limit(200);
-
-  // Resolve submitter names
-  const result = [];
-  for (const row of rows) {
-    let submittedBy = 'Anonymous';
-    if (row.widgetUserId) {
-      const [wu] = await db
-        .select({ name: widgetUsers.name })
-        .from(widgetUsers)
-        .where(eq(widgetUsers.id, row.widgetUserId))
-        .limit(1);
-      if (wu?.name) submittedBy = wu.name;
-    }
-    result.push({
-      id: row.id,
-      title: row.title,
-      description: row.description,
-      isPrivate: row.isPrivate,
-      channelId: row.channelId,
-      slug: row.slug,
-      sourceVoteData: JSON.stringify({ yes: row.yesVotes, no: row.noVotes, submittedBy }),
-    });
-  }
-
-  return result;
-}
-
-/**
- * Mark tickets as synced and store their Fly-side todo IDs.
- */
-export async function markTicketsSynced(
-  ticketIds: string[],
-  flyTodoIds: Record<string, string>,
-) {
-  await db.transaction(async (tx) => {
-    for (const ticketId of ticketIds) {
-      await tx
-        .update(widgetTickets)
-        .set({
-          syncStatus: 'synced',
-          flyTodoId: flyTodoIds[ticketId] || null,
-          updatedAt: new Date(),
-        })
-        .where(eq(widgetTickets.id, ticketId));
-    }
-  });
-}
-
-/**
- * Update a ticket's status (called by Fly server when todo status changes).
- */
-export async function updateTicketStatus(
-  ticketId: string,
-  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled',
-) {
-  await db
-    .update(widgetTickets)
-    .set({ status, updatedAt: new Date() })
-    .where(eq(widgetTickets.id, ticketId));
 }
