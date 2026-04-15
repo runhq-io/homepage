@@ -2,6 +2,15 @@ import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, unique
 import { relations } from 'drizzle-orm';
 
 // ============================================================================
+// Migration tracking (created by db:migrate — kept so db:push won't drop it)
+// ============================================================================
+
+export const schemaMigrations = pgTable('schema_migrations', {
+  name: text('name').primaryKey(),
+  appliedAt: timestamp('applied_at').defaultNow().notNull(),
+});
+
+// ============================================================================
 // Billing Plans
 // ============================================================================
 
