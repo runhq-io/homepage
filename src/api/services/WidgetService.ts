@@ -8,7 +8,8 @@
  * Widget submissions use sourceType='widget' and createdByType='external'.
  */
 
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import * as jose from 'jose';
 import { db } from '../../db/index';
 import {
   widgetProjects,
@@ -209,10 +210,16 @@ function mapTaskToWidgetResponse(
   };
 }
 
-function base64urlDecode(str: string): string {
-  const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = base64 + '=='.slice(0, (4 - (base64.length % 4)) % 4);
-  return Buffer.from(padded, 'base64').toString('utf-8');
+/** Decode a standard JWT payload without verifying signature (for extracting `fp` before lookup). */
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 async function recountVotes(taskId: string, serverId: string): Promise<void> {
@@ -275,18 +282,10 @@ export async function authenticateWidget(
     return { projectId: project.id, projectSlug: project.slug, authenticated: false };
   }
 
-  // ---- Mode 3: Signed JWT {payload}.{signature} ----
-  const payloadB64 = token.slice(0, dotIndex);
-  const sigB64 = token.slice(dotIndex + 1);
-
-  let payload: { sub?: string; name?: string; fp: string; iat?: number };
-  try {
-    payload = JSON.parse(base64urlDecode(payloadB64));
-  } catch {
-    return null;
-  }
-
-  if (!payload.fp) return null;
+  // ---- Mode 3: Signed JWT (standard 3-part header.payload.signature) ----
+  // Decode unverified payload to extract `fp` for project lookup
+  const decoded = decodeJwtPayload(token);
+  if (!decoded || typeof decoded.fp !== 'string') return null;
 
   const [project] = await db
     .select({
@@ -296,46 +295,45 @@ export async function authenticateWidget(
       apiSecretHash: widgetProjects.apiSecretHash,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.apiKey, payload.fp))
+    .where(eq(widgetProjects.apiKey, decoded.fp))
     .limit(1);
 
   if (!project || !project.enabled) return null;
 
-  // Verify HMAC-SHA256 signature
-  const expected = createHmac('sha256', project.apiSecretHash)
-    .update(payloadB64)
-    .digest('base64url');
-
-  let sigValid = false;
+  // Verify signature, expiry, and type using jose
+  let payload: jose.JWTPayload;
   try {
-    sigValid = timingSafeEqual(
-      Buffer.from(expected, 'utf8'),
-      Buffer.from(sigB64, 'utf8')
-    );
+    const secret = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, secret, {
+      algorithms: ['HS256'],
+    });
+    if (verified.type !== 'widget_user') return null;
+    payload = verified;
   } catch {
     return null;
   }
-  if (!sigValid) return null;
 
   // If sub is provided, upsert a widgetUser for identified submissions
   let widgetUserId: string | undefined;
-  if (payload.sub) {
+  const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
+  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  if (sub) {
     const [existing] = await db
       .select({ id: widgetUsers.id })
       .from(widgetUsers)
       .where(
         and(
           eq(widgetUsers.projectId, project.id),
-          eq(widgetUsers.externalUserId, payload.sub)
+          eq(widgetUsers.externalUserId, sub)
         )
       )
       .limit(1);
 
     if (existing) {
-      if (payload.name) {
+      if (name) {
         await db
           .update(widgetUsers)
-          .set({ name: payload.name })
+          .set({ name })
           .where(eq(widgetUsers.id, existing.id));
       }
       widgetUserId = existing.id;
@@ -344,8 +342,8 @@ export async function authenticateWidget(
         .insert(widgetUsers)
         .values({
           projectId: project.id,
-          externalUserId: payload.sub,
-          name: payload.name,
+          externalUserId: sub,
+          name,
         })
         .returning({ id: widgetUsers.id });
       widgetUserId = inserted.id;
@@ -1051,19 +1049,19 @@ export async function generateUserTokenBySecret(
 
   if (!project) return null;
 
-  const payload = {
-    sub: userId,
-    name: userName || undefined,
+  const signingKey = new TextEncoder().encode(project.apiSecretHash);
+  const token = await new jose.SignJWT({
     fp: project.apiKey,
-    iat: Math.floor(Date.now() / 1000),
-  };
+    type: 'widget_user',
+    ...(userName ? { name: userName } : {}),
+  })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(userId)
+    .setIssuedAt()
+    .setExpirationTime('24h')
+    .sign(signingKey);
 
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const signature = createHmac('sha256', project.apiSecretHash)
-    .update(payloadB64)
-    .digest('base64url');
-
-  return { token: `${payloadB64}.${signature}` };
+  return { token };
 }
 
 export async function getWidgetIntegration(serverId: string) {
