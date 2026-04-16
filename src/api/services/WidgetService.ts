@@ -470,10 +470,71 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   };
 }
 
+const ALLOWED_METADATA_KEYS = new Set([
+  'url', 'referrer', 'userAgent', 'viewport', 'screenSize',
+  'locale', 'timestamp', 'consoleLogs', 'errors',
+]);
+const MAX_STRING_LENGTH = 2048;
+const MAX_LOG_ENTRIES = 50;
+const MAX_LOG_MESSAGE_LENGTH = 1024;
+
+function sanitizeWidgetMetadata(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const input = raw as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+
+  for (const key of Object.keys(input)) {
+    if (!ALLOWED_METADATA_KEYS.has(key)) continue;
+    const val = input[key];
+
+    if (key === 'url' || key === 'referrer' || key === 'userAgent' || key === 'locale' || key === 'timestamp') {
+      if (typeof val === 'string') result[key] = val.slice(0, MAX_STRING_LENGTH);
+    } else if (key === 'viewport' || key === 'screenSize') {
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const obj = val as Record<string, unknown>;
+        if (typeof obj.width === 'number' && typeof obj.height === 'number') {
+          result[key] = { width: obj.width, height: obj.height };
+        }
+      }
+    } else if (key === 'consoleLogs') {
+      if (Array.isArray(val)) {
+        result[key] = val.slice(0, MAX_LOG_ENTRIES).map((entry: unknown) => {
+          if (!entry || typeof entry !== 'object') return null;
+          const e = entry as Record<string, unknown>;
+          return {
+            level: typeof e.level === 'string' ? e.level.slice(0, 10) : 'log',
+            message: typeof e.message === 'string' ? e.message.slice(0, MAX_LOG_MESSAGE_LENGTH) : '',
+            ts: typeof e.ts === 'string' ? e.ts.slice(0, 30) : '',
+          };
+        }).filter(Boolean);
+      }
+    } else if (key === 'errors') {
+      if (Array.isArray(val)) {
+        result[key] = val.slice(0, MAX_LOG_ENTRIES).map((entry: unknown) => {
+          if (!entry || typeof entry !== 'object') return null;
+          const e = entry as Record<string, unknown>;
+          return {
+            type: typeof e.type === 'string' ? e.type.slice(0, 50) : 'error',
+            message: typeof e.message === 'string' ? e.message.slice(0, MAX_LOG_MESSAGE_LENGTH) : '',
+            source: typeof e.source === 'string' ? e.source.slice(0, MAX_STRING_LENGTH) : undefined,
+            line: typeof e.line === 'number' ? e.line : undefined,
+            col: typeof e.col === 'number' ? e.col : undefined,
+            stack: typeof e.stack === 'string' ? e.stack.slice(0, MAX_STRING_LENGTH) : undefined,
+            ts: typeof e.ts === 'string' ? e.ts.slice(0, 30) : '',
+          };
+        }).filter(Boolean);
+      }
+    }
+  }
+
+  return Object.keys(result).length > 0 ? result : null;
+}
+
 export async function createTicket(
   projectId: string,
   widgetUserId: string | undefined,
-  opts: { title?: string; description?: string; isPrivate?: boolean }
+  opts: { title?: string; description?: string; isPrivate?: boolean; context?: unknown }
 ) {
   const [project] = await db
     .select({
@@ -514,6 +575,8 @@ export async function createTicket(
     createdByName = wu?.name || undefined;
   }
 
+  const metadata = sanitizeWidgetMetadata(opts.context);
+
   const [task] = await db
     .insert(workspaceTasks)
     .values({
@@ -528,6 +591,7 @@ export async function createTicket(
       createdByName: createdByName ?? null,
       moderationStatus,
       votingEndsAt,
+      metadata,
     })
     .returning();
 

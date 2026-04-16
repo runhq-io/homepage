@@ -152,6 +152,7 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     attachments: attachments ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    metadata: (row.metadata as Record<string, unknown> | null) ?? null,
   };
 }
 

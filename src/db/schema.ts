@@ -1036,6 +1036,7 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   upvoteCount: integer('upvote_count').notNull().default(0),
   downvoteCount: integer('downvote_count').notNull().default(0),
   moderationStatus: text('moderation_status').notNull().$type<'pending' | 'approved' | 'rejected'>().default('approved'),
+  metadata: jsonb('metadata').$type<Record<string, unknown> | null>(),
   votingEndsAt: timestamp('voting_ends_at'),
   legacyWorkspaceTodoId: text('legacy_workspace_todo_id'),
   lastMigratedAt: timestamp('last_migrated_at'),

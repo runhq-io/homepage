@@ -331,6 +331,7 @@ export interface CanonicalTask {
   votingEndsAt?: string | null;
   upvotedByMe?: boolean;
   attachments?: CanonicalTaskAttachment[] | null;
+  metadata?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
 }
