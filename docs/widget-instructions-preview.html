@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Widget Instructions Preview</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 p-8 flex justify-center">
+<div class="w-[500px] space-y-4">
+
+  <div class="flex items-center gap-2">
+    <h3 class="text-sm font-medium text-white">Widget</h3>
+    <span class="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 border border-green-500/30 rounded-full">Connected</span>
+  </div>
+  <p class="text-xs text-slate-400">Enable an embeddable voting and ticket widget for this project. Embed it on any website so users can submit and vote on proposals.</p>
+
+  <div class="space-y-4">
+
+    <!-- Step 1: Server-side -->
+    <div>
+      <label class="block text-xs font-medium text-slate-300 mb-1">1. Server-side — Generate user tokens</label>
+      <p class="text-xs text-slate-500 mb-2">Install the RunHQ package and use your API key to generate tokens for your users.</p>
+
+      <!-- Neon-style obfuscated key -->
+      <div class="relative group">
+        <pre
+          class="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs font-mono whitespace-pre-wrap break-all cursor-text"
+          style="color: transparent; text-shadow: 0 0 6px rgba(148,163,184,0.5);"
+          onmouseenter="this.style.color=''; this.style.textShadow='';"
+          onmouseleave="this.style.color='transparent'; this.style.textShadow='0 0 6px rgba(148,163,184,0.5)';"
+        >K_oMhpiM3zXEU0i6877sALfg0XPF9cJDPRwTnbT2r2o</pre>
+        <div class="absolute top-1.5 right-2 flex items-center gap-1">
+          <span class="text-[10px] text-slate-500 group-hover:hidden">Click to reveal & copy</span>
+          <button class="px-2 py-1 text-xs bg-red-900/50 hover:bg-red-900/70 text-red-300 rounded border border-red-800/50 transition-colors">Regenerate</button>
+        </div>
+      </div>
+
+      <!-- Code snippet -->
+      <pre class="mt-2 px-3 py-2 bg-slate-800/50 border border-slate-700/50 rounded-lg text-xs text-slate-400 font-mono whitespace-pre-wrap">import RunHQ from 'runhq';
+const runhq = new RunHQ('YOUR_API_KEY');
+
+// Generate a token for each user session
+const token = runhq.generateToken({
+  userId: user.id,
+  name: user.name, // optional
+});
+// Pass this token to your frontend</pre>
+    </div>
+
+    <!-- Step 2: Client-side -->
+    <div>
+      <label class="block text-xs font-medium text-slate-300 mb-1">2. Client-side — Add widget to your site</label>
+      <p class="text-xs text-slate-500 mb-2">Add the script tag and initialize with the token from your backend.</p>
+      <div class="relative">
+        <pre class="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-slate-300 font-mono whitespace-pre-wrap break-all">&lt;script src="https://console.runhq.io/widget.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+  // token comes from your backend (step 1)
+  RunHQWidget.init({ token: TOKEN_FROM_BACKEND });
+&lt;/script&gt;</pre>
+        <button class="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 rounded border border-slate-600 transition-colors">Copy</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Connected channel -->
+  <div class="flex items-center gap-1.5 px-3 py-2 bg-green-500/10 border border-green-500/25 rounded-lg">
+    <svg class="w-3.5 h-3.5 text-green-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+    <span class="text-xs text-green-400">Widget submissions will appear in #todo</span>
+  </div>
+
+  <p class="text-center text-xs text-slate-600 mt-8">Hover over the blurred API key to reveal it</p>
+</div>
+</body>
+</html>

@@ -636,7 +636,7 @@
 
       /* Inline feedback form */
       ".rw-inline-form { padding: 0 12px 8px; }",
-      ".rw-inline-title { margin-bottom: 6px; font-size: 13px; height: 36px; }",
+      ".rw-inline-title { display: none; }",
       ".rw-inline-textarea { min-height: 64px; resize: none; }",
       ".rw-inline-bottom { display: flex; align-items: center; gap: 8px; margin-top: 6px; }",
       ".rw-inline-bottom-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }",
@@ -1414,13 +1414,6 @@
   function renderInlineForm(onSubmit) {
     var noticeContainer = h("div", null);
 
-    var titleInput = h("input", {
-      className: "rw-input rw-inline-title",
-      placeholder: "Title (optional)",
-      maxlength: "200",
-      type: "text",
-    });
-
     var descInput = h("textarea", {
       className: "rw-input rw-textarea rw-inline-textarea",
       placeholder: "Write your feedback, proposal, or bug report here\u2026",
@@ -1479,6 +1472,14 @@
       }
     });
 
+    // Ctrl+Enter / Cmd+Enter to submit
+    descInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitBtn.click();
+      }
+    });
+
     // --- Submit button ---
     var submitBtn = h("button", { className: "rw-inline-submit", type: "button" }, "Submit");
     submitBtn.addEventListener("click", function () {
@@ -1506,9 +1507,7 @@
         locale: navigator.language,
       };
 
-      var titleVal = titleInput.value.trim();
       onSubmit({
-        title: titleVal || undefined,
         description: description,
         type: "feedback",
         context: context,
@@ -1524,7 +1523,6 @@
         });
         return chain;
       }).then(function () {
-        titleInput.value = "";
         descInput.value = "";
         privateCheckbox.checked = false;
         attachedFiles.length = 0;
@@ -1560,7 +1558,7 @@
       bottomRight,
     ]);
 
-    var formChildren = [noticeContainer, titleInput, descInput, previewContainer, bottomRow, fileInput];
+    var formChildren = [noticeContainer, descInput, previewContainer, bottomRow, fileInput];
 
     var form = h("div", { className: "rw-inline-form" }, formChildren);
 
