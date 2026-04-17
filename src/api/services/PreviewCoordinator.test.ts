@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as ServerService from './ServerService';
-import { channelForPort } from './PreviewCoordinator';
+import { channelForPort, startChannel } from './PreviewCoordinator';
 
 vi.mock('./ServerService', async () => {
   const actual = await vi.importActual<typeof import('./ServerService')>('./ServerService');
@@ -57,5 +57,45 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('propagates fetch errors', async () => {
     (ServerService.fetchFromServer as any).mockRejectedValue(new Error('server down'));
     await expect(channelForPort({ server: mockServer, userId: 'u1', port: 3000 })).rejects.toThrow('server down');
+  });
+});
+
+describe('PreviewCoordinator.startChannel', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('relays success response from the machine', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      started: true, alreadyStarted: false, terminalSessionId: 'sess_1', bootId: 'b1',
+    });
+    const result = await startChannel({ server: mockServer, userId: 'u1', channelId: 'ch_a' });
+    expect(result).toEqual({ started: true, alreadyStarted: false, terminalSessionId: 'sess_1', bootId: 'b1' });
+    expect(ServerService.fetchFromServer).toHaveBeenCalledWith(
+      mockServer, 'u1', '/__preview/start-channel',
+      { method: 'POST', body: { channelId: 'ch_a', force: false } },
+    );
+  });
+
+  it('propagates force=true', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({ started: true, alreadyStarted: false, terminalSessionId: 's', bootId: 'b' });
+    await startChannel({ server: mockServer, userId: 'u1', channelId: 'ch_a', force: true });
+    expect(ServerService.fetchFromServer).toHaveBeenCalledWith(
+      mockServer, 'u1', '/__preview/start-channel',
+      { method: 'POST', body: { channelId: 'ch_a', force: true } },
+    );
+  });
+
+  it('returns channelMissing on HTTP 404', async () => {
+    (ServerService.fetchFromServer as any).mockRejectedValue(new Error('Server responded with HTTP 404'));
+    const result = await startChannel({ server: mockServer, userId: 'u1', channelId: 'ch_a' });
+    expect(result).toEqual({
+      started: false, alreadyStarted: false,
+      terminalSessionId: null, bootId: null,
+      channelMissing: true,
+    });
+  });
+
+  it('propagates other HTTP errors', async () => {
+    (ServerService.fetchFromServer as any).mockRejectedValue(new Error('Server responded with HTTP 500'));
+    await expect(startChannel({ server: mockServer, userId: 'u1', channelId: 'ch_a' })).rejects.toThrow('HTTP 500');
   });
 });

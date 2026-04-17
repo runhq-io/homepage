@@ -30,6 +30,14 @@ export interface PreviewChannelMatch {
   startingCommand: string | null;
 }
 
+export interface StartChannelResult {
+  started: boolean;
+  alreadyStarted: boolean;
+  terminalSessionId: string | null;
+  bootId: string | null;
+  channelMissing?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -70,4 +78,41 @@ export async function channelForPort(args: {
     channelName: match.name,
     startingCommand,
   };
+}
+
+/**
+ * Instruct the machine to start the channel's Start Command.
+ *
+ * On success the machine's response shape is relayed directly.
+ * On HTTP 404 (channel not found / no startingCommand) the result
+ * surfaces `channelMissing: true` so callers can handle it gracefully.
+ * All other errors (network, non-404 HTTP) are propagated.
+ */
+export async function startChannel(args: {
+  server: Server;
+  userId: string;
+  channelId: string;
+  force?: boolean;
+}): Promise<StartChannelResult> {
+  const { server, userId, channelId, force } = args;
+
+  try {
+    return await fetchFromServer<StartChannelResult>(
+      server,
+      userId,
+      '/__preview/start-channel',
+      { method: 'POST', body: { channelId, force: force ?? false } },
+    );
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Server responded with HTTP 404') {
+      return {
+        started: false,
+        alreadyStarted: false,
+        terminalSessionId: null,
+        bootId: null,
+        channelMissing: true,
+      };
+    }
+    throw err;
+  }
 }
