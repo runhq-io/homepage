@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, unique } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, unique, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
 // ============================================================================
@@ -149,6 +149,8 @@ export const users = pgTable('users', {
   isActivated: boolean('is_activated').default(false), // Requires invite code to activate
   emailVerifiedAt: timestamp('email_verified_at'), // When user verified their email
   lastLoginAt: timestamp('last_login_at'),
+  mfaEnabled: boolean('mfa_enabled').notNull().default(false),
+  mfaEnabledAt: timestamp('mfa_enabled_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -501,6 +503,39 @@ export type InviteCode = typeof inviteCodes.$inferSelect;
 export type NewInviteCode = typeof inviteCodes.$inferInsert;
 
 // ============================================================================
+// User MFA (TOTP + future methods)
+// ============================================================================
+
+export const userMfa = pgTable('user_mfa', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  method: text('method').notNull(), // 'totp'
+  secretEncrypted: text('secret_encrypted').notNull(),
+  secretIv: text('secret_iv').notNull(),
+  secretAuthTag: text('secret_auth_tag').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+}, (t) => ({
+  userMethodUnique: uniqueIndex('user_mfa_user_method_idx').on(t.userId, t.method),
+}));
+
+export type UserMfa = typeof userMfa.$inferSelect;
+export type NewUserMfa = typeof userMfa.$inferInsert;
+
+export const userRecoveryCodes = pgTable('user_recovery_codes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  codeHash: text('code_hash').notNull(),
+  usedAt: timestamp('used_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('user_recovery_codes_user_idx').on(t.userId),
+}));
+
+export type UserRecoveryCode = typeof userRecoveryCodes.$inferSelect;
+export type NewUserRecoveryCode = typeof userRecoveryCodes.$inferInsert;
+
+// ============================================================================
 // Organizations (teams for collaboration)
 // ============================================================================
 
@@ -510,6 +545,8 @@ export const organizations = pgTable('organizations', {
   slug: text('slug').unique(), // URL-friendly identifier
   ownerId: uuid('owner_id').references(() => users.id).notNull(),
   avatarUrl: text('avatar_url'),
+  requireMfa: boolean('require_mfa').notNull().default(false),
+  requireMfaEnforcedAt: timestamp('require_mfa_enforced_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
