@@ -97,3 +97,33 @@ export function verifyTotp(secret: string, code: string): boolean {
     return false;
   }
 }
+
+import bcrypt from 'bcryptjs';
+
+const RECOVERY_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+const RECOVERY_CODE_LENGTH = 10;
+const RECOVERY_CODE_COUNT = 10;
+const BCRYPT_ROUNDS = 12;
+
+export function generateRecoveryCodes(count = RECOVERY_CODE_COUNT): string[] {
+  const codes: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const raw = Array.from(randomBytes(RECOVERY_CODE_LENGTH))
+      .map((b) => RECOVERY_ALPHABET[b % RECOVERY_ALPHABET.length])
+      .join('');
+    codes.push(`${raw.slice(0, 5)}-${raw.slice(5)}`);
+  }
+  return codes;
+}
+
+export async function hashRecoveryCode(code: string): Promise<string> {
+  return bcrypt.hash(normalizeRecoveryCode(code), BCRYPT_ROUNDS);
+}
+
+export async function verifyRecoveryCode(code: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(normalizeRecoveryCode(code), hash);
+}
+
+export function normalizeRecoveryCode(code: string): string {
+  return code.trim().toLowerCase().replace(/\s+/g, '');
+}

@@ -74,3 +74,56 @@ describe('TOTP', () => {
     expect(url.startsWith('data:image/png;base64,')).toBe(true);
   });
 });
+
+import {
+  generateRecoveryCodes,
+  hashRecoveryCode,
+  verifyRecoveryCode,
+  normalizeRecoveryCode,
+} from './mfa';
+
+describe('Recovery codes', () => {
+  it('generates the requested number of codes', () => {
+    const codes = generateRecoveryCodes(10);
+    expect(codes).toHaveLength(10);
+  });
+
+  it('generates unique codes', () => {
+    const codes = generateRecoveryCodes(20);
+    expect(new Set(codes).size).toBe(20);
+  });
+
+  it('uses the dash-separated format', () => {
+    const codes = generateRecoveryCodes(5);
+    for (const c of codes) {
+      expect(c).toMatch(/^[a-z2-9]{5}-[a-z2-9]{5}$/);
+    }
+  });
+
+  it('excludes visually ambiguous characters', () => {
+    const codes = generateRecoveryCodes(50);
+    for (const c of codes) {
+      expect(c).not.toMatch(/[0o1li]/);
+    }
+  });
+
+  it('hashes and verifies a code', async () => {
+    const code = 'abcde-fghij';
+    const hash = await hashRecoveryCode(code);
+    expect(await verifyRecoveryCode(code, hash)).toBe(true);
+  });
+
+  it('rejects wrong codes', async () => {
+    const hash = await hashRecoveryCode('abcde-fghij');
+    expect(await verifyRecoveryCode('aaaaa-aaaaa', hash)).toBe(false);
+  });
+
+  it('normalizes user input (case, whitespace)', async () => {
+    const hash = await hashRecoveryCode('abcde-fghij');
+    expect(await verifyRecoveryCode(' ABCDE-FGHIJ ', hash)).toBe(true);
+  });
+
+  it('normalizes to lowercase trimmed', () => {
+    expect(normalizeRecoveryCode(' ABCDE-fghij\n')).toBe('abcde-fghij');
+  });
+});
