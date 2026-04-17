@@ -336,6 +336,19 @@ export async function getServer(serverId: string): Promise<Server | null> {
 }
 
 /**
+ * Get server by Fly machine ID
+ */
+export async function getServerByMachineId(machineId: string): Promise<Server | null> {
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.machineId, machineId))
+    .limit(1);
+
+  return server ?? null;
+}
+
+/**
  * Ensure a remote server has a Cloudflare tunnel ID and connector token on its machine.
  * Tunnel token is fetched on-demand and never persisted in plaintext.
  */

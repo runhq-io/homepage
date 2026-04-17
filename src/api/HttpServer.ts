@@ -3106,6 +3106,78 @@ export function createHttpApp() {
     }
   });
 
+  // Resolve a Fly machine ID to its server record (used by the preview gateway)
+  app.get('/api/servers/by-machine/:machineId', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const machineId = c.req.param('machineId');
+      const server = await ServerService.getServerByMachineId(machineId);
+      if (!server) {
+        return c.json({ error: 'Not found' }, 404);
+      }
+
+      const hasAccess = await ServerService.canAccessServer(server.id, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
+
+      return c.json({ serverId: server.id, serverUrl: server.serverUrl, status: server.status });
+    } catch (error) {
+      console.error('[HttpServer] Get server by machine error:', error);
+      return c.json({ error: 'Failed to get server by machine' }, 500);
+    }
+  });
+
+  // Probe whether a specific preview port on a Fly machine is ready
+  app.get('/api/servers/:serverId/preview/health', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
+
+      const portParam = c.req.query('port');
+      const port = portParam !== undefined ? Number(portParam) : NaN;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return c.json({ error: 'Invalid port' }, 400);
+      }
+
+      const server = await ServerService.getServer(serverId);
+      if (!server) {
+        return c.json({ error: 'Server not found' }, 404);
+      }
+      if (!server.serverUrl) {
+        return c.json({ error: 'Server has no URL' }, 404);
+      }
+
+      const ready = await PreviewCoordinator.probeReady({ server, userId, port });
+      return c.json({ ready });
+    } catch (error) {
+      console.error('[HttpServer] Preview health error:', error);
+      return c.json({ error: 'Failed to probe preview health' }, 500);
+    }
+  });
+
   // Mint a short-lived server-scoped JWT for the preview-gateway handoff
   app.post('/api/servers/:serverId/preview/mint-token', async (c) => {
     try {

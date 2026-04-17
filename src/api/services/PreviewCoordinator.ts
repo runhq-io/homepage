@@ -81,6 +81,31 @@ export async function channelForPort(args: {
 }
 
 /**
+ * Probe whether the Fly machine's preview port is ready.
+ *
+ * Returns `true` when the machine reports `ready: true` for the given port.
+ * Returns `false` on any error (network failure, machine offline, etc.) so the
+ * caller can treat those as "not yet ready" rather than a hard failure.
+ */
+export async function probeReady(args: {
+  server: Server;
+  userId: string;
+  port: number;
+}): Promise<boolean> {
+  try {
+    const result = await fetchFromServer<{ ready?: boolean }>(
+      args.server,
+      args.userId,
+      `/__preview/health?port=${args.port}`,
+      { timeoutMs: 2000 },
+    );
+    return result.ready === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Instruct the machine to start the channel's Start Command.
  *
  * On success the machine's response shape is relayed directly.

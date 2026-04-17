@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as ServerService from './ServerService';
-import { channelForPort, startChannel } from './PreviewCoordinator';
+import { channelForPort, startChannel, probeReady } from './PreviewCoordinator';
 
 vi.mock('./ServerService', async () => {
   const actual = await vi.importActual<typeof import('./ServerService')>('./ServerService');
@@ -97,5 +97,24 @@ describe('PreviewCoordinator.startChannel', () => {
   it('propagates other HTTP errors', async () => {
     (ServerService.fetchFromServer as any).mockRejectedValue(new Error('Server responded with HTTP 500'));
     await expect(startChannel({ server: mockServer, userId: 'u1', channelId: 'ch_a' })).rejects.toThrow('HTTP 500');
+  });
+});
+
+describe('PreviewCoordinator.probeReady', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('returns true when ready', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({ ready: true, listening: true, bootId: 'b' });
+    expect(await probeReady({ server: mockServer, userId: 'u1', port: 3000 })).toBe(true);
+  });
+
+  it('returns false when ready is false', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({ ready: false });
+    expect(await probeReady({ server: mockServer, userId: 'u1', port: 3000 })).toBe(false);
+  });
+
+  it('returns false on fetch failure', async () => {
+    (ServerService.fetchFromServer as any).mockRejectedValue(new Error('offline'));
+    expect(await probeReady({ server: mockServer, userId: 'u1', port: 3000 })).toBe(false);
   });
 });
