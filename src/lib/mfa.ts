@@ -68,3 +68,32 @@ export function decryptSecret(enc: EncryptedSecret): string {
 export function _resetMfaKeyForTesting() {
   _mfaKey = null;
 }
+
+import { authenticator } from 'otplib';
+import QRCode from 'qrcode';
+
+authenticator.options = { step: 30, window: 1, digits: 6 };
+
+const ISSUER = 'RunHQ';
+
+export function generateTotpSecret(): string {
+  return authenticator.generateSecret();
+}
+
+export function buildOtpAuthUrl(secret: string, accountEmail: string): string {
+  return authenticator.keyuri(accountEmail, ISSUER, secret);
+}
+
+export async function generateQrDataUrl(secret: string, accountEmail: string): Promise<string> {
+  const url = buildOtpAuthUrl(secret, accountEmail);
+  return QRCode.toDataURL(url, { errorCorrectionLevel: 'M', margin: 2, width: 256 });
+}
+
+export function verifyTotp(secret: string, code: string): boolean {
+  if (!/^\d{6}$/.test(code)) return false;
+  try {
+    return authenticator.verify({ token: code, secret });
+  } catch {
+    return false;
+  }
+}
