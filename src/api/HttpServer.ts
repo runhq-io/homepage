@@ -3187,6 +3187,52 @@ export function createHttpApp() {
     }
   });
 
+  // Start (or reuse) a channel's startingCommand on the Fly machine
+  app.post('/api/servers/:serverId/preview/start-channel', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
+
+      const body = await c.req.json().catch(() => ({}));
+      const { channelId, force } = body as { channelId?: unknown; force?: unknown };
+      if (!channelId || typeof channelId !== 'string') {
+        return c.json({ error: 'channelId required' }, 400);
+      }
+
+      const server = await ServerService.getServer(serverId);
+      if (!server) {
+        return c.json({ error: 'Server not found' }, 404);
+      }
+      if (!server.serverUrl) {
+        return c.json({ error: 'Server has no URL' }, 404);
+      }
+
+      const result = await PreviewCoordinator.startChannel({
+        server,
+        userId,
+        channelId,
+        force: force === true,
+      });
+      return c.json(result);
+    } catch (error) {
+      console.error('[HttpServer] Start-channel error:', error);
+      return c.json({ error: 'Failed to start channel' }, 500);
+    }
+  });
+
   // Restart a remote server
   app.post('/api/servers/:serverId/server/restart', async (c) => {
     try {
