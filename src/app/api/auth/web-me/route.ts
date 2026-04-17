@@ -50,6 +50,7 @@ export async function GET(request: Request) {
         isAdmin: userIsAdmin,
         approved: !!user.isActivated,
         hasPassword: !!user.passwordHash,
+        mfaEnabled: user.mfaEnabled ?? false,
       },
     }, { headers: corsHeaders });
   } catch (err) {
