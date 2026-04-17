@@ -123,7 +123,17 @@ describe('Recovery codes', () => {
     expect(await verifyRecoveryCode(' ABCDE-FGHIJ ', hash)).toBe(true);
   });
 
-  it('normalizes to lowercase trimmed', () => {
-    expect(normalizeRecoveryCode(' ABCDE-fghij\n')).toBe('abcde-fghij');
+  it('normalizes to lowercase trimmed, strips dashes and whitespace', () => {
+    expect(normalizeRecoveryCode(' ABCDE-fghij\n')).toBe('abcdefghij');
+  });
+
+  it('verifies a code typed without the dash', async () => {
+    const hash = await hashRecoveryCode('abcde-fghij');
+    expect(await verifyRecoveryCode('abcdefghij', hash)).toBe(true);
+  });
+
+  it('verifies a code with extra whitespace/uppercase and no dash', async () => {
+    const hash = await hashRecoveryCode('abcde-fghij');
+    expect(await verifyRecoveryCode('  ABCDE FGHIJ  ', hash)).toBe(true);
   });
 });

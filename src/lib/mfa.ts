@@ -7,6 +7,12 @@
  * production — rotating it invalidates all enrolled TOTP secrets.
  */
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+// otplib pinned to ^12.x: v13 removed the `authenticator` namespace API.
+import { authenticator } from 'otplib';
+import QRCode from 'qrcode';
+import bcrypt from 'bcryptjs';
+
+authenticator.options = { step: 30, window: 1, digits: 6 };
 
 const KEY_LENGTH = 32; // AES-256
 const IV_LENGTH = 12;  // GCM standard
@@ -69,11 +75,6 @@ export function _resetMfaKeyForTesting() {
   _mfaKey = null;
 }
 
-import { authenticator } from 'otplib';
-import QRCode from 'qrcode';
-
-authenticator.options = { step: 30, window: 1, digits: 6 };
-
 const ISSUER = 'RunHQ';
 
 export function generateTotpSecret(): string {
@@ -97,8 +98,6 @@ export function verifyTotp(secret: string, code: string): boolean {
     return false;
   }
 }
-
-import bcrypt from 'bcryptjs';
 
 const RECOVERY_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 const RECOVERY_CODE_LENGTH = 10;
@@ -125,5 +124,5 @@ export async function verifyRecoveryCode(code: string, hash: string): Promise<bo
 }
 
 export function normalizeRecoveryCode(code: string): string {
-  return code.trim().toLowerCase().replace(/\s+/g, '');
+  return code.trim().toLowerCase().replace(/[\s-]+/g, '');
 }
