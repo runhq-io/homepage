@@ -45,6 +45,11 @@ export async function generateServerSessionToken(
   expiresInSeconds: number = 3600, // 1 hour default
   options?: { userName?: string; userEmail?: string; serverRole?: 'owner' | 'member' },
 ): Promise<string> {
+  if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
+    throw new Error(`Invalid expiresInSeconds: ${expiresInSeconds}`);
+  }
+  const ttl = Math.min(expiresInSeconds, 86400);
+
   const token = await new SignJWT({
     userId,
     serverId,
@@ -55,7 +60,7 @@ export async function generateServerSessionToken(
   } as ServerSessionPayload)
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setExpirationTime(`${expiresInSeconds}s`)
+    .setExpirationTime(`${ttl}s`)
     .setJti(crypto.randomUUID())
     .sign(getSecret());
 
