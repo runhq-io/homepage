@@ -1933,9 +1933,12 @@ export async function validateChangeTier(
     return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
 
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only the server owner can change tier' };
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasCloudPerm) {
+    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
+    if (!hasRBACPerm) {
+      return { success: false, error: 'Only administrators can change tier' };
+    }
   }
 
   if (!isAnyProviderConfigured()) {
@@ -2000,9 +2003,12 @@ export async function changeTier(
     return { success: false, error: `Invalid tier. Must be one of: ${VALID_TIERS.join(', ')}` };
   }
 
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only the server owner can change tier' };
+  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasCloudPerm) {
+    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
+    if (!hasRBACPerm) {
+      return { success: false, error: 'Only administrators can change tier' };
+    }
   }
 
   if (!isAnyProviderConfigured()) {
