@@ -27,6 +27,7 @@ import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './services/TaskAttachmentStorageService';
+import * as PreviewCoordinator from './services/PreviewCoordinator';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
@@ -3138,6 +3139,51 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Mint token error:', error);
       return c.json({ error: 'Failed to mint token' }, 500);
+    }
+  });
+
+  // Resolve a preview port to its owning channel + startingCommand
+  app.get('/api/servers/:serverId/preview/channel-for-port', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
+
+      const portParam = c.req.query('port');
+      const port = portParam !== undefined ? Number(portParam) : NaN;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return c.json({ error: 'Invalid port' }, 400);
+      }
+
+      const server = await ServerService.getServer(serverId);
+      if (!server) {
+        return c.json({ error: 'Server not found' }, 404);
+      }
+      if (!server.serverUrl) {
+        return c.json({ error: 'Server has no URL' }, 404);
+      }
+
+      const match = await PreviewCoordinator.channelForPort({ server, userId, port });
+      if (!match) {
+        return c.json({ error: 'No channel on this port' }, 404);
+      }
+
+      return c.json(match);
+    } catch (error) {
+      console.error('[HttpServer] Channel-for-port error:', error);
+      return c.json({ error: 'Failed to resolve channel for port' }, 500);
     }
   });
 
