@@ -3105,6 +3105,42 @@ export function createHttpApp() {
     }
   });
 
+  // Mint a short-lived server-scoped JWT for the preview-gateway handoff
+  app.post('/api/servers/:serverId/preview/mint-token', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
+
+      const body = await c.req.json().catch(() => ({}));
+      const ttlSeconds = typeof body.ttlSeconds === 'number' ? body.ttlSeconds : 86400;
+      if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+        return c.json({ error: 'Invalid ttlSeconds' }, 400);
+      }
+
+      const minted = await ServerSessionService.generateServerSessionToken(userId, serverId, ttlSeconds);
+      const parts = minted.split('.');
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      console.log('[HttpServer] Minted preview token for', userId, serverId);
+      return c.json({ token: minted, expiresAt: payload.exp * 1000 });
+    } catch (error) {
+      console.error('[HttpServer] Mint token error:', error);
+      return c.json({ error: 'Failed to mint token' }, 500);
+    }
+  });
+
   // Restart a remote server
   app.post('/api/servers/:serverId/server/restart', async (c) => {
     try {
