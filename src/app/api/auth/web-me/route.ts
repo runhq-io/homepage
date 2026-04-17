@@ -4,6 +4,7 @@ import { users } from '@/db';
 import { eq } from 'drizzle-orm';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { isAdmin } from '@/lib/adminPolicy';
+import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -39,6 +40,7 @@ export async function GET(request: Request) {
     }
 
     const userIsAdmin = await isAdmin(user.id);
+    const mfaEnforcement = await computeMfaEnforcement(user.id);
 
     return NextResponse.json({
       user: {
@@ -52,6 +54,7 @@ export async function GET(request: Request) {
         hasPassword: !!user.passwordHash,
         mfaEnabled: user.mfaEnabled ?? false,
       },
+      mfaEnforcement,
     }, { headers: corsHeaders });
   } catch (err) {
     console.error('[web-me] Token validation error:', err);
