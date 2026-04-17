@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, users } from '@/db';
 import { eq } from 'drizzle-orm';
 import { verifyPassword } from '@/lib/password';
-import { createToken } from '@/api/auth/jwt';
+import { createToken, createMfaPendingToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 
 // Rate limiters for brute-force prevention
@@ -87,7 +87,6 @@ export async function POST(request: NextRequest) {
   // Update last login
   await db.update(users).set({ lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(users.id, user.id));
 
-  const token = await createToken(user.id);
   const userInfo = {
     id: user.id,
     email: user.email,
@@ -96,19 +95,29 @@ export async function POST(request: NextRequest) {
     avatarUrl: user.avatarUrl,
   };
 
-  // Web client needs the token in the response body (cross-origin, can't set cookies)
+  // If MFA is enabled, don't issue a session yet — return a short-lived
+  // mfa-pending token that only the /api/auth/mfa/verify endpoint accepts.
+  if (user.mfaEnabled) {
+    const mfaToken = await createMfaPendingToken(user.id);
+    return NextResponse.json(
+      { mfaRequired: true, mfaToken, user: { id: user.id, email: user.email } },
+      { headers },
+    );
+  }
+
+  const token = await createToken(user.id);
+
   if (returnToken) {
     return NextResponse.json({ token, user: userInfo }, { headers });
   }
 
-  // Console: set HttpOnly cookie
   const response = NextResponse.json({ success: true, user: userInfo }, { headers });
   response.cookies.set('auth_token', token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
-    maxAge: 30 * 24 * 60 * 60, // 30 days
+    maxAge: 30 * 24 * 60 * 60,
   });
 
   return response;
