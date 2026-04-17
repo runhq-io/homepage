@@ -3305,6 +3305,52 @@ export function createHttpApp() {
     }
   });
 
+  // Fetch the last N lines of terminal output for a channel from the machine
+  app.get('/api/servers/:serverId/preview/recent-output', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const hasAccess = await ServerService.canAccessServer(serverId, userId);
+      if (!hasAccess) {
+        return c.json({ error: 'Access denied' }, 403);
+      }
+
+      const channelId = c.req.query('channelId');
+      if (!channelId) {
+        return c.json({ error: 'channelId required' }, 400);
+      }
+
+      const linesParam = c.req.query('lines');
+      const lines = linesParam !== undefined ? Number(linesParam) : undefined;
+
+      const server = await ServerService.getServer(serverId);
+      if (!server) {
+        return c.json({ error: 'Server not found' }, 404);
+      }
+      if (!server.serverUrl) {
+        return c.json({ error: 'Server has no URL' }, 404);
+      }
+
+      const result = await PreviewCoordinator.recentOutput({ server, userId, channelId, lines });
+      if (result === null) {
+        return c.json({ error: 'No terminal session for this channel' }, 404);
+      }
+      return c.json(result);
+    } catch (error) {
+      console.error('[HttpServer] Recent-output error:', error);
+      return c.json({ error: 'Failed to fetch recent output' }, 500);
+    }
+  });
+
   // Restart a remote server
   app.post('/api/servers/:serverId/server/restart', async (c) => {
     try {

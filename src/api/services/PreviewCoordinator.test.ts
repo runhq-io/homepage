@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as ServerService from './ServerService';
-import { channelForPort, startChannel, probeReady } from './PreviewCoordinator';
+import { channelForPort, startChannel, probeReady, recentOutput } from './PreviewCoordinator';
 
 vi.mock('./ServerService', async () => {
   const actual = await vi.importActual<typeof import('./ServerService')>('./ServerService');
@@ -116,5 +116,34 @@ describe('PreviewCoordinator.probeReady', () => {
   it('returns false on fetch failure', async () => {
     (ServerService.fetchFromServer as any).mockRejectedValue(new Error('offline'));
     expect(await probeReady({ server: mockServer, userId: 'u1', port: 3000 })).toBe(false);
+  });
+});
+
+describe('PreviewCoordinator.recentOutput', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('returns output and sessionId on success', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      output: 'line 1\nline 2\nline 3',
+      sessionId: 'sess_42',
+    });
+    const result = await recentOutput({ server: mockServer, userId: 'u1', channelId: 'ch_a', lines: 3 });
+    expect(result).toEqual({ output: 'line 1\nline 2\nline 3', sessionId: 'sess_42' });
+    expect(ServerService.fetchFromServer).toHaveBeenCalledWith(
+      mockServer, 'u1',
+      expect.stringContaining('/__preview/recent-output?channelId=ch_a&lines=3'),
+      expect.objectContaining({ timeoutMs: 3000 }),
+    );
+  });
+
+  it('returns null when the machine responds with HTTP 404', async () => {
+    (ServerService.fetchFromServer as any).mockRejectedValue(new Error('Server responded with HTTP 404'));
+    const result = await recentOutput({ server: mockServer, userId: 'u1', channelId: 'ch_missing' });
+    expect(result).toBeNull();
+  });
+
+  it('propagates non-404 errors', async () => {
+    (ServerService.fetchFromServer as any).mockRejectedValue(new Error('Server responded with HTTP 500'));
+    await expect(recentOutput({ server: mockServer, userId: 'u1', channelId: 'ch_a' })).rejects.toThrow('HTTP 500');
   });
 });
