@@ -1,10 +1,15 @@
 /**
  * Shared JWT token signing/verification.
- * Used by both the Hono HTTP server and WebSocket server.
+ *
+ * Scopes:
+ *   - (no scope)      = session token (30 days)
+ *   - 'mfa-pending'   = issued after password check when MFA is enabled;
+ *                       only valid for POST /api/auth/mfa/verify
+ *   - 'mfa-setup'     = carries an unpersisted TOTP secret through the
+ *                       setup flow (10 min)
  */
 import * as jose from 'jose';
 
-// Read JWT secret lazily — module-load-time reads can race with env injection.
 let _jwtSecret: Uint8Array | null = null;
 
 function getJwtSecret(): Uint8Array {
@@ -18,9 +23,7 @@ function getJwtSecret(): Uint8Array {
   return _jwtSecret;
 }
 
-/**
- * Create a signed JWT token for a user
- */
+/** Session token — no scope claim. */
 export async function createToken(userId: string): Promise<string> {
   return await new jose.SignJWT({ userId })
     .setProtectedHeader({ alg: 'HS256' })
@@ -29,25 +32,67 @@ export async function createToken(userId: string): Promise<string> {
     .sign(getJwtSecret());
 }
 
-/**
- * Verify and decode a JWT token.
- * Returns userId if valid, null if invalid or expired.
- */
+/** Verify a session token. Rejects scoped tokens. */
 export async function verifyToken(token: string): Promise<string | null> {
   try {
     const { payload } = await jose.jwtVerify(token, getJwtSecret());
-    if (typeof payload.userId === 'string') {
-      return payload.userId;
-    }
+    if (payload.scope) return null;
+    if (typeof payload.userId === 'string') return payload.userId;
     return null;
   } catch {
     return null;
   }
 }
 
-/**
- * Extract userId from a signed JWT Bearer token.
- */
 export async function extractUserIdFromToken(token: string): Promise<string | null> {
   return verifyToken(token);
+}
+
+export interface MfaPendingClaims {
+  userId: string;
+}
+
+/** MFA-pending token: short-lived, scope='mfa-pending'. */
+export async function createMfaPendingToken(userId: string): Promise<string> {
+  return new jose.SignJWT({ userId, scope: 'mfa-pending' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('5m')
+    .sign(getJwtSecret());
+}
+
+export async function verifyMfaPendingToken(token: string): Promise<MfaPendingClaims | null> {
+  try {
+    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    if (payload.scope !== 'mfa-pending') return null;
+    if (typeof payload.userId !== 'string') return null;
+    return { userId: payload.userId };
+  } catch {
+    return null;
+  }
+}
+
+export interface MfaSetupClaims {
+  userId: string;
+  secret: string;
+}
+
+/** Carries the unpersisted TOTP secret through the two-step setup. */
+export async function createMfaSetupToken(userId: string, secret: string): Promise<string> {
+  return new jose.SignJWT({ userId, secret, scope: 'mfa-setup' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('10m')
+    .sign(getJwtSecret());
+}
+
+export async function verifyMfaSetupToken(token: string): Promise<MfaSetupClaims | null> {
+  try {
+    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    if (payload.scope !== 'mfa-setup') return null;
+    if (typeof payload.userId !== 'string' || typeof payload.secret !== 'string') return null;
+    return { userId: payload.userId, secret: payload.secret };
+  } catch {
+    return null;
+  }
 }
