@@ -833,7 +833,6 @@ export type ClientMessage =
 
 // Server → Client messages
 export type ServerMessage =
-  | { type: 'auth:result'; success: boolean; userId?: string; serverId?: string; isOwner?: boolean; error?: string }
   | { type: 'subscribed'; channels: SubscriptionChannel[] }
   | { type: 'unsubscribed'; channels: SubscriptionChannel[] }
   | { type: 'pong' }
