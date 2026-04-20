@@ -63,11 +63,21 @@ export async function POST(request: NextRequest) {
       .where(and(eq(userRecoveryCodes.userId, claims.userId), isNull(userRecoveryCodes.usedAt)));
     for (const row of unused) {
       if (await verifyRecoveryCode(normalized, row.codeHash)) {
-        await db.update(userRecoveryCodes)
+        // Conditional update ensures one-shot semantics: if two concurrent
+        // requests see the same code as unused, only the winning UPDATE
+        // returns a row; the loser's consumed.length === 0 and no session
+        // is minted.
+        const consumed = await db.update(userRecoveryCodes)
           .set({ usedAt: new Date() })
-          .where(eq(userRecoveryCodes.id, row.id));
-        verified = true;
-        recoveryCodesRemaining = unused.length - 1;
+          .where(and(
+            eq(userRecoveryCodes.id, row.id),
+            isNull(userRecoveryCodes.usedAt),
+          ))
+          .returning({ id: userRecoveryCodes.id });
+        if (consumed.length > 0) {
+          verified = true;
+          recoveryCodesRemaining = unused.length - 1;
+        }
         break;
       }
     }
