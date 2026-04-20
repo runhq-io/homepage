@@ -7,7 +7,19 @@ import {
   organizationMembers,
 } from '@/db';
 
-export const MFA_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+// Grace period is configurable via env var MFA_GRACE_PERIOD_DAYS.
+// Default: 0 (enforce immediately). Set to 7 or more for a rollout period.
+// Read per-call (not cached at module load) so env changes take effect
+// without restarting, and so tests can set the value after importing.
+export function getMfaGracePeriodMs(): number {
+  const raw = process.env.MFA_GRACE_PERIOD_DAYS;
+  const days = raw !== undefined ? Number(raw) : 0;
+  if (!Number.isFinite(days) || days < 0) return 0;
+  return days * 24 * 60 * 60 * 1000;
+}
+
+/** @deprecated Use getMfaGracePeriodMs() — this constant is only a snapshot at module load. */
+export const MFA_GRACE_PERIOD_MS = getMfaGracePeriodMs();
 
 export interface MfaEnforcementState {
   status: 'ok' | 'grace' | 'required';
@@ -44,11 +56,12 @@ export async function computeMfaEnforcement(userId: string): Promise<MfaEnforcem
 
   if (rows.length === 0) return { status: 'ok' };
 
+  const graceMs = getMfaGracePeriodMs();
   const now = Date.now();
   let worst: { orgId: string; name: string; deadline: Date; past: boolean } | null = null;
   for (const r of rows) {
     const enforcedAt = r.enforcedAt ? r.enforcedAt.getTime() : now;
-    const deadline = new Date(enforcedAt + MFA_GRACE_PERIOD_MS);
+    const deadline = new Date(enforcedAt + graceMs);
     const past = now > deadline.getTime();
     if (!worst || deadline < worst.deadline) {
       worst = { orgId: r.orgId, name: r.name, deadline, past };

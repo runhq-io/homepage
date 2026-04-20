@@ -11,9 +11,14 @@ vi.mock('@/db', () => {
 });
 
 import { db } from '@/db';
-import { computeMfaEnforcement, enforceMfaOrRespond, MFA_GRACE_PERIOD_MS } from './workspaceMfaEnforcement';
+import { computeMfaEnforcement, enforceMfaOrRespond, getMfaGracePeriodMs } from './workspaceMfaEnforcement';
 
-beforeEach(() => vi.clearAllMocks());
+// Pin grace period to 7 days for the test suite so the math stays stable
+// regardless of the deployed env's MFA_GRACE_PERIOD_DAYS setting.
+beforeEach(() => {
+  process.env.MFA_GRACE_PERIOD_DAYS = '7';
+  vi.clearAllMocks();
+});
 
 function mockSelects(userRow: any, orgRows: any[]) {
   let call = 0;
@@ -49,7 +54,7 @@ describe('computeMfaEnforcement', () => {
     expect(state.status).toBe('grace');
     expect(state.workspaceId).toBe('o1');
     expect(state.workspaceName).toBe('Workspace A');
-    expect(state.deadline!.getTime()).toBeCloseTo(enforcedAt.getTime() + MFA_GRACE_PERIOD_MS, -2);
+    expect(state.deadline!.getTime()).toBeCloseTo(enforcedAt.getTime() + getMfaGracePeriodMs(), -2);
   });
 
   it('returns required when past grace', async () => {
