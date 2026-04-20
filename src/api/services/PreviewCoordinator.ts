@@ -70,8 +70,9 @@ export async function channelForPort(args: {
     return null;
   }
 
-  const rawCommand = match.agentConfig?.startingCommand || match.agentConfig?.previewStartCommand;
-  const startingCommand = rawCommand != null && rawCommand !== '' ? rawCommand : null;
+  const sc = match.agentConfig?.startingCommand?.trim();
+  const psc = match.agentConfig?.previewStartCommand?.trim();
+  const startingCommand = sc || psc || null;
 
   return {
     channelId: match.id,

@@ -94,6 +94,33 @@ describe('PreviewCoordinator.channelForPort', () => {
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBeNull();
   });
+
+  it('falls back to previewStartCommand when startingCommand is whitespace-only', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '   ', previewStartCommand: 'npm start' } }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBe('npm start');
+  });
+
+  it('returns null when startingCommand is whitespace and previewStartCommand is whitespace', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '\t\n', previewStartCommand: '   ' } }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBeNull();
+  });
+
+  it('trims surrounding whitespace from a valid startingCommand', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '  npm run dev  ' } }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBe('npm run dev');
+  });
 });
 
 describe('PreviewCoordinator.startChannel', () => {
