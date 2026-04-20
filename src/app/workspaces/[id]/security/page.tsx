@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation';
+import Link from 'next/link';
 import { auth } from '@/lib/auth';
 import { SecurityForm } from './SecurityForm';
 import { db, organizations, organizationMembers, users } from '@/db';
@@ -18,11 +19,36 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
     redirect('/');
   }
 
-  // Enforce workspace MFA policy — even admins must have MFA enabled to
-  // manage workspace security once they are past their grace period.
+  // Enforce workspace MFA policy: even admins must have MFA enabled to manage
+  // workspace security once they're past grace. Since MFA setup UI lives in
+  // the runhq client SPA (not the Console), we render an explanation with a
+  // link rather than redirecting to a dead-end Console route.
   const mfa = await computeMfaEnforcement(session.user.id);
   if (mfa.status === 'required') {
-    redirect('/settings?section=security&mfaRequired=1');
+    const clientUrl = process.env.CLIENT_APP_URL || process.env.NEXT_PUBLIC_CLIENT_APP_URL || '';
+    const mfaSetupHref = clientUrl ? `${clientUrl}/settings` : '/settings';
+    return (
+      <section className="max-w-lg mx-auto p-8">
+        <div className="border border-red-300 bg-red-50 rounded p-5 mb-4">
+          <h1 className="text-xl font-semibold text-red-900 mb-2">
+            Two-factor authentication required
+          </h1>
+          <p className="text-sm text-red-900 mb-3">
+            Your workspace{mfa.workspaceName ? ` "${mfa.workspaceName}"` : ''} requires
+            all members to use two-factor authentication, and your grace period has ended.
+          </p>
+          <p className="text-sm text-red-900">
+            Enable two-factor authentication to regain access to this page.
+          </p>
+        </div>
+        <Link
+          href={mfaSetupHref}
+          className="inline-block px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm"
+        >
+          Go to account settings
+        </Link>
+      </section>
+    );
   }
 
   const [org] = await db.select({

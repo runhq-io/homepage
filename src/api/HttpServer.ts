@@ -2338,6 +2338,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
       const body = await c.req.json();
       const { sizeGb } = body;
 
@@ -3077,6 +3079,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
       const result = await ServerService.wakeRemoteServer(serverId, userId);
 
       if (!result.success) {
@@ -3405,6 +3409,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
       const result = await ServerService.getRemoteServerStatus(serverId, userId);
 
       if (!result) {
