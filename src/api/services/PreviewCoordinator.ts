@@ -131,32 +131,6 @@ export async function probeReady(args: {
 }
 
 /**
- * Fetch the last N lines of terminal output for a channel from the machine.
- *
- * Returns null when the machine reports HTTP 404 (no session for the channel).
- * All other errors are propagated to the caller.
- */
-export async function recentOutput(args: {
-  server: Server;
-  userId: string;
-  channelId: string;
-  lines?: number;
-}): Promise<{ output: string; sessionId: string | null } | null> {
-  try {
-    const lines = Math.min(Math.max(args.lines ?? 50, 1), 500);
-    return await fetchFromServer<{ output: string; sessionId: string | null }>(
-      args.server,
-      args.userId,
-      `/__preview/recent-output?channelId=${encodeURIComponent(args.channelId)}&lines=${lines}`,
-      { timeoutMs: 3000 },
-    );
-  } catch (err: any) {
-    if (String(err?.message || '').includes('HTTP 404')) return null;
-    throw err;
-  }
-}
-
-/**
  * Instruct the machine to start the channel's Start Command.
  *
  * On success the machine's response shape is relayed directly.
