@@ -1960,10 +1960,8 @@ export function createHttpApp() {
       const serverId = c.req.param('serverId');
 
       // Check if user has access to this server
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const server = await ServerService.getServer(serverId);
       if (!server) {
@@ -2029,10 +2027,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const usage = await MachineUsageService.getMachineUsage(serverId);
       if (!usage) {
@@ -2060,10 +2056,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
       const members = await ServerService.getServerMembers(serverId);
       return c.json({ members });
     } catch (error) {
@@ -2534,10 +2528,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
       const bans = await ServerService.getServerBans(serverId);
       return c.json({ bans });
     } catch (error) {
@@ -2864,10 +2856,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
       const portMappings = await PublicPortService.listPortMappings(serverId);
       return c.json({ success: true, portMappings });
     } catch (error) {
@@ -3048,10 +3038,8 @@ export function createHttpApp() {
       const serverId = c.req.param('serverId');
 
       // Check if user has access to this server
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const server = await ServerService.getServer(serverId);
       if (!server) {
@@ -3125,10 +3113,8 @@ export function createHttpApp() {
         return c.json({ error: 'Not found' }, 404);
       }
 
-      const hasAccess = await ServerService.canAccessServer(server.id, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(server.id, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       return c.json({ serverId: server.id, serverUrl: server.serverUrl, status: server.status });
     } catch (error) {
@@ -3151,10 +3137,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const portParam = c.req.query('port');
       const port = portParam !== undefined ? Number(portParam) : NaN;
@@ -3192,10 +3176,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const body = await c.req.json().catch(() => ({}));
       const ttlSeconds = typeof body.ttlSeconds === 'number' ? body.ttlSeconds : 86400;
@@ -3228,10 +3210,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const portParam = c.req.query('port');
       const port = portParam !== undefined ? Number(portParam) : NaN;
@@ -3273,10 +3253,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const body = await c.req.json().catch(() => ({}));
       const { channelId, force } = body as { channelId?: unknown; force?: unknown };
@@ -3319,10 +3297,8 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       const channelId = c.req.query('channelId');
       if (!channelId) {
@@ -3495,10 +3471,8 @@ export function createHttpApp() {
       const serverId = c.req.param('serverId');
 
       // Verify user has access to this server
-      const hasAccess = await ServerService.canAccessServer(serverId, userId);
-      if (!hasAccess) {
-        return c.json({ error: 'Access denied' }, 403);
-      }
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
 
       // Fetch user info + server role for JWT (name/email for presence + chat display, role for permissions)
       const [sessionUser] = await db.select({ username: users.username, name: users.name, email: users.email }).from(users).where(eq(users.id, userId));
@@ -3813,8 +3787,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const hasAccess = await ServerService.canAccessServer(serverId, userId);
-    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerAccess(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const visibility = c.req.query('visibility');
     const includeDeleted = c.req.query('includeDeleted') === 'true';
@@ -3838,8 +3812,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const canEdit = await ServerService.canEditServer(serverId, userId);
-    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerEdit(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
     const task = await WorkspaceTaskService.createTask(serverId, body);
@@ -3851,8 +3825,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const canEdit = await ServerService.canEditServer(serverId, userId);
-    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerEdit(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
     const task = await WorkspaceTaskService.updateTask(serverId, c.req.param('taskId'), body);
@@ -3865,8 +3839,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const hasAccess = await ServerService.canAccessServer(serverId, userId);
-    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerAccess(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.setTaskUpvote(serverId, c.req.param('taskId'), {
       voterId: userId,
@@ -3882,8 +3856,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const hasAccess = await ServerService.canAccessServer(serverId, userId);
-    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerAccess(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.setTaskUpvote(serverId, c.req.param('taskId'), {
       voterId: userId,
@@ -3899,8 +3873,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const hasAccess = await ServerService.canAccessServer(serverId, userId);
-    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerAccess(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'), {
       includeAttachments: true,
@@ -3917,8 +3891,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const canEdit = await ServerService.canEditServer(serverId, userId);
-    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerEdit(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
@@ -3932,8 +3906,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const canEdit = await ServerService.canEditServer(serverId, userId);
-    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerEdit(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
@@ -3948,8 +3922,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const hasAccess = await ServerService.canAccessServer(serverId, userId);
-    if (!hasAccess) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerAccess(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
@@ -3962,8 +3936,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
 
     const serverId = c.req.param('serverId');
-    const canEdit = await ServerService.canEditServer(serverId, userId);
-    if (!canEdit) return c.json({ error: 'Forbidden' }, 403);
+    const gate = await ServerService.gateServerEdit(serverId, userId);
+    if (!gate.ok) return c.json(gate.body, gate.status);
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);

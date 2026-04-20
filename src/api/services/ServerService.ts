@@ -34,6 +34,7 @@ import { getUserByEmail } from '../../db/services';
 import { getProvider, isAnyProviderConfigured, getDefaultProviderId } from './providers/registry';
 import { flyTierToTierId, tierIdToFlyTier } from './providers/FlyProvider';
 import type { ProviderId } from './providers/types';
+import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
 
 // Server is considered offline after 60 seconds without heartbeat
 const SERVER_HEARTBEAT_TIMEOUT_MS = 60_000;
@@ -1097,6 +1098,68 @@ export async function canAccessServer(serverId: string, userId: string): Promise
  */
 export async function canEditServer(serverId: string, userId: string): Promise<boolean> {
   return checkServerPermission(serverId, userId, ['owner', 'member']);
+}
+
+export type ServerAccessGate =
+  | { ok: true }
+  | { ok: false; status: 403; body: { error: 'Forbidden' } }
+  | { ok: false; status: 403; body: {
+      error: 'MFA_REQUIRED';
+      workspaceId?: string;
+      workspaceName?: string;
+      deadline?: string;
+    } };
+
+/**
+ * Workspace authorization gate for read access. Combines MFA-enforcement
+ * check (returns MFA_REQUIRED if the user is past grace on any required
+ * workspace) with the existing canAccessServer check.
+ *
+ * Invariants:
+ *   - MFA enforcement is checked FIRST; a user past grace cannot touch any
+ *     server regardless of membership.
+ *   - Delegates to canAccessServer for the membership decision; that helper
+ *     remains a pure boolean so non-HTTP callers (e.g. wsHandlers) can
+ *     continue to use it.
+ */
+export async function gateServerAccess(serverId: string, userId: string): Promise<ServerAccessGate> {
+  const mfa = await computeMfaEnforcement(userId);
+  if (mfa.status === 'required') {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: 'MFA_REQUIRED',
+        workspaceId: mfa.workspaceId,
+        workspaceName: mfa.workspaceName,
+        deadline: mfa.deadline?.toISOString(),
+      },
+    };
+  }
+  const allowed = await canAccessServer(serverId, userId);
+  return allowed ? { ok: true } : { ok: false, status: 403, body: { error: 'Forbidden' } };
+}
+
+/**
+ * Same as gateServerAccess but for edit operations. See gateServerAccess
+ * for invariants.
+ */
+export async function gateServerEdit(serverId: string, userId: string): Promise<ServerAccessGate> {
+  const mfa = await computeMfaEnforcement(userId);
+  if (mfa.status === 'required') {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: 'MFA_REQUIRED',
+        workspaceId: mfa.workspaceId,
+        workspaceName: mfa.workspaceName,
+        deadline: mfa.deadline?.toISOString(),
+      },
+    };
+  }
+  const allowed = await canEditServer(serverId, userId);
+  return allowed ? { ok: true } : { ok: false, status: 403, body: { error: 'Forbidden' } };
 }
 
 /**

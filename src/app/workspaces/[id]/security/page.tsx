@@ -3,6 +3,7 @@ import { auth } from '@/lib/auth';
 import { SecurityForm } from './SecurityForm';
 import { db, organizations, organizationMembers, users } from '@/db';
 import { eq, and } from 'drizzle-orm';
+import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
 
 export default async function Page({ params }: { params: Promise<{ id: string }> }) {
   const { id: orgId } = await params;
@@ -15,6 +16,13 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
     .limit(1);
   if (!membership || (membership.role !== 'owner' && membership.role !== 'admin')) {
     redirect('/');
+  }
+
+  // Enforce workspace MFA policy — even admins must have MFA enabled to
+  // manage workspace security once they are past their grace period.
+  const mfa = await computeMfaEnforcement(session.user.id);
+  if (mfa.status === 'required') {
+    redirect('/settings?section=security&mfaRequired=1');
   }
 
   const [org] = await db.select({
