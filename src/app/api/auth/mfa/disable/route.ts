@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+import { eq, and, isNull } from 'drizzle-orm';
 import { db, users, userMfa, userRecoveryCodes } from '@/db';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { verifyPassword } from '@/lib/password';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
-import { verifyTotp, decryptSecret } from '@/lib/mfa';
+import {
+  verifyTotp,
+  decryptSecret,
+  verifyRecoveryCode,
+  normalizeRecoveryCode,
+} from '@/lib/mfa';
 
 const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
 
@@ -25,14 +30,16 @@ export async function POST(request: NextRequest) {
   }
   if (!perUserLimiter.check(userId)) return rateLimitResponse(corsHeaders);
 
-  let body: { password?: string; code?: string };
+  let body: { password?: string; code?: string; recoveryCode?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
   }
-  if (!body.password || !body.code) {
-    return NextResponse.json({ error: 'password and code required' }, { status: 400, headers: corsHeaders });
+
+  const usingRecovery = !!body.recoveryCode;
+  if (!usingRecovery && !body.code) {
+    return NextResponse.json({ error: 'code or recoveryCode required' }, { status: 400, headers: corsHeaders });
   }
 
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
@@ -42,28 +49,59 @@ export async function POST(request: NextRequest) {
   if (!user.mfaEnabled) {
     return NextResponse.json({ error: 'MFA_NOT_ENABLED' }, { status: 409, headers: corsHeaders });
   }
-  if (!user.passwordHash) {
-    return NextResponse.json({ error: 'Account has no password' }, { status: 400, headers: corsHeaders });
-  }
-  const passwordOk = await verifyPassword(body.password, user.passwordHash);
-  if (!passwordOk) {
-    return NextResponse.json({ error: 'INVALID_PASSWORD' }, { status: 401, headers: corsHeaders });
+
+  // Password check: required if the account has a password, optional (ignored)
+  // for OAuth-only accounts. Users with a password must still provide it.
+  if (user.passwordHash) {
+    if (!body.password) {
+      return NextResponse.json({ error: 'password required' }, { status: 400, headers: corsHeaders });
+    }
+    if (!(await verifyPassword(body.password, user.passwordHash))) {
+      return NextResponse.json({ error: 'INVALID_PASSWORD' }, { status: 401, headers: corsHeaders });
+    }
   }
 
-  const [mfaRow] = await db.select().from(userMfa)
-    .where(eq(userMfa.userId, userId)).limit(1);
-  if (!mfaRow) {
-    return NextResponse.json({ error: 'MFA_NOT_ENABLED' }, { status: 409, headers: corsHeaders });
+  // Second factor: either a current TOTP code or a valid unused recovery code.
+  let secondFactorOk = false;
+  if (usingRecovery) {
+    const normalized = normalizeRecoveryCode(body.recoveryCode!);
+    const unused = await db.select().from(userRecoveryCodes)
+      .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
+    for (const row of unused) {
+      if (await verifyRecoveryCode(normalized, row.codeHash)) {
+        // Atomically consume.
+        const consumed = await db.update(userRecoveryCodes)
+          .set({ usedAt: new Date() })
+          .where(and(
+            eq(userRecoveryCodes.id, row.id),
+            isNull(userRecoveryCodes.usedAt),
+          ))
+          .returning({ id: userRecoveryCodes.id });
+        if (consumed.length > 0) {
+          secondFactorOk = true;
+        }
+        break;
+      }
+    }
+  } else {
+    const [mfaRow] = await db.select().from(userMfa)
+      .where(eq(userMfa.userId, userId)).limit(1);
+    if (mfaRow) {
+      const secret = decryptSecret({
+        ciphertext: mfaRow.secretEncrypted,
+        iv: mfaRow.secretIv,
+        authTag: mfaRow.secretAuthTag,
+      });
+      if (verifyTotp(secret, body.code!)) {
+        secondFactorOk = true;
+      }
+    }
   }
-  const secret = decryptSecret({
-    ciphertext: mfaRow.secretEncrypted,
-    iv: mfaRow.secretIv,
-    authTag: mfaRow.secretAuthTag,
-  });
-  if (!verifyTotp(secret, body.code)) {
+  if (!secondFactorOk) {
     return NextResponse.json({ error: 'INVALID_MFA_CODE' }, { status: 401, headers: corsHeaders });
   }
 
+  // Tear down MFA fully.
   await db.transaction(async (tx) => {
     await tx.delete(userMfa).where(eq(userMfa.userId, userId));
     await tx.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
