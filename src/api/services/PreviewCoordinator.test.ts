@@ -12,12 +12,12 @@ const mockServer = { id: 's1', serverUrl: 'https://srv' } as any;
 describe('PreviewCoordinator.channelForPort', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('returns the channel whose previewPort matches', async () => {
+  it('returns the channel whose previewUrl port matches', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
       data: [
-        { id: 'ch_a', name: 'frontend', previewPort: 3000, agentConfig: { startingCommand: 'npm run dev' } },
-        { id: 'ch_b', name: 'api',      previewPort: 8000, agentConfig: { startingCommand: 'uvicorn main:app' } },
+        { id: 'ch_a', name: 'frontend', previewUrl: "http://localhost:3000", agentConfig: { startingCommand: 'npm run dev' } },
+        { id: 'ch_b', name: 'api',      previewUrl: "http://localhost:8000", agentConfig: { startingCommand: 'uvicorn main:app' } },
       ],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
@@ -33,7 +33,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('null startingCommand when channel has none', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_c', name: 'docs', previewPort: 4000, agentConfig: null }],
+      data: [{ id: 'ch_c', name: 'docs', previewUrl: "http://localhost:4000", agentConfig: null }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 4000 });
     expect(result).toEqual({ channelId: 'ch_c', channelName: 'docs', startingCommand: null });
@@ -42,7 +42,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('null startingCommand when command is empty string', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_d', name: 'x', previewPort: 5000, agentConfig: { startingCommand: '' } }],
+      data: [{ id: 'ch_d', name: 'x', previewUrl: "http://localhost:5000", agentConfig: { startingCommand: '' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 5000 });
     expect(result?.startingCommand).toBeNull();
@@ -62,7 +62,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('falls back to previewStartCommand when startingCommand is missing', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { previewStartCommand: 'npm start' } }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: { previewStartCommand: 'npm start' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBe('npm start');
@@ -71,7 +71,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('falls back to previewStartCommand when startingCommand is empty', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '', previewStartCommand: 'npm start' } }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: { startingCommand: '', previewStartCommand: 'npm start' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBe('npm start');
@@ -80,7 +80,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('prefers startingCommand over previewStartCommand when both present', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: 'pnpm dev', previewStartCommand: 'npm start' } }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: { startingCommand: 'pnpm dev', previewStartCommand: 'npm start' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBe('pnpm dev');
@@ -89,7 +89,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('returns null when both startingCommand and previewStartCommand are absent', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: {} }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: {} }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBeNull();
@@ -98,7 +98,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('falls back to previewStartCommand when startingCommand is whitespace-only', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '   ', previewStartCommand: 'npm start' } }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: { startingCommand: '   ', previewStartCommand: 'npm start' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBe('npm start');
@@ -107,7 +107,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('returns null when startingCommand is whitespace and previewStartCommand is whitespace', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '\t\n', previewStartCommand: '   ' } }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: { startingCommand: '\t\n', previewStartCommand: '   ' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBeNull();
@@ -116,7 +116,7 @@ describe('PreviewCoordinator.channelForPort', () => {
   it('trims surrounding whitespace from a valid startingCommand', async () => {
     (ServerService.fetchFromServer as any).mockResolvedValue({
       success: true,
-      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '  npm run dev  ' } }],
+      data: [{ id: 'ch_p', name: 'preview', previewUrl: "http://localhost:3000", agentConfig: { startingCommand: '  npm run dev  ' } }],
     });
     const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
     expect(result?.startingCommand).toBe('npm run dev');

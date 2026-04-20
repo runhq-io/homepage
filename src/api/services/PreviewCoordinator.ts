@@ -15,8 +15,31 @@ import { fetchFromServer } from './ServerService';
 interface RemoteChannel {
   id: string;
   name: string;
-  previewPort?: number | null;
+  previewUrl?: string | null;
   agentConfig?: { startingCommand?: string | null; previewStartCommand?: string | null } | null;
+}
+
+function portFromPreviewUrl(previewUrl: string | null | undefined): number | null {
+  if (!previewUrl) return null;
+  const raw = previewUrl.trim();
+  if (!raw) return null;
+  // Accept bare "3000", "localhost:3000", or full URLs like "http://localhost:3000/path"
+  try {
+    const withScheme = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const parsed = new URL(withScheme);
+    const fromPort = parseInt(parsed.port, 10);
+    if (Number.isFinite(fromPort) && fromPort > 0) return fromPort;
+    if (parsed.protocol === 'https:') return 443;
+    if (parsed.protocol === 'http:') return 80;
+    return null;
+  } catch {
+    const m = raw.match(/:(\d{1,5})(\/|$)/);
+    if (m) {
+      const p = parseInt(m[1], 10);
+      if (Number.isFinite(p) && p > 0 && p <= 65535) return p;
+    }
+    return null;
+  }
 }
 
 interface RemoteChannelsResponse {
@@ -45,8 +68,9 @@ export interface StartChannelResult {
 /**
  * Look up the channel bound to a specific preview port on a running server.
  *
- * Returns a {@link PreviewChannelMatch} when a channel whose `previewPort`
- * equals `port` is found, or `null` when no such channel exists.
+ * Matches by parsing the port out of the channel's `previewUrl` (the canonical
+ * field — Channel does not expose a separate `previewPort`). Accepts bare
+ * numbers, "localhost:N", and full URLs.
  *
  * Errors from `fetchFromServer` (e.g. server unreachable) are propagated
  * to the caller — this function does not swallow them.
@@ -65,7 +89,7 @@ export async function channelForPort(args: {
     { method: 'GET' },
   );
 
-  const match = response.data.find((ch) => ch.previewPort === port);
+  const match = response.data.find((ch) => portFromPreviewUrl(ch.previewUrl) === port);
   if (!match) {
     return null;
   }
