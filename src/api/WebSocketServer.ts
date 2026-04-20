@@ -1,6 +1,7 @@
 import { WebSocketServer as WSServer, WebSocket } from 'ws';
 import { nanoid } from 'nanoid';
 import { verifyToken } from './auth/jwt';
+import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
 import type {
   DesktopToCloudMessage,
   CloudToDesktopMessage,
@@ -179,7 +180,29 @@ export class RunHQWebSocketServer {
       userId = await verifyToken(message.token);
     }
 
+    // Token invalid — existing failure path below will return the generic error.
+    // Token valid — check MFA enforcement before granting authenticated state.
     if (userId) {
+      const mfa = await computeMfaEnforcement(userId);
+      if (mfa.status === 'required') {
+        const authResult: AuthResultMessage = {
+          type: 'auth_result',
+          success: false,
+          error: 'MFA_REQUIRED',
+          workspaceName: mfa.workspaceName,
+          deadline: mfa.deadline?.toISOString(),
+          timestamp: Date.now(),
+        };
+        this.send(client, authResult);
+        // Give the client ~150ms to receive the frame before we close.
+        // Clients must handle 'auth_result' with error=MFA_REQUIRED as a
+        // terminal state; messages sent after close will silently drop.
+        setTimeout(() => {
+          try { client.ws.close(1008, 'MFA_REQUIRED'); } catch { /* already closed */ }
+        }, 150);
+        return;
+      }
+
       client.authenticated = true;
       client.userId = userId;
 
