@@ -25,8 +25,12 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   // link rather than redirecting to a dead-end Console route.
   const mfa = await computeMfaEnforcement(session.user.id);
   if (mfa.status === 'required') {
-    const clientUrl = process.env.CLIENT_APP_URL || process.env.NEXT_PUBLIC_CLIENT_APP_URL || '';
-    const mfaSetupHref = clientUrl ? `${clientUrl}/settings` : '/settings';
+    // CLIENT_URL is the canonical env var for the runhq client SPA in this repo
+    // (see HttpServer.ts invite links). APP_URL is the secondary fallback used by
+    // auth email routes. Final fallback is the production client URL — never
+    // link to a Console-relative path, which would be a dead end.
+    const clientUrl = process.env.CLIENT_URL || process.env.APP_URL || 'https://app.runhq.io';
+    const mfaSetupHref = `${clientUrl.replace(/\/$/, '')}/settings`;
     return (
       <section className="max-w-lg mx-auto p-8">
         <div className="border border-red-300 bg-red-50 rounded p-5 mb-4">
