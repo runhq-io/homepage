@@ -58,6 +58,42 @@ describe('PreviewCoordinator.channelForPort', () => {
     (ServerService.fetchFromServer as any).mockRejectedValue(new Error('server down'));
     await expect(channelForPort({ server: mockServer, userId: 'u1', port: 3000 })).rejects.toThrow('server down');
   });
+
+  it('falls back to previewStartCommand when startingCommand is missing', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { previewStartCommand: 'npm start' } }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBe('npm start');
+  });
+
+  it('falls back to previewStartCommand when startingCommand is empty', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: '', previewStartCommand: 'npm start' } }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBe('npm start');
+  });
+
+  it('prefers startingCommand over previewStartCommand when both present', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: { startingCommand: 'pnpm dev', previewStartCommand: 'npm start' } }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBe('pnpm dev');
+  });
+
+  it('returns null when both startingCommand and previewStartCommand are absent', async () => {
+    (ServerService.fetchFromServer as any).mockResolvedValue({
+      success: true,
+      data: [{ id: 'ch_p', name: 'preview', previewPort: 3000, agentConfig: {} }],
+    });
+    const result = await channelForPort({ server: mockServer, userId: 'u1', port: 3000 });
+    expect(result?.startingCommand).toBeNull();
+  });
 });
 
 describe('PreviewCoordinator.startChannel', () => {

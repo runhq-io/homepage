@@ -16,7 +16,7 @@ interface RemoteChannel {
   id: string;
   name: string;
   previewPort?: number | null;
-  agentConfig?: { startingCommand?: string | null } | null;
+  agentConfig?: { startingCommand?: string | null; previewStartCommand?: string | null } | null;
 }
 
 interface RemoteChannelsResponse {
@@ -70,7 +70,7 @@ export async function channelForPort(args: {
     return null;
   }
 
-  const rawCommand = match.agentConfig?.startingCommand;
+  const rawCommand = match.agentConfig?.startingCommand || match.agentConfig?.previewStartCommand;
   const startingCommand = rawCommand != null && rawCommand !== '' ? rawCommand : null;
 
   return {
