@@ -84,9 +84,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Update last login
-  await db.update(users).set({ lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(users.id, user.id));
-
   const userInfo = {
     id: user.id,
     email: user.email,
@@ -104,6 +101,9 @@ export async function POST(request: NextRequest) {
       { headers },
     );
   }
+
+  // Update last login — only after full authentication (post-MFA short-circuit).
+  await db.update(users).set({ lastLoginAt: new Date(), updatedAt: new Date() }).where(eq(users.id, user.id));
 
   const token = await createToken(user.id);
 
