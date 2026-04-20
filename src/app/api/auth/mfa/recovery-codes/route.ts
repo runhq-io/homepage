@@ -47,6 +47,8 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ remaining: unused.length }, { headers: corsHeaders });
 }
 
+class InvalidMfaCodeError extends Error {}
+
 export async function POST(request: NextRequest) {
   const maybe = await requireUser(request);
   if (maybe instanceof NextResponse) return maybe;
@@ -54,76 +56,76 @@ export async function POST(request: NextRequest) {
   if (!regenLimiter.check(userId)) return rateLimitResponse(corsHeaders);
 
   let body: { password?: string; code?: string; recoveryCode?: string };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
-  }
+  try { body = await request.json(); }
+  catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders }); }
+
   const usingRecovery = !!body.recoveryCode;
   if (!usingRecovery && !body.code) {
     return NextResponse.json({ error: 'code or recoveryCode required' }, { status: 400, headers: corsHeaders });
   }
 
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!user) {
-    return NextResponse.json({ error: 'User not found' }, { status: 404, headers: corsHeaders });
-  }
-  if (!user.mfaEnabled) {
-    return NextResponse.json({ error: 'MFA_NOT_ENABLED' }, { status: 409, headers: corsHeaders });
-  }
+  if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404, headers: corsHeaders });
+  if (!user.mfaEnabled) return NextResponse.json({ error: 'MFA_NOT_ENABLED' }, { status: 409, headers: corsHeaders });
 
   if (user.passwordHash) {
-    if (!body.password) {
-      return NextResponse.json({ error: 'password required' }, { status: 400, headers: corsHeaders });
-    }
+    if (!body.password) return NextResponse.json({ error: 'password required' }, { status: 400, headers: corsHeaders });
     if (!(await verifyPassword(body.password, user.passwordHash))) {
       return NextResponse.json({ error: 'INVALID_PASSWORD' }, { status: 401, headers: corsHeaders });
     }
   }
 
-  let secondFactorOk = false;
-  if (usingRecovery) {
-    const normalized = normalizeRecoveryCode(body.recoveryCode!);
-    const unused = await db.select().from(userRecoveryCodes)
-      .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
-    for (const row of unused) {
-      if (await verifyRecoveryCode(normalized, row.codeHash)) {
-        const consumed = await db.update(userRecoveryCodes)
-          .set({ usedAt: new Date() })
-          .where(and(
-            eq(userRecoveryCodes.id, row.id),
-            isNull(userRecoveryCodes.usedAt),
-          ))
-          .returning({ id: userRecoveryCodes.id });
-        if (consumed.length > 0) secondFactorOk = true;
-        break;
-      }
-    }
-  } else {
+  // TOTP path: verify before starting the transaction.
+  if (!usingRecovery) {
     const [mfaRow] = await db.select().from(userMfa)
       .where(eq(userMfa.userId, userId)).limit(1);
+    let totpOk = false;
     if (mfaRow) {
       const secret = decryptSecret({
         ciphertext: mfaRow.secretEncrypted,
         iv: mfaRow.secretIv,
         authTag: mfaRow.secretAuthTag,
       });
-      if (verifyTotp(secret, body.code!)) secondFactorOk = true;
+      totpOk = verifyTotp(secret, body.code!);
     }
-  }
-  if (!secondFactorOk) {
-    return NextResponse.json({ error: 'INVALID_MFA_CODE' }, { status: 401, headers: corsHeaders });
+    if (!totpOk) return NextResponse.json({ error: 'INVALID_MFA_CODE' }, { status: 401, headers: corsHeaders });
   }
 
   const plainCodes = generateRecoveryCodes(10);
   const hashedCodes = await Promise.all(plainCodes.map(hashRecoveryCode));
 
-  await db.transaction(async (tx) => {
-    await tx.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
-    await tx.insert(userRecoveryCodes).values(
-      hashedCodes.map((codeHash) => ({ userId, codeHash })),
-    );
-  });
+  // Consume (if recovery path) + replace codes atomically.
+  try {
+    await db.transaction(async (tx) => {
+      if (usingRecovery) {
+        const normalized = normalizeRecoveryCode(body.recoveryCode!);
+        const unused = await tx.select().from(userRecoveryCodes)
+          .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
+        let consumedOk = false;
+        for (const row of unused) {
+          if (await verifyRecoveryCode(normalized, row.codeHash)) {
+            const consumed = await tx.update(userRecoveryCodes)
+              .set({ usedAt: new Date() })
+              .where(and(eq(userRecoveryCodes.id, row.id), isNull(userRecoveryCodes.usedAt)))
+              .returning({ id: userRecoveryCodes.id });
+            if (consumed.length > 0) consumedOk = true;
+            break;
+          }
+        }
+        if (!consumedOk) throw new InvalidMfaCodeError();
+      }
+      // Replace all codes.
+      await tx.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
+      await tx.insert(userRecoveryCodes).values(
+        hashedCodes.map((codeHash) => ({ userId, codeHash })),
+      );
+    });
+  } catch (e) {
+    if (e instanceof InvalidMfaCodeError) {
+      return NextResponse.json({ error: 'INVALID_MFA_CODE' }, { status: 401, headers: corsHeaders });
+    }
+    throw e;
+  }
 
   return NextResponse.json({ recoveryCodes: plainCodes }, { headers: corsHeaders });
 }
