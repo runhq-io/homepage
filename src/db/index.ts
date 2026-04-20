@@ -31,10 +31,17 @@ export function getDb(): NodePgDatabase<typeof schema> {
     const isNeon = url.includes('neon.tech');
 
     if (isNeon) {
-      const { neon } = require('@neondatabase/serverless');
-      const { drizzle } = require('drizzle-orm/neon-http');
-      const sql = neon(url);
-      _db = drizzle(sql, { schema }) as unknown as NodePgDatabase<typeof schema>;
+      // Use neon-serverless (WebSocket) rather than neon-http because the HTTP
+      // driver does not support db.transaction() — which we need for MFA
+      // enable/disable/regenerate-codes atomicity. Same package, different
+      // driver; API-compatible with node-postgres.
+      const { Pool, neonConfig } = require('@neondatabase/serverless');
+      const { drizzle } = require('drizzle-orm/neon-serverless');
+      const wsModule = require('ws');
+      // Neon requires us to supply a WebSocket constructor in Node.
+      neonConfig.webSocketConstructor = wsModule.WebSocket ?? wsModule;
+      const pool = new Pool({ connectionString: url });
+      _db = drizzle(pool, { schema }) as unknown as NodePgDatabase<typeof schema>;
     } else {
       const { Pool } = require('pg');
       const { drizzle } = require('drizzle-orm/node-postgres');
