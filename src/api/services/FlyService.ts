@@ -621,7 +621,7 @@ export async function createMachine(
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
         SERVER_SESSION_SECRET: process.env.SERVER_SESSION_SECRET || '',
         PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
-        APP_URL: process.env.APP_URL ?? 'https://app.runhq.io',
+        CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
         NODE_ENV: 'development',
         PORT: '61987',
         HOST: '0.0.0.0',
@@ -800,7 +800,7 @@ export async function updateMachineImage(machineId: string): Promise<void> {
           ...existingEnv,
           PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
           CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
-          APP_URL: process.env.APP_URL ?? 'https://app.runhq.io',
+          CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
         },
       },
     }
