@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { eq, and } from 'drizzle-orm';
 import { db, users, organizations, organizationMembers } from '@/db';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
+import { enforceMfaOrRespond } from '@/lib/workspaceMfaEnforcement';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -22,6 +23,9 @@ export async function GET(
   if (!userId) {
     return NextResponse.json({ error: 'Invalid token' }, { status: 401, headers: corsHeaders });
   }
+
+  const mfaGate = await enforceMfaOrRespond(userId, corsHeaders);
+  if (mfaGate) return mfaGate;
 
   const [membership] = await db.select({ role: organizationMembers.role })
     .from(organizationMembers)

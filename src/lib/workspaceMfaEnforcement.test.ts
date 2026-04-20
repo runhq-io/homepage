@@ -11,7 +11,7 @@ vi.mock('@/db', () => {
 });
 
 import { db } from '@/db';
-import { computeMfaEnforcement, MFA_GRACE_PERIOD_MS } from './workspaceMfaEnforcement';
+import { computeMfaEnforcement, enforceMfaOrRespond, MFA_GRACE_PERIOD_MS } from './workspaceMfaEnforcement';
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -68,5 +68,31 @@ describe('computeMfaEnforcement', () => {
     ]);
     const state = await computeMfaEnforcement('u1');
     expect(state.workspaceId).toBe('o1');
+  });
+});
+
+describe('enforceMfaOrRespond', () => {
+  it('returns null when ok', async () => {
+    mockSelects({ mfaEnabled: true }, []);
+    expect(await enforceMfaOrRespond('u1')).toBeNull();
+  });
+
+  it('returns null when in grace period', async () => {
+    mockSelects({ mfaEnabled: false }, [
+      { orgId: 'o1', name: 'A', requireMfa: true, enforcedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) },
+    ]);
+    expect(await enforceMfaOrRespond('u1')).toBeNull();
+  });
+
+  it('returns 403 MFA_REQUIRED when past grace', async () => {
+    mockSelects({ mfaEnabled: false }, [
+      { orgId: 'o1', name: 'A', requireMfa: true, enforcedAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000) },
+    ]);
+    const res = await enforceMfaOrRespond('u1');
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(403);
+    const body = await res!.json();
+    expect(body.error).toBe('MFA_REQUIRED');
+    expect(body.workspaceId).toBe('o1');
   });
 });

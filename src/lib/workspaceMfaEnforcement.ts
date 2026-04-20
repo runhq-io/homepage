@@ -1,4 +1,5 @@
 import { and, eq } from 'drizzle-orm';
+import { NextResponse } from 'next/server';
 import {
   db,
   users,
@@ -61,4 +62,24 @@ export async function computeMfaEnforcement(userId: string): Promise<MfaEnforcem
     workspaceName: worst.name,
     deadline: worst.deadline,
   };
+}
+
+/**
+ * If the user is past grace, return a 403 Response handlers should return.
+ * Otherwise return null (handler proceeds).
+ *
+ * Call this right after auth in every workspace-scoped route.
+ */
+export async function enforceMfaOrRespond(
+  userId: string,
+  corsHeaders: Record<string, string> = {},
+): Promise<NextResponse | null> {
+  const state = await computeMfaEnforcement(userId);
+  if (state.status !== 'required') return null;
+  return NextResponse.json({
+    error: 'MFA_REQUIRED',
+    workspaceId: state.workspaceId,
+    workspaceName: state.workspaceName,
+    deadline: state.deadline?.toISOString(),
+  }, { status: 403, headers: corsHeaders });
 }

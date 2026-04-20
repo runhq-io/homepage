@@ -3,6 +3,7 @@ import { eq, and } from 'drizzle-orm';
 import { db, organizations, organizationMembers } from '@/db';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
+import { enforceMfaOrRespond } from '@/lib/workspaceMfaEnforcement';
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
 
@@ -26,6 +27,9 @@ export async function PATCH(
     return NextResponse.json({ error: 'Invalid token' }, { status: 401, headers: corsHeaders });
   }
   if (!limiter.check(userId)) return rateLimitResponse(corsHeaders);
+
+  const mfaGate = await enforceMfaOrRespond(userId, corsHeaders);
+  if (mfaGate) return mfaGate;
 
   const [membership] = await db.select({ role: organizationMembers.role })
     .from(organizationMembers)
