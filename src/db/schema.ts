@@ -671,6 +671,11 @@ export const servers = pgTable('servers', {
   // Cloudflare Tunnel fields (for public port routing)
   tunnelId: text('tunnel_id'), // Cloudflare Named Tunnel ID
   tunnelToken: text('tunnel_token'), // Deprecated: no longer persisted in plaintext (kept for migration compatibility)
+  // Server-wide security policy: when true, all members must have MFA enabled
+  // to access this server (subject to MFA_GRACE_PERIOD_DAYS grace window from
+  // requireMfaEnforcedAt).
+  requireMfa: boolean('require_mfa').notNull().default(false),
+  requireMfaEnforcedAt: timestamp('require_mfa_enforced_at'),
   // Timestamps
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
