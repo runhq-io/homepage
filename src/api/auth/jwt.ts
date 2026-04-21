@@ -146,3 +146,28 @@ export async function verifyPasskeyAuthenticationToken(token: string): Promise<P
     return null;
   }
 }
+
+export interface PasskeyReauthClaims {
+  userId: string;
+  challenge: string;
+}
+
+/** Carries a reauth challenge for destructive ops (disable MFA, regenerate codes, delete passkey). */
+export async function createPasskeyReauthToken(userId: string, challenge: string): Promise<string> {
+  return new jose.SignJWT({ userId, challenge, scope: 'passkey-reauth' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('2m')
+    .sign(getJwtSecret());
+}
+
+export async function verifyPasskeyReauthToken(token: string): Promise<PasskeyReauthClaims | null> {
+  try {
+    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    if (payload.scope !== 'passkey-reauth') return null;
+    if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
+    return { userId: payload.userId, challenge: payload.challenge };
+  } catch {
+    return null;
+  }
+}

@@ -5,6 +5,7 @@ import {
   createMfaSetupToken, verifyMfaSetupToken,
   createPasskeyRegistrationToken, verifyPasskeyRegistrationToken,
   createPasskeyAuthenticationToken, verifyPasskeyAuthenticationToken,
+  createPasskeyReauthToken, verifyPasskeyReauthToken,
 } from './jwt';
 
 beforeAll(() => {
@@ -88,5 +89,32 @@ describe('passkey JWT scopes', () => {
     const p = await createPasskeyRegistrationToken('u1', 'c');
     expect(await verifyPasskeyAuthenticationToken(s)).toBeNull();
     expect(await verifyPasskeyAuthenticationToken(p)).toBeNull();
+  });
+});
+
+describe('passkey-reauth scope', () => {
+  it('roundtrips', async () => {
+    const t = await createPasskeyReauthToken('u1', 'c1');
+    expect(await verifyPasskeyReauthToken(t)).toEqual({ userId: 'u1', challenge: 'c1' });
+  });
+
+  it('session verify rejects', async () => {
+    const t = await createPasskeyReauthToken('u1', 'c');
+    expect(await verifyToken(t)).toBeNull();
+  });
+
+  it('other scope verifiers reject', async () => {
+    const t = await createPasskeyReauthToken('u1', 'c');
+    expect(await verifyPasskeyRegistrationToken(t)).toBeNull();
+    expect(await verifyPasskeyAuthenticationToken(t)).toBeNull();
+  });
+
+  it('reauth verify rejects other scopes', async () => {
+    const s = await createToken('u1');
+    const p1 = await createPasskeyRegistrationToken('u1', 'c');
+    const p2 = await createPasskeyAuthenticationToken('u1', 'c');
+    expect(await verifyPasskeyReauthToken(s)).toBeNull();
+    expect(await verifyPasskeyReauthToken(p1)).toBeNull();
+    expect(await verifyPasskeyReauthToken(p2)).toBeNull();
   });
 });
