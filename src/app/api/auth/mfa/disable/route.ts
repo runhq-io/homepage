@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { eq, and, isNull } from 'drizzle-orm';
-import { db, users, userMfa, userRecoveryCodes } from '@/db';
+import { db, users, userMfa, userRecoveryCodes, userPasskeys } from '@/db';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { verifyPassword } from '@/lib/password';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
@@ -92,6 +92,7 @@ export async function POST(request: NextRequest) {
       // Tear down MFA fully (happens in same tx; if this fails, the recovery-code consume rolls back).
       await tx.delete(userMfa).where(eq(userMfa.userId, userId));
       await tx.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
+      await tx.delete(userPasskeys).where(eq(userPasskeys.userId, userId));
       await tx.update(users)
         .set({ mfaEnabled: false, mfaEnabledAt: null, updatedAt: new Date() })
         .where(eq(users.id, userId));
