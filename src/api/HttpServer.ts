@@ -2674,8 +2674,7 @@ export function createHttpApp() {
       }
 
       const serverId = c.req.param('serverId');
-      const hasPermission = await ServerService.checkServerPermission(serverId, userId, ['owner']);
-      if (!hasPermission) {
+      if (!(await ServerService.canManageServerMembers(serverId, userId))) {
         return c.json({ error: 'Access denied' }, 403);
       }
       const invites = await ServerService.getServerInvites(serverId);

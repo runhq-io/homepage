@@ -744,6 +744,18 @@ export type CreateInviteResult =
   | { success: false; reason: 'no_permission' | 'already_member' };
 
 /**
+ * Whether userId can manage members/invites on this server.
+ * Cloud-level owner OR per-server RBAC administrator/manage_roles.
+ * Mirrors the runhq /invite-links gate in roles.ts.
+ */
+export async function canManageServerMembers(serverId: string, userId: string): Promise<boolean> {
+  if (await checkServerPermission(serverId, userId, ['owner'])) return true;
+  if (await checkServerRBACPermission(serverId, userId, 'administrator')) return true;
+  if (await checkServerRBACPermission(serverId, userId, 'manage_roles')) return true;
+  return false;
+}
+
+/**
  * Create an invitation to join the server
  */
 export async function createInvite(
@@ -752,15 +764,7 @@ export async function createInvite(
   email: string,
   role: ServerRole = 'member'
 ): Promise<CreateInviteResult> {
-  // Cloud-level owner OR per-server RBAC administrator/manage_roles can invite.
-  // Mirrors the runhq /invite-links gate in roles.ts (administrator || manage_roles).
-  let hasPermission = await checkServerPermission(serverId, inviterId, ['owner']);
-  if (!hasPermission) {
-    hasPermission =
-      (await checkServerRBACPermission(serverId, inviterId, 'administrator')) ||
-      (await checkServerRBACPermission(serverId, inviterId, 'manage_roles'));
-  }
-  if (!hasPermission) {
+  if (!(await canManageServerMembers(serverId, inviterId))) {
     return { success: false, reason: 'no_permission' };
   }
 
@@ -933,8 +937,7 @@ export async function acceptInvite(token: string, userId: string): Promise<{ suc
  * Cancel/revoke an invitation
  */
 export async function cancelInvite(serverId: string, requesterId: string, email: string): Promise<boolean> {
-  const hasPermission = await checkServerPermission(serverId, requesterId, ['owner']);
-  if (!hasPermission) {
+  if (!(await canManageServerMembers(serverId, requesterId))) {
     return false;
   }
 
