@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
+import * as jose from 'jose';
 import {
   createToken, verifyToken,
   createMfaPendingToken, verifyMfaPendingToken,
@@ -93,18 +94,30 @@ describe('passkey JWT scopes', () => {
 });
 
 describe('passkey-reauth scope', () => {
-  it('roundtrips', async () => {
-    const t = await createPasskeyReauthToken('u1', 'c1');
-    expect(await verifyPasskeyReauthToken(t)).toEqual({ userId: 'u1', challenge: 'c1' });
+  it('roundtrips with action', async () => {
+    const t = await createPasskeyReauthToken('u1', 'c1', 'disable-mfa');
+    expect(await verifyPasskeyReauthToken(t)).toEqual({
+      userId: 'u1', challenge: 'c1', action: 'disable-mfa',
+    });
+  });
+
+  it('rejects tokens without valid action claim', async () => {
+    // Manually craft a token lacking action:
+    const bad = await new jose.SignJWT({ userId: 'u1', challenge: 'c', scope: 'passkey-reauth' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt()
+      .setExpirationTime('2m')
+      .sign(new TextEncoder().encode(process.env.JWT_SECRET!));
+    expect(await verifyPasskeyReauthToken(bad)).toBeNull();
   });
 
   it('session verify rejects', async () => {
-    const t = await createPasskeyReauthToken('u1', 'c');
+    const t = await createPasskeyReauthToken('u1', 'c', 'disable-mfa');
     expect(await verifyToken(t)).toBeNull();
   });
 
   it('other scope verifiers reject', async () => {
-    const t = await createPasskeyReauthToken('u1', 'c');
+    const t = await createPasskeyReauthToken('u1', 'c', 'disable-mfa');
     expect(await verifyPasskeyRegistrationToken(t)).toBeNull();
     expect(await verifyPasskeyAuthenticationToken(t)).toBeNull();
   });

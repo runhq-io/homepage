@@ -147,14 +147,25 @@ export async function verifyPasskeyAuthenticationToken(token: string): Promise<P
   }
 }
 
+export type PasskeyReauthAction = 'disable-mfa' | 'regenerate-codes' | 'delete-passkey';
+
 export interface PasskeyReauthClaims {
   userId: string;
   challenge: string;
+  action: PasskeyReauthAction;
 }
 
-/** Carries a reauth challenge for destructive ops (disable MFA, regenerate codes, delete passkey). */
-export async function createPasskeyReauthToken(userId: string, challenge: string): Promise<string> {
-  return new jose.SignJWT({ userId, challenge, scope: 'passkey-reauth' })
+/**
+ * Carries a reauth challenge for destructive ops (disable MFA, regenerate codes,
+ * delete passkey). Bound to a specific action so a token issued for one operation
+ * cannot be replayed against a different destructive endpoint.
+ */
+export async function createPasskeyReauthToken(
+  userId: string,
+  challenge: string,
+  action: PasskeyReauthAction,
+): Promise<string> {
+  return new jose.SignJWT({ userId, challenge, action, scope: 'passkey-reauth' })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('2m')
@@ -166,7 +177,9 @@ export async function verifyPasskeyReauthToken(token: string): Promise<PasskeyRe
     const { payload } = await jose.jwtVerify(token, getJwtSecret());
     if (payload.scope !== 'passkey-reauth') return null;
     if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
-    return { userId: payload.userId, challenge: payload.challenge };
+    const action = payload.action;
+    if (action !== 'disable-mfa' && action !== 'regenerate-codes' && action !== 'delete-passkey') return null;
+    return { userId: payload.userId, challenge: payload.challenge, action };
   } catch {
     return null;
   }
