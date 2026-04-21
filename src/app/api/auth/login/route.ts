@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, users } from '@/db';
-import { eq } from 'drizzle-orm';
+import { db, users, userMfa, userPasskeys } from '@/db';
+import { and, eq, isNull } from 'drizzle-orm';
 import { verifyPassword } from '@/lib/password';
 import { createToken, createMfaPendingToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
@@ -95,9 +95,25 @@ export async function POST(request: NextRequest) {
   // If MFA is enabled, don't issue a session yet — return a short-lived
   // mfa-pending token that only the /api/auth/mfa/verify endpoint accepts.
   if (user.mfaEnabled) {
+    // Detect which methods the user has enrolled so the client can render the
+    // right prompt at /mfa-verify.
+    const [totpRow] = await db.select({ id: userMfa.id }).from(userMfa)
+      .where(eq(userMfa.userId, user.id)).limit(1);
+    const [passkeyRow] = await db.select({ id: userPasskeys.id }).from(userPasskeys)
+      .where(and(eq(userPasskeys.userId, user.id), isNull(userPasskeys.disabledAt)))
+      .limit(1);
+
     const mfaToken = await createMfaPendingToken(user.id);
     return NextResponse.json(
-      { mfaRequired: true, mfaToken, user: { id: user.id, email: user.email } },
+      {
+        mfaRequired: true,
+        mfaToken,
+        mfaMethods: {
+          hasTotp: !!totpRow,
+          hasPasskey: !!passkeyRow,
+        },
+        user: { id: user.id, email: user.email },
+      },
       { headers },
     );
   }
