@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { db, users, userMfa, userRecoveryCodes } from '@/db';
 import {
   extractUserIdFromToken,
@@ -14,6 +14,8 @@ import {
 } from '@/lib/mfa';
 
 const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
+
+class TotpAlreadyEnabledError extends Error {}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -55,31 +57,55 @@ export async function POST(request: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: 'User not found' }, { status: 404, headers: corsHeaders });
   }
-  if (user.mfaEnabled) {
-    return NextResponse.json({ error: 'MFA_ALREADY_ENABLED' }, { status: 409, headers: corsHeaders });
-  }
 
   const enc = encryptSecret(setupClaims.secret);
-  const plainCodes = generateRecoveryCodes(10);
-  const hashedCodes = await Promise.all(plainCodes.map(hashRecoveryCode));
 
-  await db.transaction(async (tx) => {
-    await tx.insert(userMfa).values({
-      userId,
-      method: 'totp',
-      secretEncrypted: enc.ciphertext,
-      secretIv: enc.iv,
-      secretAuthTag: enc.authTag,
+  // If the user has no recovery codes yet (e.g., first MFA method), provision a
+  // fresh set. If they already have codes (from a prior passkey enrollment),
+  // reuse those — we never want to silently rotate the user's existing codes
+  // as a side-effect of adding a second factor.
+  let newCodes: string[] | null = null;
+
+  try {
+    await db.transaction(async (tx) => {
+      const [existingTotp] = await tx.select({ id: userMfa.id }).from(userMfa)
+        .where(eq(userMfa.userId, userId)).limit(1);
+      if (existingTotp) {
+        throw new TotpAlreadyEnabledError();
+      }
+
+      await tx.insert(userMfa).values({
+        userId,
+        method: 'totp',
+        secretEncrypted: enc.ciphertext,
+        secretIv: enc.iv,
+        secretAuthTag: enc.authTag,
+      });
+
+      const [{ c: existingCodes }] = await tx.select({ c: count() }).from(userRecoveryCodes)
+        .where(eq(userRecoveryCodes.userId, userId));
+      if (existingCodes === 0) {
+        const plainCodes = generateRecoveryCodes(10);
+        const hashedCodes = await Promise.all(plainCodes.map(hashRecoveryCode));
+        await tx.insert(userRecoveryCodes).values(
+          hashedCodes.map((codeHash) => ({ userId, codeHash })),
+        );
+        newCodes = plainCodes;
+      }
+
+      // mfaEnabled is idempotent — may already be true from a passkey enrollment.
+      await tx.update(users)
+        .set({ mfaEnabled: true, mfaEnabledAt: user.mfaEnabledAt ?? new Date(), updatedAt: new Date() })
+        .where(eq(users.id, userId));
     });
-    await tx.insert(userRecoveryCodes).values(
-      hashedCodes.map((codeHash) => ({ userId, codeHash })),
-    );
-    await tx.update(users)
-      .set({ mfaEnabled: true, mfaEnabledAt: new Date(), updatedAt: new Date() })
-      .where(eq(users.id, userId));
-  });
+  } catch (e) {
+    if (e instanceof TotpAlreadyEnabledError) {
+      return NextResponse.json({ error: 'TOTP_ALREADY_ENABLED' }, { status: 409, headers: corsHeaders });
+    }
+    throw e;
+  }
 
-  return NextResponse.json({ recoveryCodes: plainCodes }, { headers: corsHeaders });
+  return NextResponse.json({ recoveryCodes: newCodes }, { headers: corsHeaders });
 }
 
 export async function OPTIONS() {

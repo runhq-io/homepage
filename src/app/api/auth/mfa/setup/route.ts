@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
-import { db, users } from '@/db';
+import { db, users, userMfa } from '@/db';
 import { extractUserIdFromToken, createMfaSetupToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import { generateTotpSecret, generateQrDataUrl } from '@/lib/mfa';
@@ -28,8 +28,13 @@ export async function POST(request: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: 'User not found' }, { status: 404, headers: corsHeaders });
   }
-  if (user.mfaEnabled) {
-    return NextResponse.json({ error: 'MFA_ALREADY_ENABLED' }, { status: 409, headers: corsHeaders });
+  // Gate on TOTP specifically, not on the generic mfaEnabled flag — a user with
+  // only passkeys (mfaEnabled=true, no userMfa row) is allowed to add TOTP as
+  // an additional factor.
+  const [existingTotp] = await db.select({ id: userMfa.id }).from(userMfa)
+    .where(eq(userMfa.userId, userId)).limit(1);
+  if (existingTotp) {
+    return NextResponse.json({ error: 'TOTP_ALREADY_ENABLED' }, { status: 409, headers: corsHeaders });
   }
   if (!user.email) {
     return NextResponse.json({ error: 'Account has no email' }, { status: 400, headers: corsHeaders });
