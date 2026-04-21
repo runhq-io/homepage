@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { eq, and, isNull } from 'drizzle-orm';
+import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { db, users, userMfa, userRecoveryCodes, userPasskeys } from '@/db';
-import { extractUserIdFromToken } from '@/api/auth/jwt';
+import { extractUserIdFromToken, verifyPasskeyReauthToken } from '@/api/auth/jwt';
 import { verifyPassword } from '@/lib/password';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import {
@@ -10,6 +11,7 @@ import {
   verifyRecoveryCode,
   normalizeRecoveryCode,
 } from '@/lib/mfa';
+import { verifyPasskeyAssertion } from '@/lib/passkeyVerify';
 
 const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
 
@@ -32,13 +34,26 @@ export async function POST(request: NextRequest) {
   }
   if (!perUserLimiter.check(userId)) return rateLimitResponse(corsHeaders);
 
-  let body: { password?: string; code?: string; recoveryCode?: string };
+  let body: {
+    password?: string;
+    code?: string;
+    recoveryCode?: string;
+    passkeyAssertion?: {
+      reauthToken: string;
+      response: AuthenticationResponseJSON;
+    };
+  };
   try { body = await request.json(); }
   catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders }); }
 
+  const usingPasskey = !!body.passkeyAssertion;
   const usingRecovery = !!body.recoveryCode;
-  if (!usingRecovery && !body.code) {
-    return NextResponse.json({ error: 'code or recoveryCode required' }, { status: 400, headers: corsHeaders });
+  const usingTotp = !!body.code;
+  if (!usingPasskey && !usingRecovery && !usingTotp) {
+    return NextResponse.json(
+      { error: 'code, recoveryCode, or passkeyAssertion required' },
+      { status: 400, headers: corsHeaders },
+    );
   }
 
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
@@ -53,9 +68,29 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // TOTP path: verify before starting the transaction (read-only).
-  let totpOk = false;
-  if (!usingRecovery) {
+  // Second-factor verification. The passkey and TOTP paths verify before the
+  // teardown transaction (read-only or self-contained). The recovery path
+  // verifies + consumes inside the teardown transaction so the consume +
+  // teardown are atomic.
+  let secondFactorOk = false;
+
+  if (usingPasskey) {
+    const claims = await verifyPasskeyReauthToken(body.passkeyAssertion!.reauthToken);
+    if (!claims || claims.userId !== userId) {
+      return NextResponse.json({ error: 'AUTH_CHALLENGE_EXPIRED' }, { status: 401, headers: corsHeaders });
+    }
+    const result = await verifyPasskeyAssertion({
+      userId,
+      expectedChallenge: claims.challenge,
+      response: body.passkeyAssertion!.response,
+    });
+    if (result.kind === 'ok') {
+      secondFactorOk = true;
+    } else if (result.kind === 'clone') {
+      return NextResponse.json({ error: 'CREDENTIAL_CLONE_DETECTED' }, { status: 401, headers: corsHeaders });
+    }
+    // kind === 'invalid' falls through to the !secondFactorOk check below.
+  } else if (usingTotp) {
     const [mfaRow] = await db.select().from(userMfa)
       .where(eq(userMfa.userId, userId)).limit(1);
     if (mfaRow) {
@@ -64,12 +99,18 @@ export async function POST(request: NextRequest) {
         iv: mfaRow.secretIv,
         authTag: mfaRow.secretAuthTag,
       });
-      totpOk = verifyTotp(secret, body.code!);
+      secondFactorOk = verifyTotp(secret, body.code!);
     }
-    if (!totpOk) return NextResponse.json({ error: 'INVALID_MFA_CODE' }, { status: 401, headers: corsHeaders });
   }
 
-  // Consume + teardown atomically.
+  if (!usingRecovery && !secondFactorOk) {
+    return NextResponse.json(
+      { error: usingPasskey ? 'INVALID_PASSKEY' : 'INVALID_MFA_CODE' },
+      { status: 401, headers: corsHeaders },
+    );
+  }
+
+  // Consume (recovery) + teardown atomically.
   try {
     await db.transaction(async (tx) => {
       if (usingRecovery) {
