@@ -96,3 +96,53 @@ export async function verifyMfaSetupToken(token: string): Promise<MfaSetupClaims
     return null;
   }
 }
+
+export interface PasskeyRegistrationClaims {
+  userId: string;
+  challenge: string; // base64url
+}
+
+/** Carries the registration challenge through the two-step registration flow. */
+export async function createPasskeyRegistrationToken(userId: string, challenge: string): Promise<string> {
+  return new jose.SignJWT({ userId, challenge, scope: 'passkey-registration' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('1m')
+    .sign(getJwtSecret());
+}
+
+export async function verifyPasskeyRegistrationToken(token: string): Promise<PasskeyRegistrationClaims | null> {
+  try {
+    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    if (payload.scope !== 'passkey-registration') return null;
+    if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
+    return { userId: payload.userId, challenge: payload.challenge };
+  } catch {
+    return null;
+  }
+}
+
+export interface PasskeyAuthenticationClaims {
+  userId: string;
+  challenge: string;
+}
+
+/** Carries the authentication challenge through the two-step auth flow. */
+export async function createPasskeyAuthenticationToken(userId: string, challenge: string): Promise<string> {
+  return new jose.SignJWT({ userId, challenge, scope: 'passkey-authentication' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('2m')
+    .sign(getJwtSecret());
+}
+
+export async function verifyPasskeyAuthenticationToken(token: string): Promise<PasskeyAuthenticationClaims | null> {
+  try {
+    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    if (payload.scope !== 'passkey-authentication') return null;
+    if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
+    return { userId: payload.userId, challenge: payload.challenge };
+  } catch {
+    return null;
+  }
+}
