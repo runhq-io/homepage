@@ -3,6 +3,8 @@ import {
   createToken, verifyToken,
   createMfaPendingToken, verifyMfaPendingToken,
   createMfaSetupToken, verifyMfaSetupToken,
+  createPasskeyRegistrationToken, verifyPasskeyRegistrationToken,
+  createPasskeyAuthenticationToken, verifyPasskeyAuthenticationToken,
 } from './jwt';
 
 beforeAll(() => {
@@ -50,5 +52,41 @@ describe('JWT scope isolation', () => {
   it('round-trips a session token', async () => {
     const t = await createToken('user-9');
     expect(await verifyToken(t)).toBe('user-9');
+  });
+});
+
+describe('passkey JWT scopes', () => {
+  it('registration token roundtrips', async () => {
+    const t = await createPasskeyRegistrationToken('u1', 'ch1');
+    expect(await verifyPasskeyRegistrationToken(t)).toEqual({ userId: 'u1', challenge: 'ch1' });
+  });
+
+  it('authentication token roundtrips', async () => {
+    const t = await createPasskeyAuthenticationToken('u2', 'ch2');
+    expect(await verifyPasskeyAuthenticationToken(t)).toEqual({ userId: 'u2', challenge: 'ch2' });
+  });
+
+  it('session verify rejects passkey-registration token', async () => {
+    const t = await createPasskeyRegistrationToken('u1', 'c');
+    expect(await verifyToken(t)).toBeNull();
+  });
+
+  it('session verify rejects passkey-authentication token', async () => {
+    const t = await createPasskeyAuthenticationToken('u1', 'c');
+    expect(await verifyToken(t)).toBeNull();
+  });
+
+  it('passkey-registration verify rejects other scopes', async () => {
+    const s = await createToken('u1');
+    const p = await createPasskeyAuthenticationToken('u1', 'c');
+    expect(await verifyPasskeyRegistrationToken(s)).toBeNull();
+    expect(await verifyPasskeyRegistrationToken(p)).toBeNull();
+  });
+
+  it('passkey-authentication verify rejects other scopes', async () => {
+    const s = await createToken('u1');
+    const p = await createPasskeyRegistrationToken('u1', 'c');
+    expect(await verifyPasskeyAuthenticationToken(s)).toBeNull();
+    expect(await verifyPasskeyAuthenticationToken(p)).toBeNull();
   });
 });
