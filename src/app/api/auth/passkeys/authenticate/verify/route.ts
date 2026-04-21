@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { verifyAuthenticationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture } from '@simplewebauthn/server';
 import { db, users, userPasskeys } from '@/db';
@@ -55,70 +55,79 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'AUTH_CHALLENGE_EXPIRED' }, { status: 401, headers });
   }
 
-  const [passkeyRow] = await db.select().from(userPasskeys)
-    .where(and(
-      eq(userPasskeys.credentialId, body.response.id),
-      eq(userPasskeys.userId, mfa.userId),
-      isNull(userPasskeys.disabledAt),
-    ))
-    .limit(1);
-
-  if (!passkeyRow) {
-    return NextResponse.json({ error: 'INVALID_PASSKEY' }, { status: 401, headers });
-  }
-
+  // Serialize concurrent verifies against the same credential via SELECT FOR
+  // UPDATE. This prevents two parallel assertions from both passing clone
+  // detection against a stale counter read — the classic "check-then-act"
+  // race. Postgres row lock ensures the second verify waits until the first
+  // commits its counter update, then sees the fresh value.
   const { rpID, expectedOrigin } = getRpConfig();
 
-  let verification;
-  try {
-    verification = await verifyAuthenticationResponse({
-      response: body.response,
-      expectedChallenge: authClaims.challenge,
-      expectedOrigin,
-      expectedRPID: rpID,
-      requireUserVerification: true,
-      credential: {
-        id: passkeyRow.credentialId,
-        publicKey: Buffer.from(passkeyRow.publicKey, 'base64url'),
-        counter: passkeyRow.counter,
-        transports: (passkeyRow.transports as AuthenticatorTransportFuture[]) || undefined,
-      },
-    });
-  } catch {
-    return NextResponse.json({ error: 'INVALID_PASSKEY' }, { status: 401, headers });
-  }
+  const result = await db.transaction(async (tx) => {
+    const [passkeyRow] = await tx.select().from(userPasskeys)
+      .where(and(
+        eq(userPasskeys.credentialId, body.response!.id),
+        eq(userPasskeys.userId, mfa.userId),
+        isNull(userPasskeys.disabledAt),
+      ))
+      .for('update')
+      .limit(1);
 
-  if (!verification.verified) {
-    return NextResponse.json({ error: 'INVALID_PASSKEY' }, { status: 401, headers });
-  }
+    if (!passkeyRow) {
+      return { kind: 'invalid' as const };
+    }
 
-  const newCounter = verification.authenticationInfo.newCounter;
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response: body.response!,
+        expectedChallenge: authClaims.challenge,
+        expectedOrigin,
+        expectedRPID: rpID,
+        requireUserVerification: true,
+        credential: {
+          id: passkeyRow.credentialId,
+          publicKey: Buffer.from(passkeyRow.publicKey, 'base64url'),
+          counter: passkeyRow.counter,
+          transports: (passkeyRow.transports as AuthenticatorTransportFuture[]) || undefined,
+        },
+      });
+    } catch {
+      return { kind: 'invalid' as const };
+    }
 
-  // Clone detection: if both sides are non-zero and new counter is not greater,
-  // disable the credential.
-  if (passkeyRow.counter > 0 && newCounter > 0 && newCounter <= passkeyRow.counter) {
-    await db.update(userPasskeys)
-      .set({ disabledAt: new Date() })
+    if (!verification.verified) {
+      return { kind: 'invalid' as const };
+    }
+
+    const newCounter = verification.authenticationInfo.newCounter;
+
+    // Clone detection: now safe under the row lock. No stale reads.
+    if (passkeyRow.counter > 0 && newCounter > 0 && newCounter <= passkeyRow.counter) {
+      await tx.update(userPasskeys)
+        .set({ disabledAt: new Date() })
+        .where(eq(userPasskeys.id, passkeyRow.id));
+      return { kind: 'clone' as const };
+    }
+
+    // Under the row lock the counter is guaranteed fresh, so a plain
+    // assignment is correct — GREATEST is only needed when concurrent
+    // writes can race, which they can't here.
+    await tx.update(userPasskeys)
+      .set({
+        counter: newCounter,
+        lastUsedAt: new Date(),
+        backedUp: verification.authenticationInfo.credentialBackedUp,
+      })
       .where(eq(userPasskeys.id, passkeyRow.id));
-    return NextResponse.json({ error: 'CREDENTIAL_CLONE_DETECTED' }, { status: 401, headers });
-  }
 
-  // Update counter, lastUsedAt, backedUp. Use GREATEST so concurrent writes
-  // can't move the counter backwards: Postgres row locks serialize the
-  // UPDATEs, and the final stored value is the max of all concurrent
-  // newCounter attempts. For synced passkeys (counter always 0),
-  // GREATEST(0, 0) = 0, which is correct. This preserves the clone-detection
-  // invariant that the stored counter is monotonically non-decreasing.
-  const updated = await db.update(userPasskeys)
-    .set({
-      counter: sql`GREATEST(${userPasskeys.counter}, ${newCounter})`,
-      lastUsedAt: new Date(),
-      backedUp: verification.authenticationInfo.credentialBackedUp,
-    })
-    .where(eq(userPasskeys.id, passkeyRow.id))
-    .returning({ id: userPasskeys.id });
-  if (updated.length === 0) {
+    return { kind: 'ok' as const };
+  });
+
+  if (result.kind === 'invalid') {
     return NextResponse.json({ error: 'INVALID_PASSKEY' }, { status: 401, headers });
+  }
+  if (result.kind === 'clone') {
+    return NextResponse.json({ error: 'CREDENTIAL_CLONE_DETECTED' }, { status: 401, headers });
   }
 
   await db.update(users).set({ lastLoginAt: new Date(), updatedAt: new Date() })
