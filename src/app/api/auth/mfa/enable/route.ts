@@ -13,7 +13,7 @@ import {
   hashRecoveryCode,
 } from '@/lib/mfa';
 
-const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
+const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
 
 class TotpAlreadyEnabledError extends Error {}
 

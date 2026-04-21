@@ -7,7 +7,7 @@ import { extractUserIdFromToken, createPasskeyRegistrationToken } from '@/api/au
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import { getRpConfig } from '@/lib/passkeys';
 
-const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
+const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

@@ -5,7 +5,7 @@ import { extractUserIdFromToken, createMfaSetupToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import { generateTotpSecret, generateQrDataUrl } from '@/lib/mfa';
 
-const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
+const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
