@@ -1,5 +1,5 @@
 import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, unique, index, uniqueIndex } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
 // Migration tracking (created by db:migrate — kept so db:push won't drop it)
@@ -501,6 +501,30 @@ export const inviteCodesRelations = relations(inviteCodes, ({ one }) => ({
 
 export type InviteCode = typeof inviteCodes.$inferSelect;
 export type NewInviteCode = typeof inviteCodes.$inferInsert;
+
+// ============================================================================
+// User Passkeys (WebAuthn credentials)
+// ============================================================================
+
+export const userPasskeys = pgTable('user_passkeys', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  credentialId: text('credential_id').notNull().unique(),
+  publicKey: text('public_key').notNull(),
+  counter: bigint('counter', { mode: 'number' }).notNull().default(0),
+  transports: text('transports').array().notNull().default(sql`ARRAY[]::text[]`),
+  deviceType: text('device_type').notNull(),
+  backedUp: boolean('backed_up').notNull(),
+  nickname: text('nickname').notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  disabledAt: timestamp('disabled_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('user_passkeys_user_idx').on(t.userId),
+}));
+
+export type UserPasskey = typeof userPasskeys.$inferSelect;
+export type NewUserPasskey = typeof userPasskeys.$inferInsert;
 
 // ============================================================================
 // User MFA (TOTP + future methods)
