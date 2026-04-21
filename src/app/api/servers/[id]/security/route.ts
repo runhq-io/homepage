@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { eq, and } from 'drizzle-orm';
-import { db, organizations, organizationMembers } from '@/db';
+import { eq } from 'drizzle-orm';
+import { db, servers } from '@/db';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import { enforceMfaOrRespond } from '@/lib/workspaceMfaEnforcement';
+import { checkServerPermission } from '@/api/services/ServerService';
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
 
@@ -17,7 +18,7 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const { id: orgId } = await params;
+  const { id: serverId } = await params;
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
     return NextResponse.json({ error: 'No token provided' }, { status: 401, headers: corsHeaders });
@@ -31,15 +32,13 @@ export async function PATCH(
   const mfaGate = await enforceMfaOrRespond(userId, corsHeaders);
   if (mfaGate) return mfaGate;
 
-  const [membership] = await db.select({ role: organizationMembers.role })
-    .from(organizationMembers)
-    .where(and(eq(organizationMembers.orgId, orgId), eq(organizationMembers.userId, userId)))
-    .limit(1);
-  if (!membership) {
-    return NextResponse.json({ error: 'Not a member of this workspace' }, { status: 403, headers: corsHeaders });
-  }
-  if (membership.role !== 'owner' && membership.role !== 'admin') {
-    return NextResponse.json({ error: 'Owner or admin role required' }, { status: 403, headers: corsHeaders });
+  // Toggling a server-wide security policy is owner-only. Servers currently
+  // only have 'owner' | 'member' — no dedicated admin role — so we gate on
+  // ownership explicitly rather than using canEditServer (which also lets
+  // members edit).
+  const isOwner = await checkServerPermission(serverId, userId, ['owner']);
+  if (!isOwner) {
+    return NextResponse.json({ error: 'Owner role required' }, { status: 403, headers: corsHeaders });
   }
 
   let body: { requireMfa?: boolean };
@@ -51,11 +50,11 @@ export async function PATCH(
   }
 
   const [existing] = await db.select({
-    requireMfa: organizations.requireMfa,
-    enforcedAt: organizations.requireMfaEnforcedAt,
-  }).from(organizations).where(eq(organizations.id, orgId)).limit(1);
+    requireMfa: servers.requireMfa,
+    enforcedAt: servers.requireMfaEnforcedAt,
+  }).from(servers).where(eq(servers.id, serverId)).limit(1);
   if (!existing) {
-    return NextResponse.json({ error: 'Workspace not found' }, { status: 404, headers: corsHeaders });
+    return NextResponse.json({ error: 'Server not found' }, { status: 404, headers: corsHeaders });
   }
 
   const patch: Record<string, unknown> = {
@@ -69,7 +68,7 @@ export async function PATCH(
     patch.requireMfaEnforcedAt = null;
   }
 
-  await db.update(organizations).set(patch).where(eq(organizations.id, orgId));
+  await db.update(servers).set(patch).where(eq(servers.id, serverId));
 
   return NextResponse.json({
     requireMfa: body.requireMfa,
