@@ -189,7 +189,7 @@ export class RunHQWebSocketServer {
           type: 'auth_result',
           success: false,
           error: 'MFA_REQUIRED',
-          workspaceName: mfa.workspaceName,
+          serverName: mfa.serverName,
           deadline: mfa.deadline?.toISOString(),
           timestamp: Date.now(),
         };

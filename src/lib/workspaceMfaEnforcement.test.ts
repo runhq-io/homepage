@@ -54,9 +54,6 @@ describe('computeMfaEnforcement', () => {
     expect(state.status).toBe('grace');
     expect(state.serverId).toBe('srv1');
     expect(state.serverName).toBe('Server A');
-    // Backward-compat aliases mirror the canonical server fields.
-    expect(state.workspaceId).toBe(state.serverId);
-    expect(state.workspaceName).toBe(state.serverName);
     expect(state.deadline!.getTime()).toBeCloseTo(enforcedAt.getTime() + getMfaGracePeriodMs(), -2);
   });
 
@@ -102,7 +99,5 @@ describe('enforceMfaOrRespond', () => {
     const body = await res!.json();
     expect(body.error).toBe('MFA_REQUIRED');
     expect(body.serverId).toBe('srv1');
-    // Backward-compat alias preserved for clients still reading workspaceId.
-    expect(body.workspaceId).toBe('srv1');
   });
 });

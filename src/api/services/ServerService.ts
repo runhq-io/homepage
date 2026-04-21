@@ -1105,8 +1105,8 @@ export type ServerAccessGate =
   | { ok: false; status: 403; body: { error: 'Forbidden' } }
   | { ok: false; status: 403; body: {
       error: 'MFA_REQUIRED';
-      workspaceId?: string;
-      workspaceName?: string;
+      serverId?: string;
+      serverName?: string;
       deadline?: string;
     } };
 
@@ -1130,8 +1130,8 @@ export async function gateServerAccess(serverId: string, userId: string): Promis
       status: 403,
       body: {
         error: 'MFA_REQUIRED',
-        workspaceId: mfa.workspaceId,
-        workspaceName: mfa.workspaceName,
+        serverId: mfa.serverId,
+        serverName: mfa.serverName,
         deadline: mfa.deadline?.toISOString(),
       },
     };
@@ -1152,8 +1152,8 @@ export async function gateServerEdit(serverId: string, userId: string): Promise<
       status: 403,
       body: {
         error: 'MFA_REQUIRED',
-        workspaceId: mfa.workspaceId,
-        workspaceName: mfa.workspaceName,
+        serverId: mfa.serverId,
+        serverName: mfa.serverName,
         deadline: mfa.deadline?.toISOString(),
       },
     };

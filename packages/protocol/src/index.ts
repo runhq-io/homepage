@@ -1595,8 +1595,8 @@ export interface AuthResultMessage {
   success: boolean;
   userId?: string;
   error?: string;
-  /** Workspace name whose MFA policy triggered the block (only set when error === 'MFA_REQUIRED'). */
-  workspaceName?: string;
+  /** Server name whose MFA policy triggered the block (only set when error === 'MFA_REQUIRED'). */
+  serverName?: string;
   /** ISO-8601 timestamp of the MFA grace-period deadline (only set when error === 'MFA_REQUIRED'). */
   deadline?: string;
   timestamp: number;

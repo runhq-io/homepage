@@ -26,10 +26,6 @@ export interface MfaEnforcementState {
   /** Server whose require_mfa policy is driving enforcement (earliest deadline wins). */
   serverId?: string;
   serverName?: string;
-  /** @deprecated Alias for serverId, preserved for one release so client code keeps working. */
-  workspaceId?: string;
-  /** @deprecated Alias for serverName, preserved for one release so client code keeps working. */
-  workspaceName?: string;
   deadline?: Date;
 }
 
@@ -82,9 +78,6 @@ export async function computeMfaEnforcement(userId: string): Promise<MfaEnforcem
     status: worst.past ? 'required' : 'grace',
     serverId: worst.serverId,
     serverName: worst.name,
-    // Backward-compat aliases — remove once all client consumers switch to serverId/serverName.
-    workspaceId: worst.serverId,
-    workspaceName: worst.name,
     deadline: worst.deadline,
   };
 }
@@ -105,9 +98,6 @@ export async function enforceMfaOrRespond(
     error: 'MFA_REQUIRED',
     serverId: state.serverId,
     serverName: state.serverName,
-    // Backward-compat aliases — remove once all client consumers switch to serverId/serverName.
-    workspaceId: state.serverId,
-    workspaceName: state.serverName,
     deadline: state.deadline?.toISOString(),
   }, { status: 403, headers: corsHeaders });
 }
