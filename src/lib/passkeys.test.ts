@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { getRpConfig, defaultNickname } from './passkeys';
 
 beforeEach(() => {
-  process.env.WEBAUTHN_RP_ID = 'test.example.com';
-  process.env.WEBAUTHN_ORIGIN = 'https://test.example.com';
+  process.env.CLIENT_URL = 'https://test.example.com';
+  delete process.env.APP_URL;
   delete process.env.WEBAUTHN_RP_NAME;
 });
 
 describe('getRpConfig', () => {
-  it('returns config from env', () => {
+  it('derives config from CLIENT_URL', () => {
     const cfg = getRpConfig();
     expect(cfg).toEqual({
       rpID: 'test.example.com',
@@ -17,19 +17,33 @@ describe('getRpConfig', () => {
     });
   });
 
+  it('falls back to APP_URL when CLIENT_URL not set', () => {
+    delete process.env.CLIENT_URL;
+    process.env.APP_URL = 'https://app.example.com:8443';
+    const cfg = getRpConfig();
+    expect(cfg.rpID).toBe('app.example.com');
+    expect(cfg.expectedOrigin).toBe('https://app.example.com:8443');
+  });
+
+  it('strips path and query from the origin', () => {
+    process.env.CLIENT_URL = 'https://app.example.com/some/path?q=1';
+    expect(getRpConfig().expectedOrigin).toBe('https://app.example.com');
+  });
+
   it('uses WEBAUTHN_RP_NAME override', () => {
     process.env.WEBAUTHN_RP_NAME = 'MyApp';
     expect(getRpConfig().rpName).toBe('MyApp');
   });
 
-  it('throws when rpID missing', () => {
-    delete process.env.WEBAUTHN_RP_ID;
-    expect(() => getRpConfig()).toThrow(/WEBAUTHN_RP_ID/);
+  it('throws when neither CLIENT_URL nor APP_URL is set', () => {
+    delete process.env.CLIENT_URL;
+    delete process.env.APP_URL;
+    expect(() => getRpConfig()).toThrow(/CLIENT_URL/);
   });
 
-  it('throws when origin missing', () => {
-    delete process.env.WEBAUTHN_ORIGIN;
-    expect(() => getRpConfig()).toThrow(/WEBAUTHN_ORIGIN/);
+  it('throws when URL is malformed', () => {
+    process.env.CLIENT_URL = 'not a url';
+    expect(() => getRpConfig()).toThrow(/not a valid URL/);
   });
 });
 

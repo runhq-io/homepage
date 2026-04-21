@@ -1,12 +1,17 @@
 /**
  * Passkey (WebAuthn) configuration and small helpers.
  *
- * RP (Relying Party) config comes from env:
- *   WEBAUTHN_RP_ID      — domain the passkey is bound to (e.g., 'app.runhq.io')
- *   WEBAUTHN_RP_NAME    — display name in OS prompts (default: 'RunHQ')
- *   WEBAUTHN_ORIGIN     — full origin for verification (e.g., 'https://app.runhq.io')
+ * RP (Relying Party) config is derived from the client app URL so there's
+ * one source of truth for where the browser lives. We read, in order:
+ *   1. CLIENT_URL       (primary — used for invite links and client-facing UI)
+ *   2. APP_URL          (fallback — used by auth email routes)
  *
- * These must exactly match the browsing origin or verifications fail.
+ * From the resolved URL we derive:
+ *   - rpID           = hostname           (what the passkey is bound to)
+ *   - expectedOrigin = scheme + host+port (what the server verifies against)
+ *
+ * Only WEBAUTHN_RP_NAME is a dedicated env — display-only string shown in
+ * OS prompts (e.g., "RunHQ wants to create a passkey"). Defaults to 'RunHQ'.
  */
 
 export interface PasskeyRpConfig {
@@ -16,12 +21,21 @@ export interface PasskeyRpConfig {
 }
 
 export function getRpConfig(): PasskeyRpConfig {
-  const rpID = process.env.WEBAUTHN_RP_ID;
-  const expectedOrigin = process.env.WEBAUTHN_ORIGIN;
-  const rpName = process.env.WEBAUTHN_RP_NAME || 'RunHQ';
-  if (!rpID) throw new Error('[Passkeys] WEBAUTHN_RP_ID must be set');
-  if (!expectedOrigin) throw new Error('[Passkeys] WEBAUTHN_ORIGIN must be set');
-  return { rpID, rpName, expectedOrigin };
+  const clientUrl = process.env.CLIENT_URL || process.env.APP_URL;
+  if (!clientUrl) {
+    throw new Error('[Passkeys] CLIENT_URL must be set to derive WebAuthn RP config');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(clientUrl);
+  } catch {
+    throw new Error(`[Passkeys] CLIENT_URL is not a valid URL: ${clientUrl}`);
+  }
+  return {
+    rpID: parsed.hostname,
+    rpName: process.env.WEBAUTHN_RP_NAME || 'RunHQ',
+    expectedOrigin: parsed.origin,
+  };
 }
 
 /**
