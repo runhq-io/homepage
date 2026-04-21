@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { verifyAuthenticationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture } from '@simplewebauthn/server';
 import { db, users, userPasskeys } from '@/db';
@@ -103,12 +103,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'CREDENTIAL_CLONE_DETECTED' }, { status: 401, headers });
   }
 
-  // Update counter, lastUsedAt, backedUp. No conditional WHERE — the clone
-  // detection above already handled the regression case; a concurrent legit
-  // request would see a consistent updated counter and not regress.
+  // Update counter, lastUsedAt, backedUp. Use GREATEST so concurrent writes
+  // can't move the counter backwards: Postgres row locks serialize the
+  // UPDATEs, and the final stored value is the max of all concurrent
+  // newCounter attempts. For synced passkeys (counter always 0),
+  // GREATEST(0, 0) = 0, which is correct. This preserves the clone-detection
+  // invariant that the stored counter is monotonically non-decreasing.
   const updated = await db.update(userPasskeys)
     .set({
-      counter: newCounter,
+      counter: sql`GREATEST(${userPasskeys.counter}, ${newCounter})`,
       lastUsedAt: new Date(),
       backedUp: verification.authenticationInfo.credentialBackedUp,
     })
