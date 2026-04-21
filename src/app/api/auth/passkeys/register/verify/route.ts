@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
-import { db, users, userPasskeys } from '@/db';
+import { db, users, userPasskeys, userRecoveryCodes } from '@/db';
 import { extractUserIdFromToken, verifyPasskeyRegistrationToken } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import { getRpConfig, defaultNickname } from '@/lib/passkeys';
+import { generateRecoveryCodes, hashRecoveryCode } from '@/lib/mfa';
 
 const perUserLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
 
@@ -68,23 +69,50 @@ export async function POST(request: NextRequest) {
   const nickname = defaultNickname(transports, credentialDeviceType, userAgent);
 
   try {
-    const [inserted] = await db.insert(userPasskeys).values({
-      userId,
-      credentialId,
-      publicKey: publicKeyB64,
-      counter,
-      transports,
-      deviceType: credentialDeviceType,
-      backedUp: credentialBackedUp,
-      nickname,
-    }).returning({ id: userPasskeys.id, nickname: userPasskeys.nickname });
+    // All three operations — passkey insert, user MFA flag, conditional
+    // recovery-code provisioning — happen in one transaction. On any failure
+    // the whole thing rolls back so the user isn't left in a half-enrolled
+    // state (e.g. mfa_enabled=true with no passkey row and no recovery codes).
+    const result = await db.transaction(async (tx) => {
+      const [inserted] = await tx.insert(userPasskeys).values({
+        userId,
+        credentialId,
+        publicKey: publicKeyB64,
+        counter,
+        transports,
+        deviceType: credentialDeviceType,
+        backedUp: credentialBackedUp,
+        nickname,
+      }).returning({ id: userPasskeys.id, nickname: userPasskeys.nickname });
 
-    // Flip mfa_enabled if it wasn't already true.
-    await db.update(users)
-      .set({ mfaEnabled: true, mfaEnabledAt: new Date(), updatedAt: new Date() })
-      .where(eq(users.id, userId));
+      await tx.update(users)
+        .set({ mfaEnabled: true, mfaEnabledAt: new Date(), updatedAt: new Date() })
+        .where(eq(users.id, userId));
 
-    return NextResponse.json({ id: inserted.id, nickname: inserted.nickname }, { headers: corsHeaders });
+      // Provision recovery codes on first MFA enrollment so a passkey-only
+      // user isn't stuck if they lose the device. If the user already has
+      // codes (e.g. TOTP was enabled first), preserve them.
+      const [{ c: existingCodes }] = await tx.select({ c: count() })
+        .from(userRecoveryCodes)
+        .where(eq(userRecoveryCodes.userId, userId));
+
+      let recoveryCodes: string[] | null = null;
+      if (existingCodes === 0) {
+        recoveryCodes = generateRecoveryCodes(10);
+        const hashed = await Promise.all(recoveryCodes.map(hashRecoveryCode));
+        await tx.insert(userRecoveryCodes).values(
+          hashed.map((codeHash) => ({ userId, codeHash })),
+        );
+      }
+
+      return { id: inserted.id, nickname: inserted.nickname, recoveryCodes };
+    });
+
+    return NextResponse.json({
+      id: result.id,
+      nickname: result.nickname,
+      recoveryCodes: result.recoveryCodes,
+    }, { headers: corsHeaders });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes('user_passkeys_credential_id') || msg.includes('duplicate')) {
