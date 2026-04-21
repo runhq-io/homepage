@@ -1137,9 +1137,13 @@ export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
         request.role
       );
 
-      if (result) {
+      if (result.success) {
         success = true;
         expiresAt = result.expiresAt.toISOString();
+      } else if (result.reason === 'no_permission') {
+        error = 'You do not have permission to invite members to this server.';
+      } else if (result.reason === 'already_member') {
+        error = 'This user is already a member of the server.';
       } else {
         error = 'Failed to create invite';
       }

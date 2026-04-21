@@ -2394,9 +2394,15 @@ export function createHttpApp() {
       const resolvedServerName = serverName || 'Untitled Server';
       await ServerService.ensureServer(serverId, userId, resolvedServerName);
 
-      const invite = await ServerService.createInvite(serverId, userId, email, role || 'member');
-      if (!invite) {
-        return c.json({ error: 'Failed to create invite. User may already be a member.' }, 400);
+      const result = await ServerService.createInvite(serverId, userId, email, role || 'member');
+      if (!result.success) {
+        if (result.reason === 'no_permission') {
+          return c.json({ error: 'You do not have permission to invite members to this server.' }, 403);
+        }
+        if (result.reason === 'already_member') {
+          return c.json({ error: 'This user is already a member of the server.' }, 409);
+        }
+        return c.json({ error: 'Failed to create invite' }, 400);
       }
 
       // Send invite email
@@ -2404,14 +2410,14 @@ export function createHttpApp() {
         const [inviter] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
         const inviterName = inviter?.name || inviter?.email || 'Someone';
         const CLIENT_URL = process.env.CLIENT_URL || 'https://app.runhq.io';
-        const acceptUrl = `${CLIENT_URL}/invite/accept?token=${invite.token}`;
+        const acceptUrl = `${CLIENT_URL}/invite/accept?token=${result.token}`;
         await sendInviteEmail(email, inviterName, resolvedServerName, acceptUrl);
       } catch (emailErr) {
         console.error('[HttpServer] Failed to send invite email:', emailErr);
         // Invite was created successfully, just email failed - don't fail the request
       }
 
-      return c.json({ success: true, invite });
+      return c.json({ success: true, invite: { token: result.token, expiresAt: result.expiresAt } });
     } catch (error) {
       console.error('[HttpServer] Invite member error:', error);
       return c.json({ error: String(error) }, 500);

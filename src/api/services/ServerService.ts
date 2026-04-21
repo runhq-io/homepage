@@ -696,6 +696,10 @@ export async function leaveServer(serverId: string, userId: string): Promise<boo
 
 const INVITE_EXPIRY_DAYS = 7;
 
+export type CreateInviteResult =
+  | { success: true; token: string; expiresAt: Date }
+  | { success: false; reason: 'no_permission' | 'already_member' };
+
 /**
  * Create an invitation to join the server
  */
@@ -704,11 +708,17 @@ export async function createInvite(
   inviterId: string,
   email: string,
   role: ServerRole = 'member'
-): Promise<{ token: string; expiresAt: Date } | null> {
-  // Check permission (owner only)
-  const hasPermission = await checkServerPermission(serverId, inviterId, ['owner']);
+): Promise<CreateInviteResult> {
+  // Cloud-level owner OR per-server RBAC administrator/manage_roles can invite.
+  // Mirrors the runhq /invite-links gate in roles.ts (administrator || manage_roles).
+  let hasPermission = await checkServerPermission(serverId, inviterId, ['owner']);
   if (!hasPermission) {
-    return null;
+    hasPermission =
+      (await checkServerRBACPermission(serverId, inviterId, 'administrator')) ||
+      (await checkServerRBACPermission(serverId, inviterId, 'manage_roles'));
+  }
+  if (!hasPermission) {
+    return { success: false, reason: 'no_permission' };
   }
 
   // Check if user is already a member
@@ -721,7 +731,7 @@ export async function createInvite(
 
   if (existingMember.length > 0) {
     console.log(`[ServerService] User ${email} is already a member of server ${serverId}`);
-    return null;
+    return { success: false, reason: 'already_member' };
   }
 
   // Check for existing pending invite
@@ -734,6 +744,7 @@ export async function createInvite(
   if (existingInvite.length > 0) {
     // Return existing invite token
     return {
+      success: true,
       token: existingInvite[0].token,
       expiresAt: existingInvite[0].expiresAt,
     };
@@ -752,7 +763,7 @@ export async function createInvite(
   });
 
   console.log(`[ServerService] Created invite for ${email} to server ${serverId}`);
-  return { token, expiresAt };
+  return { success: true, token, expiresAt };
 }
 
 /**
