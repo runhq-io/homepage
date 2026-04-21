@@ -3,8 +3,8 @@ import { NextResponse } from 'next/server';
 import {
   db,
   users,
-  organizations,
-  organizationMembers,
+  servers,
+  serverMembers,
 } from '@/db';
 
 // Grace period is configurable via env var MFA_GRACE_PERIOD_DAYS.
@@ -23,17 +23,26 @@ export const MFA_GRACE_PERIOD_MS = getMfaGracePeriodMs();
 
 export interface MfaEnforcementState {
   status: 'ok' | 'grace' | 'required';
+  /** Server whose require_mfa policy is driving enforcement (earliest deadline wins). */
+  serverId?: string;
+  serverName?: string;
+  /** @deprecated Alias for serverId, preserved for one release so client code keeps working. */
   workspaceId?: string;
+  /** @deprecated Alias for serverName, preserved for one release so client code keeps working. */
   workspaceName?: string;
   deadline?: Date;
 }
 
 /**
- * Return enforcement state for the given user.
+ * Return enforcement state for the given user based on server memberships.
  *   - 'ok'       = no enforcement, or user has MFA enabled
- *   - 'grace'    = enforced but within 7-day grace period (UI shows banner, access allowed)
- *   - 'required' = enforced past grace (workspace-scoped routes should block)
- * If enrolled in multiple requiring workspaces, the earliest deadline wins.
+ *   - 'grace'    = enforced but within the grace period (UI shows banner, access allowed)
+ *   - 'required' = enforced past grace (server-scoped routes should block)
+ * If the user belongs to multiple servers requiring MFA, the earliest deadline wins.
+ *
+ * Historically this helper read from organizations/organization_members. The
+ * RunHQ client product only exposes "servers" (per-workspace settings), so the
+ * policy now lives on the `servers` table.
  */
 export async function computeMfaEnforcement(userId: string): Promise<MfaEnforcementState> {
   const [user] = await db.select({ mfaEnabled: users.mfaEnabled })
@@ -42,36 +51,39 @@ export async function computeMfaEnforcement(userId: string): Promise<MfaEnforcem
   if (user.mfaEnabled) return { status: 'ok' };
 
   const rows = await db.select({
-    orgId: organizations.id,
-    name: organizations.name,
-    requireMfa: organizations.requireMfa,
-    enforcedAt: organizations.requireMfaEnforcedAt,
+    serverId: servers.id,
+    name: servers.name,
+    requireMfa: servers.requireMfa,
+    enforcedAt: servers.requireMfaEnforcedAt,
   })
-    .from(organizations)
-    .innerJoin(organizationMembers, eq(organizationMembers.orgId, organizations.id))
+    .from(servers)
+    .innerJoin(serverMembers, eq(serverMembers.serverId, servers.id))
     .where(and(
-      eq(organizationMembers.userId, userId),
-      eq(organizations.requireMfa, true),
+      eq(serverMembers.userId, userId),
+      eq(servers.requireMfa, true),
     ));
 
   if (rows.length === 0) return { status: 'ok' };
 
   const graceMs = getMfaGracePeriodMs();
   const now = Date.now();
-  let worst: { orgId: string; name: string; deadline: Date; past: boolean } | null = null;
+  let worst: { serverId: string; name: string; deadline: Date; past: boolean } | null = null;
   for (const r of rows) {
     const enforcedAt = r.enforcedAt ? r.enforcedAt.getTime() : now;
     const deadline = new Date(enforcedAt + graceMs);
     const past = now > deadline.getTime();
     if (!worst || deadline < worst.deadline) {
-      worst = { orgId: r.orgId, name: r.name, deadline, past };
+      worst = { serverId: r.serverId, name: r.name, deadline, past };
     }
   }
   if (!worst) return { status: 'ok' };
 
   return {
     status: worst.past ? 'required' : 'grace',
-    workspaceId: worst.orgId,
+    serverId: worst.serverId,
+    serverName: worst.name,
+    // Backward-compat aliases — remove once all client consumers switch to serverId/serverName.
+    workspaceId: worst.serverId,
     workspaceName: worst.name,
     deadline: worst.deadline,
   };
@@ -81,7 +93,7 @@ export async function computeMfaEnforcement(userId: string): Promise<MfaEnforcem
  * If the user is past grace, return a 403 Response handlers should return.
  * Otherwise return null (handler proceeds).
  *
- * Call this right after auth in every workspace-scoped route.
+ * Call this right after auth in every server-scoped route.
  */
 export async function enforceMfaOrRespond(
   userId: string,
@@ -91,8 +103,11 @@ export async function enforceMfaOrRespond(
   if (state.status !== 'required') return null;
   return NextResponse.json({
     error: 'MFA_REQUIRED',
-    workspaceId: state.workspaceId,
-    workspaceName: state.workspaceName,
+    serverId: state.serverId,
+    serverName: state.serverName,
+    // Backward-compat aliases — remove once all client consumers switch to serverId/serverName.
+    workspaceId: state.serverId,
+    workspaceName: state.serverName,
     deadline: state.deadline?.toISOString(),
   }, { status: 403, headers: corsHeaders });
 }
