@@ -96,7 +96,7 @@ export async function POST(request: NextRequest) {
 
   if (usingPasskey) {
     const claims = await verifyPasskeyReauthToken(body.passkeyAssertion!.reauthToken);
-    if (!claims || claims.userId !== userId) {
+    if (!claims || claims.userId !== userId || claims.action !== 'regenerate-codes') {
       return NextResponse.json({ error: 'AUTH_CHALLENGE_EXPIRED' }, { status: 401, headers: corsHeaders });
     }
     const result = await verifyPasskeyAssertion({

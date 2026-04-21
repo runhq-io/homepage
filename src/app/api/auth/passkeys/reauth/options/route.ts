@@ -6,6 +6,7 @@ import { db, userPasskeys } from '@/db';
 import {
   extractUserIdFromToken,
   createPasskeyReauthToken,
+  type PasskeyReauthAction,
 } from '@/api/auth/jwt';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import { getRpConfig } from '@/lib/passkeys';
@@ -29,6 +30,22 @@ export async function POST(request: NextRequest) {
   }
   if (!perUserLimiter.check(userId)) return rateLimitResponse(corsHeaders);
 
+  let body: { action?: string };
+  try {
+    body = request.headers.get('content-type')?.includes('application/json')
+      ? await request.json()
+      : {};
+  } catch { body = {}; }
+
+  const actionRaw = body.action;
+  if (actionRaw !== 'disable-mfa' && actionRaw !== 'regenerate-codes' && actionRaw !== 'delete-passkey') {
+    return NextResponse.json(
+      { error: 'action must be one of: disable-mfa, regenerate-codes, delete-passkey' },
+      { status: 400, headers: corsHeaders },
+    );
+  }
+  const action: PasskeyReauthAction = actionRaw;
+
   const active = await db.select({
     credentialId: userPasskeys.credentialId,
     transports: userPasskeys.transports,
@@ -50,7 +67,7 @@ export async function POST(request: NextRequest) {
     })),
   });
 
-  const reauthToken = await createPasskeyReauthToken(userId, options.challenge);
+  const reauthToken = await createPasskeyReauthToken(userId, options.challenge, action);
   return NextResponse.json({ options, reauthToken }, { headers: corsHeaders });
 }
 
