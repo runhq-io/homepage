@@ -756,6 +756,20 @@ export async function canManageServerMembers(serverId: string, userId: string): 
 }
 
 /**
+ * Whether userId can change server-wide security policy (MFA enforcement,
+ * future security toggles). Cloud-level owner OR per-server RBAC administrator.
+ *
+ * Separate from canManageServerMembers because security policy has a stricter
+ * scope (no manage_roles fallback) — only full administrators should be able
+ * to lock members out of the server.
+ */
+export async function canManageServerSecurity(serverId: string, userId: string): Promise<boolean> {
+  if (await checkServerPermission(serverId, userId, ['owner'])) return true;
+  if (await checkServerRBACPermission(serverId, userId, 'administrator')) return true;
+  return false;
+}
+
+/**
  * Create an invitation to join the server
  */
 export async function createInvite(
@@ -1440,6 +1454,107 @@ export async function updateSessionTokenExpiry(
     .where(eq(servers.id, serverId));
 
   return expirySeconds;
+}
+
+// ============================================================================
+// MFA enforcement policy (per-server)
+// ============================================================================
+
+export interface ServerMfaStatus {
+  requireMfa: boolean;
+  requireMfaEnforcedAt: string | null;
+  totalMembers: number;
+  membersWithMfa: number;
+  /** Only populated for the server owner (privacy + scope of action). */
+  membersWithout?: Array<{ userId: string; email: string | null; name: string | null }>;
+}
+
+/**
+ * Return MFA-enforcement status for a server. Any member may read counts;
+ * only users who can manage security (owner/administrator) see the list of
+ * members without MFA — they're the ones who can act on it.
+ *
+ * Caller is responsible for access control (use gateServerAccess).
+ * Returns null when the server doesn't exist.
+ */
+export async function getServerMfaStatus(
+  serverId: string,
+  viewerId: string,
+): Promise<ServerMfaStatus | null> {
+  const [server] = await db.select({
+    requireMfa: servers.requireMfa,
+    enforcedAt: servers.requireMfaEnforcedAt,
+  }).from(servers).where(eq(servers.id, serverId)).limit(1);
+  if (!server) return null;
+
+  const members = await db.select({
+    userId: users.id,
+    email: users.email,
+    name: users.name,
+    mfaEnabled: users.mfaEnabled,
+  })
+    .from(serverMembers)
+    .innerJoin(users, eq(users.id, serverMembers.userId))
+    .where(eq(serverMembers.serverId, serverId));
+
+  const total = members.length;
+  const withMfa = members.filter((m) => m.mfaEnabled).length;
+  const canManage = await canManageServerSecurity(serverId, viewerId);
+  const membersWithout = canManage
+    ? members.filter((m) => !m.mfaEnabled).map(({ userId, email, name }) => ({ userId, email, name }))
+    : undefined;
+
+  return {
+    requireMfa: server.requireMfa,
+    requireMfaEnforcedAt: server.enforcedAt ? server.enforcedAt.toISOString() : null,
+    totalMembers: total,
+    membersWithMfa: withMfa,
+    membersWithout,
+  };
+}
+
+/**
+ * Set a server's MFA-enforcement policy. Toggling on records the enforcement
+ * timestamp (used for the grace-period deadline); toggling off clears it.
+ *
+ * Caller is responsible for owner-only access control — this function trusts
+ * its inputs and only touches the DB.
+ *
+ * Returns the applied state, or null if the server doesn't exist.
+ */
+export async function setServerRequireMfa(
+  serverId: string,
+  requireMfa: boolean,
+): Promise<{ requireMfa: boolean; requireMfaEnforcedAt: string | null } | null> {
+  const [existing] = await db.select({
+    requireMfa: servers.requireMfa,
+  }).from(servers).where(eq(servers.id, serverId)).limit(1);
+  if (!existing) return null;
+
+  const patch: {
+    requireMfa: boolean;
+    updatedAt: Date;
+    requireMfaEnforcedAt?: Date | null;
+  } = {
+    requireMfa,
+    updatedAt: new Date(),
+  };
+  // Enforcement timestamp anchors the grace-period deadline. Only (re)stamp
+  // when toggling on from off; always clear when toggling off.
+  if (requireMfa && !existing.requireMfa) {
+    patch.requireMfaEnforcedAt = new Date();
+  } else if (!requireMfa) {
+    patch.requireMfaEnforcedAt = null;
+  }
+
+  await db.update(servers).set(patch).where(eq(servers.id, serverId));
+
+  return {
+    requireMfa,
+    requireMfaEnforcedAt: patch.requireMfaEnforcedAt
+      ? patch.requireMfaEnforcedAt.toISOString()
+      : null,
+  };
 }
 
 /**

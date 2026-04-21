@@ -3738,6 +3738,75 @@ export function createHttpApp() {
   });
 
   // ==========================================================================
+  // Server-wide MFA enforcement policy
+  // ==========================================================================
+
+  // Read MFA enforcement status for a server. Any member may read aggregate
+  // counts; only the owner receives the list of members without MFA.
+  app.get('/api/servers/:serverId/mfa-status', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const userId = await extractUserIdFromToken(authHeader.substring(7));
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const gate = await ServerService.gateServerAccess(serverId, userId);
+      if (!gate.ok) return c.json(gate.body, gate.status);
+
+      const status = await ServerService.getServerMfaStatus(serverId, userId);
+      if (!status) return c.json({ error: 'Server not found' }, 404);
+      return c.json(status);
+    } catch (error) {
+      console.error('[HttpServer] Get server MFA status error:', error);
+      return c.json({ error: 'Failed to get MFA status' }, 500);
+    }
+  });
+
+  // Toggle the per-server MFA enforcement policy. Allowed for cloud-level
+  // owner OR per-server RBAC administrator — see canManageServerSecurity.
+  app.patch('/api/servers/:serverId/security', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const userId = await extractUserIdFromToken(authHeader.substring(7));
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const editGate = await ServerService.gateServerEdit(serverId, userId);
+      if (!editGate.ok) return c.json(editGate.body, editGate.status);
+
+      const canManage = await ServerService.canManageServerSecurity(serverId, userId);
+      if (!canManage) {
+        return c.json({ error: 'Administrator role required' }, 403);
+      }
+
+      let body: { requireMfa?: unknown };
+      try { body = await c.req.json(); }
+      catch { return c.json({ error: 'Invalid JSON' }, 400); }
+
+      if (typeof body.requireMfa !== 'boolean') {
+        return c.json({ error: 'requireMfa: boolean required' }, 400);
+      }
+
+      const applied = await ServerService.setServerRequireMfa(serverId, body.requireMfa);
+      if (!applied) return c.json({ error: 'Server not found' }, 404);
+      return c.json(applied);
+    } catch (error) {
+      console.error('[HttpServer] Update server security policy error:', error);
+      return c.json({ error: 'Failed to update security policy' }, 500);
+    }
+  });
+
+  // ==========================================================================
   // Canonical Workspace/Public Tasks
   // ==========================================================================
 
