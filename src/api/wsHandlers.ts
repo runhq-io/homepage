@@ -1130,11 +1130,14 @@ export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
 
     try {
       const userId = client.userId || 'anonymous';
+      // Wire allows 'owner'|'admin'|'member'|'viewer'; servers only have owner/member.
+      // 'admin'/'viewer' (and 'owner', which goes via ownership transfer) collapse to member.
+      const role: 'owner' | 'member' = request.role === 'owner' ? 'owner' : 'member';
       const result = await ServerService.createInvite(
         request.orgId,
         userId,
         request.email,
-        request.role
+        role
       );
 
       if (result.success) {
