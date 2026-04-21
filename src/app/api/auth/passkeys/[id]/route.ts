@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { and, eq, isNull, count, ne } from 'drizzle-orm';
+import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { db, users, userPasskeys, userMfa, userRecoveryCodes } from '@/db';
-import { extractUserIdFromToken } from '@/api/auth/jwt';
+import { extractUserIdFromToken, verifyPasskeyReauthToken } from '@/api/auth/jwt';
 import { verifyPassword } from '@/lib/password';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
 import {
@@ -10,6 +11,7 @@ import {
   verifyRecoveryCode,
   normalizeRecoveryCode,
 } from '@/lib/mfa';
+import { verifyPasskeyAssertion } from '@/lib/passkeyVerify';
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
 
@@ -73,7 +75,15 @@ export async function DELETE(
 
   const { id } = await params;
 
-  let body: { password?: string; code?: string; recoveryCode?: string };
+  let body: {
+    password?: string;
+    code?: string;
+    recoveryCode?: string;
+    passkeyAssertion?: {
+      reauthToken: string;
+      response: AuthenticationResponseJSON;
+    };
+  };
   try { body = await request.json(); }
   catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders }); }
 
@@ -106,15 +116,34 @@ export async function DELETE(
     }
   }
 
+  const usingPasskey = !!body.passkeyAssertion;
   const usingRecovery = !!body.recoveryCode;
   const usingTotp = !!body.code;
-  if (!usingRecovery && !usingTotp) {
-    return NextResponse.json({ error: 'code or recoveryCode required' }, { status: 400, headers: corsHeaders });
+  if (!usingPasskey && !usingRecovery && !usingTotp) {
+    return NextResponse.json(
+      { error: 'code, recoveryCode, or passkeyAssertion required' },
+      { status: 400, headers: corsHeaders },
+    );
   }
 
   let secondFactorOk = false;
 
-  if (usingRecovery) {
+  if (usingPasskey) {
+    const claims = await verifyPasskeyReauthToken(body.passkeyAssertion!.reauthToken);
+    if (!claims || claims.userId !== userId) {
+      return NextResponse.json({ error: 'AUTH_CHALLENGE_EXPIRED' }, { status: 401, headers: corsHeaders });
+    }
+    const result = await verifyPasskeyAssertion({
+      userId,
+      expectedChallenge: claims.challenge,
+      response: body.passkeyAssertion!.response,
+    });
+    if (result.kind === 'ok') {
+      secondFactorOk = true;
+    } else if (result.kind === 'clone') {
+      return NextResponse.json({ error: 'CREDENTIAL_CLONE_DETECTED' }, { status: 401, headers: corsHeaders });
+    }
+  } else if (usingRecovery) {
     const normalized = normalizeRecoveryCode(body.recoveryCode!);
     const unused = await db.select().from(userRecoveryCodes)
       .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
