@@ -5,6 +5,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { auth } from '@/lib/auth';
 import { revokeAllUserOAuthTokens } from '@/lib/oauth';
+import { deleteServersAndDependents } from '@/api/services/ServerService';
 
 // Verify the current user is an admin.
 //
@@ -59,6 +60,13 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
     await db.delete(messages).where(inArray(messages.conversationId, conversationIds));
   }
 
+  // Collect this user's server IDs up front so we can fully clean them up
+  // (members, invites, tasks, etc.) via the centralized helper. A bare
+  // `delete from servers where owner_id = ?` would fail on FK constraints
+  // for any server that has child rows.
+  const userServers = await db.select({ id: servers.id }).from(servers).where(eq(servers.ownerId, userId));
+  const userServerIds = userServers.map((s) => s.id);
+
   // 2. Tables without inter-dependencies + payments (must precede subscriptions)
   await Promise.all([
     db.delete(agentTasks).where(eq(agentTasks.userId, userId)),
@@ -68,7 +76,7 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
     db.delete(usageRecords).where(eq(usageRecords.userId, userId)),
     db.delete(payments).where(eq(payments.userId, userId)),
     db.delete(inviteCodes).where(eq(inviteCodes.createdByUserId, userId)),
-    db.delete(servers).where(eq(servers.ownerId, userId)),
+    deleteServersAndDependents(userServerIds),
     db.delete(deviceCodes).where(eq(deviceCodes.userId, userId)),
     revokeAllUserOAuthTokens(userId),
   ]);

@@ -1,10 +1,11 @@
 'use server';
 
-import { db, servers, serverMembers, serverInvites, serverInviteLinks, publicPorts } from '@/db';
-import { eq, inArray } from 'drizzle-orm';
+import { db, servers } from '@/db';
+import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { auth } from '@/lib/auth';
 import { destroyFlyMachine } from '@/lib/fly-api';
+import { deleteServersAndDependents } from '@/api/services/ServerService';
 
 async function verifyAdmin(): Promise<void> {
   const session = await auth();
@@ -26,12 +27,7 @@ export async function deleteServers(ids: string[]): Promise<{ success: boolean; 
     return { success: true, count: 0 };
   }
 
-  // Delete child records first (no ON DELETE CASCADE on these FKs)
-  await db.delete(serverMembers).where(inArray(serverMembers.serverId, ids));
-  await db.delete(serverInvites).where(inArray(serverInvites.serverId, ids));
-  await db.delete(serverInviteLinks).where(inArray(serverInviteLinks.serverId, ids));
-  await db.delete(publicPorts).where(inArray(publicPorts.serverId, ids));
-  await db.delete(servers).where(inArray(servers.id, ids));
+  await deleteServersAndDependents(ids);
 
   revalidatePath('/admin/servers');
   return { success: true, count: ids.length };
@@ -53,19 +49,13 @@ export async function destroyMachines(
     try {
       await destroyFlyMachine(machine.id);
 
-      // Clean up matching DB records if they exist
       const matchingServers = await db
         .select({ id: servers.id })
         .from(servers)
         .where(eq(servers.machineId, machine.id));
 
       if (matchingServers.length > 0) {
-        const ids = matchingServers.map((s: { id: string }) => s.id);
-        await db.delete(serverMembers).where(inArray(serverMembers.serverId, ids));
-        await db.delete(serverInvites).where(inArray(serverInvites.serverId, ids));
-        await db.delete(serverInviteLinks).where(inArray(serverInviteLinks.serverId, ids));
-        await db.delete(publicPorts).where(inArray(publicPorts.serverId, ids));
-        await db.delete(servers).where(inArray(servers.id, ids));
+        await deleteServersAndDependents(matchingServers.map((s) => s.id));
       }
 
       destroyed++;

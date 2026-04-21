@@ -1,51 +1,41 @@
 /**
- * Tests for admin server CRUD operations (actions.ts)
+ * Tests for admin server CRUD operations (actions.ts).
  *
- * Verifies:
- * - deleteServers cascades child record deletion before removing servers
- * - deleteServers requires admin authentication
- * - deleteServers handles empty input gracefully
- * - deleteServers handles partial child records (some tables have rows, others don't)
+ * The DB-level cleanup mechanics (which child tables are deleted, transaction
+ * atomicity, completeness vs. schema) live inside
+ * `deleteServersAndDependents` and are covered by
+ * `ServerService.cascade.test.ts`. This file only verifies the admin-facing
+ * contract: auth gating, early-return, and that the helper is invoked with
+ * the expected IDs.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Track all delete calls to verify cascade order
-const deleteCalls: { table: string; ids: string[] }[] = [];
-
-// Mock revalidatePath
 vi.mock('next/cache', () => ({
   revalidatePath: vi.fn(),
 }));
 
-// Mock auth
 vi.mock('@/lib/auth', () => ({
   auth: vi.fn(),
 }));
 
-// Mock db with tracking of delete operations
-vi.mock('@/lib/db', () => {
-  const createTable = (name: string) => ({
-    _name: name,
-    id: name === 'servers' ? 'id' : `${name}_id`,
-    serverId: 'server_id',
-  });
+vi.mock('@/api/services/ServerService', () => ({
+  deleteServersAndDependents: vi.fn(async () => {}),
+}));
 
-  const tables = {
-    servers: createTable('servers'),
-    serverMembers: createTable('server_members'),
-    serverInvites: createTable('server_invites'),
-    serverInviteLinks: createTable('server_invite_links'),
-    publicPorts: createTable('public_ports'),
-  };
+vi.mock('@/lib/fly-api', () => ({
+  destroyFlyMachine: vi.fn(async () => {}),
+}));
 
+vi.mock('@/db', () => {
+  const servers = { _name: 'servers', id: 'id', machineId: 'machine_id' };
   return {
-    ...tables,
+    servers,
     db: {
-      delete: vi.fn((table: any) => ({
-        where: vi.fn(async () => {
-          deleteCalls.push({ table: table._name, ids: [] });
-        }),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(async () => []),
+        })),
       })),
     },
   };
@@ -53,12 +43,12 @@ vi.mock('@/lib/db', () => {
 
 import { auth } from '@/lib/auth';
 import { revalidatePath } from 'next/cache';
+import { deleteServersAndDependents } from '@/api/services/ServerService';
 import { deleteServers } from './actions';
 
 describe('Admin Server Actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    deleteCalls.length = 0;
   });
 
   function mockAdminSession() {
@@ -80,34 +70,27 @@ describe('Admin Server Actions', () => {
   }
 
   describe('deleteServers', () => {
-    it('should delete child records before servers', async () => {
+    it('delegates to deleteServersAndDependents with the provided ids', async () => {
       mockAdminSession();
 
       const result = await deleteServers(['ws-1', 'ws-2']);
 
       expect(result).toEqual({ success: true, count: 2 });
-
-      // Verify all 5 delete calls were made (4 child tables + servers)
-      expect(deleteCalls).toHaveLength(5);
-
-      // Verify cascade order: child tables first, servers last
-      expect(deleteCalls[0].table).toBe('server_members');
-      expect(deleteCalls[1].table).toBe('server_invites');
-      expect(deleteCalls[2].table).toBe('server_invite_links');
-      expect(deleteCalls[3].table).toBe('public_ports');
-      expect(deleteCalls[4].table).toBe('servers');
+      expect(deleteServersAndDependents).toHaveBeenCalledTimes(1);
+      expect(deleteServersAndDependents).toHaveBeenCalledWith(['ws-1', 'ws-2']);
     });
 
-    it('should return early for empty ids array', async () => {
+    it('returns early without touching the helper for an empty array', async () => {
       mockAdminSession();
 
       const result = await deleteServers([]);
 
       expect(result).toEqual({ success: true, count: 0 });
-      expect(deleteCalls).toHaveLength(0);
+      expect(deleteServersAndDependents).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
     });
 
-    it('should revalidate the admin servers path after deletion', async () => {
+    it('revalidates the admin servers path after deletion', async () => {
       mockAdminSession();
 
       await deleteServers(['ws-1']);
@@ -115,45 +98,18 @@ describe('Admin Server Actions', () => {
       expect(revalidatePath).toHaveBeenCalledWith('/admin/servers');
     });
 
-    it('should not revalidate when no ids provided', async () => {
-      mockAdminSession();
-
-      await deleteServers([]);
-
-      expect(revalidatePath).not.toHaveBeenCalled();
-    });
-
-    it('should reject unauthenticated users', async () => {
+    it('rejects unauthenticated users without deleting anything', async () => {
       mockUnauthenticated();
 
       await expect(deleteServers(['ws-1'])).rejects.toThrow('Not authenticated');
-      expect(deleteCalls).toHaveLength(0);
+      expect(deleteServersAndDependents).not.toHaveBeenCalled();
     });
 
-    it('should reject non-admin users', async () => {
+    it('rejects non-admin users without deleting anything', async () => {
       mockNonAdminSession();
 
       await expect(deleteServers(['ws-1'])).rejects.toThrow('Not authorized');
-      expect(deleteCalls).toHaveLength(0);
-    });
-
-    it('should handle single server deletion', async () => {
-      mockAdminSession();
-
-      const result = await deleteServers(['ws-single']);
-
-      expect(result).toEqual({ success: true, count: 1 });
-      expect(deleteCalls).toHaveLength(5);
-    });
-
-    it('should handle bulk server deletion', async () => {
-      mockAdminSession();
-
-      const ids = Array.from({ length: 50 }, (_, i) => `ws-${i}`);
-      const result = await deleteServers(ids);
-
-      expect(result).toEqual({ success: true, count: 50 });
-      expect(deleteCalls).toHaveLength(5);
+      expect(deleteServersAndDependents).not.toHaveBeenCalled();
     });
   });
 });

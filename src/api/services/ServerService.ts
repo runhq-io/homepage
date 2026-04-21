@@ -15,6 +15,12 @@ import {
   serverInviteLinks,
   serverBans,
   serverTemplates,
+  publicPorts,
+  workspaceTasks,
+  workspaceTaskComments,
+  workspaceTaskActivity,
+  workspaceTaskAttachments,
+  workspaceTaskVotes,
   users,
   type Server,
   type ServerRole,
@@ -23,6 +29,7 @@ import {
   type ServerTier,
 } from '../../db/schema';
 import { eq, and, gt, lte, isNull, isNotNull, inArray, sql } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
 import { nanoid } from 'nanoid';
 import { createHash } from 'crypto';
 import * as CloudflareTunnelService from './CloudflareTunnelService';
@@ -552,6 +559,56 @@ export async function updateServer(
 }
 
 /**
+ * Every table that holds a foreign key to servers(id).
+ *
+ * Single source of truth for server-scoped DB cleanup: the
+ * `deleteServersAndDependents` helper walks this list in order and deletes
+ * dependent rows before removing the server row itself. A completeness test
+ * (see ServerService.cascade.test.ts) asserts this list stays in sync with
+ * the schema — if someone adds a new table with a FK to servers(id) without
+ * registering it here, CI fails.
+ *
+ * Order is irrelevant for correctness (everything runs in one transaction
+ * before the servers row is removed) but is kept stable for readability.
+ */
+export const SERVER_SCOPED_TABLES = [
+  serverMembers,
+  serverInvites,
+  serverInviteLinks,
+  serverBans,
+  publicPorts,
+  serverTemplates,
+  // workspace_tasks children cascade on task_id, but their server_id FK still
+  // blocks server deletion, so they must be cleared explicitly too.
+  workspaceTaskComments,
+  workspaceTaskActivity,
+  workspaceTaskAttachments,
+  workspaceTaskVotes,
+  workspaceTasks,
+] as const satisfies ReadonlyArray<PgTable & { serverId: unknown }>;
+
+/**
+ * Atomically delete the given server rows and every dependent row that
+ * references them. All deletions run inside a single transaction: either
+ * every row is removed, or none are — no possibility of leaving a server
+ * with orphaned children (the bug this helper exists to prevent).
+ *
+ * This is *only* DB cleanup. Callers that also manage cloud infrastructure
+ * (Fly machines/volumes, Cloudflare tunnels) are responsible for tearing
+ * those down before calling this helper.
+ */
+export async function deleteServersAndDependents(serverIds: string[]): Promise<void> {
+  if (serverIds.length === 0) return;
+
+  await db.transaction(async (tx) => {
+    for (const table of SERVER_SCOPED_TABLES) {
+      await tx.delete(table).where(inArray((table as any).serverId, serverIds));
+    }
+    await tx.delete(servers).where(inArray(servers.id, serverIds));
+  });
+}
+
+/**
  * Delete server (owner only)
  */
 export async function deleteServer(serverId: string, userId: string): Promise<{ success: boolean; error?: string }> {
@@ -565,7 +622,7 @@ export async function deleteServer(serverId: string, userId: string): Promise<{ 
     return { success: false, error: 'Server not found' };
   }
 
-  // Delete cloud resources FIRST — abort if this fails
+  // Delete cloud resources FIRST — abort if this fails to avoid orphaned machines.
   if (server.deploymentType === 'remote' && isAnyProviderConfigured()) {
     const remoteDeleted = await deleteRemoteServer(serverId);
     if (!remoteDeleted) {
@@ -574,16 +631,14 @@ export async function deleteServer(serverId: string, userId: string): Promise<{ 
     }
   }
 
-  // Cloud resources confirmed gone — now safe to clean up DB
-
-  // Delete public port mappings (DB + Cloudflare DNS/ingress)
+  // External Cloudflare cleanup (DNS records, tunnel ingress, tunnel itself).
+  // These live outside Postgres so they can't be handled by the DB helper.
   try {
     await PublicPortService.deleteAllPortMappings(serverId);
   } catch (error) {
     console.error(`[ServerService] Failed to delete port mappings (continuing):`, error);
   }
 
-  // Delete Cloudflare tunnel after all mappings are removed
   if (server.tunnelId) {
     try {
       await CloudflareTunnelService.deleteTunnel(server.tunnelId);
@@ -592,20 +647,8 @@ export async function deleteServer(serverId: string, userId: string): Promise<{ 
     }
   }
 
-  // Delete members first (foreign key constraint)
-  await db.delete(serverMembers).where(eq(serverMembers.serverId, serverId));
-
-  // Delete invite links
-  await db.delete(serverInviteLinks).where(eq(serverInviteLinks.serverId, serverId));
-
-  // Delete invites
-  await db.delete(serverInvites).where(eq(serverInvites.serverId, serverId));
-
-  // Delete bans
-  await db.delete(serverBans).where(eq(serverBans.serverId, serverId));
-
-  // Delete server
-  await db.delete(servers).where(eq(servers.id, serverId));
+  // Atomic DB cleanup: servers row + every dependent row in one transaction.
+  await deleteServersAndDependents([serverId]);
 
   console.log(`[ServerService] Deleted server ${serverId}`);
   return { success: true };
