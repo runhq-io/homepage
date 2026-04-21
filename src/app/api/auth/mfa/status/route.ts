@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { eq, and, isNull } from 'drizzle-orm';
-import { db, users, userRecoveryCodes } from '@/db';
+import { db, users, userRecoveryCodes, userMfa, userPasskeys } from '@/db';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 
 const corsHeaders = {
@@ -30,10 +30,28 @@ export async function GET(request: NextRequest) {
     .from(userRecoveryCodes)
     .where(and(eq(userRecoveryCodes.userId, userId), isNull(userRecoveryCodes.usedAt)));
 
+  const [totpRow] = await db.select({ id: userMfa.id }).from(userMfa)
+    .where(eq(userMfa.userId, userId)).limit(1);
+
+  const passkeys = await db.select({
+    id: userPasskeys.id,
+    nickname: userPasskeys.nickname,
+    deviceType: userPasskeys.deviceType,
+    backedUp: userPasskeys.backedUp,
+    transports: userPasskeys.transports,
+    lastUsedAt: userPasskeys.lastUsedAt,
+    createdAt: userPasskeys.createdAt,
+    disabledAt: userPasskeys.disabledAt,
+  })
+    .from(userPasskeys)
+    .where(eq(userPasskeys.userId, userId));
+
   return NextResponse.json({
     mfaEnabled: user.mfaEnabled,
     mfaEnabledAt: user.mfaEnabledAt,
     recoveryCodesRemaining: unused.length,
+    hasTotp: !!totpRow,
+    passkeys,
   }, { headers: corsHeaders });
 }
 
