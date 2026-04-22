@@ -749,8 +749,10 @@ export type CreateInviteResult =
  * Mirrors the runhq /invite-links gate in roles.ts.
  */
 export async function canManageServerMembers(serverId: string, userId: string): Promise<boolean> {
-  if (await checkServerPermission(serverId, userId, ['owner'])) return true;
-  if (await checkServerRBACPermission(serverId, userId, 'administrator')) return true;
+  // Owner or is_admin mirror — local BE check; survives workspace outage.
+  if (await checkCloudOpPermission(serverId, userId)) return true;
+  // manage_roles is a workspace-specific permission without a BE mirror;
+  // this leg still calls the workspace and degrades to false when it's down.
   if (await checkServerRBACPermission(serverId, userId, 'manage_roles')) return true;
   return false;
 }
@@ -764,9 +766,8 @@ export async function canManageServerMembers(serverId: string, userId: string): 
  * to lock members out of the server.
  */
 export async function canManageServerSecurity(serverId: string, userId: string): Promise<boolean> {
-  if (await checkServerPermission(serverId, userId, ['owner'])) return true;
-  if (await checkServerRBACPermission(serverId, userId, 'administrator')) return true;
-  return false;
+  // Owner or is_admin mirror — local BE check; survives workspace outage.
+  return checkCloudOpPermission(serverId, userId);
 }
 
 /**
@@ -1095,6 +1096,37 @@ export async function setServerStatus(serverId: string, status: ServerStatusType
     .update(servers)
     .set({ status, updatedAt: new Date() })
     .where(eq(servers.id, serverId));
+}
+
+/**
+ * Cloud-op permission check: is this user allowed to perform machine-lifecycle
+ * and other cloud-level operations on this server?
+ *
+ * Returns true when the user is either:
+ *   - a cloud 'owner' in server_members (BE-authoritative), or
+ *   - marked is_admin=true in server_members (workspace-derived mirror —
+ *     synced from the workspace on every role change + on boot)
+ *
+ * Reads only local BE state. Unlike checkServerRBACPermission, does NOT call
+ * the workspace — so this check succeeds even when the workspace is crashed,
+ * which is exactly when admins need to restart it.
+ */
+export async function checkCloudOpPermission(serverId: string, userId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ role: serverMembers.role, isAdmin: serverMembers.isAdmin })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+  if (row) {
+    return row.role === 'owner' || row.isAdmin === true;
+  }
+  // Fallback: servers.ownerId is the source of truth if server_members is missing.
+  const [server] = await db
+    .select({ ownerId: servers.ownerId })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  return server?.ownerId === userId;
 }
 
 /**
@@ -1813,13 +1845,10 @@ export async function restartRemoteServer(
   serverId: string,
   userId: string
 ): Promise<{ success: boolean; status?: ServerStatusType; url?: string; error?: string }> {
-  // Check cloud-level permission first (owner only), then fall back to server RBAC
-  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasCloudPerm) {
-    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
-    if (!hasRBACPerm) {
-      return { success: false, error: 'Access denied' };
-    }
+  // Cloud-op permission: owner OR is_admin (workspace-derived mirror).
+  // Reads local BE state only — works when the workspace is crashed.
+  if (!(await checkCloudOpPermission(serverId, userId))) {
+    return { success: false, error: 'Access denied' };
   }
 
   const server = await getServer(serverId);

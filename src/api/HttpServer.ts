@@ -4671,13 +4671,10 @@ export function createHttpApp() {
   // Widget Management API (called by RunHQ frontend UI)
   // ==========================================================================
 
-  // Widget management auth: cloud-level owner OR server RBAC administrator
-  // Same pattern as restart/port APIs — checks cloud role first, falls back to server RBAC
+  // Widget management auth: cloud-op permission (owner OR is_admin mirror).
+  // Local BE check — works when workspace is crashed.
   async function requireWidgetAdmin(c: any, userId: string, serverId: string): Promise<boolean> {
-    const hasCloudPerm = await ServerService.checkServerPermission(serverId, userId, ['owner']);
-    if (hasCloudPerm) return true;
-    const hasRBACPerm = await ServerService.checkServerRBACPermission(serverId, userId, 'administrator');
-    return hasRBACPerm;
+    return ServerService.checkCloudOpPermission(serverId, userId);
   }
 
   app.get('/api/widget/integration', async (c) => {

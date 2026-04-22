@@ -13,7 +13,7 @@
 import { db } from '../../db/index';
 import { publicPorts, type PublicPort } from '../../db/schema';
 import { eq, and } from 'drizzle-orm';
-import { checkServerPermission, checkServerRBACPermission, ensureServerTunnelConnector, getServer } from './ServerService';
+import { checkCloudOpPermission, ensureServerTunnelConnector, getServer } from './ServerService';
 import * as CloudflareTunnelService from './CloudflareTunnelService';
 
 // ============================================================================
@@ -99,13 +99,9 @@ export async function createPortMapping(
     return { success: false, error: portError };
   }
 
-  // Check permission (owner or administrator)
-  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasCloudPerm) {
-    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
-    if (!hasRBACPerm) {
-      return { success: false, error: 'Only server owners and administrators can manage port mappings' };
-    }
+  // Cloud-op permission: owner OR is_admin mirror. Local BE check; works when workspace is down.
+  if (!(await checkCloudOpPermission(serverId, userId))) {
+    return { success: false, error: 'Only server owners and administrators can manage port mappings' };
   }
 
   // Check limit
@@ -173,13 +169,9 @@ export async function deletePortMapping(
   userId: string,
   portMappingId: string
 ): Promise<{ success: boolean; error?: string }> {
-  // Check permission (owner or administrator)
-  const hasCloudPerm = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasCloudPerm) {
-    const hasRBACPerm = await checkServerRBACPermission(serverId, userId, 'administrator');
-    if (!hasRBACPerm) {
-      return { success: false, error: 'Only server owners and administrators can manage port mappings' };
-    }
+  // Cloud-op permission: owner OR is_admin mirror. Local BE check; works when workspace is down.
+  if (!(await checkCloudOpPermission(serverId, userId))) {
+    return { success: false, error: 'Only server owners and administrators can manage port mappings' };
   }
 
   // Find the mapping
