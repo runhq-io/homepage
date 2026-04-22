@@ -432,15 +432,22 @@ export function createHttpApp() {
       // Check credit balance before proceeding
       const creditCheck = await UsageService.checkCreditBalance(token);
       if (!creditCheck.allowed) {
+        const code =
+          creditCheck.reason === 'past_due' ? 'PAYMENT_PAST_DUE' :
+          creditCheck.reason === 'no_subscription' ? 'NO_SUBSCRIPTION' :
+          'INSUFFICIENT_CREDITS';
         const errorResponse: Record<string, unknown> = {
           error: creditCheck.reason === 'insufficient_credits'
             ? 'Insufficient credits - please add more credits to continue'
             : creditCheck.reason === 'past_due'
               ? 'Payment past due - please update your payment method'
               : 'Subscription required',
-          code: 'INSUFFICIENT_CREDITS',
+          code,
+          reason: creditCheck.reason,
           balanceCents: creditCheck.balanceCents,
           plan: creditCheck.plan,
+          hasPaymentMethod: creditCheck.hasPaymentMethod,
+          periodEnd: creditCheck.periodEnd.toISOString(),
         };
         return c.json(errorResponse, 402);
       }
@@ -673,15 +680,22 @@ export function createHttpApp() {
         // Check credit balance before proceeding
         const creditCheck = await UsageService.checkCreditBalance(token);
         if (!creditCheck.allowed) {
+          const code =
+            creditCheck.reason === 'past_due' ? 'PAYMENT_PAST_DUE' :
+            creditCheck.reason === 'no_subscription' ? 'NO_SUBSCRIPTION' :
+            'INSUFFICIENT_CREDITS';
           const errorResponse: Record<string, unknown> = {
             error: creditCheck.reason === 'insufficient_credits'
               ? 'Insufficient credits - please add more credits to continue'
               : creditCheck.reason === 'past_due'
                 ? 'Payment past due - please update your payment method'
                 : 'Subscription required',
-            code: 'INSUFFICIENT_CREDITS',
+            code,
+            reason: creditCheck.reason,
             balanceCents: creditCheck.balanceCents,
             plan: creditCheck.plan,
+            hasPaymentMethod: creditCheck.hasPaymentMethod,
+            periodEnd: creditCheck.periodEnd.toISOString(),
           };
           return c.json(errorResponse, 402);
         }

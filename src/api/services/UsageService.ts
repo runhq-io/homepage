@@ -42,6 +42,8 @@ export interface CreditCheckResult {
   reason?: 'insufficient_credits' | 'past_due' | 'no_subscription';
   balanceCents: number;
   plan: PlanId;
+  hasPaymentMethod: boolean;
+  periodEnd: Date;
 }
 
 export interface UsageTrackResult {
@@ -430,23 +432,29 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
 export async function checkCreditBalance(userToken: string): Promise<CreditCheckResult> {
   const userId = extractUserIdFromToken(userToken);
   if (!userId) {
+    const { end } = getBillingPeriod();
     return {
       allowed: false,
       reason: 'no_subscription',
       balanceCents: 0,
       plan: 'free',
+      hasPaymentMethod: false,
+      periodEnd: end,
     };
   }
 
   const subscription = await getOrCreateSubscription(userId);
+  const hasPaymentMethod = !!subscription.stripeCustomerId;
+  const periodEnd = subscription.currentPeriodEnd;
 
-  // Check subscription status
   if (subscription.status === 'past_due') {
     return {
       allowed: false,
       reason: 'past_due',
       balanceCents: subscription.creditBalanceCents || 0,
       plan: subscription.planId as PlanId,
+      hasPaymentMethod,
+      periodEnd,
     };
   }
 
@@ -459,6 +467,8 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
       reason: 'insufficient_credits',
       balanceCents: balance,
       plan: subscription.planId as PlanId,
+      hasPaymentMethod,
+      periodEnd,
     };
   }
 
@@ -466,6 +476,8 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
     allowed: true,
     balanceCents: balance,
     plan: subscription.planId as PlanId,
+    hasPaymentMethod,
+    periodEnd,
   };
 }
 
