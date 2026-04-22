@@ -17,7 +17,7 @@ import {
   workspaceTaskActivity,
   workspaceTaskComments,
 } from '../../db/schema';
-import { listFeed } from './WorkspaceTaskActivityFeedService';
+import { listFeed, countNew } from './WorkspaceTaskActivityFeedService';
 
 // ---------------------------------------------------------------------------
 // Unique identifiers for this test run — must be valid UUIDs and text IDs
@@ -156,6 +156,22 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('WorkspaceTaskActivityFeedService.countNew', () => {
+  it('counts activity+comment rows strictly newer than since', async () => {
+    // Seed layout (relative to base = Date.now() - 5000 at seed time):
+    //   activity @ base+0, +1000, +2000, +3000
+    //   comments @ base+500, +2500
+    // Using since = far past → all 6 rows should be counted
+    const count = await countNew(SERVER_ID, Date.now() - 60_000);
+    expect(count).toBe(6);
+  });
+
+  it('returns 0 when since is in the future', async () => {
+    const count = await countNew(SERVER_ID, Date.now() + 10_000_000);
+    expect(count).toBe(0);
+  });
+});
 
 describe('WorkspaceTaskActivityFeedService.listFeed', () => {
   it('returns activity + comments merged DESC by created_at with correct total', async () => {

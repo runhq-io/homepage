@@ -1,4 +1,4 @@
-import { and, eq, ne } from 'drizzle-orm';
+import { and, count, eq, gt, ne } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { workspaceTaskActivity, workspaceTaskComments } from '../../db/schema';
 
@@ -137,4 +137,39 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
   const paged = entries.slice(filters.offset, filters.offset + filters.limit);
 
   return { entries: paged, total, limit: filters.limit, offset: filters.offset };
+}
+
+// ---------------------------------------------------------------------------
+// countNew
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the total number of activity + comment rows for the given server
+ * that were created strictly after `sinceMs` (milliseconds since epoch).
+ *
+ * Used by the sidebar unread-badge to show how many feed items a member
+ * hasn't seen yet.  Two separate COUNT queries keep the implementation
+ * simple and avoid a UNION; at current row volumes the extra round-trip is
+ * negligible.
+ */
+export async function countNew(serverId: string, sinceMs: number): Promise<number> {
+  const since = new Date(sinceMs);
+
+  const [{ value: activityCount }] = await db
+    .select({ value: count() })
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.serverId, serverId),
+      gt(workspaceTaskActivity.createdAt, since),
+    ));
+
+  const [{ value: commentCount }] = await db
+    .select({ value: count() })
+    .from(workspaceTaskComments)
+    .where(and(
+      eq(workspaceTaskComments.serverId, serverId),
+      gt(workspaceTaskComments.createdAt, since),
+    ));
+
+  return activityCount + commentCount;
 }
