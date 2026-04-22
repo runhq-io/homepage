@@ -67,6 +67,7 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
     .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
     .limit(1);
   if (!member) {
+    logEvent('auto_heal.forbidden', { serverId, userId });
     return { status: 403, body: { status: 'forbidden' } };
   }
 
@@ -80,6 +81,7 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
     ))
     .limit(1);
   if (inProgress) {
+    logEvent('auto_heal.joined_in_progress', { serverId, userId, attemptId: inProgress.id });
     return { status: 202, body: { status: 'in_progress', attemptId: inProgress.id } };
   }
 
@@ -96,14 +98,23 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
       inArray(serverHealAttempts.status, ['succeeded', 'failed']),
     ));
   if (recentTerminal.length >= FLAP_THRESHOLD) {
-    console.warn(`[AutoHeal] ${serverId}: flap detected (${recentTerminal.length} attempts in 15min); refusing to restart`);
-    // Flap notifications are dispatched by a future enhancement (see plan Phase 6).
+    // Flap detected — refuse to restart and emit a structured event. Real
+    // user-facing in-app notifications require a notification service that
+    // doesn't yet exist in this codebase; the event is visible in logs and
+    // a future NotificationService can subscribe to it.
+    logEvent('auto_heal.flap_detected', {
+      serverId,
+      userId,
+      attemptCount: recentTerminal.length,
+      windowMs: FLAP_WINDOW_MS,
+    });
     return { status: 409, body: { status: 'flapping' } };
   }
 
   // Load server; confirm machine is known.
   const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
   if (!server || !server.machineId || !server.serverUrl) {
+    logEvent('auto_heal.missing', { serverId, userId, reason: !server ? 'no_server' : !server.machineId ? 'no_machine_id' : 'no_server_url' });
     return { status: 410, body: { status: 'missing' } };
   }
 
@@ -111,7 +122,7 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
   // False positives from the client side (laptop sleep, network switch) are
   // filtered here — if BE can reach /health, the workspace isn't really dead.
   if (await confirmHealthy(server.serverUrl)) {
-    console.log(`[AutoHeal] ${serverId}: confirmation /health passed; no restart`);
+    logEvent('auto_heal.confirmed_healthy', { serverId, userId });
     return { status: 200, body: { status: 'healthy' } };
   }
 
@@ -149,18 +160,17 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
   // Fire the Fly restart.
   try {
     const provider = getProvider((server.provider || 'fly') as ProviderId);
-    console.log(`[AutoHeal] ${serverId}: calling restartMachine(${server.machineId}); attemptId=${attemptId}`);
+    logEvent('auto_heal.triggered', { serverId, userId, attemptId, machineId: server.machineId });
     await provider.restartMachine(server.machineId);
   } catch (err) {
     const errMsg = String(err);
-    // Fly returns 404 when the machine is gone. FlyService wraps errors as
-    // "Fly.io API error: <status> - <body>" so detect by substring.
     const is404 = /\b404\b/.test(errMsg);
     await markFailed(attemptId, errMsg);
     if (is404) {
+      logEvent('auto_heal.machine_missing', { serverId, userId, attemptId, error: errMsg });
       return { status: 410, body: { status: 'missing', attemptId } };
     }
-    console.error(`[AutoHeal] ${serverId}: restartMachine failed:`, err);
+    logEvent('auto_heal.provider_unavailable', { serverId, userId, attemptId, error: errMsg });
     return { status: 503, body: { status: 'provider_unavailable', attemptId } };
   }
 
@@ -168,6 +178,15 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
   startHealPoller(attemptId, server.serverUrl);
 
   return { status: 202, body: { status: 'restarting', attemptId } };
+}
+
+/**
+ * Structured event log. One line per event, JSON-parseable tail, for log
+ * aggregators and future dashboards. Prefixed with a tag so it's greppable
+ * when scanning raw logs.
+ */
+function logEvent(event: string, fields: Record<string, unknown>): void {
+  console.log(`[AutoHeal] ${event} ${JSON.stringify(fields)}`);
 }
 
 async function confirmHealthy(serverUrl: string): Promise<boolean> {

@@ -30,6 +30,7 @@ export function startHealPoller(attemptId: string, serverUrl: string): void {
 
 async function runPoll(attemptId: string, serverUrl: string): Promise<void> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
+  const startedAt = Date.now();
   let lastError: string | undefined;
 
   while (Date.now() < deadline) {
@@ -40,7 +41,7 @@ async function runPoll(attemptId: string, serverUrl: string): Promise<void> {
       .where(eq(serverHealAttempts.id, attemptId))
       .limit(1);
     if (!row || row.status !== 'in_progress') {
-      console.log(`[HealPoller] ${attemptId}: attempt no longer in_progress (${row?.status ?? 'missing'}); exiting`);
+      console.log(`[HealPoller] auto_heal.poll_exit_external ${JSON.stringify({ attemptId, finalStatus: row?.status ?? 'missing' })}`);
       return;
     }
 
@@ -50,7 +51,7 @@ async function runPoll(attemptId: string, serverUrl: string): Promise<void> {
       });
       if (res.ok) {
         await finalize(attemptId, 'succeeded', undefined);
-        console.log(`[HealPoller] ${attemptId}: workspace healthy; marked succeeded`);
+        console.log(`[HealPoller] auto_heal.succeeded ${JSON.stringify({ attemptId, durationMs: Date.now() - startedAt })}`);
         return;
       }
       lastError = `/health returned ${res.status}`;
@@ -61,8 +62,9 @@ async function runPoll(attemptId: string, serverUrl: string): Promise<void> {
     await sleep(POLL_INTERVAL_MS);
   }
 
-  await finalize(attemptId, 'failed', lastError ?? 'health poll timeout after 2 minutes');
-  console.warn(`[HealPoller] ${attemptId}: timed out; marked failed (${lastError ?? 'no response'})`);
+  const errorMessage = lastError ?? 'health poll timeout after 2 minutes';
+  await finalize(attemptId, 'failed', errorMessage);
+  console.warn(`[HealPoller] auto_heal.failed ${JSON.stringify({ attemptId, durationMs: Date.now() - startedAt, error: errorMessage })}`);
 }
 
 async function finalize(attemptId: string, status: 'succeeded' | 'failed', error?: string): Promise<void> {
