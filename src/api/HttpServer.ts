@@ -21,6 +21,7 @@ import * as StripeService from './services/StripeService';
 import * as InviteService from './services/InviteService';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
+import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
 import * as ServerSessionService from './services/ServerSessionService';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
@@ -3040,6 +3041,38 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Server heartbeat error:', error);
       return c.json({ error: 'Failed to update heartbeat' }, 500);
+    }
+  });
+
+  // Sync the workspace's effective admin user-ID set to BE.
+  // Authenticated with X-Server-Token; serverId in URL must match the token's server.
+  // Called by the workspace's AdminMirrorPush on every role mutation and on boot.
+  app.post('/api/internal/servers/:serverId/admins/sync', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) {
+        return c.json({ error: 'X-Server-Token required' }, 401);
+      }
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) {
+        return c.json({ error: 'Invalid server token' }, 401);
+      }
+
+      const body = await c.req.json().catch(() => null) as { admins?: unknown } | null;
+      if (
+        !body ||
+        !Array.isArray(body.admins) ||
+        !body.admins.every((v: unknown) => typeof v === 'string')
+      ) {
+        return c.json({ error: 'body.admins must be a string[]' }, 400);
+      }
+
+      const result = await ServerAdminMirrorService.syncAdmins(serverId, body.admins);
+      return c.json(result);
+    } catch (error) {
+      console.error('[HttpServer] Admin mirror sync error:', error);
+      return c.json({ error: 'Failed to sync admins' }, 500);
     }
   });
 
