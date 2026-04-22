@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { workspaceTaskActivity, workspaceTaskComments } from '../../db/schema';
 
@@ -45,10 +45,17 @@ export interface FeedResult {
  * All other type values filter only activity rows.
  *
  * Pagination (limit/offset) is applied after merging and sorting.
+ *
+ * NOTE: intentional in-memory merge/sort/paginate. At current data volumes
+ * (low-thousands of rows per server) this is simpler than a cross-table SQL
+ * UNION with correlated pagination. If any server exceeds ~10k combined
+ * activity+comments, push ORDER BY created_at DESC + LIMIT into each
+ * sub-query and merge a pre-sorted k-way stream (fetch limit+offset from
+ * each, merge, slice).
  */
 export async function listFeed(serverId: string, filters: FeedFilters): Promise<FeedResult> {
-  const activityWhere: ReturnType<typeof eq>[] = [eq(workspaceTaskActivity.serverId, serverId)];
-  const commentsWhere: ReturnType<typeof eq>[] = [eq(workspaceTaskComments.serverId, serverId)];
+  const activityWhere = [eq(workspaceTaskActivity.serverId, serverId)];
+  const commentsWhere = [eq(workspaceTaskComments.serverId, serverId)];
 
   if (filters.userId) {
     activityWhere.push(eq(workspaceTaskActivity.createdById, filters.userId));
@@ -56,8 +63,8 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
   }
 
   if (filters.excludeAgents) {
-    activityWhere.push(sql`${workspaceTaskActivity.createdByType} <> 'agent'` as any);
-    commentsWhere.push(sql`${workspaceTaskComments.createdByType} <> 'agent'` as any);
+    activityWhere.push(ne(workspaceTaskActivity.createdByType, 'agent'));
+    commentsWhere.push(ne(workspaceTaskComments.createdByType, 'agent'));
   }
 
   const includeActivity = !filters.type || filters.type !== 'comment';
@@ -99,27 +106,27 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
   ]);
 
   const entries: FeedEntry[] = [
-    ...(activityRows as any[]).map((r) => ({
-      id: r.id as string,
-      todoId: r.taskId as string,
-      type: r.type as string,
-      content: (r.content ?? null) as string | null,
+    ...activityRows.map((r) => ({
+      id: r.id,
+      todoId: r.taskId,
+      type: r.type,
+      content: r.content ?? null,
       metadata: (r.metadata ?? null) as Record<string, unknown> | null,
-      attachments: null,
-      createdBy: (r.createdById ?? null) as string | null,
-      createdByName: (r.createdByName ?? null) as string | null,
-      createdAt: (r.createdAt as Date).getTime(),
+      attachments: null as null,
+      createdBy: r.createdById ?? null,
+      createdByName: r.createdByName ?? null,
+      createdAt: r.createdAt.getTime(),
     })),
-    ...(commentRows as any[]).map((r) => ({
-      id: r.id as string,
-      todoId: r.taskId as string,
-      type: 'comment',
-      content: r.content as string,
-      metadata: null,
-      attachments: null,
-      createdBy: (r.createdById ?? null) as string | null,
-      createdByName: (r.createdByName ?? null) as string | null,
-      createdAt: (r.createdAt as Date).getTime(),
+    ...commentRows.map((r) => ({
+      id: r.id,
+      todoId: r.taskId,
+      type: 'comment' as const,
+      content: r.content,
+      metadata: null as null,
+      attachments: null as null,
+      createdBy: r.createdById ?? null,
+      createdByName: r.createdByName ?? null,
+      createdAt: r.createdAt.getTime(),
     })),
   ];
 

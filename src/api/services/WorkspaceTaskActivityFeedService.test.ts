@@ -5,6 +5,7 @@
  * (suffixed with a timestamp + random hex) so test rows are isolated across
  * concurrent or repeated runs and cleanup is scoped to that server only.
  */
+import 'dotenv/config';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
