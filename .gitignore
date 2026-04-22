@@ -4,3 +4,6 @@ dist/
 .env
 *.local
 do-app-spec.yaml
+
+# Git worktrees (created via superpowers skill)
+.worktrees/
