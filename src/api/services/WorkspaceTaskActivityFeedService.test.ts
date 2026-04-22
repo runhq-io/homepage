@@ -30,6 +30,7 @@ const ALICE_ID = `feedfeed-0001-4000-a000-${RUN_HEX.padStart(12, '0')}`;
 const BOB_ID   = `feedfeed-0002-4000-a000-${RUN_HEX.padStart(12, '0')}`;
 
 let TASK_ID: string;
+let seedBase: number; // captured from seed so countNew tests can split on it
 
 // ---------------------------------------------------------------------------
 // Seed — runs once before all tests
@@ -70,6 +71,7 @@ async function seed() {
 
   // 4 activity rows — spread across time so sort order is deterministic
   const base = Date.now() - 5000;
+  seedBase = base; // expose to tests for boundary assertions
   await db
     .insert(workspaceTaskActivity)
     .values([
@@ -159,12 +161,17 @@ afterAll(async () => {
 
 describe('WorkspaceTaskActivityFeedService.countNew', () => {
   it('counts activity+comment rows strictly newer than since', async () => {
-    // Seed layout (relative to base = Date.now() - 5000 at seed time):
-    //   activity @ base+0, +1000, +2000, +3000
-    //   comments @ base+500, +2500
-    // Using since = far past → all 6 rows should be counted
-    const count = await countNew(SERVER_ID, Date.now() - 60_000);
-    expect(count).toBe(6);
+    // Seed layout (relative to seedBase = Date.now() - 5000 at seed time):
+    //   activity @ seedBase+0, +1000, +2000, +3000
+    //   comments @ seedBase+500, +2500
+    //
+    // Picking since = seedBase + 1500 splits the seed at a real boundary:
+    //   rows BEFORE (or equal): +0, +500, +1000   (3 rows — not counted)
+    //   rows AFTER:             +2000, +2500, +3000 (3 rows — counted)
+    // Expected count = 3, which is neither 0 nor the total (6).
+    const since = seedBase + 1500;
+    const count = await countNew(SERVER_ID, since);
+    expect(count).toBe(3);
   });
 
   it('returns 0 when since is in the future', async () => {
