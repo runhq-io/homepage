@@ -1,4 +1,4 @@
-import { and, count, eq, gt, gte, lte, ne, sql } from 'drizzle-orm';
+import { and, count, eq, gt, gte, isNotNull, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { workspaceTaskActivity, workspaceTaskComments } from '../../db/schema';
 
@@ -211,6 +211,11 @@ export async function memberStats(
   // Build WHERE predicates for each table
   const activityPreds = [eq(workspaceTaskActivity.serverId, serverId)];
   const commentsPreds = [eq(workspaceTaskComments.serverId, serverId)];
+
+  // Exclude rows with NULL createdById at the SQL level so the DB never groups them.
+  // The JS `if (!a.userId) continue` guards below remain as defensive fallbacks.
+  activityPreds.push(isNotNull(workspaceTaskActivity.createdById));
+  commentsPreds.push(isNotNull(workspaceTaskComments.createdById));
 
   if (startMs !== undefined) {
     activityPreds.push(gte(workspaceTaskActivity.createdAt, new Date(startMs)));

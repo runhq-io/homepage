@@ -309,13 +309,12 @@ describe('WorkspaceTaskActivityFeedService.memberStats', () => {
   });
 
   it('respects startMs/endMs date window', async () => {
-    // Window [base+1500, base+2500] contains exactly:
-    //   activity: Bob's status_change→done at base+2000
-    //   comments: none (Bob's comment is at base+2500, exclusive)
+    // Window [base+1500, base+2000]: lte is inclusive, so endMs = base+2000 captures
+    // Bob's status_change→done at exactly base+2000 while excluding his comment at
+    // base+2500 and Bob's agent_assigned at base+3000.
     // Alice's rows are all outside: +0, +1000 (before window), +500 comment (before window)
-    // Bob's agent_assigned at +3000 is after the window
     const startMs = seedBase + 1500;
-    const endMs   = seedBase + 2499; // strictly before Bob's comment at +2500
+    const endMs   = seedBase + 2000; // inclusive — captures Bob's status_change→done exactly
 
     const stats = await memberStats(SERVER_ID, startMs, endMs);
 
