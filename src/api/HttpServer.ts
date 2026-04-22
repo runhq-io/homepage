@@ -22,6 +22,7 @@ import * as InviteService from './services/InviteService';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
 import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
+import * as AutoHealService from './services/AutoHealService';
 import * as ServerSessionService from './services/ServerSessionService';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
@@ -3403,6 +3404,31 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Preview widget-config error:', error);
       return c.json({ error: 'Failed to read widget config' }, 500);
+    }
+  });
+
+  // Auto-heal a workspace that has become unreachable from the client.
+  // Any authenticated member of the server can trigger; no admin required —
+  // restoring a crashed service isn't a disruptive action. Idempotent and
+  // flap-protected server-side.
+  app.post('/api/servers/:serverId/auto-heal', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ status: 'unauthenticated' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ status: 'unauthenticated' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const result = await AutoHealService.requestAutoHeal({ serverId, userId });
+      return c.json(result.body, result.status as any);
+    } catch (error) {
+      console.error('[HttpServer] Auto-heal error:', error);
+      return c.json({ status: 'provider_unavailable' }, 503);
     }
   });
 
