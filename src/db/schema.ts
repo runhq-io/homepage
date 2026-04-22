@@ -1227,7 +1227,7 @@ export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 
 export const widgetProjects = pgTable('widget_projects', {
   id: uuid('id').primaryKey().defaultRandom(),
-  serverId: text('server_id').notNull().unique(),
+  serverId: text('server_id').notNull(),
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   apiKey: text('api_key').notNull().unique(),
