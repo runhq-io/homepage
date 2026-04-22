@@ -26,6 +26,12 @@ import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
+import {
+  listFeed as listActivityFeed,
+  countNew as countNewActivity,
+  memberStats as activityMemberStats,
+  memberActivity as activityMemberActivity,
+} from './services/WorkspaceTaskActivityFeedService';
 import { TaskAttachmentStorageService } from './services/TaskAttachmentStorageService';
 import * as PreviewCoordinator from './services/PreviewCoordinator';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
@@ -4245,6 +4251,65 @@ export function createHttpApp() {
     const body = await c.req.json();
     const activity = await WorkspaceTaskService.addActivity(server.id, task.id, body);
     return c.json({ success: true, data: activity }, 201);
+  });
+
+  // ==========================================================================
+  // Server-wide Activity Feed
+  // ==========================================================================
+
+  app.get('/api/server/activity-feed', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const userId = c.req.query('userId') || undefined;
+    const type = c.req.query('type') || undefined;
+    const excludeAgents = c.req.query('excludeAgents') === 'true';
+    const limit = Math.max(1, Math.min(200, parseInt(c.req.query('limit') || '20', 10)));
+    const offset = Math.max(0, parseInt(c.req.query('offset') || '0', 10));
+
+    const data = await listActivityFeed(server.id, { userId, type, excludeAgents, limit, offset });
+    return c.json({ success: true, data });
+  });
+
+  app.get('/api/server/activity-feed/count-new', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const since = parseInt(c.req.query('since') || '0', 10);
+    const count = await countNewActivity(server.id, since);
+    return c.json({ success: true, data: { count } });
+  });
+
+  app.get('/api/server/activity-feed/member-stats', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const startDate = c.req.query('startDate') ? parseInt(c.req.query('startDate')!, 10) : undefined;
+    const endDate = c.req.query('endDate') ? parseInt(c.req.query('endDate')!, 10) : undefined;
+    const members = await activityMemberStats(server.id, startDate, endDate);
+    return c.json({ success: true, data: { members } });
+  });
+
+  app.get('/api/server/activity-feed/member-activity', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const startDate = parseInt(c.req.query('startDate') || '0', 10);
+    const endDate = parseInt(c.req.query('endDate') || String(Date.now()), 10);
+    const granularity = (c.req.query('granularity') || 'day') as 'day' | 'week' | 'month';
+    if (!['day', 'week', 'month'].includes(granularity)) {
+      return c.json({ success: false, error: 'Invalid granularity. Must be day, week, or month.' }, 400);
+    }
+    const data = await activityMemberActivity(server.id, startDate, endDate, granularity);
+    return c.json({ success: true, data });
   });
 
   // ==========================================================================
