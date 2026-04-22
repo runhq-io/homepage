@@ -32,7 +32,7 @@ import { serverMembers, serverHealAttempts, servers } from '../../db/schema';
 import { and, eq, gte, inArray } from 'drizzle-orm';
 import { getProvider } from './providers/registry';
 import type { ProviderId } from './providers/types';
-import { startHealPoller } from './HealPoller';
+import { startHealPoller, buildMachineHealthRequest } from './HealPoller';
 
 const FLAP_WINDOW_MS = 15 * 60_000;
 const FLAP_THRESHOLD = 3;
@@ -120,8 +120,12 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
 
   // Confirmation health check (BE's independent path to the workspace).
   // False positives from the client side (laptop sleep, network switch) are
-  // filtered here — if BE can reach /health, the workspace isn't really dead.
-  if (await confirmHealthy(server.serverUrl)) {
+  // filtered here — if BE can reach THIS MACHINE's /health, the workspace
+  // isn't really dead. Critically, we must target the specific machine via
+  // fly-force-instance-id — without that header, Fly's shared proxy can
+  // route us to a different machine in the same app and we'd falsely
+  // conclude "healthy".
+  if (await confirmHealthy(server)) {
     logEvent('auto_heal.confirmed_healthy', { serverId, userId });
     return { status: 200, body: { status: 'healthy' } };
   }
@@ -175,7 +179,11 @@ export async function requestAutoHeal(req: AutoHealRequest): Promise<AutoHealRes
   }
 
   // Start async poller to finalize the attempt when /health recovers.
-  startHealPoller(attemptId, server.serverUrl);
+  startHealPoller(attemptId, {
+    machineId: server.machineId,
+    serverUrl: server.serverUrl,
+    provider: server.provider,
+  });
 
   return { status: 202, body: { status: 'restarting', attemptId } };
 }
@@ -189,9 +197,16 @@ function logEvent(event: string, fields: Record<string, unknown>): void {
   console.log(`[AutoHeal] ${event} ${JSON.stringify(fields)}`);
 }
 
-async function confirmHealthy(serverUrl: string): Promise<boolean> {
+async function confirmHealthy(server: {
+  machineId: string | null;
+  serverUrl: string | null;
+  provider: string | null;
+}): Promise<boolean> {
+  const req = buildMachineHealthRequest(server);
+  if (!req) return false;
   try {
-    const res = await fetch(`${serverUrl.replace(/\/$/, '')}/health`, {
+    const res = await fetch(req.url, {
+      headers: req.headers,
       signal: AbortSignal.timeout(CONFIRMATION_HEALTH_TIMEOUT_MS),
     });
     return res.ok;

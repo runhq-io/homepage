@@ -8,27 +8,85 @@
  *
  * Respects external completion: if another process or an admin manual restart
  * updates the attempt row to a terminal state, the poller exits quietly.
+ *
+ * Also exposes buildMachineHealthRequest, shared with AutoHealService's
+ * confirmation check — both must target a specific Fly machine via
+ * fly-force-instance-id; without that header Fly's shared proxy load-balances
+ * across machines in the same app and the /health call can land on the wrong
+ * workspace.
  */
 
 import { db } from '../../db/index';
 import { serverHealAttempts } from '../../db/schema';
 import { and, eq } from 'drizzle-orm';
+import { getProvider } from './providers/registry';
+import type { ProviderId } from './providers/types';
 
 const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 120_000;
 const HEALTH_REQUEST_TIMEOUT_MS = 3_000;
 
+export interface HealthCheckTarget {
+  machineId: string | null;
+  serverUrl: string | null;
+  provider: string | null;
+}
+
+export interface MachineHealthRequest {
+  url: string;
+  headers: Record<string, string>;
+}
+
+/**
+ * Build the URL + routing headers needed for a machine-targeted /health call.
+ *
+ * For Fly-hosted workspaces the provider's public URL is a shared *.fly.dev
+ * endpoint, and the specific machine is selected via the fly-force-instance-id
+ * header. Without that header Fly load-balances across machines and a health
+ * probe can land on the wrong workspace.
+ *
+ * Returns null if we can't build a targetable request (no serverUrl, or
+ * machineId missing for a provider that requires routing).
+ */
+export function buildMachineHealthRequest(target: HealthCheckTarget): MachineHealthRequest | null {
+  if (!target.serverUrl) return null;
+
+  let url = target.serverUrl;
+  const headers: Record<string, string> = {};
+
+  if (target.machineId) {
+    const provider = getProvider((target.provider || 'fly') as ProviderId);
+    const routing = provider.getRoutingInfo(target.machineId);
+    url = routing.serverUrl;
+    if (routing.routingToken && routing.requiresRoutingHeaders) {
+      headers['fly-force-instance-id'] = routing.routingToken;
+    }
+  }
+
+  return {
+    url: `${url.replace(/\/$/, '')}/health`,
+    headers,
+  };
+}
+
 /**
  * Fire-and-forget: starts an async poll cycle. Returns immediately so the
  * caller's request can complete.
  */
-export function startHealPoller(attemptId: string, serverUrl: string): void {
-  void runPoll(attemptId, serverUrl).catch((err) => {
+export function startHealPoller(attemptId: string, target: HealthCheckTarget): void {
+  void runPoll(attemptId, target).catch((err) => {
     console.error(`[HealPoller] Unhandled error for ${attemptId}:`, err);
   });
 }
 
-async function runPoll(attemptId: string, serverUrl: string): Promise<void> {
+async function runPoll(attemptId: string, target: HealthCheckTarget): Promise<void> {
+  const req = buildMachineHealthRequest(target);
+  if (!req) {
+    await finalize(attemptId, 'failed', 'no machine routing info available');
+    console.warn(`[HealPoller] auto_heal.failed ${JSON.stringify({ attemptId, reason: 'no_target' })}`);
+    return;
+  }
+
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   const startedAt = Date.now();
   let lastError: string | undefined;
@@ -46,7 +104,8 @@ async function runPoll(attemptId: string, serverUrl: string): Promise<void> {
     }
 
     try {
-      const res = await fetch(`${serverUrl.replace(/\/$/, '')}/health`, {
+      const res = await fetch(req.url, {
+        headers: req.headers,
         signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
       });
       if (res.ok) {
