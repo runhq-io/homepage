@@ -851,6 +851,41 @@ export type ServerBan = typeof serverBans.$inferSelect;
 export type NewServerBan = typeof serverBans.$inferInsert;
 
 // ============================================================================
+// Server Heal Attempts (auto-heal + admin restart audit / flap detection)
+// ============================================================================
+
+export type HealAttemptStatus = 'in_progress' | 'succeeded' | 'failed';
+
+export const serverHealAttempts = pgTable('server_heal_attempts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id, { onDelete: 'cascade' }).notNull(),
+  triggeredBy: uuid('triggered_by').references(() => users.id).notNull(),
+  startedAt: timestamp('started_at').defaultNow().notNull(),
+  completedAt: timestamp('completed_at'),
+  status: text('status').$type<HealAttemptStatus>().notNull(),
+  errorMessage: text('error_message'),
+}, (t) => ({
+  // Lookup by (server, recent) for cooldown + flap checks.
+  serverStartedIdx: index('server_heal_attempts_server_started_idx').on(t.serverId, t.startedAt),
+  // Partial unique index enforcing at-most-one in-progress attempt per server
+  // is defined in the SQL migration (Drizzle 0.38 cannot emit partial indexes).
+}));
+
+export const serverHealAttemptsRelations = relations(serverHealAttempts, ({ one }) => ({
+  server: one(servers, {
+    fields: [serverHealAttempts.serverId],
+    references: [servers.id],
+  }),
+  triggeredByUser: one(users, {
+    fields: [serverHealAttempts.triggeredBy],
+    references: [users.id],
+  }),
+}));
+
+export type ServerHealAttempt = typeof serverHealAttempts.$inferSelect;
+export type NewServerHealAttempt = typeof serverHealAttempts.$inferInsert;
+
+// ============================================================================
 // Public Ports (expose server services via custom subdomains)
 // ============================================================================
 
