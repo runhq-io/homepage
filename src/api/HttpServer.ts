@@ -4728,6 +4728,31 @@ export function createHttpApp() {
     return ServerService.checkCloudOpPermission(serverId, userId);
   }
 
+  // Fire-and-forget: tell the preview proxy to drop its widget config cache
+  // for this server. Called after ANY widget mutation that could change the
+  // shouldInject flag or the bootstrap payload — i.e. enable, disable,
+  // settings update — not just when auto-inject flips. Otherwise a machine
+  // that booted with the widget disabled would keep injecting `false` after
+  // a re-enable, because `auto_inject_in_preview` didn't change in the DB.
+  //
+  // Failures (machine stopped, network error) are intentionally swallowed:
+  // the machine will re-fetch on its next boot anyway.
+  function pushInvalidateWidgetCache(serverId: string, userId: string): void {
+    (async () => {
+      try {
+        const server = await ServerService.getServer(serverId);
+        if (!server?.serverUrl) return;
+        await ServerService.fetchFromServer(server, userId, '/__preview/config-invalidate', {
+          method: 'POST',
+          body: { kind: 'widget' },
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log('[HttpServer] Widget config push failed (safe, machine may be stopped):', msg);
+      }
+    })();
+  }
+
   app.get('/api/widget/integration', async (c) => {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
@@ -4749,6 +4774,7 @@ export function createHttpApp() {
     if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     const result = await WidgetService.enableWidget(serverId, { name, channelId });
+    pushInvalidateWidgetCache(serverId, userId);
     return c.json({ success: true, data: result });
   });
 
@@ -4761,6 +4787,7 @@ export function createHttpApp() {
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     await WidgetService.disableWidget(serverId);
+    pushInvalidateWidgetCache(serverId, userId);
     return c.json({ success: true });
   });
 
@@ -4839,21 +4866,15 @@ export function createHttpApp() {
       throw err;
     }
 
-    // When auto-inject flipped, push-invalidate the preview proxy's cache so
-    // the change takes effect immediately. Fire-and-forget — if the machine is
-    // stopped the next boot will read fresh config anyway.
-    if (result.autoInjectChanged) {
-      const server = await ServerService.getServer(serverId);
-      if (server?.serverUrl) {
-        ServerService.fetchFromServer(server, userId, '/__preview/config-invalidate', {
-          method: 'POST',
-          body: { kind: 'widget' },
-        }).catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.log('[HttpServer] Widget config push failed (safe, machine may be stopped):', msg);
-        });
-      }
-    }
+    // Always push-invalidate on widget settings changes — not just when
+    // `autoInjectInPreview` flipped. Other fields (widget_position, slug, etc.)
+    // flow into the widget bootstrap payload, and limiting to the flag alone
+    // misses re-enable-after-disable scenarios where the DB value didn't
+    // change but the effective shouldInject did.
+    pushInvalidateWidgetCache(serverId, userId);
+    // `result.autoInjectChanged` is returned for callers that care (telemetry,
+    // audit logs); we don't branch on it here.
+    void result;
 
     return c.json({ success: true });
   });
