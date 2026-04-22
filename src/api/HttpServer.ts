@@ -3292,6 +3292,73 @@ export function createHttpApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Preview widget auto-injection
+  //
+  // Both endpoints are called by the Fly preview proxy (not the dashboard), so
+  // they authenticate via a server-session JWT (`preview_token`) rather than a
+  // user session token. The JWT's serverId claim must match the URL serverId.
+  // ---------------------------------------------------------------------------
+
+  // Return widget bootstrap (token + config) for the authenticated preview user.
+  // 404 when widget is not enabled, auto-inject is off, or no channel is set.
+  app.post('/api/servers/:serverId/preview/widget-bootstrap', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+
+      const payload = await ServerSessionService.verifyServerSessionToken(token);
+      if (!payload) return c.json({ error: 'Invalid server-session token' }, 401);
+
+      const urlServerId = c.req.param('serverId');
+      if (payload.serverId !== urlServerId) {
+        return c.json({ error: 'Server mismatch' }, 403);
+      }
+
+      const bootstrap = await WidgetService.generatePreviewWidgetBootstrap(
+        payload.serverId,
+        payload.userId,
+        payload.userName,
+      );
+      if (!bootstrap) return c.json({ error: 'Widget auto-inject not enabled' }, 404);
+
+      return c.json(bootstrap);
+    } catch (error) {
+      console.error('[HttpServer] Preview widget-bootstrap error:', error);
+      return c.json({ error: 'Failed to build widget bootstrap' }, 500);
+    }
+  });
+
+  // Return whether the preview proxy should inject the bootstrap script for
+  // this server. Cached indefinitely by the proxy; invalidated via push from
+  // the widget-settings update handler below.
+  app.get('/api/servers/:serverId/preview/widget-config', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+
+      const payload = await ServerSessionService.verifyServerSessionToken(token);
+      if (!payload) return c.json({ error: 'Invalid server-session token' }, 401);
+
+      const urlServerId = c.req.param('serverId');
+      if (payload.serverId !== urlServerId) {
+        return c.json({ error: 'Server mismatch' }, 403);
+      }
+
+      const flag = await WidgetService.getPreviewWidgetFlag(payload.serverId);
+      return c.json(flag);
+    } catch (error) {
+      console.error('[HttpServer] Preview widget-config error:', error);
+      return c.json({ error: 'Failed to read widget config' }, 500);
+    }
+  });
+
   // Restart a remote server
   app.post('/api/servers/:serverId/server/restart', async (c) => {
     try {
@@ -4653,10 +4720,46 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId, auto_approve, widget_position, voting_period_hours, is_public, slug } = await c.req.json();
+    const {
+      serverId,
+      auto_approve,
+      widget_position,
+      voting_period_hours,
+      is_public,
+      auto_inject_in_preview,
+      slug,
+    } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    await WidgetService.updateWidgetSettings(serverId, { auto_approve, widget_position, voting_period_hours, is_public, slug });
+
+    let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
+    try {
+      result = await WidgetService.updateWidgetSettings(serverId, {
+        auto_approve, widget_position, voting_period_hours, is_public, auto_inject_in_preview, slug,
+      });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetSettingsValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+
+    // When auto-inject flipped, push-invalidate the preview proxy's cache so
+    // the change takes effect immediately. Fire-and-forget — if the machine is
+    // stopped the next boot will read fresh config anyway.
+    if (result.autoInjectChanged) {
+      const server = await ServerService.getServer(serverId);
+      if (server?.serverUrl) {
+        ServerService.fetchFromServer(server, userId, '/__preview/config-invalidate', {
+          method: 'POST',
+          body: { kind: 'widget' },
+        }).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log('[HttpServer] Widget config push failed (safe, machine may be stopped):', msg);
+        });
+      }
+    }
+
     return c.json({ success: true });
   });
 

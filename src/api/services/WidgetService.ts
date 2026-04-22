@@ -1093,6 +1093,29 @@ export async function listPublicProjects() {
 }
 
 /**
+ * Sign a widget_user JWT. Pure function — takes all signing material as params
+ * so it's testable without DB access.
+ */
+export async function signWidgetUserJwt(params: {
+  apiSecretHash: string;
+  apiKey: string;
+  userId: string;
+  userName?: string;
+}): Promise<string> {
+  const signingKey = new TextEncoder().encode(params.apiSecretHash);
+  return await new jose.SignJWT({
+    fp: params.apiKey,
+    type: 'widget_user',
+    ...(params.userName ? { name: params.userName } : {}),
+  })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(params.userId)
+    .setIssuedAt()
+    .setExpirationTime('24h')
+    .sign(signingKey);
+}
+
+/**
  * Generate a signed widget JWT for an identified user, given the API secret.
  */
 export async function generateUserTokenBySecret(
@@ -1113,17 +1136,12 @@ export async function generateUserTokenBySecret(
 
   if (!project) return null;
 
-  const signingKey = new TextEncoder().encode(project.apiSecretHash);
-  const token = await new jose.SignJWT({
-    fp: project.apiKey,
-    type: 'widget_user',
-    ...(userName ? { name: userName } : {}),
-  })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setSubject(userId)
-    .setIssuedAt()
-    .setExpirationTime('24h')
-    .sign(signingKey);
+  const token = await signWidgetUserJwt({
+    apiSecretHash: project.apiSecretHash,
+    apiKey: project.apiKey,
+    userId,
+    userName,
+  });
 
   return { token };
 }
@@ -1143,6 +1161,95 @@ export async function getWidgetIntegration(serverId: string) {
   return project ?? null;
 }
 
+// ============================================================================
+// Preview auto-injection
+// ============================================================================
+
+export interface PreviewWidgetBootstrap {
+  widgetToken: string;
+  config: {
+    projectSlug: string;
+    widgetPosition: string | null;
+    channelId: string;
+    autoApprove: boolean;
+  };
+}
+
+/**
+ * Mint a widget_user JWT + config for the preview auto-inject flow.
+ *
+ * Returns null when the server has no widget project, widget is disabled,
+ * auto-inject is not enabled, or no channel is configured. Callers should
+ * map null to 404.
+ */
+export async function generatePreviewWidgetBootstrap(
+  serverId: string,
+  userId: string,
+  userName?: string,
+): Promise<PreviewWidgetBootstrap | null> {
+  const [project] = await db
+    .select({
+      slug: widgetProjects.slug,
+      apiKey: widgetProjects.apiKey,
+      apiSecretHash: widgetProjects.apiSecretHash,
+      enabled: widgetProjects.enabled,
+      autoInjectInPreview: widgetProjects.autoInjectInPreview,
+      widgetPosition: widgetProjects.widgetPosition,
+      channelId: widgetProjects.channelId,
+      autoApprove: widgetProjects.autoApprove,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.serverId, serverId))
+    .limit(1);
+
+  if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
+    return null;
+  }
+
+  const widgetToken = await signWidgetUserJwt({
+    apiSecretHash: project.apiSecretHash,
+    apiKey: project.apiKey,
+    userId,
+    userName,
+  });
+
+  return {
+    widgetToken,
+    config: {
+      projectSlug: project.slug,
+      widgetPosition: project.widgetPosition,
+      channelId: project.channelId,
+      autoApprove: project.autoApprove,
+    },
+  };
+}
+
+/**
+ * Report whether a server has auto-inject enabled (used by the preview proxy
+ * to decide whether to include the bootstrap script in HTML responses).
+ */
+export async function getPreviewWidgetFlag(serverId: string): Promise<{
+  shouldInject: boolean;
+  projectSlug?: string;
+}> {
+  const [project] = await db
+    .select({
+      slug: widgetProjects.slug,
+      enabled: widgetProjects.enabled,
+      autoInjectInPreview: widgetProjects.autoInjectInPreview,
+      channelId: widgetProjects.channelId,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.serverId, serverId))
+    .limit(1);
+
+  if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
+    return { shouldInject: false };
+  }
+
+  return { shouldInject: true, projectSlug: project.slug };
+}
+
 export async function getWidgetSettings(serverId: string) {
   const [project] = await db
     .select({
@@ -1150,6 +1257,8 @@ export async function getWidgetSettings(serverId: string) {
       widgetPosition: widgetProjects.widgetPosition,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       isPublic: widgetProjects.isPublic,
+      autoInjectInPreview: widgetProjects.autoInjectInPreview,
+      channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
     })
     .from(widgetProjects)
@@ -1163,8 +1272,25 @@ export async function getWidgetSettings(serverId: string) {
     widget_position: project.widgetPosition,
     voting_period_hours: project.votingPeriodHours,
     is_public: project.isPublic,
+    auto_inject_in_preview: project.autoInjectInPreview,
+    channel_id: project.channelId,
     slug: project.slug,
   };
+}
+
+export class WidgetSettingsValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WidgetSettingsValidationError';
+  }
+}
+
+/**
+ * Result flags the caller needs for side-effects that live outside the service
+ * (push-invalidate the preview proxy when auto-inject changed).
+ */
+export interface UpdateWidgetSettingsResult {
+  autoInjectChanged: boolean;
 }
 
 export async function updateWidgetSettings(
@@ -1174,9 +1300,38 @@ export async function updateWidgetSettings(
     widget_position?: string;
     voting_period_hours?: number;
     is_public?: boolean;
+    auto_inject_in_preview?: boolean;
     slug?: string;
+  },
+): Promise<UpdateWidgetSettingsResult> {
+  // Enabling auto-inject requires a channel already to be set on the project.
+  // Without a channel the widget has nowhere to submit tickets.
+  if (settings.auto_inject_in_preview === true) {
+    const [current] = await db
+      .select({ channelId: widgetProjects.channelId })
+      .from(widgetProjects)
+      .where(eq(widgetProjects.serverId, serverId))
+      .limit(1);
+    if (!current?.channelId) {
+      throw new WidgetSettingsValidationError(
+        'Set a channel on the widget project before enabling auto-inject in preview URLs.',
+      );
+    }
   }
-) {
+
+  // Detect whether auto-inject flipped so the caller can push-invalidate.
+  let autoInjectChanged = false;
+  if (settings.auto_inject_in_preview !== undefined) {
+    const [current] = await db
+      .select({ autoInjectInPreview: widgetProjects.autoInjectInPreview })
+      .from(widgetProjects)
+      .where(eq(widgetProjects.serverId, serverId))
+      .limit(1);
+    if (current && current.autoInjectInPreview !== settings.auto_inject_in_preview) {
+      autoInjectChanged = true;
+    }
+  }
+
   await db
     .update(widgetProjects)
     .set({
@@ -1184,10 +1339,13 @@ export async function updateWidgetSettings(
       ...(settings.widget_position !== undefined && { widgetPosition: settings.widget_position }),
       ...(settings.voting_period_hours !== undefined && { votingPeriodHours: settings.voting_period_hours }),
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
+      ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
       updatedAt: new Date(),
     })
     .where(eq(widgetProjects.serverId, serverId));
+
+  return { autoInjectChanged };
 }
 
 // ============================================================================

@@ -1189,7 +1189,7 @@ export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 
 export const widgetProjects = pgTable('widget_projects', {
   id: uuid('id').primaryKey().defaultRandom(),
-  serverId: text('server_id').notNull(),
+  serverId: text('server_id').notNull().unique(),
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   apiKey: text('api_key').notNull().unique(),
@@ -1197,6 +1197,7 @@ export const widgetProjects = pgTable('widget_projects', {
   enabled: boolean('enabled').default(true).notNull(),
   isPublic: boolean('is_public').default(false).notNull(),
   autoApprove: boolean('auto_approve').default(false).notNull(),
+  autoInjectInPreview: boolean('auto_inject_in_preview').default(false).notNull(),
   widgetPosition: text('widget_position'),
   votingPeriodHours: integer('voting_period_hours'),
   channelId: text('channel_id'),
