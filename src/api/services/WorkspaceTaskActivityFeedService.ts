@@ -288,3 +288,172 @@ export async function memberStats(
 
   return Array.from(byUser.values());
 }
+
+// ─── memberActivity ───────────────────────────────────────────────────────────
+
+export interface MemberActivityBucket {
+  period: string;
+  members: Array<{
+    userId: string;
+    userName: string;
+    isAgent: boolean;
+    total: number;
+    created: number;
+    completed: number;
+    assigned: number;
+    comments: number;
+  }>;
+}
+
+/**
+ * Returns bucketed time-series per-member contribution counts for a given server.
+ *
+ * Bucketing uses PostgreSQL `date_trunc` on `created_at AT TIME ZONE 'UTC'`,
+ * cast to `::date`, producing ISO-8601 date strings (YYYY-MM-DD) as period keys.
+ * For `granularity = 'week'` the period is the Monday of that ISO week;
+ * for `granularity = 'month'` it is the first day of that month.
+ *
+ * The `[startMs, endMs]` window is inclusive on both ends (>= and <=).
+ * Rows with a NULL `created_by_id` are skipped at the SQL level.
+ *
+ * Implementation runs two queries in parallel (activity + comments) and merges
+ * results in memory by (period, userId), matching the pattern established in
+ * `memberStats`.  The granularity string is whitelisted to 3 safe values before
+ * being inlined as a SQL literal via `sql.raw()` — `date_trunc` requires its
+ * first argument to be a string literal, not a bind parameter, so parameterising
+ * it would cause a PostgreSQL error.
+ */
+export async function memberActivity(
+  serverId: string,
+  startMs: number,
+  endMs: number,
+  granularity: 'day' | 'week' | 'month',
+): Promise<{ buckets: MemberActivityBucket[] }> {
+  // `date_trunc` requires its granularity arg to be a literal, not a bind
+  // parameter. We whitelist to exactly these three values so sql.raw() is safe.
+  const trunc: 'day' | 'week' | 'month' = granularity === 'day' ? 'day' : granularity === 'week' ? 'week' : 'month';
+
+  type ActivityRow = {
+    period: string;
+    user_id: string;
+    user_name: string | null;
+    is_agent: boolean;
+    created: number;
+    completed: number;
+    assigned: number;
+  };
+
+  type CommentRow = {
+    period: string;
+    user_id: string;
+    user_name: string | null;
+    is_agent: boolean;
+    comments: number;
+  };
+
+  const [activityResult, commentResult] = await Promise.all([
+    db.execute<ActivityRow>(sql`
+      SELECT
+        date_trunc(${sql.raw(`'${trunc}'`)}, created_at AT TIME ZONE 'UTC')::date AS period,
+        created_by_id   AS user_id,
+        created_by_name AS user_name,
+        (created_by_type = 'agent') AS is_agent,
+        count(*) FILTER (WHERE type = 'task_created')::int    AS created,
+        count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' = 'done')::int AS completed,
+        count(*) FILTER (WHERE type = 'agent_assigned')::int  AS assigned
+      FROM workspace_task_activity
+      WHERE server_id     = ${serverId}
+        AND created_at   >= ${new Date(startMs)}
+        AND created_at   <= ${new Date(endMs)}
+        AND created_by_id IS NOT NULL
+      GROUP BY period, created_by_id, created_by_name, is_agent
+    `),
+    db.execute<CommentRow>(sql`
+      SELECT
+        date_trunc(${sql.raw(`'${trunc}'`)}, created_at AT TIME ZONE 'UTC')::date AS period,
+        created_by_id   AS user_id,
+        created_by_name AS user_name,
+        (created_by_type = 'agent') AS is_agent,
+        count(*)::int AS comments
+      FROM workspace_task_comments
+      WHERE server_id     = ${serverId}
+        AND created_at   >= ${new Date(startMs)}
+        AND created_at   <= ${new Date(endMs)}
+        AND created_by_id IS NOT NULL
+      GROUP BY period, created_by_id, created_by_name, is_agent
+    `),
+  ]);
+
+  type MemberEntry = {
+    userId: string;
+    userName: string;
+    isAgent: boolean;
+    created: number;
+    completed: number;
+    assigned: number;
+    comments: number;
+  };
+
+  // Merge by (period, userId) — outer map keyed by period ISO string,
+  // inner map keyed by userId.
+  const byPeriod = new Map<string, Map<string, MemberEntry>>();
+
+  for (const row of activityResult.rows) {
+    const period = String(row.period);
+    if (!byPeriod.has(period)) byPeriod.set(period, new Map());
+    const members = byPeriod.get(period)!;
+
+    const existing = members.get(row.user_id);
+    if (existing) {
+      existing.created   += row.created   ?? 0;
+      existing.completed += row.completed ?? 0;
+      existing.assigned  += row.assigned  ?? 0;
+      existing.isAgent   = existing.isAgent || !!row.is_agent;
+    } else {
+      members.set(row.user_id, {
+        userId:    row.user_id,
+        userName:  row.user_name ?? '',
+        isAgent:   !!row.is_agent,
+        created:   row.created   ?? 0,
+        completed: row.completed ?? 0,
+        assigned:  row.assigned  ?? 0,
+        comments:  0,
+      });
+    }
+  }
+
+  for (const row of commentResult.rows) {
+    const period = String(row.period);
+    if (!byPeriod.has(period)) byPeriod.set(period, new Map());
+    const members = byPeriod.get(period)!;
+
+    const existing = members.get(row.user_id);
+    if (existing) {
+      existing.comments += row.comments ?? 0;
+      existing.isAgent   = existing.isAgent || !!row.is_agent;
+    } else {
+      members.set(row.user_id, {
+        userId:    row.user_id,
+        userName:  row.user_name ?? '',
+        isAgent:   !!row.is_agent,
+        created:   0,
+        completed: 0,
+        assigned:  0,
+        comments:  row.comments ?? 0,
+      });
+    }
+  }
+
+  // Flatten to buckets[], computing total per member, sorted by period ASC.
+  const buckets: MemberActivityBucket[] = Array.from(byPeriod.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([period, members]) => ({
+      period,
+      members: Array.from(members.values()).map((m) => ({
+        ...m,
+        total: m.created + m.completed + m.assigned + m.comments,
+      })),
+    }));
+
+  return { buckets };
+}

@@ -17,7 +17,7 @@ import {
   workspaceTaskActivity,
   workspaceTaskComments,
 } from '../../db/schema';
-import { listFeed, countNew, memberStats } from './WorkspaceTaskActivityFeedService';
+import { listFeed, countNew, memberStats, memberActivity } from './WorkspaceTaskActivityFeedService';
 
 // ---------------------------------------------------------------------------
 // Unique identifiers for this test run — must be valid UUIDs and text IDs
@@ -327,5 +327,68 @@ describe('WorkspaceTaskActivityFeedService.memberStats', () => {
     expect(bob!.tasksCreated).toBe(0);
     expect(bob!.agentsAssigned).toBe(0);
     expect(bob!.comments).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memberActivity tests
+// ---------------------------------------------------------------------------
+//
+// Seed recap (all rows use seedBase = Date.now() - 5000 captured in beforeAll):
+//   Activity rows:
+//     base+0     Alice  task_created
+//     base+500   Alice  comment (workspace_task_comments)
+//     base+1000  Alice  status_change  { from: 'pending', to: 'in_progress' }
+//     base+2000  Bob    status_change  { from: 'in_progress', to: 'done' }
+//     base+2500  Bob    comment (workspace_task_comments)
+//     base+3000  Bob    agent_assigned
+//
+// All 6 rows fall within the same UTC calendar day (today).
+//
+// Day-bucket expected:
+//   Alice: created=1, completed=0, assigned=0, comments=1, total=2
+//   Bob:   created=0, completed=1, assigned=1, comments=1, total=3
+
+describe('WorkspaceTaskActivityFeedService.memberActivity', () => {
+  it('returns day-bucketed per-member totals for today with correct counts', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Wide window: 10s before base to 60s after, capturing all 6 seed rows
+    const startMs = seedBase - 10_000;
+    const endMs   = seedBase + 60_000;
+
+    const result = await memberActivity(SERVER_ID, startMs, endMs, 'day');
+
+    expect(result.buckets).toBeDefined();
+    expect(Array.isArray(result.buckets)).toBe(true);
+
+    // There must be a bucket for today
+    const todayBucket = result.buckets.find((b) => b.period.startsWith(today));
+    expect(todayBucket).toBeDefined();
+
+    const alice = todayBucket!.members.find((m) => m.userId === ALICE_ID);
+    const bob   = todayBucket!.members.find((m) => m.userId === BOB_ID);
+
+    // Both members must appear
+    expect(alice).toBeDefined();
+    expect(bob).toBeDefined();
+
+    // Alice: task_created + status_change→in_progress (NOT done) + comment
+    expect(alice!.userName).toBe('Alice');
+    expect(alice!.isAgent).toBe(false);
+    expect(alice!.created).toBe(1);
+    expect(alice!.completed).toBe(0);
+    expect(alice!.assigned).toBe(0);
+    expect(alice!.comments).toBe(1);
+    expect(alice!.total).toBe(2);
+
+    // Bob: status_change→done + agent_assigned + comment
+    expect(bob!.userName).toBe('Bob');
+    expect(bob!.isAgent).toBe(false);
+    expect(bob!.created).toBe(0);
+    expect(bob!.completed).toBe(1);
+    expect(bob!.assigned).toBe(1);
+    expect(bob!.comments).toBe(1);
+    expect(bob!.total).toBe(3);
   });
 });
