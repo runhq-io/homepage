@@ -79,7 +79,19 @@ async function main() {
       );
     } catch (err) {
       stats.unreachable++;
-      console.log(`[backfill] ${server.id}: unreachable (${(err as Error).message})`);
+      // Node's native fetch wraps the real reason in .cause. Log both so
+      // DNS / connection-refused / TLS / abort errors are distinguishable.
+      const e = err as Error & { cause?: unknown };
+      const causeMsg = e.cause instanceof Error ? e.cause.message : e.cause ? String(e.cause) : '';
+      const causeCode = (e.cause as any)?.code ?? '';
+      console.log(
+        `[backfill] ${server.id}: unreachable` +
+        ` url=${server.serverUrl}` +
+        ` machineId=${server.machineId ?? 'null'}` +
+        ` err="${e.message}"` +
+        (causeCode ? ` code=${causeCode}` : '') +
+        (causeMsg ? ` cause="${causeMsg}"` : ''),
+      );
     }
   }
 
