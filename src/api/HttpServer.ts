@@ -3407,28 +3407,53 @@ export function createHttpApp() {
     }
   });
 
-  // Auto-heal a workspace that has become unreachable from the client.
-  // Any authenticated member of the server can trigger; no admin required —
-  // restoring a crashed service isn't a disruptive action. Idempotent and
-  // flap-protected server-side.
-  app.post('/api/servers/:serverId/auto-heal', async (c) => {
+  // Report a workspace as unreachable from the client. This is a SIGNAL,
+  // not a restart command — BE decides the appropriate action (no_op, wake,
+  // restart, flapping, missing) based on objective state (provider machine
+  // state + machine-targeted /health probe). Non-admin members cannot
+  // directly force a restart via this endpoint.
+  app.post('/api/servers/:serverId/report-unreachable', async (c) => {
     try {
       const authHeader = c.req.header('Authorization');
       if (!authHeader?.startsWith('Bearer ')) {
-        return c.json({ status: 'unauthenticated' }, 401);
+        return c.json({ action: 'unauthenticated' }, 401);
       }
       const token = authHeader.substring(7);
       const userId = await extractUserIdFromToken(token);
       if (!userId) {
-        return c.json({ status: 'unauthenticated' }, 401);
+        return c.json({ action: 'unauthenticated' }, 401);
       }
 
       const serverId = c.req.param('serverId');
-      const result = await AutoHealService.requestAutoHeal({ serverId, userId });
+      const result = await AutoHealService.reportUnreachable({ serverId, userId });
       return c.json(result.body, result.status as any);
     } catch (error) {
-      console.error('[HttpServer] Auto-heal error:', error);
-      return c.json({ status: 'provider_unavailable' }, 503);
+      console.error('[HttpServer] report-unreachable error:', error);
+      return c.json({ action: 'provider_unavailable' }, 503);
+    }
+  });
+
+  // Poll terminal state of a heal attempt. Client uses this to exit its
+  // `healing` state deterministically (instead of a blind watchdog timeout).
+  app.get('/api/servers/:serverId/heal-attempts/:attemptId', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'unauthenticated' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'unauthenticated' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const attemptId = c.req.param('attemptId');
+      const result = await AutoHealService.getHealAttemptStatus(serverId, userId, attemptId);
+      return c.json(result.body, result.status as any);
+    } catch (error) {
+      console.error('[HttpServer] heal-attempts status error:', error);
+      return c.json({ error: 'internal_error' }, 500);
     }
   });
 
