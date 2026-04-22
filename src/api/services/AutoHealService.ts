@@ -35,11 +35,15 @@ import { and, eq, gte, inArray } from 'drizzle-orm';
 import { getProvider } from './providers/registry';
 import type { ProviderId, MachineState } from './providers/types';
 import { startHealPoller, buildMachineHealthRequest } from './HealPoller';
+import {
+  decideMachineStateAction,
+  decideRunningHealthAction,
+  isFlapping,
+  isHeartbeatFresh,
+  FLAP_WINDOW_MS,
+} from './AutoHealDecisions';
 
-const FLAP_WINDOW_MS = 15 * 60_000;
-const FLAP_THRESHOLD = 3;
 const CONFIRMATION_HEALTH_TIMEOUT_MS = 10_000;
-const HEARTBEAT_STALE_AFTER_MS = 60_000;
 /** Delay between the first and second /health probes when the workspace still has a fresh heartbeat. */
 const RECONFIRM_DELAY_MS = 3_000;
 
@@ -114,7 +118,7 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
       gte(serverHealAttempts.startedAt, windowStart),
       inArray(serverHealAttempts.status, ['succeeded', 'failed']),
     ));
-  if (recentTerminal.length >= FLAP_THRESHOLD) {
+  if (isFlapping(recentTerminal.length)) {
     logEvent('auto_heal.flap_detected', {
       serverId,
       userId,
@@ -148,17 +152,16 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
     return { status: 503, body: { action: 'provider_unavailable' } };
   }
 
-  if (machineState === 'destroyed' || machineState === 'destroying') {
+  const heartbeatFresh = isHeartbeatFresh(server.lastSeen);
+  const stateDecision = decideMachineStateAction(machineState);
+
+  if (stateDecision === 'missing') {
     logEvent('auto_heal.missing', { serverId, userId, machineState });
     return { status: 410, body: { action: 'missing' } };
   }
 
-  // Heartbeat freshness (diagnostic only — helps reason about split-brain cases).
-  const heartbeatFresh = !!server.lastSeen && (Date.now() - server.lastSeen.getTime()) < HEARTBEAT_STALE_AFTER_MS;
-
-  if (machineState === 'stopped' || machineState === 'suspended') {
-    // Machine is not running — wake it. Fly's auto-suspend policy may have
-    // suspended a machine the user is actively trying to open.
+  if (stateDecision === 'wake') {
+    const alreadyStarting = machineState === 'starting';
     return await startAttempt({
       serverId,
       userId,
@@ -168,87 +171,56 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
       serverUrl: server.serverUrl,
       machineId: server.machineId,
       provider: server.provider,
-      run: () => provider.startMachine(server.machineId!),
+      // If already starting, no provider call — just open an attempt row
+      // so the poller watches it come online. Otherwise issue startMachine
+      // for stopped/suspended (Fly auto-suspend path).
+      run: alreadyStarting
+        ? async () => { /* already starting */ }
+        : () => provider.startMachine(server.machineId!),
     });
   }
 
-  if (machineState === 'starting') {
-    // Already coming up on its own — join the party by opening an attempt row
-    // and letting the poller watch it. No restart/wake call.
-    return await startAttempt({
-      serverId,
-      userId,
-      action: 'wake', // treat as wake for UX (workspace is already coming online)
-      heartbeatFresh,
-      machineState,
-      serverUrl: server.serverUrl,
-      machineId: server.machineId,
-      provider: server.provider,
-      run: async () => { /* already starting; no provider call */ },
-    });
-  }
-
-  if (machineState !== 'running') {
-    // stopping, creating — transient. Tell client we can't act right now.
+  if (stateDecision === 'transient' || stateDecision === 'unknown') {
     logEvent('auto_heal.transient_state', { serverId, userId, machineState });
     return { status: 503, body: { action: 'provider_unavailable', heartbeatFresh } };
   }
 
-  // Machine reports running. Objective signal #2: can BE reach /health on the
-  // specific machine (not via the shared proxy's load balancer)?
+  // Machine is running. Combine two objective signals:
+  //   1. Machine-targeted /health probe (via fly-force-instance-id)
+  //   2. Heartbeat staleness (server.lastSeen from workspace's 30s ping)
+  //
+  // Decision tree (decideRunningHealthAction):
+  //   - probe ok                                     → no_op
+  //   - probe fails + stale heartbeat                → restart (both signals agree)
+  //   - probe fails + fresh heartbeat                → reprobe after 3s
+  //   - probe fails + fresh heartbeat + reprobe ok   → no_op (transient blip)
+  //   - probe fails + fresh heartbeat + reprobe fail → restart
   const healthTarget = {
     machineId: server.machineId,
     serverUrl: server.serverUrl,
     provider: server.provider,
   };
   const firstProbeOk = await confirmHealthy(healthTarget);
-  if (firstProbeOk) {
-    // Workspace is actually up. Client's disconnect is client-local; nothing
-    // for us to do. This is the single most important check — it stops one
-    // member's bad WiFi from bouncing a shared workspace for everyone.
-    logEvent('auto_heal.confirmed_healthy', { serverId, userId, heartbeatFresh });
+
+  let firstStep = decideRunningHealthAction({ firstProbeOk, heartbeatFresh, secondProbeOk: null });
+  let probes = 1;
+  let secondProbeOk: boolean | null = null;
+
+  if (firstStep === 'reprobe') {
+    await sleep(RECONFIRM_DELAY_MS);
+    secondProbeOk = await confirmHealthy(healthTarget);
+    firstStep = decideRunningHealthAction({ firstProbeOk, heartbeatFresh, secondProbeOk });
+    probes = 2;
+  }
+
+  if (firstStep === 'no_op') {
+    logEvent('auto_heal.confirmed_healthy', { serverId, userId, heartbeatFresh, probes });
     return { status: 200, body: { action: 'no_op', heartbeatFresh } };
   }
 
-  // First /health probe failed. Before committing to a restart, combine with
-  // the heartbeat signal to reject false positives from transient Fly/proxy
-  // blips:
-  //
-  //   - Stale heartbeat (>60s) + failed /health → both signals agree the
-  //     process is dead; restart immediately.
-  //   - Fresh heartbeat (<60s) + failed /health → conflict. The workspace
-  //     was communicating with BE recently, but /health just failed. This is
-  //     more likely a transient blip than a real crash. Wait 3s and probe
-  //     once more; only restart if that also fails.
-  //
-  // Restart is destructive (kills terminal sessions, in-flight agent work),
-  // so the bias is "be sure before acting". A worst-case dead-workspace with
-  // a still-fresh heartbeat will be caught on the next call once the
-  // heartbeat goes stale.
-  if (!heartbeatFresh) {
-    logEvent('auto_heal.decision_restart', { serverId, userId, heartbeatFresh, probes: 1, reason: 'stale_heartbeat' });
-    return await startAttempt({
-      serverId,
-      userId,
-      action: 'restart',
-      heartbeatFresh,
-      machineState,
-      serverUrl: server.serverUrl,
-      machineId: server.machineId,
-      provider: server.provider,
-      run: () => provider.restartMachine(server.machineId!),
-    });
-  }
-
-  // Heartbeat fresh but /health failed — re-probe once before committing.
-  await sleep(RECONFIRM_DELAY_MS);
-  const secondProbeOk = await confirmHealthy(healthTarget);
-  if (secondProbeOk) {
-    logEvent('auto_heal.confirmed_healthy', { serverId, userId, heartbeatFresh, probes: 2, note: 'second_probe_succeeded' });
-    return { status: 200, body: { action: 'no_op', heartbeatFresh } };
-  }
-
-  logEvent('auto_heal.decision_restart', { serverId, userId, heartbeatFresh, probes: 2, reason: 'double_probe_failed' });
+  // firstStep === 'restart' (the only remaining value at this point)
+  const reason = heartbeatFresh ? 'double_probe_failed' : 'stale_heartbeat';
+  logEvent('auto_heal.decision_restart', { serverId, userId, heartbeatFresh, probes, reason });
   return await startAttempt({
     serverId,
     userId,
