@@ -196,7 +196,8 @@ describe('WorkspaceTaskActivityFeedService.listFeed', () => {
     // Each entry must have required shape
     for (const e of result.entries) {
       expect(e.id).toBeTruthy();
-      expect(e.todoId).toBeTruthy();
+      expect(e.canonicalTaskId).toBe(TASK_ID);
+      expect(e.todoTitle).toMatch(/Feed Test Task/);
       expect(typeof e.type).toBe('string');
       expect(typeof e.createdAt).toBe('number');
       expect(e.attachments).toBeNull();
@@ -622,5 +623,63 @@ describe('WorkspaceTaskActivityFeedService.memberActivity', () => {
     const bucket = result.buckets[0];
     expect(bucket.members.find((m) => m.userId === ALICE_ID)).toBeDefined();
     expect(bucket.members.find((m) => m.userId === BOB_ID)).toBeDefined();
+  });
+});
+
+// Regression: both `done` and `cancelled` status_change entries must count as
+// completed. The workspace's old SQLite aggregation used IN ('done', 'cancelled');
+// if the BE narrows this to 'done' only, historical "completed" counts on the
+// ReportsPage will silently drop.
+describe('WorkspaceTaskActivityFeedService — cancelled counts as completed', () => {
+  const CANCEL_RUN_HEX = randomBytes(6).toString('hex');
+  const CANCEL_SERVER = `ws_cancel_${CANCEL_RUN_HEX}`;
+  const CANCELLER_ID = `cancel-${CANCEL_RUN_HEX}`;
+  let CANCEL_TASK_ID: string;
+
+  beforeAll(async () => {
+    await db
+      .insert(servers)
+      .values({ id: CANCEL_SERVER, name: 'cancel-test', ownerId: ALICE_ID })
+      .onConflictDoNothing();
+    const [task] = await db
+      .insert(workspaceTasks)
+      .values({ serverId: CANCEL_SERVER, title: `Cancel Task ${CANCEL_RUN_HEX}` })
+      .returning({ id: workspaceTasks.id });
+    if (!task) throw new Error('Failed to insert cancel test task');
+    CANCEL_TASK_ID = task.id;
+    await db.insert(workspaceTaskActivity).values([
+      {
+        serverId: CANCEL_SERVER,
+        taskId: CANCEL_TASK_ID,
+        type: 'status_change',
+        metadata: { from: 'in_progress', to: 'cancelled' },
+        createdById: CANCELLER_ID,
+        createdByName: 'Canceller',
+        createdAt: new Date(),
+      },
+    ]);
+  });
+
+  afterAll(async () => {
+    await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, CANCEL_SERVER));
+    await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, CANCEL_SERVER));
+    await db.delete(servers).where(eq(servers.id, CANCEL_SERVER));
+  });
+
+  it('memberStats counts status_change → cancelled as tasksCompleted', async () => {
+    const stats = await memberStats(CANCEL_SERVER);
+    const canceller = stats.find((m) => m.userId === CANCELLER_ID);
+    expect(canceller).toBeDefined();
+    expect(canceller!.tasksCompleted).toBe(1);
+  });
+
+  it('memberActivity counts status_change → cancelled in completed', async () => {
+    const start = Date.now() - 60_000;
+    const end = Date.now() + 60_000;
+    const result = await memberActivity(CANCEL_SERVER, start, end, 'day');
+    expect(result.buckets.length).toBeGreaterThan(0);
+    const canceller = result.buckets[0].members.find((m) => m.userId === CANCELLER_ID);
+    expect(canceller).toBeDefined();
+    expect(canceller!.completed).toBe(1);
   });
 });

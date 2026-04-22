@@ -1,6 +1,6 @@
 import { and, count, eq, gt, gte, isNotNull, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
-import { workspaceTaskActivity, workspaceTaskComments } from '../../db/schema';
+import { workspaceTaskActivity, workspaceTaskComments, workspaceTasks } from '../../db/schema';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -14,7 +14,12 @@ export interface FeedFilters {
 
 export interface FeedEntry {
   id: string;
-  todoId: string;            // maps from .taskId for workspace-side compatibility
+  /** BE canonical task UUID. Workspace callers translate this to a workspace-local todoId via their exec-state map. */
+  canonicalTaskId: string;
+  /** Joined from workspace_tasks.title so clients can render a task label without a second round-trip. */
+  todoTitle: string | null;
+  /** Joined from workspace_tasks.workspace_channel_id so clients can deep-link to the task's channel. */
+  todoChannelId: string | null;
   type: string;
   content: string | null;
   metadata: Record<string, unknown> | null;
@@ -82,8 +87,11 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
             createdById: workspaceTaskActivity.createdById,
             createdByName: workspaceTaskActivity.createdByName,
             createdAt: workspaceTaskActivity.createdAt,
+            todoTitle: workspaceTasks.title,
+            todoChannelId: workspaceTasks.workspaceChannelId,
           })
           .from(workspaceTaskActivity)
+          .leftJoin(workspaceTasks, eq(workspaceTaskActivity.taskId, workspaceTasks.id))
           .where(and(...activityWhere))
       : Promise.resolve([]),
     includeComments
@@ -95,8 +103,11 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
             createdById: workspaceTaskComments.createdById,
             createdByName: workspaceTaskComments.createdByName,
             createdAt: workspaceTaskComments.createdAt,
+            todoTitle: workspaceTasks.title,
+            todoChannelId: workspaceTasks.workspaceChannelId,
           })
           .from(workspaceTaskComments)
+          .leftJoin(workspaceTasks, eq(workspaceTaskComments.taskId, workspaceTasks.id))
           .where(and(...commentsWhere))
       : Promise.resolve([]),
   ]);
@@ -104,7 +115,9 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
   const entries: FeedEntry[] = [
     ...activityRows.map((r) => ({
       id: r.id,
-      todoId: r.taskId,
+      canonicalTaskId: r.taskId,
+      todoTitle: r.todoTitle ?? null,
+      todoChannelId: r.todoChannelId ?? null,
       type: r.type,
       content: r.content ?? null,
       metadata: (r.metadata ?? null) as Record<string, unknown> | null,
@@ -115,7 +128,9 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
     })),
     ...commentRows.map((r) => ({
       id: r.id,
-      todoId: r.taskId,
+      canonicalTaskId: r.taskId,
+      todoTitle: r.todoTitle ?? null,
+      todoChannelId: r.todoChannelId ?? null,
       type: 'comment' as const,
       content: r.content,
       metadata: null as null,
@@ -230,7 +245,7 @@ export async function memberStats(
         userName:       sql<string | null>`max(${workspaceTaskActivity.createdByName}) FILTER (WHERE ${workspaceTaskActivity.createdByName} IS NOT NULL)`,
         isAgent:        sql<boolean>`bool_or(${workspaceTaskActivity.createdByType} = 'agent')`,
         tasksCreated:   sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'task_created')::int`,
-        tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' = 'done')::int`,
+        tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' IN ('done', 'cancelled'))::int`,
         agentsAssigned: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'agent_assigned')::int`,
       })
       .from(workspaceTaskActivity)
@@ -360,7 +375,7 @@ export async function memberActivity(
         max(created_by_name) FILTER (WHERE created_by_name IS NOT NULL) AS user_name,
         bool_or(created_by_type = 'agent') AS is_agent,
         count(*) FILTER (WHERE type = 'task_created')::int    AS created,
-        count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' = 'done')::int AS completed,
+        count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' IN ('done', 'cancelled'))::int AS completed,
         count(*) FILTER (WHERE type = 'agent_assigned')::int  AS assigned
       FROM workspace_task_activity
       WHERE server_id     = ${serverId}
