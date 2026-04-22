@@ -328,6 +328,66 @@ describe('WorkspaceTaskActivityFeedService.memberStats', () => {
     expect(bob!.agentsAssigned).toBe(0);
     expect(bob!.comments).toBe(0);
   });
+
+  it('deduplicates a user who appears with two different createdByName values', async () => {
+    // Simulate a user rename: insert two activity rows for ALICE_ID with different
+    // createdByName values. memberStats must return exactly ONE row for ALICE_ID,
+    // with userName equal to the lexicographic max of the two names.
+    const RENAME_SERVER = `ws_rename_stat_${RUN_HEX}`;
+
+    // Reuse the existing task from the main seed; we need a server + task pair.
+    // Use a dedicated server so cleanup is trivial.
+    await db
+      .insert(servers)
+      .values({ id: RENAME_SERVER, name: `Rename Test ${RUN_HEX}`, ownerId: ALICE_ID })
+      .onConflictDoNothing();
+
+    const [renameTask] = await db
+      .insert(workspaceTasks)
+      .values({ serverId: RENAME_SERVER, title: `Rename Task ${RUN_HEX}` })
+      .returning({ id: workspaceTasks.id });
+
+    if (!renameTask) throw new Error('Failed to insert rename task');
+
+    // Two rows for ALICE_ID — same userId, different createdByName ("Alice" vs "Alice Smith")
+    await db.insert(workspaceTaskActivity).values([
+      {
+        serverId: RENAME_SERVER,
+        taskId: renameTask.id,
+        type: 'task_created',
+        createdById: ALICE_ID,
+        createdByName: 'Alice',
+        createdAt: new Date(Date.now() - 2000),
+      },
+      {
+        serverId: RENAME_SERVER,
+        taskId: renameTask.id,
+        type: 'agent_assigned',
+        createdById: ALICE_ID,
+        createdByName: 'Alice Smith',
+        createdAt: new Date(Date.now() - 1000),
+      },
+    ]);
+
+    try {
+      const stats = await memberStats(RENAME_SERVER);
+
+      // Must produce exactly ONE row for ALICE_ID despite two different names
+      const aliceRows = stats.filter((s) => s.userId === ALICE_ID);
+      expect(aliceRows.length).toBe(1);
+
+      // userName is max() of the two: 'Alice Smith' > 'Alice' lexicographically
+      expect(aliceRows[0].userName).toBe('Alice Smith');
+
+      // Both activity rows must be counted
+      expect(aliceRows[0].tasksCreated).toBe(1);
+      expect(aliceRows[0].agentsAssigned).toBe(1);
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, RENAME_SERVER));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, RENAME_SERVER));
+      await db.delete(servers).where(eq(servers.id, RENAME_SERVER));
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -390,5 +450,177 @@ describe('WorkspaceTaskActivityFeedService.memberActivity', () => {
     expect(bob!.assigned).toBe(1);
     expect(bob!.comments).toBe(1);
     expect(bob!.total).toBe(3);
+  });
+
+  it('splits rows across day boundaries when rows fall on different UTC days', async () => {
+    // Use a separate server to avoid interfering with the main seed counts.
+    const DAY_SERVER = `ws_day_test_${RUN_HEX}`;
+
+    await db
+      .insert(servers)
+      .values({ id: DAY_SERVER, name: `Day Boundary Test ${RUN_HEX}`, ownerId: ALICE_ID })
+      .onConflictDoNothing();
+
+    const [dayTask] = await db
+      .insert(workspaceTasks)
+      .values({ serverId: DAY_SERVER, title: `Day Task ${RUN_HEX}` })
+      .returning({ id: workspaceTasks.id });
+
+    if (!dayTask) throw new Error('Failed to insert day task');
+
+    // Row on a fixed past date (2026-01-15) — clearly on a different UTC day than today
+    const pastDate = new Date(Date.UTC(2026, 0, 15, 12, 0, 0));
+    // Row on today
+    const todayDate = new Date();
+
+    await db.insert(workspaceTaskActivity).values([
+      {
+        serverId: DAY_SERVER,
+        taskId: dayTask.id,
+        type: 'task_created',
+        createdById: ALICE_ID,
+        createdByName: 'Alice',
+        createdAt: pastDate,
+      },
+      {
+        serverId: DAY_SERVER,
+        taskId: dayTask.id,
+        type: 'agent_assigned',
+        createdById: ALICE_ID,
+        createdByName: 'Alice',
+        createdAt: todayDate,
+      },
+    ]);
+
+    try {
+      // Window wide enough to span from 2026-01-15 through today
+      const startMs = pastDate.getTime() - 1000;
+      const endMs   = todayDate.getTime() + 60_000;
+
+      const result = await memberActivity(DAY_SERVER, startMs, endMs, 'day');
+
+      // Must have at least 2 buckets (one for each UTC day)
+      expect(result.buckets.length).toBeGreaterThanOrEqual(2);
+
+      // The 2026-01-15 bucket must exist with count 1
+      const pastBucket = result.buckets.find((b) => b.period === '2026-01-15');
+      expect(pastBucket).toBeDefined();
+      const alicePast = pastBucket!.members.find((m) => m.userId === ALICE_ID);
+      expect(alicePast).toBeDefined();
+      expect(alicePast!.created).toBe(1);
+      expect(alicePast!.assigned).toBe(0);
+      expect(alicePast!.total).toBe(1);
+
+      // Today's bucket must have the agent_assigned row
+      const todayStr = todayDate.toISOString().slice(0, 10);
+      const todayBucket = result.buckets.find((b) => b.period === todayStr);
+      expect(todayBucket).toBeDefined();
+      const aliceToday = todayBucket!.members.find((m) => m.userId === ALICE_ID);
+      expect(aliceToday).toBeDefined();
+      expect(aliceToday!.assigned).toBe(1);
+      expect(aliceToday!.total).toBeGreaterThanOrEqual(1);
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, DAY_SERVER));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, DAY_SERVER));
+      await db.delete(servers).where(eq(servers.id, DAY_SERVER));
+    }
+  });
+
+  it('deduplicates a user who appears with two different createdByName values in memberActivity', async () => {
+    const RENAME_SERVER = `ws_rename_act_${RUN_HEX}`;
+
+    await db
+      .insert(servers)
+      .values({ id: RENAME_SERVER, name: `Rename Activity Test ${RUN_HEX}`, ownerId: ALICE_ID })
+      .onConflictDoNothing();
+
+    const [renameTask] = await db
+      .insert(workspaceTasks)
+      .values({ serverId: RENAME_SERVER, title: `Rename Activity Task ${RUN_HEX}` })
+      .returning({ id: workspaceTasks.id });
+
+    if (!renameTask) throw new Error('Failed to insert rename activity task');
+
+    const base = Date.now() - 3000;
+
+    // Same ALICE_ID, same day, two different createdByName values
+    await db.insert(workspaceTaskActivity).values([
+      {
+        serverId: RENAME_SERVER,
+        taskId: renameTask.id,
+        type: 'task_created',
+        createdById: ALICE_ID,
+        createdByName: 'Alice',
+        createdAt: new Date(base),
+      },
+      {
+        serverId: RENAME_SERVER,
+        taskId: renameTask.id,
+        type: 'agent_assigned',
+        createdById: ALICE_ID,
+        createdByName: 'Alice Smith',
+        createdAt: new Date(base + 1000),
+      },
+    ]);
+
+    try {
+      const startMs = base - 5000;
+      const endMs   = base + 60_000;
+      const result = await memberActivity(RENAME_SERVER, startMs, endMs, 'day');
+
+      // Exactly one bucket
+      expect(result.buckets.length).toBe(1);
+
+      // Exactly one member entry for ALICE_ID (not two groups due to name mismatch)
+      const aliceEntries = result.buckets[0].members.filter((m) => m.userId === ALICE_ID);
+      expect(aliceEntries.length).toBe(1);
+
+      // userName is max() of the two names
+      expect(aliceEntries[0].userName).toBe('Alice Smith');
+
+      // Both rows counted
+      expect(aliceEntries[0].created).toBe(1);
+      expect(aliceEntries[0].assigned).toBe(1);
+      expect(aliceEntries[0].total).toBe(2);
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, RENAME_SERVER));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, RENAME_SERVER));
+      await db.delete(servers).where(eq(servers.id, RENAME_SERVER));
+    }
+  });
+
+  it('week granularity returns a single bucket when all rows fall within one ISO week', async () => {
+    // All main seed rows are within the same ~5-second window today, so they
+    // all fall in the same ISO week. A week-granularity call must return exactly
+    // one bucket (period = Monday of this week).
+    const startMs = seedBase - 10_000;
+    const endMs   = seedBase + 60_000;
+
+    const result = await memberActivity(SERVER_ID, startMs, endMs, 'week');
+
+    expect(result.buckets).toBeDefined();
+    expect(result.buckets.length).toBe(1);
+
+    // The bucket must have both Alice and Bob
+    const bucket = result.buckets[0];
+    expect(bucket.members.find((m) => m.userId === ALICE_ID)).toBeDefined();
+    expect(bucket.members.find((m) => m.userId === BOB_ID)).toBeDefined();
+  });
+
+  it('month granularity returns a single bucket when all rows fall within one calendar month', async () => {
+    const startMs = seedBase - 10_000;
+    const endMs   = seedBase + 60_000;
+
+    const result = await memberActivity(SERVER_ID, startMs, endMs, 'month');
+
+    expect(result.buckets).toBeDefined();
+    expect(result.buckets.length).toBe(1);
+
+    // The period must look like YYYY-MM-01 (first day of the month)
+    expect(result.buckets[0].period).toMatch(/^\d{4}-\d{2}-01$/);
+
+    const bucket = result.buckets[0];
+    expect(bucket.members.find((m) => m.userId === ALICE_ID)).toBeDefined();
+    expect(bucket.members.find((m) => m.userId === BOB_ID)).toBeDefined();
   });
 });

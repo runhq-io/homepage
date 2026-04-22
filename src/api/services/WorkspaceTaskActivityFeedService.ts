@@ -2,9 +2,7 @@ import { and, count, eq, gt, gte, isNotNull, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { workspaceTaskActivity, workspaceTaskComments } from '../../db/schema';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface FeedFilters {
   userId?: string;
@@ -33,9 +31,7 @@ export interface FeedResult {
   offset: number;
 }
 
-// ---------------------------------------------------------------------------
-// listFeed
-// ---------------------------------------------------------------------------
+// ─── listFeed ─────────────────────────────────────────────────────────────────
 
 /**
  * Returns a server-wide unified activity feed (workspace_task_activity rows
@@ -139,9 +135,7 @@ export async function listFeed(serverId: string, filters: FeedFilters): Promise<
   return { entries: paged, total, limit: filters.limit, offset: filters.offset };
 }
 
-// ---------------------------------------------------------------------------
-// countNew
-// ---------------------------------------------------------------------------
+// ─── countNew ─────────────────────────────────────────────────────────────────
 
 /**
  * Returns the total number of activity + comment rows for the given server
@@ -191,9 +185,13 @@ export interface MemberStat {
  *
  * Each element represents one distinct creator (`createdById`) observed in
  * either workspace_task_activity or workspace_task_comments for the server.
- * Rows with a NULL `createdById` are skipped.
+ * Rows with a NULL `createdById` are skipped at the SQL level.
  *
  * `isAgent` is true if ANY of the member's rows have `createdByType = 'agent'`.
+ *
+ * The display name (`userName`) is resolved as the lexicographic maximum of
+ * all `createdByName` values observed for that user, making it stable even
+ * when a user renames themselves between rows.
  *
  * Optional `startMs` / `endMs` (millisecond epoch) bound rows by `createdAt`
  * (both ends inclusive).
@@ -213,7 +211,6 @@ export async function memberStats(
   const commentsPreds = [eq(workspaceTaskComments.serverId, serverId)];
 
   // Exclude rows with NULL createdById at the SQL level so the DB never groups them.
-  // The JS `if (!a.userId) continue` guards below remain as defensive fallbacks.
   activityPreds.push(isNotNull(workspaceTaskActivity.createdById));
   commentsPreds.push(isNotNull(workspaceTaskComments.createdById));
 
@@ -230,7 +227,7 @@ export async function memberStats(
     db
       .select({
         userId:         workspaceTaskActivity.createdById,
-        userName:       workspaceTaskActivity.createdByName,
+        userName:       sql<string | null>`max(${workspaceTaskActivity.createdByName}) FILTER (WHERE ${workspaceTaskActivity.createdByName} IS NOT NULL)`,
         isAgent:        sql<boolean>`bool_or(${workspaceTaskActivity.createdByType} = 'agent')`,
         tasksCreated:   sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'task_created')::int`,
         tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' = 'done')::int`,
@@ -238,17 +235,17 @@ export async function memberStats(
       })
       .from(workspaceTaskActivity)
       .where(and(...activityPreds))
-      .groupBy(workspaceTaskActivity.createdById, workspaceTaskActivity.createdByName),
+      .groupBy(workspaceTaskActivity.createdById),
     db
       .select({
         userId:   workspaceTaskComments.createdById,
-        userName: workspaceTaskComments.createdByName,
+        userName: sql<string | null>`max(${workspaceTaskComments.createdByName}) FILTER (WHERE ${workspaceTaskComments.createdByName} IS NOT NULL)`,
         isAgent:  sql<boolean>`bool_or(${workspaceTaskComments.createdByType} = 'agent')`,
         comments: sql<number>`count(*)::int`,
       })
       .from(workspaceTaskComments)
       .where(and(...commentsPreds))
-      .groupBy(workspaceTaskComments.createdById, workspaceTaskComments.createdByName),
+      .groupBy(workspaceTaskComments.createdById),
   ]);
 
   // Merge by userId (include rows from both queries)
@@ -316,6 +313,10 @@ export interface MemberActivityBucket {
  * The `[startMs, endMs]` window is inclusive on both ends (>= and <=).
  * Rows with a NULL `created_by_id` are skipped at the SQL level.
  *
+ * The display name (`user_name`) is resolved as `max(created_by_name)` within
+ * each (period, user) group so that a user rename between rows does not
+ * produce duplicate groups.
+ *
  * Implementation runs two queries in parallel (activity + comments) and merges
  * results in memory by (period, userId), matching the pattern established in
  * `memberStats`.  The granularity string is whitelisted to 3 safe values before
@@ -356,8 +357,8 @@ export async function memberActivity(
       SELECT
         date_trunc(${sql.raw(`'${trunc}'`)}, created_at AT TIME ZONE 'UTC')::date AS period,
         created_by_id   AS user_id,
-        created_by_name AS user_name,
-        (created_by_type = 'agent') AS is_agent,
+        max(created_by_name) FILTER (WHERE created_by_name IS NOT NULL) AS user_name,
+        bool_or(created_by_type = 'agent') AS is_agent,
         count(*) FILTER (WHERE type = 'task_created')::int    AS created,
         count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' = 'done')::int AS completed,
         count(*) FILTER (WHERE type = 'agent_assigned')::int  AS assigned
@@ -366,21 +367,21 @@ export async function memberActivity(
         AND created_at   >= ${new Date(startMs)}
         AND created_at   <= ${new Date(endMs)}
         AND created_by_id IS NOT NULL
-      GROUP BY period, created_by_id, created_by_name, is_agent
+      GROUP BY period, created_by_id
     `),
     db.execute<CommentRow>(sql`
       SELECT
         date_trunc(${sql.raw(`'${trunc}'`)}, created_at AT TIME ZONE 'UTC')::date AS period,
         created_by_id   AS user_id,
-        created_by_name AS user_name,
-        (created_by_type = 'agent') AS is_agent,
+        max(created_by_name) FILTER (WHERE created_by_name IS NOT NULL) AS user_name,
+        bool_or(created_by_type = 'agent') AS is_agent,
         count(*)::int AS comments
       FROM workspace_task_comments
       WHERE server_id     = ${serverId}
         AND created_at   >= ${new Date(startMs)}
         AND created_at   <= ${new Date(endMs)}
         AND created_by_id IS NOT NULL
-      GROUP BY period, created_by_id, created_by_name, is_agent
+      GROUP BY period, created_by_id
     `),
   ]);
 
