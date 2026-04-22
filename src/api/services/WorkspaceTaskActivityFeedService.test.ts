@@ -17,7 +17,7 @@ import {
   workspaceTaskActivity,
   workspaceTaskComments,
 } from '../../db/schema';
-import { listFeed, countNew } from './WorkspaceTaskActivityFeedService';
+import { listFeed, countNew, memberStats } from './WorkspaceTaskActivityFeedService';
 
 // ---------------------------------------------------------------------------
 // Unique identifiers for this test run — must be valid UUIDs and text IDs
@@ -259,5 +259,74 @@ describe('WorkspaceTaskActivityFeedService.listFeed', () => {
     const minPage1 = Math.min(...page1.entries.map((e) => e.createdAt));
     const maxPage2 = Math.max(...page2.entries.map((e) => e.createdAt));
     expect(minPage1).toBeGreaterThanOrEqual(maxPage2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memberStats tests
+// ---------------------------------------------------------------------------
+//
+// Seed recap (all rows use seedBase = Date.now() - 5000 captured in beforeAll):
+//   Activity rows:
+//     base+0     Alice  task_created
+//     base+1000  Alice  status_change  { from: 'pending',      to: 'in_progress' }
+//     base+2000  Bob    status_change  { from: 'in_progress',  to: 'done'        }
+//     base+3000  Bob    agent_assigned
+//   Comment rows:
+//     base+500   Alice  'First comment from Alice'
+//     base+2500  Bob    'Second comment from Bob'
+//
+// Per-member expected (full window):
+//   Alice: tasksCreated=1, tasksCompleted=0, agentsAssigned=0, comments=1
+//   Bob:   tasksCreated=0, tasksCompleted=1, agentsAssigned=1, comments=1
+
+describe('WorkspaceTaskActivityFeedService.memberStats', () => {
+  it('aggregates per-member stats across the full seed (no date window)', async () => {
+    const stats = await memberStats(SERVER_ID);
+
+    // Both Alice and Bob must appear
+    const alice = stats.find((s) => s.userId === ALICE_ID);
+    const bob   = stats.find((s) => s.userId === BOB_ID);
+
+    expect(alice).toBeDefined();
+    expect(bob).toBeDefined();
+
+    // Alice: task_created activity + status_change→in_progress + 1 comment
+    expect(alice!.userName).toBe('Alice');
+    expect(alice!.isAgent).toBe(false);
+    expect(alice!.tasksCreated).toBe(1);
+    expect(alice!.tasksCompleted).toBe(0);
+    expect(alice!.agentsAssigned).toBe(0);
+    expect(alice!.comments).toBe(1);
+
+    // Bob: status_change→done + agent_assigned + 1 comment
+    expect(bob!.userName).toBe('Bob');
+    expect(bob!.isAgent).toBe(false);
+    expect(bob!.tasksCreated).toBe(0);
+    expect(bob!.tasksCompleted).toBe(1);
+    expect(bob!.agentsAssigned).toBe(1);
+    expect(bob!.comments).toBe(1);
+  });
+
+  it('respects startMs/endMs date window', async () => {
+    // Window [base+1500, base+2500] contains exactly:
+    //   activity: Bob's status_change→done at base+2000
+    //   comments: none (Bob's comment is at base+2500, exclusive)
+    // Alice's rows are all outside: +0, +1000 (before window), +500 comment (before window)
+    // Bob's agent_assigned at +3000 is after the window
+    const startMs = seedBase + 1500;
+    const endMs   = seedBase + 2499; // strictly before Bob's comment at +2500
+
+    const stats = await memberStats(SERVER_ID, startMs, endMs);
+
+    // Only Bob should appear (only his status_change→done falls in the window)
+    expect(stats.length).toBe(1);
+
+    const bob = stats.find((s) => s.userId === BOB_ID);
+    expect(bob).toBeDefined();
+    expect(bob!.tasksCompleted).toBe(1);
+    expect(bob!.tasksCreated).toBe(0);
+    expect(bob!.agentsAssigned).toBe(0);
+    expect(bob!.comments).toBe(0);
   });
 });

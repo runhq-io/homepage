@@ -1,4 +1,4 @@
-import { and, count, eq, gt, ne } from 'drizzle-orm';
+import { and, count, eq, gt, gte, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { workspaceTaskActivity, workspaceTaskComments } from '../../db/schema';
 
@@ -172,4 +172,114 @@ export async function countNew(serverId: string, sinceMs: number): Promise<numbe
     ));
 
   return activityCount + commentCount;
+}
+
+// ─── memberStats ─────────────────────────────────────────────────────────────
+
+export interface MemberStat {
+  userId: string;
+  userName: string;
+  isAgent: boolean;
+  tasksCreated: number;
+  tasksCompleted: number;
+  agentsAssigned: number;
+  comments: number;
+}
+
+/**
+ * Returns per-member aggregated contribution stats for a given server.
+ *
+ * Each element represents one distinct creator (`createdById`) observed in
+ * either workspace_task_activity or workspace_task_comments for the server.
+ * Rows with a NULL `createdById` are skipped.
+ *
+ * `isAgent` is true if ANY of the member's rows have `createdByType = 'agent'`.
+ *
+ * Optional `startMs` / `endMs` (millisecond epoch) bound rows by `createdAt`
+ * (both ends inclusive).
+ *
+ * NOTE: activity aggregation and comment aggregation are run in parallel (two
+ * GROUP BY queries), then merged in memory by userId.  A UNION-based single
+ * query would be more concise but harder to read and offers no meaningful
+ * performance gain at current row volumes.
+ */
+export async function memberStats(
+  serverId: string,
+  startMs?: number,
+  endMs?: number,
+): Promise<MemberStat[]> {
+  // Build WHERE predicates for each table
+  const activityPreds = [eq(workspaceTaskActivity.serverId, serverId)];
+  const commentsPreds = [eq(workspaceTaskComments.serverId, serverId)];
+
+  if (startMs !== undefined) {
+    activityPreds.push(gte(workspaceTaskActivity.createdAt, new Date(startMs)));
+    commentsPreds.push(gte(workspaceTaskComments.createdAt, new Date(startMs)));
+  }
+  if (endMs !== undefined) {
+    activityPreds.push(lte(workspaceTaskActivity.createdAt, new Date(endMs)));
+    commentsPreds.push(lte(workspaceTaskComments.createdAt, new Date(endMs)));
+  }
+
+  const [activityAgg, commentAgg] = await Promise.all([
+    db
+      .select({
+        userId:         workspaceTaskActivity.createdById,
+        userName:       workspaceTaskActivity.createdByName,
+        isAgent:        sql<boolean>`bool_or(${workspaceTaskActivity.createdByType} = 'agent')`,
+        tasksCreated:   sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'task_created')::int`,
+        tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' = 'done')::int`,
+        agentsAssigned: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'agent_assigned')::int`,
+      })
+      .from(workspaceTaskActivity)
+      .where(and(...activityPreds))
+      .groupBy(workspaceTaskActivity.createdById, workspaceTaskActivity.createdByName),
+    db
+      .select({
+        userId:   workspaceTaskComments.createdById,
+        userName: workspaceTaskComments.createdByName,
+        isAgent:  sql<boolean>`bool_or(${workspaceTaskComments.createdByType} = 'agent')`,
+        comments: sql<number>`count(*)::int`,
+      })
+      .from(workspaceTaskComments)
+      .where(and(...commentsPreds))
+      .groupBy(workspaceTaskComments.createdById, workspaceTaskComments.createdByName),
+  ]);
+
+  // Merge by userId (include rows from both queries)
+  const byUser = new Map<string, MemberStat>();
+
+  for (const a of activityAgg) {
+    if (!a.userId) continue;
+    byUser.set(a.userId, {
+      userId:         a.userId,
+      userName:       a.userName ?? '',
+      isAgent:        !!a.isAgent,
+      tasksCreated:   a.tasksCreated ?? 0,
+      tasksCompleted: a.tasksCompleted ?? 0,
+      agentsAssigned: a.agentsAssigned ?? 0,
+      comments:       0,
+    });
+  }
+
+  for (const c of commentAgg) {
+    if (!c.userId) continue;
+    const existing = byUser.get(c.userId);
+    if (existing) {
+      existing.comments = c.comments ?? 0;
+      existing.isAgent  = existing.isAgent || !!c.isAgent;
+    } else {
+      byUser.set(c.userId, {
+        userId:         c.userId,
+        userName:       c.userName ?? '',
+        isAgent:        !!c.isAgent,
+        tasksCreated:   0,
+        tasksCompleted: 0,
+        agentsAssigned: 0,
+        comments:       c.comments ?? 0,
+      });
+    }
+  }
+
+  return Array.from(byUser.values());
 }
