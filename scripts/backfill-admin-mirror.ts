@@ -18,6 +18,13 @@ import { db } from '../src/db/index';
 import { servers } from '../src/db/schema';
 import { fetchFromServer } from '../src/api/services/ServerService';
 import { syncAdmins } from '../src/api/services/ServerAdminMirrorService';
+import { initProviders } from '../src/api/services/providers/registry';
+
+// Standalone scripts bypass src/server.ts startup, so the provider registry
+// is empty unless we initialize it here. Without this, fetchFromServer's
+// machine routing (provider.getRoutingInfo) throws and every server is
+// reported "unreachable".
+initProviders();
 
 interface Stats {
   total: number;
