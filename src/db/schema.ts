@@ -730,6 +730,9 @@ export const serverMembers = pgTable('server_members', {
   serverId: text('server_id').references(() => servers.id).notNull(),
   userId: uuid('user_id').references(() => users.id).notNull(),
   role: text('role').$type<ServerRole>().notNull().default('member'),
+  // Workspace-derived admin mirror. Set only by POST /api/internal/servers/:serverId/admins/sync.
+  // True iff the user holds at least one workspace role with the administrator permission flag.
+  isAdmin: boolean('is_admin').notNull().default(false),
   invitedById: uuid('invited_by_id').references(() => users.id),
   joinedAt: timestamp('joined_at').defaultNow().notNull(),
   sortOrder: integer('sort_order'),
