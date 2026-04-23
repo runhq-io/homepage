@@ -680,6 +680,7 @@
       ".rw-tab-btn:hover{color:" + text + ";background:" + bgAlt + "}",
       ".rw-tab-active{color:" + text + ";background:" + border + "}",
       ".rw-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:" + accent + ";color:#fff;font-size:11px;font-weight:600;margin-left:4px}",
+      ".rw-tab-btn:disabled{opacity:.5;cursor:not-allowed}",
 
       /* Login prompt */
       ".rw-login-prompt{padding:10px 12px;border-radius:8px;background:" + bgAlt + ";text-align:center;font-size:12px;color:" + textMuted + ";margin-bottom:8px}",
@@ -1328,7 +1329,11 @@
     ]);
   }
 
-  function renderTabs(onTabChange, myCount) {
+  function renderTabs(onTabChange, myCount, isIdentified) {
+    var updatesBtn = h("button", {
+      className: "rw-tab-btn" + (activeTab === "updates" ? " rw-tab-active" : ""),
+      onClick: function () { onTabChange("updates"); },
+    }, "Updates");
     var allBtn = h("button", {
       className: "rw-tab-btn" + (activeTab === "all" ? " rw-tab-active" : ""),
       onClick: function () { onTabChange("all"); },
@@ -1337,11 +1342,16 @@
     if (myCount != null && myCount > 0) {
       mineChildren.push(h("span", { className: "rw-tab-badge" }, String(myCount)));
     }
-    var mineBtn = h("button", {
+    var mineBtnAttrs = {
       className: "rw-tab-btn" + (activeTab === "mine" ? " rw-tab-active" : ""),
-      onClick: function () { onTabChange("mine"); },
-    }, mineChildren);
-    return h("div", { className: "rw-tabs" }, [allBtn, mineBtn]);
+      onClick: function () { if (isIdentified) onTabChange("mine"); },
+    };
+    if (!isIdentified) {
+      mineBtnAttrs.disabled = true;
+      mineBtnAttrs.title = "Log in to view your tickets";
+    }
+    var mineBtn = h("button", mineBtnAttrs, mineChildren);
+    return h("div", { className: "rw-tabs" }, [updatesBtn, allBtn, mineBtn]);
   }
 
   function renderMySubmissions(tickets) {
