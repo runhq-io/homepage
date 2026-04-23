@@ -759,6 +759,14 @@
       ".rw-edit-attach-item { display: inline-flex; position: relative; margin: 0 6px 6px 0; }",
       ".rw-edit-attach-img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; border: 1px solid " + border + "; }",
       ".rw-edit-attach-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; background: " + noColor + "; color: #fff; border: none; border-radius: 50%; font-size: 11px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }",
+
+      /* Comment action row (edit/delete own comments) */
+      ".rw-comment-actions{display:flex;gap:6px;margin-top:6px}",
+      ".rw-comment-action-btn{font-size:11px;color:" + textMuted + ";background:transparent;border:none;cursor:pointer;padding:2px 4px}",
+      ".rw-comment-action-btn:hover{color:" + text + ";text-decoration:underline}",
+      ".rw-comment-edit-form{margin-top:6px}",
+      ".rw-comment-edit-form textarea{width:100%;min-height:50px;resize:vertical}",
+      ".rw-comment-edit-actions{display:flex;gap:6px;margin-top:6px}",
     ].join("\n");
 
     var style = document.createElement("style");
@@ -1008,6 +1016,89 @@
     return container;
   }
 
+  function renderCommentActions(ticketId, comment) {
+    var actionsRow = h("div", { className: "rw-comment-actions" });
+
+    var editBtn = h("button", { className: "rw-comment-action-btn", type: "button" }, "Edit");
+    editBtn.addEventListener("click", function () {
+      var form = renderCommentEditForm(ticketId, comment);
+      actionsRow.parentNode.replaceChild(form, actionsRow);
+    });
+
+    var deleteBtn = h("button", { className: "rw-comment-action-btn", type: "button" }, "Delete");
+    deleteBtn.addEventListener("click", function () {
+      var confirmBox = h("div", { className: "rw-delete-confirm" }, [
+        h("p", null, "Delete this comment?"),
+        h("div", { className: "rw-delete-confirm-actions" }, [
+          h("button", {
+            className: "rw-delete-yes",
+            onClick: function () {
+              removeComment(ticketId, comment.id).then(function () {
+                showTicketDetail(ticketId);
+              }).catch(function (err) {
+                confirmBox.innerHTML = "";
+                confirmBox.appendChild(renderNotice("error", "Failed: " + err.message));
+              });
+            },
+          }, "Delete"),
+          h("button", {
+            className: "rw-delete-cancel",
+            onClick: function () { confirmBox.parentNode.replaceChild(actionsRow, confirmBox); },
+          }, "Cancel"),
+        ]),
+      ]);
+      actionsRow.parentNode.replaceChild(confirmBox, actionsRow);
+    });
+
+    actionsRow.appendChild(editBtn);
+    actionsRow.appendChild(deleteBtn);
+    return actionsRow;
+  }
+
+  function renderCommentEditForm(ticketId, comment) {
+    var textarea = h("textarea", {
+      className: "rw-input rw-textarea",
+      maxlength: "2000",
+    });
+    textarea.value = comment.body;
+    var noticeArea = h("div", null);
+
+    var saveBtn = h("button", { className: "rw-save-btn", type: "button" }, "Save");
+    var cancelBtn = h("button", { className: "rw-cancel-btn", type: "button" }, "Cancel");
+
+    var form = h("div", { className: "rw-comment-edit-form" }, [
+      noticeArea,
+      textarea,
+      h("div", { className: "rw-comment-edit-actions" }, [saveBtn, cancelBtn]),
+    ]);
+
+    saveBtn.addEventListener("click", function () {
+      var content = textarea.value.trim();
+      if (!content) {
+        noticeArea.innerHTML = "";
+        noticeArea.appendChild(renderNotice("error", "Content required"));
+        return;
+      }
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving…";
+      editComment(ticketId, comment.id, content).then(function () {
+        showTicketDetail(ticketId);
+      }).catch(function (err) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save";
+        noticeArea.innerHTML = "";
+        noticeArea.appendChild(renderNotice("error", "Failed: " + err.message));
+      });
+    });
+
+    cancelBtn.addEventListener("click", function () {
+      var actions = renderCommentActions(ticketId, comment);
+      form.parentNode.replaceChild(actions, form);
+    });
+
+    return form;
+  }
+
   function renderTicketDetail(data) {
     var ticket = data.ticket;
     var isOwner = data.isOwner;
@@ -1209,12 +1300,18 @@
         }
         var cardHeader = h("div", { className: "rw-timeline-card-header" }, headerChildren);
         var cardBody;
+        var cardChildren;
         if (item.kind === "comment") {
           cardBody = h("div", { className: "rw-timeline-body" }, item.body);
+          cardChildren = [cardHeader, cardBody];
+          if (item.isAuthorOfCurrentUser && config.isIdentified) {
+            cardChildren.push(renderCommentActions(ticket.id, item));
+          }
         } else {
           cardBody = h("div", { className: "rw-timeline-activity" }, renderActivityLabel(item));
+          cardChildren = [cardHeader, cardBody];
         }
-        var card = h("div", { className: "rw-timeline-card" }, [cardHeader, cardBody]);
+        var card = h("div", { className: "rw-timeline-card" }, cardChildren);
         var timelineItem = h("div", { className: "rw-timeline-item" }, [
           h("div", { className: "rw-timeline-line" }),
           h("div", { className: dotClass }),
