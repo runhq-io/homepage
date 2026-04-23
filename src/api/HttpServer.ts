@@ -4886,6 +4886,7 @@ export function createHttpApp() {
     } catch (err: any) {
       const msg = err?.message || String(err);
       if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      if (msg === 'Comments are disabled for this task') return c.json({ error: msg }, 403);
       return c.json({ error: msg }, 400);
     }
   });

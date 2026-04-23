@@ -115,6 +115,38 @@ describe('addWidgetComment', () => {
       addWidgetComment(PROJECT_ID, pendingTask!.id, other!.id, 'hostile')
     ).rejects.toThrow('Ticket not found');
   });
+
+  it('blocks comment creation when commentsDisabled is true', async () => {
+    const [disabledTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID,
+      title: 'No Comments',
+      visibility: 'public',
+      moderationStatus: 'approved',
+      commentsDisabled: true,
+      createdByType: 'external',
+      createdById: WIDGET_USER_ID,
+      createdByName: 'Author',
+    }).returning({ id: workspaceTasks.id });
+    await expect(
+      addWidgetComment(PROJECT_ID, disabledTask!.id, WIDGET_USER_ID, 'should fail')
+    ).rejects.toThrow('Comments are disabled for this task');
+  });
+
+  it('still allows edits on existing comments when commentsDisabled is later set', async () => {
+    // Comment exists first (created when flag was false)
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Edit after disable', visibility: 'public',
+      moderationStatus: 'approved', createdByType: 'external', createdById: WIDGET_USER_ID,
+    }).returning({ id: workspaceTasks.id });
+    const created = await addWidgetComment(PROJECT_ID, task!.id, WIDGET_USER_ID, 'original');
+
+    // Flag flips to true after the fact
+    await db.update(workspaceTasks).set({ commentsDisabled: true }).where(eq(workspaceTasks.id, task!.id));
+
+    // Existing comment can still be edited
+    const updated = await updateWidgetComment(PROJECT_ID, task!.id, created.id, WIDGET_USER_ID, 'edited');
+    expect(updated.body).toBe('edited');
+  });
 });
 
 describe('updateWidgetComment', () => {

@@ -86,6 +86,7 @@ export type PublicTicketDetail = {
     attachments?: PublicAttachmentSummary[] | null;
     createdByType: CanonicalTaskActorType;
     externalUserId: string | null;
+    commentsDisabled: boolean;
   };
   /** Whether the requesting user owns this ticket */
   isOwner: boolean;
@@ -557,6 +558,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       attachments: (fullTask?.attachments ?? []).map(mapAttachmentSummary),
       createdByType: task.createdByType,
       externalUserId: ticketExternalUserId,
+      commentsDisabled: task.commentsDisabled,
     },
     isOwner,
     isEditable,
@@ -577,7 +579,7 @@ async function resolveTicketVisibleToWidget(
   projectId: string,
   ticketId: string,
   widgetUserId: string,
-): Promise<{ serverId: string } | null> {
+): Promise<{ serverId: string; commentsDisabled: boolean } | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
@@ -590,6 +592,7 @@ async function resolveTicketVisibleToWidget(
       createdByType: workspaceTasks.createdByType,
       createdById: workspaceTasks.createdById,
       workspaceChannelId: workspaceTasks.workspaceChannelId,
+      commentsDisabled: workspaceTasks.commentsDisabled,
     })
     .from(workspaceTasks)
     .where(and(
@@ -607,12 +610,12 @@ async function resolveTicketVisibleToWidget(
 
   // Public + approved → anyone identified can comment
   if (task.visibility === 'public' && task.moderationStatus === 'approved') {
-    return { serverId: task.serverId };
+    return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
   }
 
   // Pending or private → owner only
   if (isOwner) {
-    return { serverId: task.serverId };
+    return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
   }
 
   return null;
@@ -626,6 +629,7 @@ export async function addWidgetComment(
 ) {
   const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
   if (!visible) throw new Error('Ticket not found');
+  if (visible.commentsDisabled) throw new Error('Comments are disabled for this task');
 
   const [widgetUser] = await db
     .select({ name: widgetUsers.name })

@@ -89,6 +89,16 @@ describe('POST /api/widget/tickets/:id/comments', () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it('403 when Comments are disabled for this task', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
+    (WidgetService.addWidgetComment as any).mockRejectedValue(new Error('Comments are disabled for this task'));
+    const app = makeApp();
+    const res = await app.request('/api/widget/tickets/t1/comments', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'x' }),
+    });
+    expect(res.status).toBe(403);
+  });
 });
 
 describe('PATCH /api/widget/tickets/:id/comments/:commentId', () => {

@@ -26,6 +26,7 @@
   var activeTab = "updates"; // "updates" | "all" | "mine"
   var statsCache = null;
   var updatesCache = null;
+  var pendingDetailNotice = null;
 
   // ---------------------------------------------------------------------------
   // Console & error capture
@@ -999,19 +1000,48 @@
       submitBtn.disabled = true;
       submitBtn.textContent = "Posting…";
       noticeArea.innerHTML = "";
+
+      var commentPosted = false;
+      var newCommentId = null;
+      var uploadErrors = [];
+
       postComment(ticketId, content).then(function (res) {
-        var commentId = res.comment && res.comment.id;
-        if (pendingFiles.length === 0 || !commentId) return;
+        commentPosted = true;
+        newCommentId = res.comment && res.comment.id;
+        if (pendingFiles.length === 0 || !newCommentId) return;
+        // Collect per-file failures instead of short-circuiting
         return pendingFiles.reduce(function (chain, f) {
-          return chain.then(function () { return uploadCommentAttachment(ticketId, commentId, f); });
+          return chain.then(function () {
+            return uploadCommentAttachment(ticketId, newCommentId, f).catch(function (err) {
+              uploadErrors.push(f.name + ": " + (err.message || String(err)));
+            });
+          });
         }, Promise.resolve());
       }).then(function () {
+        if (uploadErrors.length > 0) {
+          // Partial success: comment posted, but some attachments failed.
+          pendingDetailNotice = {
+            level: "error",
+            message: "Comment posted, but " + uploadErrors.length + " attachment(s) failed: " + uploadErrors.join("; "),
+          };
+        }
         showTicketDetail(ticketId);
       }).catch(function (err) {
+        // Only reached if postComment itself failed (attachment errors are caught inline above).
         submitBtn.disabled = false;
         submitBtn.textContent = "Comment";
         noticeArea.innerHTML = "";
-        noticeArea.appendChild(renderNotice("error", "Failed to post: " + err.message));
+        if (commentPosted) {
+          // Defensive: shouldn't happen since we catch upload errors inline, but if some other
+          // unexpected failure occurs after the comment persisted, surface it without losing state.
+          pendingDetailNotice = {
+            level: "error",
+            message: "Comment posted, but follow-up action failed: " + (err.message || String(err)),
+          };
+          showTicketDetail(ticketId);
+        } else {
+          noticeArea.appendChild(renderNotice("error", "Failed to post: " + (err.message || String(err))));
+        }
       });
     });
 
@@ -1151,6 +1181,12 @@
         h("path", { d: "M10 14L21 3" }),
       ]),
     ]));
+
+    // Flash notice from the composer (e.g., "Comment posted, but attachment failed")
+    if (pendingDetailNotice) {
+      container.appendChild(renderNotice(pendingDetailNotice.level, pendingDetailNotice.message));
+      pendingDetailNotice = null;
+    }
 
     // Title + status
     var statusText = ticket.status.replace(/_/g, " ");
@@ -1353,11 +1389,12 @@
     }
 
     // Comment composer
-    if (config.isIdentified) {
-      container.appendChild(h("hr", { className: "rw-divider" }));
+    container.appendChild(h("hr", { className: "rw-divider" }));
+    if (ticket.commentsDisabled) {
+      container.appendChild(h("div", { className: "rw-login-prompt" }, "Comments are disabled for this ticket"));
+    } else if (config.isIdentified) {
       container.appendChild(renderCommentComposer(ticket.id));
     } else {
-      container.appendChild(h("hr", { className: "rw-divider" }));
       container.appendChild(h("div", { className: "rw-login-prompt" }, "Log in to comment"));
     }
 

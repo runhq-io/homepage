@@ -172,6 +172,16 @@ describe('getPublicTicketDetail comment payload', () => {
     }
   });
 
+  it('exposes commentsDisabled on the ticket detail payload', async () => {
+    const [disabled] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Has flag', visibility: 'public',
+      createdByType: 'external', createdById: WIDGET_USER_ID, commentsDisabled: true,
+    }).returning({ id: workspaceTasks.id });
+    const detail = await getPublicTicketDetail(PROJECT_ID, disabled!.id, WIDGET_USER_ID);
+    expect(detail!.ticket.commentsDisabled).toBe(true);
+    await db.delete(workspaceTasks).where(eq(workspaceTasks.id, disabled!.id));
+  });
+
   it('channel-scoped widget project cannot resolve a task outside its channel by id', async () => {
     // Project with a channel scope set cannot fetch details for a ticket
     // whose workspaceChannelId differs (or is null).
