@@ -22,6 +22,7 @@ import {
   type Plan,
 } from '../../db/schema';
 import type { TokenUsage } from '@runhq/server-protocol';
+import type { TokenCounts } from './pricing';
 
 // ============================================================================
 // Types
@@ -118,22 +119,6 @@ export const PLAN_CONFIG: Record<PlanId, {
     isActive: false,
   },
 };
-
-// ============================================================================
-// Cost Calculation (based on Claude pricing)
-// ============================================================================
-
-// Pricing per 1M tokens (approximate, adjust as needed)
-const INPUT_TOKEN_COST_PER_MILLION = 300;   // $3.00 per 1M input tokens
-const OUTPUT_TOKEN_COST_PER_MILLION = 1500; // $15.00 per 1M output tokens
-
-export function calculateCostCents(inputTokens: number, outputTokens: number): number {
-  const inputCost = (inputTokens / 1_000_000) * INPUT_TOKEN_COST_PER_MILLION;
-  const outputCost = (outputTokens / 1_000_000) * OUTPUT_TOKEN_COST_PER_MILLION;
-  // Round to nearest cent, minimum 1 cent if any tokens used
-  const totalCents = Math.round(inputCost + outputCost);
-  return inputTokens + outputTokens > 0 ? Math.max(1, totalCents) : 0;
-}
 
 // ============================================================================
 // Helper Functions
@@ -283,101 +268,71 @@ export async function addCredits(userId: string, amountCents: number): Promise<n
 }
 
 // ============================================================================
-// Usage Record Management
-// ============================================================================
-
-/**
- * Get or create the current billing period usage record for a user
- */
-export async function getOrCreateCurrentUsageRecord(userId: string): Promise<UsageRecord> {
-  const { start, end } = getBillingPeriod();
-
-  // Look for existing record for current period
-  const existing = await db.query.usageRecords.findFirst({
-    where: and(
-      eq(usageRecords.userId, userId),
-      gte(usageRecords.periodStart, start),
-      lte(usageRecords.periodEnd, end)
-    ),
-  });
-
-  if (existing) {
-    return existing;
-  }
-
-  // Create new record for this billing period
-  const [newRecord] = await db.insert(usageRecords).values({
-    userId,
-    periodStart: start,
-    periodEnd: end,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalCostCents: 0,
-    requestCount: 0,
-  }).returning();
-
-  return newRecord;
-}
-
-// ============================================================================
 // Usage Tracking
 // ============================================================================
 
+export interface TrackUsageContext {
+  serverId: string | null;
+  taskId: string | null;
+  taskLabel: string | null;
+  channelId: string | null;
+  channelLabel: string | null;
+  agentId: string | null;
+  agentLabel: string | null;
+  conversationId: string | null;
+}
+
+export interface TrackUsageInput {
+  userId: string;
+  model: string;
+  tokens: TokenCounts;
+  costCents: number;               // computed by caller using pricing.calculateCost
+  context: TrackUsageContext;
+  anthropicRequestId: string | null;
+}
+
 /**
- * Track usage and deduct from credit balance
- * Returns the cost and new balance
+ * Persist one Claude-call event and deduct the cost from the user's balance.
+ * Both operations happen in one DB transaction — either both succeed or neither.
+ *
+ * Balance is clamped at 0 (existing behavior; debt is not tracked).
  */
-export async function trackUsage(
-  userToken: string | null | undefined,
-  tokenUsage: TokenUsage
-): Promise<UsageTrackResult> {
-  console.log(`[UsageService] trackUsage called with token: ${userToken ? userToken.substring(0, 30) + '...' : 'none'}`);
-  console.log(`[UsageService] tokenUsage:`, JSON.stringify(tokenUsage));
+export async function trackUsage(input: TrackUsageInput): Promise<void> {
+  const { userId, model, tokens, costCents, context, anthropicRequestId } = input;
 
-  if (!userToken) {
-    console.warn('[UsageService] No user token provided, skipping usage tracking');
-    return { costCents: 0, newBalanceCents: 0 };
-  }
+  await db.transaction(async (tx) => {
+    // Deduct balance atomically using SQL GREATEST(0, balance - cost).
+    // creditBalanceCents is an integer column — round before writing.
+    const costWhole = Math.round(costCents);
+    await tx
+      .update(subscriptions)
+      .set({
+        creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${costWhole})`,
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.userId, userId));
 
-  const userId = extractUserIdFromToken(userToken);
-  if (!userId) {
-    console.warn('[UsageService] Could not extract userId from token');
-    return { costCents: 0, newBalanceCents: 0 };
-  }
-
-  console.log(`[UsageService] trackUsage for userId: ${userId}`);
-
-  // Calculate cost
-  const costCents = tokenUsage.costCents > 0
-    ? Math.round(tokenUsage.costCents)
-    : calculateCostCents(tokenUsage.inputTokens, tokenUsage.outputTokens);
-
-  // Deduct from credit balance
-  const subscription = await getOrCreateSubscription(userId);
-  const newBalance = Math.max(0, (subscription.creditBalanceCents || 0) - costCents);
-
-  await db.update(subscriptions)
-    .set({
-      creditBalanceCents: newBalance,
-      updatedAt: new Date(),
-    })
-    .where(eq(subscriptions.userId, userId));
-
-  // Update usage record (for analytics/history)
-  const usageRecord = await getOrCreateCurrentUsageRecord(userId);
-  await db.update(usageRecords)
-    .set({
-      inputTokens: sql`${usageRecords.inputTokens} + ${tokenUsage.inputTokens}`,
-      outputTokens: sql`${usageRecords.outputTokens} + ${tokenUsage.outputTokens}`,
-      totalCostCents: sql`${usageRecords.totalCostCents} + ${costCents}`,
-      requestCount: sql`${usageRecords.requestCount} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(eq(usageRecords.id, usageRecord.id));
-
-  console.log(`[UsageService] User ${userId}: spent $${centsToDollars(costCents)}, balance: $${centsToDollars(newBalance)}`);
-
-  return { costCents, newBalanceCents: newBalance };
+    // Insert the event with full precision cost.
+    await tx.insert(usageEvents).values({
+      userId,
+      serverId: context.serverId,
+      ts: new Date(),
+      model,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      cacheReadTokens: tokens.cacheReadTokens,
+      cacheCreationTokens: tokens.cacheCreationTokens,
+      costCents: costCents.toFixed(4),  // numeric column expects string
+      taskId: context.taskId,
+      taskLabel: context.taskLabel,
+      channelId: context.channelId,
+      channelLabel: context.channelLabel,
+      agentId: context.agentId,
+      agentLabel: context.agentLabel,
+      conversationId: context.conversationId,
+      anthropicRequestId,
+    });
+  });
 }
 
 
