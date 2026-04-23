@@ -78,10 +78,10 @@ export default async function UsagePage({
   return (
     <div className="flex flex-col gap-6 p-6">
       <header className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Usage</h1>
+        <h1 className="text-2xl font-bold text-white">Usage</h1>
         <a
           href={csvHref}
-          className="rounded bg-black px-3 py-1.5 text-sm text-white hover:bg-neutral-800"
+          className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500"
         >
           Export CSV
         </a>
@@ -155,9 +155,9 @@ export default async function UsagePage({
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-neutral-200 bg-white p-4">
-      <div className="text-xs uppercase tracking-wide text-neutral-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold">{value}</div>
+    <div className="rounded-lg bg-slate-800 p-6">
+      <div className="text-xs font-medium uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="mt-2 text-2xl font-bold text-white">{value}</div>
     </div>
   );
 }

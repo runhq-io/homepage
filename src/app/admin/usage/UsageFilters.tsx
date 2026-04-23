@@ -34,26 +34,22 @@ export function UsageFilters({ current }: Props) {
     update({ start: start.toISOString(), end: end.toISOString() });
   };
 
+  const presetBtn =
+    'rounded border border-slate-600 bg-slate-700 px-2 py-1 text-sm text-slate-200 hover:bg-slate-600';
+  const dateInput =
+    'rounded border border-slate-600 bg-slate-700 px-2 py-1 text-sm text-slate-100 [color-scheme:dark] focus:outline-none focus:ring-1 focus:ring-blue-500';
+
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-neutral-200 bg-white p-3">
+    <div className="flex flex-wrap items-center gap-3 rounded-lg bg-slate-800 p-3">
       <div className="flex items-center gap-2">
-        <span className="text-sm text-neutral-600">Range:</span>
-        <button
-          onClick={() => applyPreset(7)}
-          className="rounded border px-2 py-1 text-sm hover:bg-neutral-50"
-        >
+        <span className="text-sm text-slate-400">Range:</span>
+        <button onClick={() => applyPreset(7)} className={presetBtn}>
           7d
         </button>
-        <button
-          onClick={() => applyPreset(30)}
-          className="rounded border px-2 py-1 text-sm hover:bg-neutral-50"
-        >
+        <button onClick={() => applyPreset(30)} className={presetBtn}>
           30d
         </button>
-        <button
-          onClick={() => applyPreset(90)}
-          className="rounded border px-2 py-1 text-sm hover:bg-neutral-50"
-        >
+        <button onClick={() => applyPreset(90)} className={presetBtn}>
           90d
         </button>
       </div>
@@ -61,16 +57,16 @@ export function UsageFilters({ current }: Props) {
       <div className="flex items-center gap-2">
         <input
           type="date"
-          className="rounded border px-2 py-1 text-sm"
+          className={dateInput}
           value={current.start.toISOString().slice(0, 10)}
           onChange={(e) =>
             update({ start: new Date(e.target.value + 'T00:00:00Z').toISOString() })
           }
         />
-        <span className="text-sm text-neutral-400">→</span>
+        <span className="text-sm text-slate-500">→</span>
         <input
           type="date"
-          className="rounded border px-2 py-1 text-sm"
+          className={dateInput}
           value={current.end.toISOString().slice(0, 10)}
           onChange={(e) =>
             update({ end: new Date(e.target.value + 'T23:59:59Z').toISOString() })
@@ -79,13 +75,15 @@ export function UsageFilters({ current }: Props) {
       </div>
 
       <div className="ml-auto flex items-center gap-2">
-        <span className="text-sm text-neutral-600">Group by:</span>
+        <span className="text-sm text-slate-400">Group by:</span>
         {(['day', 'week', 'month'] as const).map((g) => (
           <button
             key={g}
             onClick={() => update({ groupBy: g })}
             className={`rounded px-2 py-1 text-sm ${
-              current.groupBy === g ? 'bg-black text-white' : 'border hover:bg-neutral-50'
+              current.groupBy === g
+                ? 'bg-blue-600 text-white'
+                : 'border border-slate-600 bg-slate-700 text-slate-200 hover:bg-slate-600'
             }`}
           >
             {g}

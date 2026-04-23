@@ -26,16 +26,35 @@ export function UsageChart({ data, bucket }: Props) {
     bucket === 'day' ? 'Daily usage ($)' : bucket === 'week' ? 'Weekly usage ($)' : 'Monthly usage ($)';
 
   return (
-    <div className="rounded-lg border border-neutral-200 bg-white p-4">
-      <h2 className="mb-3 text-sm font-medium text-neutral-700">{title}</h2>
+    <div className="rounded-lg bg-slate-800 p-6">
+      <h2 className="mb-3 text-sm font-medium text-slate-300">{title}</h2>
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ left: 4, right: 8, top: 8, bottom: 4 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-            <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-            <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${v}`} />
-            <Tooltip formatter={(v) => `$${Number(v).toFixed(2)}`} />
-            <Area type="monotone" dataKey="dollars" stroke="#111" fill="#111" fillOpacity={0.1} />
+            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+            <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#94a3b8' }} stroke="#475569" />
+            <YAxis
+              tick={{ fontSize: 11, fill: '#94a3b8' }}
+              stroke="#475569"
+              tickFormatter={(v) => `$${v}`}
+            />
+            <Tooltip
+              formatter={(v) => `$${Number(v).toFixed(2)}`}
+              contentStyle={{
+                backgroundColor: '#1e293b',
+                border: '1px solid #334155',
+                borderRadius: 6,
+                color: '#e2e8f0',
+              }}
+              labelStyle={{ color: '#cbd5e1' }}
+            />
+            <Area
+              type="monotone"
+              dataKey="dollars"
+              stroke="#60a5fa"
+              fill="#3b82f6"
+              fillOpacity={0.2}
+            />
           </AreaChart>
         </ResponsiveContainer>
       </div>
