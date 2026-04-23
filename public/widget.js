@@ -1320,6 +1320,18 @@
     return "<1h";
   }
 
+  function formatRelativeTime(isoOrMs) {
+    if (!isoOrMs) return "";
+    var t = typeof isoOrMs === "string" ? Date.parse(isoOrMs) : isoOrMs;
+    if (isNaN(t)) return "";
+    var diff = Date.now() - t;
+    if (diff < 60000) return "just now";
+    if (diff < 3600000) return Math.floor(diff / 60000) + "m ago";
+    if (diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
+    if (diff < 86400000 * 30) return Math.floor(diff / 86400000) + "d ago";
+    return new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  }
+
   function renderStats(stats) {
     if (!stats || !stats.avgResolutionMs) return null;
     return h("div", { className: "rw-stats-banner" }, [
@@ -1352,6 +1364,36 @@
     }
     var mineBtn = h("button", mineBtnAttrs, mineChildren);
     return h("div", { className: "rw-tabs" }, [updatesBtn, allBtn, mineBtn]);
+  }
+
+  function renderUpdatesList(tickets) {
+    if (!tickets || tickets.length === 0) {
+      return renderEmpty("Nothing shipped yet.");
+    }
+    var container = h("div", null);
+    tickets.forEach(function (p) {
+      var desc = (p.description || "").length > 140
+        ? p.description.slice(0, 140) + "…"
+        : (p.description || "");
+      var badge = h("span", {
+        className: "rw-status-badge",
+        style: "color:#10b981;background:#10b9811a",
+      }, "Done");
+      var relTime = p.completedAt ? "Shipped " + formatRelativeTime(p.completedAt) : "";
+      var metaItems = [badge];
+      if (relTime) metaItems.push(h("span", { className: "rw-submission-date" }, relTime));
+      var cardChildren = [h("div", { className: "rw-submission-title" }, p.title)];
+      if (desc) cardChildren.push(h("div", { className: "rw-submission-desc" }, desc));
+      cardChildren.push(h("div", { className: "rw-submission-meta" }, metaItems));
+      var card = h("div", {
+        className: "rw-submission-card",
+        onClick: (function (ticketId) {
+          return function () { showTicketDetail(ticketId); };
+        })(p.id),
+      }, cardChildren);
+      container.appendChild(card);
+    });
+    return container;
   }
 
   function renderMySubmissions(tickets) {
@@ -1652,6 +1694,36 @@
     }).catch(function (err) {
       setBodyContent(renderNotice("error", "Could not load proposals: " + err.message));
     });
+  }
+
+  function showUpdatesView(isIdentified) {
+    if (updatesCache) {
+      renderUpdatesView(isIdentified);
+      return;
+    }
+    setBodyContent(renderLoading());
+    loadUpdates().then(function (data) {
+      updatesCache = data.tickets || [];
+      renderUpdatesView(isIdentified);
+    }).catch(function (err) {
+      setBodyContent(renderNotice("error", "Could not load updates: " + err.message));
+    });
+  }
+
+  function renderUpdatesView(isIdentified) {
+    var container = h("div", null);
+    var statsBanner = renderStats(statsCache);
+    if (statsBanner) container.appendChild(statsBanner);
+
+    if (isIdentified) {
+      container.appendChild(renderInlineForm(submitSuggestion));
+    } else {
+      container.appendChild(renderLoginPrompt());
+    }
+    container.appendChild(h("hr", { className: "rw-divider" }));
+    container.appendChild(renderTabs(handleTabChange, mySubmissionsCountCache, isIdentified));
+    container.appendChild(renderUpdatesList(updatesCache));
+    setBodyContent(container);
   }
 
   function renderCurrentTab(isIdentified) {
