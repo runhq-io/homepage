@@ -11,17 +11,14 @@ import { db } from '../../db/index';
 import {
   users,
   subscriptions,
-  usageRecords,
   usageEvents,
   usageAdjustments,
   plans,
   adminUsers,
   type PlanId,
   type Subscription,
-  type UsageRecord,
   type Plan,
 } from '../../db/schema';
-import type { TokenUsage } from '@runhq/server-protocol';
 import type { TokenCounts } from './pricing';
 
 // ============================================================================
@@ -366,19 +363,20 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
   console.log(`[UsageService] getCreditBalance for userId: ${userId}`);
 
   const subscription = await getOrCreateSubscription(userId);
-  const usageRecord = await getOrCreateCurrentUsageRecord(userId);
+  const period = getBillingPeriod();
+  const spending = await getPeriodSpending(userId, period.start, period.end);
 
-  console.log(`[UsageService] getCreditBalance - periodSpentCents: ${usageRecord.totalCostCents}, requestCount: ${usageRecord.requestCount}`);
+  console.log(`[UsageService] getCreditBalance - periodSpentCents: ${spending.totalCostCents}, requestCount: ${spending.requestCount}`);
 
   return {
     balanceCents: subscription.creditBalanceCents || 0,
     balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
     plan: subscription.planId as PlanId,
     hasPaymentMethod: !!subscription.stripeCustomerId,
-    periodSpentCents: usageRecord.totalCostCents || 0,
-    periodRequestCount: usageRecord.requestCount || 0,
-    periodStart: usageRecord.periodStart,
-    periodEnd: usageRecord.periodEnd,
+    periodSpentCents: spending.totalCostCents,
+    periodRequestCount: spending.requestCount,
+    periodStart: period.start,
+    periodEnd: period.end,
   };
 }
 
@@ -439,30 +437,39 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
 }
 
 
+export interface UsageHistoryRow {
+  period: string;        // 'YYYY-MM'
+  inputTokens: number;
+  outputTokens: number;
+  totalCostCents: number;
+  requestCount: number;
+}
+
 /**
- * Get usage records for a time period
+ * Get usage history grouped by calendar month for a time period.
+ * Replaces the old usage_records-based getUsageRecords.
  */
-export async function getUsageRecords(
-  userToken: string,
-  startTime?: number,
-  endTime?: number
-): Promise<UsageRecord[]> {
-  const userId = extractUserIdFromToken(userToken);
-  if (!userId) {
-    return [];
-  }
-
-  const start = startTime ? new Date(startTime) : new Date(0);
-  const end = endTime ? new Date(endTime) : new Date();
-
-  return db.query.usageRecords.findMany({
-    where: and(
-      eq(usageRecords.userId, userId),
-      gte(usageRecords.periodStart, start),
-      lte(usageRecords.periodEnd, end)
-    ),
-    orderBy: (records, { desc }) => [desc(records.periodStart)],
-  });
+export async function getUsageHistory(
+  userId: string,
+  start: Date,
+  end: Date,
+): Promise<UsageHistoryRow[]> {
+  return db
+    .select({
+      period:         sql<string>`to_char(date_trunc('month', ${usageEvents.ts}), 'YYYY-MM')`,
+      inputTokens:    sql<number>`COALESCE(SUM(${usageEvents.inputTokens}), 0)::int`,
+      outputTokens:   sql<number>`COALESCE(SUM(${usageEvents.outputTokens}), 0)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+    })
+    .from(usageEvents)
+    .where(and(
+      eq(usageEvents.userId, userId),
+      gte(usageEvents.ts, start),
+      lte(usageEvents.ts, end),
+    ))
+    .groupBy(sql`date_trunc('month', ${usageEvents.ts})`)
+    .orderBy(sql`date_trunc('month', ${usageEvents.ts})`);
 }
 
 // ============================================================================
@@ -583,18 +590,17 @@ export async function getUserCredits(userId: string): Promise<{
     return null;
   }
 
-  const usageRecord = await getOrCreateCurrentUsageRecord(userId);
-
-  // Get user email
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, userId),
-  });
+  const period = getBillingPeriod();
+  const [spending, user] = await Promise.all([
+    getPeriodSpending(userId, period.start, period.end),
+    db.query.users.findFirst({ where: eq(users.id, userId) }),
+  ]);
 
   return {
     plan: subscription.planId as PlanId,
     balanceCents: subscription.creditBalanceCents || 0,
     balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
-    periodSpentCents: usageRecord.totalCostCents || 0,
+    periodSpentCents: spending.totalCostCents,
     email: user?.email || undefined,
   };
 }
@@ -679,25 +685,20 @@ export async function listUsersWithUsage(limit = 50, offset = 0): Promise<Array<
     orderBy: (subs, { desc }) => [desc(subs.createdAt)],
   });
 
-  const result = [];
-  for (const sub of allSubscriptions) {
-    const usageRecord = await db.query.usageRecords.findFirst({
-      where: and(
-        eq(usageRecords.userId, sub.userId),
-        gte(usageRecords.periodStart, getBillingPeriod().start),
-      ),
-    });
+  const period = getBillingPeriod();
 
-    result.push({
+  const result = await Promise.all(allSubscriptions.map(async (sub) => {
+    const spending = await getPeriodSpending(sub.userId, period.start, period.end);
+    return {
       userId: sub.userId,
       email: sub.user?.email || 'unknown',
       plan: sub.planId as PlanId,
       balanceCents: sub.creditBalanceCents || 0,
       balanceDollars: centsToDollars(sub.creditBalanceCents || 0),
-      periodSpentCents: usageRecord?.totalCostCents || 0,
+      periodSpentCents: spending.totalCostCents,
       createdAt: sub.createdAt,
-    });
-  }
+    };
+  }));
 
   return result;
 }
