@@ -188,7 +188,8 @@ export async function getOrCreateSubscription(userId: string): Promise<Subscript
     userId,
     planId: 'free',
     status: 'active',
-    creditBalanceCents: planConfig.monthlyCreditsCents,
+    // numeric column: Drizzle expects a string at write time.
+    creditBalanceCents: planConfig.monthlyCreditsCents.toFixed(4),
     currentPeriodStart: start,
     currentPeriodEnd: end,
   }).returning();
@@ -225,16 +226,18 @@ export async function updateSubscriptionPlan(
     newPlanId !== 'free' &&
     planConfig.signupBonusCents > 0;
 
-  // Add monthly credits + signup bonus to balance
+  // Add monthly credits + signup bonus to balance.
+  // creditBalanceCents comes back from Drizzle as a string (numeric column) — cast first.
   const creditsToAdd = planConfig.monthlyCreditsCents + (grantSignupBonus ? planConfig.signupBonusCents : 0);
-  const newBalance = (existing.creditBalanceCents || 0) + creditsToAdd;
+  const newBalance = Number(existing.creditBalanceCents ?? 0) + creditsToAdd;
 
   const [updated] = await db.update(subscriptions)
     .set({
       planId: newPlanId,
       stripeSubscriptionId: stripeSubscriptionId || existing.stripeSubscriptionId,
       stripeCustomerId: stripeCustomerId || existing.stripeCustomerId,
-      creditBalanceCents: newBalance,
+      // numeric column: pass as string.
+      creditBalanceCents: newBalance.toFixed(4),
       updatedAt: new Date(),
     })
     .where(eq(subscriptions.userId, userId))
@@ -281,12 +284,11 @@ export async function trackUsage(input: TrackUsageInput): Promise<void> {
 
   await db.transaction(async (tx) => {
     // Deduct balance atomically using SQL GREATEST(0, balance - cost).
-    // creditBalanceCents is an integer column — round before writing.
-    const costWhole = Math.round(costCents);
+    // Cost preserved at sub-cent precision via numeric(12,4) column — no rounding.
     await tx
       .update(subscriptions)
       .set({
-        creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${costWhole})`,
+        creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${costCents.toFixed(4)}::numeric)`,
         updatedAt: new Date(),
       })
       .where(eq(subscriptions.userId, userId));
@@ -350,9 +352,11 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
 
   console.log(`[UsageService] getCreditBalance - periodSpentCents: ${spending.totalCostCents}, requestCount: ${spending.requestCount}`);
 
+  // Drizzle returns numeric as a string — cast once at the boundary.
+  const balanceCents = Number(subscription.creditBalanceCents ?? 0);
   return {
-    balanceCents: subscription.creditBalanceCents || 0,
-    balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
+    balanceCents,
+    balanceDollars: centsToDollars(balanceCents),
     plan: subscription.planId as PlanId,
     hasPaymentMethod: !!subscription.stripeCustomerId,
     periodSpentCents: spending.totalCostCents,
@@ -384,18 +388,19 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
   const hasPaymentMethod = !!subscription.stripeCustomerId;
   const periodEnd = subscription.currentPeriodEnd;
 
+  // Drizzle returns numeric as a string — cast once at the boundary.
+  const balance = Number(subscription.creditBalanceCents ?? 0);
+
   if (subscription.status === 'past_due') {
     return {
       allowed: false,
       reason: 'past_due',
-      balanceCents: subscription.creditBalanceCents || 0,
+      balanceCents: balance,
       plan: subscription.planId as PlanId,
       hasPaymentMethod,
       periodEnd,
     };
   }
-
-  const balance = subscription.creditBalanceCents || 0;
 
   // Need at least 1 cent to make a request
   if (balance < 1) {
@@ -570,8 +575,9 @@ export async function grantCredits(
   });
 
   // Re-read balance to report back to the caller.
+  // Drizzle returns numeric as a string — cast at the boundary.
   const sub = await getOrCreateSubscription(targetUserId);
-  const newBalance = sub.creditBalanceCents || 0;
+  const newBalance = Number(sub.creditBalanceCents ?? 0);
 
   console.log(`[UsageService] Admin ${adminUserId} granted $${centsToDollars(amountCents)} to user ${targetUserId}${reason ? ` (${reason})` : ''}`);
 
@@ -602,10 +608,12 @@ export async function getUserCredits(userId: string): Promise<{
     db.query.users.findFirst({ where: eq(users.id, userId) }),
   ]);
 
+  // Drizzle returns numeric as a string — cast once at the boundary.
+  const balanceCents = Number(subscription.creditBalanceCents ?? 0);
   return {
     plan: subscription.planId as PlanId,
-    balanceCents: subscription.creditBalanceCents || 0,
-    balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
+    balanceCents,
+    balanceDollars: centsToDollars(balanceCents),
     periodSpentCents: spending.totalCostCents,
     email: user?.email || undefined,
   };
@@ -695,12 +703,14 @@ export async function listUsersWithUsage(limit = 50, offset = 0): Promise<Array<
 
   const result = await Promise.all(allSubscriptions.map(async (sub) => {
     const spending = await getPeriodSpending(sub.userId, period.start, period.end);
+    // Drizzle returns numeric as a string — cast once at the boundary.
+    const balanceCents = Number(sub.creditBalanceCents ?? 0);
     return {
       userId: sub.userId,
       email: sub.user?.email || 'unknown',
       plan: sub.planId as PlanId,
-      balanceCents: sub.creditBalanceCents || 0,
-      balanceDollars: centsToDollars(sub.creditBalanceCents || 0),
+      balanceCents,
+      balanceDollars: centsToDollars(balanceCents),
       periodSpentCents: spending.totalCostCents,
       createdAt: sub.createdAt,
     };

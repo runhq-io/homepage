@@ -933,7 +933,8 @@ export function createHttpApp() {
             .from(subscriptions)
             .where(eq(subscriptions.userId, userId))
             .limit(1);
-          newBalanceCents = sub?.b ?? 0;
+          // creditBalanceCents is numeric(12,4) — Drizzle returns it as a string.
+          newBalanceCents = sub?.b !== undefined ? Number(sub.b) : 0;
         } catch (err) {
           console.error('[HttpServer] failed to read post-deduct balance', err);
           // Leave newBalanceCents as-is (0) rather than fail the response.

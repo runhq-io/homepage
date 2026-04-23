@@ -42,7 +42,8 @@ async function getUsersWithDetails() {
       const plan = sub ? plansById.get(sub.planId) : null;
       const totalUsageCents = (usageByUser.get(user.id) || 0) + (adjustByUser.get(user.id) || 0);
       const totalPurchasedCents = purchasesByUser.get(user.id) || 0;
-      const balanceCents = sub?.creditBalanceCents || 0;
+      // subscriptions.creditBalanceCents is numeric(12,4) — Drizzle returns as string.
+      const balanceCents = Number(sub?.creditBalanceCents ?? 0);
 
       return {
         ...user,

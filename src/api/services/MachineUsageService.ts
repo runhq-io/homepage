@@ -236,10 +236,15 @@ async function deductCredits(userId: string, amountCents: number): Promise<void>
 
   if (!subscription) return;
 
-  const newBalance = Math.max(0, (subscription.creditBalanceCents || 0) - amountCents);
+  // creditBalanceCents is numeric — Drizzle returns it as a string; cast first.
+  const newBalance = Math.max(0, Number(subscription.creditBalanceCents ?? 0) - amountCents);
 
   await db
     .update(subscriptions)
-    .set({ creditBalanceCents: newBalance, updatedAt: new Date() })
+    .set({
+      // numeric column: pass as string.
+      creditBalanceCents: newBalance.toFixed(4),
+      updatedAt: new Date(),
+    })
     .where(eq(subscriptions.id, subscription.id));
 }

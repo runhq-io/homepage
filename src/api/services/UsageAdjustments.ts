@@ -21,7 +21,6 @@ export interface ApplyAdjustmentInput {
 export async function applyAdjustment(input: ApplyAdjustmentInput): Promise<void> {
   const { userId, adminUserId, amountCents, reason } = input;
   if (!reason.trim()) throw new Error('applyAdjustment: reason is required');
-  const wholeAmount = Math.round(amountCents);
 
   // Ensure a subscription row exists — otherwise UPDATE would silently no-op
   // for users who haven't made any Claude calls yet (e.g., admin grants to
@@ -29,10 +28,11 @@ export async function applyAdjustment(input: ApplyAdjustmentInput): Promise<void
   await getOrCreateSubscription(userId);
 
   await db.transaction(async (tx) => {
+    // Balance is numeric(12,4) — preserve sub-cent precision, no rounding.
     await tx
       .update(subscriptions)
       .set({
-        creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${wholeAmount})`,
+        creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${amountCents.toFixed(4)}::numeric)`,
         updatedAt: new Date(),
       })
       .where(eq(subscriptions.userId, userId));

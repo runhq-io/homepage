@@ -46,8 +46,11 @@ export const subscriptions = pgTable('subscriptions', {
   stripePriceId: text('stripe_price_id'),
   // Status
   status: text('status').$type<SubscriptionStatus>().notNull().default('active'),
-  // Credit balance (in cents - $1.00 = 100 cents)
-  creditBalanceCents: integer('credit_balance_cents').notNull().default(0),
+  // Credit balance (in cents - $1.00 = 100 cents).
+  // numeric(12,4) to match usage_events.cost_cents precision. This lets
+  // tiny sub-cent Haiku+cache deductions be tracked without rounding drift.
+  // Drizzle returns numeric as string — all readers must cast to Number().
+  creditBalanceCents: numeric('credit_balance_cents', { precision: 12, scale: 4 }).notNull().default('0'),
   // Billing period
   currentPeriodStart: timestamp('current_period_start'),
   currentPeriodEnd: timestamp('current_period_end'),

@@ -18,8 +18,9 @@ describe('applyAdjustment', () => {
       { id: userId,  email: 'adj-test@example.com' } as any,
       { id: adminId, email: 'admin-test@example.com' } as any,
     ]);
+    // creditBalanceCents is numeric(12,4) — pass as string.
     await db.insert(subscriptions).values({
-      userId, planId: 'free', status: 'active', creditBalanceCents: 10000,
+      userId, planId: 'free', status: 'active', creditBalanceCents: '10000.0000',
     } as any);
   });
 
@@ -34,7 +35,8 @@ describe('applyAdjustment', () => {
     await applyAdjustment({ userId, adminUserId: adminId, amountCents: 500, reason: 'correction' });
 
     const [sub] = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId));
-    expect(sub.creditBalanceCents).toBe(9500);
+    // Drizzle returns numeric(12,4) as string — cast.
+    expect(Number(sub.creditBalanceCents)).toBe(9500);
 
     const rows = await db.select().from(usageAdjustments).where(eq(usageAdjustments.userId, userId));
     expect(rows).toHaveLength(1);
@@ -47,7 +49,7 @@ describe('applyAdjustment', () => {
     await applyAdjustment({ userId, adminUserId: adminId, amountCents: -200, reason: 'refund for outage' });
 
     const [sub] = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId));
-    expect(sub.creditBalanceCents).toBe(10200);
+    expect(Number(sub.creditBalanceCents)).toBe(10200);
   });
 
   it('adjustments appear in getPeriodSpending', async () => {
@@ -96,7 +98,7 @@ describe('applyAdjustment', () => {
     expect(sub).toBeDefined();
     // getOrCreateSubscription seeds new free-tier users with planConfig.monthlyCreditsCents (500).
     // A -500 adjustment (credit grant) applies GREATEST(0, 500 - (-500)) = 1000.
-    expect(sub.creditBalanceCents).toBe(1000);
+    expect(Number(sub.creditBalanceCents)).toBe(1000);
 
     const rows = await db.select().from(usageAdjustments).where(eq(usageAdjustments.userId, userId));
     expect(rows).toHaveLength(1);
@@ -117,8 +119,9 @@ describe('grantCredits', () => {
       { id: u, email: 'gc-test@example.com' } as any,
       { id: a, email: 'gc-admin@example.com' } as any,
     ]);
+    // creditBalanceCents is numeric(12,4) — pass as string.
     await db.insert(subscriptions).values({
-      userId: u, planId: 'free', status: 'active', creditBalanceCents: 5000,
+      userId: u, planId: 'free', status: 'active', creditBalanceCents: '5000.0000',
     } as any);
   });
 

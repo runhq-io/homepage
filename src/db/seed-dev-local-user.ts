@@ -34,7 +34,8 @@ export async function seedDevLocalUser(): Promise<void> {
       userId: DEV_LOCAL_USER_ID,
       planId: 'free',
       status: 'active',
-      creditBalanceCents: 1_000_000, // $10,000 — dev convenience; never hits zero
+      // numeric(12,4) column — pass as string. $10,000 — dev convenience; never hits zero.
+      creditBalanceCents: '1000000.0000',
     } as any).onConflictDoNothing().returning({ id: subscriptions.id });
 
     if (subResult.length > 0) {

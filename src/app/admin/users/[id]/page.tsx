@@ -93,7 +93,15 @@ export default async function UserDetailPage({ params }: { params: Promise<{ id:
       <div className="bg-slate-800 rounded-lg p-4 mb-6">
         <SubscriptionManager
           userId={id}
-          subscription={subscriptionData?.subscription || null}
+          // creditBalanceCents is numeric(12,4) — Drizzle returns as string; cast at the boundary.
+          subscription={
+            subscriptionData?.subscription
+              ? {
+                  ...subscriptionData.subscription,
+                  creditBalanceCents: Number(subscriptionData.subscription.creditBalanceCents ?? 0),
+                }
+              : null
+          }
           plan={subscriptionData?.plan || null}
           allPlans={allPlans}
           currentUsage={currentUsage}
