@@ -23,8 +23,9 @@
   var panelBodyEl = null;
   var headerTitleEl = null;
   var isOpen = false;
-  var activeTab = "all"; // "all" | "mine"
+  var activeTab = "updates"; // "updates" | "all" | "mine"
   var statsCache = null;
+  var updatesCache = null;
 
   // ---------------------------------------------------------------------------
   // Console & error capture
@@ -166,6 +167,26 @@
 
   function deleteAttachmentApi(ticketId, attachmentId) {
     return api("/api/widget/tickets/" + ticketId + "/attachments/" + attachmentId, { method: "DELETE" });
+  }
+
+  function loadUpdates() { return api("/api/widget/tickets/updates"); }
+  function postComment(ticketId, content) {
+    return api("/api/widget/tickets/" + ticketId + "/comments", { method: "POST", body: { content: content } });
+  }
+  function editComment(ticketId, commentId, content) {
+    return api("/api/widget/tickets/" + ticketId + "/comments/" + commentId, { method: "PATCH", body: { content: content } });
+  }
+  function removeComment(ticketId, commentId) {
+    return api("/api/widget/tickets/" + ticketId + "/comments/" + commentId, { method: "DELETE" });
+  }
+  function uploadCommentAttachment(ticketId, commentId, file) {
+    var formData = new FormData();
+    formData.append("file", file);
+    return fetch(RUNHQ_API + "/api/widget/tickets/" + ticketId + "/comments/" + commentId + "/attachments", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + config.token },
+      body: formData,
+    }).then(function (r) { return r.json(); });
   }
 
   // ---------------------------------------------------------------------------
@@ -1279,6 +1300,14 @@
   // ---------------------------------------------------------------------------
   // Duration, stats, tabs, my-submissions renderers
   // ---------------------------------------------------------------------------
+
+  function handleTabChange(tab) {
+    activeTab = tab;
+    var isIdentified = !!config.isIdentified;
+    if (tab === "updates") showUpdatesView(isIdentified);
+    else if (tab === "mine") showMySubmissionsView(isIdentified);
+    else renderCurrentTab(isIdentified);
+  }
 
   function formatDuration(ms) {
     if (!ms || ms <= 0) return "";
