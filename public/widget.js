@@ -186,7 +186,15 @@
       method: "POST",
       headers: { Authorization: "Bearer " + config.token },
       body: formData,
-    }).then(function (r) { return r.json(); });
+    }).then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok) {
+          var msg = (data && data.error) || ("Upload failed with status " + r.status);
+          throw new Error(msg);
+        }
+        return data;
+      });
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -735,6 +743,7 @@
       ".rw-timeline-date { font-size: 10px; color: " + textFaint + "; }",
       ".rw-timeline-body { font-size: 12px; color: " + textMuted + "; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }",
       ".rw-timeline-activity { font-size: 11px; color: " + textFaint + "; font-style: italic; }",
+      ".rw-timeline-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}",
 
       /* Edit form within detail */
       ".rw-edit-form { margin-bottom: 12px; }",
@@ -1267,6 +1276,7 @@
         createdByType: c.createdByType,
         isAuthorOfCurrentUser: c.isAuthorOfCurrentUser,
         body: c.body,
+        attachments: c.attachments,
         createdAt: c.createdAt,
         updatedAt: c.updatedAt,
       });
@@ -1302,7 +1312,27 @@
         var cardBody;
         var cardChildren;
         if (item.kind === "comment") {
-          cardBody = h("div", { className: "rw-timeline-body" }, item.body);
+          var bodyChildren = [
+            h("div", { className: "rw-timeline-body" }, item.body),
+          ];
+          if (item.attachments && item.attachments.length > 0) {
+            var attachContainer = h("div", { className: "rw-timeline-attachments" });
+            item.attachments.forEach(function (att) {
+              if (att.url && att.mimeType && att.mimeType.indexOf("image/") === 0) {
+                var img = h("img", {
+                  className: "rw-detail-attach-img",
+                  src: att.url,
+                  alt: att.originalName || "attachment",
+                  onClick: function () { window.open(att.url, "_blank"); },
+                });
+                attachContainer.appendChild(img);
+              }
+            });
+            if (attachContainer.childNodes.length > 0) {
+              bodyChildren.push(attachContainer);
+            }
+          }
+          cardBody = h("div", null, bodyChildren);
           cardChildren = [cardHeader, cardBody];
           if (item.isAuthorOfCurrentUser && config.isIdentified) {
             cardChildren.push(renderCommentActions(ticket.id, item));
