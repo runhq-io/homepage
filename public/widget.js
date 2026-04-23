@@ -681,6 +681,7 @@
       ".rw-tab-active{color:" + text + ";background:" + border + "}",
       ".rw-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:" + accent + ";color:#fff;font-size:11px;font-weight:600;margin-left:4px}",
       ".rw-tab-btn:disabled{opacity:.5;cursor:not-allowed}",
+      ".rw-edited-marker{color:" + textMuted + ";font-size:11px;margin-left:4px;cursor:help}",
 
       /* Login prompt */
       ".rw-login-prompt{padding:10px 12px;border-radius:8px;background:" + bgAlt + ";text-align:center;font-size:12px;color:" + textMuted + ";margin-bottom:8px}",
@@ -1112,13 +1113,21 @@
       var timelineEl = h("div", { className: "rw-timeline" });
       timeline.forEach(function (item) {
         var dotClass = "rw-timeline-dot" + (item.kind === "comment" ? " rw-timeline-dot-comment" : "");
-        var cardHeader = h("div", { className: "rw-timeline-card-header" }, [
+        var headerChildren = [
           h("span", { className: "rw-timeline-author" },
             item.kind === "comment"
               ? formatAuthorName(item.authorName, item.externalUserId, item.createdByType)
               : (item.createdByName || "System")),
           h("span", { className: "rw-timeline-date" }, formatDate(item.createdAt)),
-        ]);
+        ];
+        if (item.kind === "comment" && item.updatedAt && item.createdAt
+            && new Date(item.updatedAt).getTime() > new Date(item.createdAt).getTime() + 1000) {
+          headerChildren.push(h("span", {
+            className: "rw-edited-marker",
+            title: "Edited at " + formatDate(item.updatedAt),
+          }, " (edited)"));
+        }
+        var cardHeader = h("div", { className: "rw-timeline-card-header" }, headerChildren);
         var cardBody;
         if (item.kind === "comment") {
           cardBody = h("div", { className: "rw-timeline-body" }, item.body);
