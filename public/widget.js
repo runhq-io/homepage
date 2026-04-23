@@ -1087,7 +1087,17 @@
     // Timeline
     var timeline = [];
     comments.forEach(function (c) {
-      timeline.push({ kind: "comment", id: c.id, authorName: c.authorName, body: c.body, createdAt: c.createdAt });
+      timeline.push({
+        kind: "comment",
+        id: c.id,
+        authorName: c.authorName,
+        externalUserId: c.externalUserId,
+        createdByType: c.createdByType,
+        isAuthorOfCurrentUser: c.isAuthorOfCurrentUser,
+        body: c.body,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+      });
     });
     activity.forEach(function (a) {
       timeline.push({ kind: "activity", id: a.id, type: a.type, content: a.content, createdByName: a.createdByName, createdAt: a.createdAt, metadata: a.metadata });
@@ -1104,7 +1114,9 @@
         var dotClass = "rw-timeline-dot" + (item.kind === "comment" ? " rw-timeline-dot-comment" : "");
         var cardHeader = h("div", { className: "rw-timeline-card-header" }, [
           h("span", { className: "rw-timeline-author" },
-            item.kind === "comment" ? (item.authorName || "Anonymous") : (item.createdByName || "System")),
+            item.kind === "comment"
+              ? formatAuthorName(item.authorName, item.externalUserId, item.createdByType)
+              : (item.createdByName || "System")),
           h("span", { className: "rw-timeline-date" }, formatDate(item.createdAt)),
         ]);
         var cardBody;
@@ -1331,6 +1343,14 @@
     if (diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
     if (diff < 86400000 * 30) return Math.floor(diff / 86400000) + "d ago";
     return new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  }
+
+  function formatAuthorName(authorName, externalUserId, createdByType) {
+    if (createdByType === "member") return authorName || "RunHQ member";
+    if (authorName && externalUserId) return authorName + " (app-user id:" + externalUserId + ")";
+    if (authorName) return authorName;
+    if (externalUserId) return "app-user (id:" + externalUserId + ")";
+    return "Anonymous";
   }
 
   function renderStats(stats) {
