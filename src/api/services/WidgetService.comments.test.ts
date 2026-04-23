@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import { users, servers, workspaceTasks, workspaceTaskComments, widgetProjects, widgetUsers } from '../../db/schema';
-import { addWidgetComment } from './WidgetService';
+import { addWidgetComment, updateWidgetComment, deleteWidgetComment } from './WidgetService';
 
 const RUN_HEX = randomBytes(6).toString('hex');
 const SERVER_ID = `ws_cmt_test_${RUN_HEX}`;
@@ -69,5 +69,61 @@ describe('addWidgetComment', () => {
   it('uses the widget user name from widget_users.name as createdByName', async () => {
     const result = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'second');
     expect(result.authorName).toBe('Author');
+  });
+});
+
+describe('updateWidgetComment', () => {
+  it('updates content when widgetUserId matches the author', async () => {
+    const created = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'original');
+    await new Promise(r => setTimeout(r, 20));
+    const updated = await updateWidgetComment(PROJECT_ID, TASK_ID, created.id, WIDGET_USER_ID, 'edited');
+    expect(updated.body).toBe('edited');
+    expect(new Date(updated.updatedAt).getTime()).toBeGreaterThan(new Date(created.updatedAt).getTime());
+  });
+
+  it('throws Not the comment author when widgetUserId is different', async () => {
+    const created = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'x');
+    const [otherUser] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID, externalUserId: `ext-other-${RUN_HEX}`, name: 'Other',
+    }).returning({ id: widgetUsers.id });
+    await expect(
+      updateWidgetComment(PROJECT_ID, TASK_ID, created.id, otherUser!.id, 'hacked')
+    ).rejects.toThrow('Not the comment author');
+  });
+
+  it('throws Not the comment author when comment is by a member (not external)', async () => {
+    const [memberComment] = await db.insert(workspaceTaskComments).values({
+      serverId: SERVER_ID, taskId: TASK_ID, content: 'member',
+      createdByType: 'member', createdById: USER_ID, createdByName: 'M', updatedAt: new Date(),
+    }).returning({ id: workspaceTaskComments.id });
+    // Even if widgetUserId happens to equal USER_ID (collision), widget users cannot edit member comments
+    await expect(
+      updateWidgetComment(PROJECT_ID, TASK_ID, memberComment!.id, USER_ID, 'spoof')
+    ).rejects.toThrow('Not the comment author');
+  });
+
+  it('throws Comment not found for unknown id', async () => {
+    await expect(
+      updateWidgetComment(PROJECT_ID, TASK_ID, '00000000-0000-0000-0000-000000000000', WIDGET_USER_ID, 'x')
+    ).rejects.toThrow('Comment not found');
+  });
+});
+
+describe('deleteWidgetComment', () => {
+  it('soft-deletes when widgetUserId matches the author', async () => {
+    const created = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'to-delete');
+    await deleteWidgetComment(PROJECT_ID, TASK_ID, created.id, WIDGET_USER_ID);
+    const [row] = await db.select().from(workspaceTaskComments).where(eq(workspaceTaskComments.id, created.id));
+    expect(row.deletedAt).not.toBeNull();
+  });
+
+  it('throws Not the comment author when widgetUserId is different', async () => {
+    const created = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'mine');
+    const [other] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID, externalUserId: `ext-o2-${RUN_HEX}`, name: 'O',
+    }).returning({ id: widgetUsers.id });
+    await expect(
+      deleteWidgetComment(PROJECT_ID, TASK_ID, created.id, other!.id)
+    ).rejects.toThrow('Not the comment author');
   });
 });

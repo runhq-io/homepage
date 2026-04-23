@@ -610,6 +610,61 @@ export async function addWidgetComment(
   return mapCommentToWidgetResponse(comment, externalUserIdMap, widgetUserId);
 }
 
+async function loadAndAuthorizeWidgetComment(
+  projectId: string,
+  ticketId: string,
+  commentId: string,
+  widgetUserId: string,
+): Promise<{ serverId: string }> {
+  const visible = await resolveTicketVisibleToWidget(projectId, ticketId);
+  if (!visible) throw new Error('Ticket not found');
+  const [row] = await db
+    .select({
+      id: workspaceTaskComments.id,
+      createdByType: workspaceTaskComments.createdByType,
+      createdById: workspaceTaskComments.createdById,
+      deletedAt: workspaceTaskComments.deletedAt,
+    })
+    .from(workspaceTaskComments)
+    .where(and(
+      eq(workspaceTaskComments.id, commentId),
+      eq(workspaceTaskComments.taskId, ticketId),
+    ))
+    .limit(1);
+  if (!row || row.deletedAt) throw new Error('Comment not found');
+  if (row.createdByType !== 'external' || row.createdById !== widgetUserId) {
+    throw new Error('Not the comment author');
+  }
+  return { serverId: visible.serverId };
+}
+
+export async function updateWidgetComment(
+  projectId: string,
+  ticketId: string,
+  commentId: string,
+  widgetUserId: string,
+  content: string,
+) {
+  const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
+  const updated = await WorkspaceTaskService.updateComment(serverId, ticketId, commentId, { content });
+  if (!updated) throw new Error('Comment not found');
+  const externalUserIdMap = await resolveExternalUserIds([updated]);
+  return mapCommentToWidgetResponse(updated, externalUserIdMap, widgetUserId);
+}
+
+export async function deleteWidgetComment(
+  projectId: string,
+  ticketId: string,
+  commentId: string,
+  widgetUserId: string,
+) {
+  await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
+  await db
+    .update(workspaceTaskComments)
+    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .where(eq(workspaceTaskComments.id, commentId));
+}
+
 const ALLOWED_METADATA_KEYS = new Set([
   'url', 'referrer', 'userAgent', 'viewport', 'screenSize',
   'locale', 'timestamp', 'consoleLogs', 'errors',
