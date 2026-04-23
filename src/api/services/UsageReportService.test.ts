@@ -60,8 +60,8 @@ describe('UsageReportService', () => {
     await db.delete(users).where(inArray(users.id, [u1, u2, adminId]));
   });
 
-  it('getSummary totals all rows in range by default', async () => {
-    const s = await getSummary(filter);
+  it('getSummary totals rows in range for seeded users', async () => {
+    const s = await getSummary({ ...filter, userIds: [u1, u2] });
     // 10 + 30 + 5 + 100 = 145
     expect(s.totalCostCents).toBeCloseTo(145, 3);
     expect(s.requestCount).toBe(4);
@@ -70,13 +70,13 @@ describe('UsageReportService', () => {
   });
 
   it('getSummary excludes pre-cutover when requested', async () => {
-    const s = await getSummary({ ...filter, excludePreCutover: true });
+    const s = await getSummary({ ...filter, userIds: [u1, u2], excludePreCutover: true });
     expect(s.totalCostCents).toBeCloseTo(45, 3);  // 10 + 30 + 5
     expect(s.requestCount).toBe(3);
   });
 
   it('getDailyTotals buckets by day', async () => {
-    const rows = await getDailyTotals({ ...filter, excludePreCutover: true }, 'day');
+    const rows = await getDailyTotals({ ...filter, userIds: [u1, u2], excludePreCutover: true }, 'day');
     // 2026-04-10: $10, 2026-04-12: $30, 2026-04-15: $5
     expect(rows).toHaveLength(3);
     const byDay = Object.fromEntries(rows.map((r) => [r.bucket, r.totalCostCents]));
@@ -86,7 +86,7 @@ describe('UsageReportService', () => {
   });
 
   it('getBreakdownByUser groups + sorts desc', async () => {
-    const rows = await getBreakdownByUser({ ...filter, excludePreCutover: true });
+    const rows = await getBreakdownByUser({ ...filter, userIds: [u1, u2], excludePreCutover: true });
     expect(rows[0].userId).toBe(u1);          // u1 spent $40
     expect(rows[0].totalCostCents).toBeCloseTo(40, 3);
     expect(rows[1].userId).toBe(u2);
@@ -94,21 +94,21 @@ describe('UsageReportService', () => {
   });
 
   it('getBreakdownByServer groups by serverId', async () => {
-    const rows = await getBreakdownByServer({ ...filter, excludePreCutover: true });
+    const rows = await getBreakdownByServer({ ...filter, userIds: [u1, u2], excludePreCutover: true });
     const byServer = Object.fromEntries(rows.map((r) => [r.serverId ?? '__null', r.totalCostCents]));
     expect(byServer.s1).toBeCloseTo(40, 3);
     expect(byServer.s2).toBeCloseTo(5, 3);
   });
 
   it('getBreakdownByTask uses taskLabel when present', async () => {
-    const rows = await getBreakdownByTask(filter);
+    const rows = await getBreakdownByTask({ ...filter, userIds: [u1, u2] });
     const taskOne = rows.find((r) => r.taskId === 't1');
     expect(taskOne?.taskLabel).toBe('Task One');
     expect(taskOne?.totalCostCents).toBeCloseTo(40, 3);
   });
 
   it('getBreakdownByAgent groups by agentId', async () => {
-    const rows = await getBreakdownByAgent(filter);
+    const rows = await getBreakdownByAgent({ ...filter, userIds: [u1, u2] });
     const byAgent = Object.fromEntries(rows.map((r) => [r.agentId ?? '__null', r.totalCostCents]));
     expect(byAgent.a1).toBeCloseTo(10, 3);
     expect(byAgent.a2).toBeCloseTo(30, 3);
