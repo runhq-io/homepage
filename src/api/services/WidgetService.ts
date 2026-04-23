@@ -21,7 +21,7 @@ import {
   workspaceTaskAttachments,
   servers,
 } from '../../db/schema';
-import { eq, and, ne, desc, sql, inArray, isNull, or } from 'drizzle-orm';
+import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
@@ -415,6 +415,7 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
           buildWidgetVisibleFilter(project),
           eq(workspaceTasks.visibility, 'public'),
           eq(workspaceTasks.status, 'done'),
+          isNotNull(workspaceTasks.completedAt),
         ))
         .orderBy(desc(workspaceTasks.completedAt))
         .limit(20)

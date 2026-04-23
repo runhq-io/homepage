@@ -35,6 +35,7 @@ beforeAll(async () => {
     { serverId: SERVER_ID, title: 'Open',               status: 'in_progress', visibility: 'public' },
     { serverId: SERVER_ID, title: 'Cancelled',          status: 'cancelled',   visibility: 'public' },
     { serverId: SERVER_ID, title: 'Private done',       status: 'done',        visibility: 'private', completedAt: new Date(now - 500) },
+    { serverId: SERVER_ID, title: 'Done with null completedAt', status: 'done', visibility: 'public' },
   ]);
 });
 
@@ -54,6 +55,7 @@ describe('listDoneTickets', () => {
     expect(titles).not.toContain('Open');
     expect(titles).not.toContain('Cancelled');
     expect(titles).not.toContain('Private done');
+    expect(titles).not.toContain('Done with null completedAt');
   });
 
   it('sorts by completedAt descending', async () => {
