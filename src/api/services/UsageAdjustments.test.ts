@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { db, users, subscriptions, usageAdjustments, adminUsers } from '@/db';
 import { applyAdjustment } from './UsageAdjustments';
 import { getPeriodSpending, grantCredits } from './UsageService';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 
 describe('applyAdjustment', () => {
   const userId  = '00000000-0000-0000-0000-000000000ccc';
@@ -56,6 +56,29 @@ describe('applyAdjustment', () => {
     const end = new Date(Date.now() + 60_000);
     const r = await getPeriodSpending(userId, start, end);
     expect(r.totalCostCents).toBeCloseTo(50, 3);
+  });
+
+  it('preserves adjustment rows when the admin user is deleted (FK set null)', async () => {
+    const tempAdmin = '00000000-0000-0000-0000-000000000eee';
+    // Clean up any stale state
+    await db.delete(usageAdjustments).where(eq(usageAdjustments.userId, userId));
+    await db.delete(users).where(eq(users.id, tempAdmin));
+
+    await db.insert(users).values({ id: tempAdmin, email: 'temp-admin@example.com' } as any);
+
+    // applyAdjustment doesn't check admin status, so we can call it directly.
+    await applyAdjustment({
+      userId, adminUserId: tempAdmin, amountCents: 100, reason: 'test-admin-delete',
+    });
+
+    // Now delete the admin user — should NOT throw (was FK violation before fix).
+    await db.delete(users).where(eq(users.id, tempAdmin));
+
+    // Adjustment row should still exist with adminUserId = null
+    const [row] = await db.select().from(usageAdjustments)
+      .where(and(eq(usageAdjustments.userId, userId), eq(usageAdjustments.reason, 'test-admin-delete')));
+    expect(row).toBeDefined();
+    expect(row.adminUserId).toBeNull();
   });
 
   it('creates a subscription row when one does not exist (new user)', async () => {

@@ -115,7 +115,7 @@ export const usageEventsRelations = relations(usageEvents, ({ one }) => ({
 export const usageAdjustments = pgTable('usage_adjustments', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id).notNull(),
-  adminUserId: uuid('admin_user_id').references(() => users.id).notNull(),
+  adminUserId: uuid('admin_user_id').references(() => users.id, { onDelete: 'set null' }),
   ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
   // Signed: negative = refund/credit, positive = additional charge/clawback
   amountCents: numeric('amount_cents', { precision: 12, scale: 4 }).notNull(),
