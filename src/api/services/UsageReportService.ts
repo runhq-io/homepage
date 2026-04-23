@@ -42,6 +42,12 @@ export interface ServerRow {
 export interface TaskRow {
   taskId: string | null;
   taskLabel: string | null;
+  // Representative serverId + channelId for this task, used by the admin UI
+  // to build a deep link into the workspace. MAX() over the events grouped by
+  // taskId — tasks typically live on one server/channel, so MAX is equivalent
+  // to "any row's value".
+  serverId: string | null;
+  channelId: string | null;
   requestCount: number;
   totalCostCents: number;
 }
@@ -49,6 +55,8 @@ export interface TaskRow {
 export interface AgentRow {
   agentId: string | null;
   agentLabel: string | null;
+  // Representative serverId for deep-linking into the workspace's agent page.
+  serverId: string | null;
   requestCount: number;
   totalCostCents: number;
 }
@@ -148,6 +156,8 @@ export async function getBreakdownByTask(f: UsageFilter): Promise<TaskRow[]> {
     .select({
       taskId:         usageEvents.taskId,
       taskLabel:      sql<string | null>`MAX(${usageEvents.taskLabel})`,
+      serverId:       sql<string | null>`MAX(${usageEvents.serverId})`,
+      channelId:      sql<string | null>`MAX(${usageEvents.channelId})`,
       requestCount:   sql<number>`COUNT(*)::int`,
       totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
     })
@@ -162,6 +172,7 @@ export async function getBreakdownByAgent(f: UsageFilter): Promise<AgentRow[]> {
     .select({
       agentId:        usageEvents.agentId,
       agentLabel:     sql<string | null>`MAX(${usageEvents.agentLabel})`,
+      serverId:       sql<string | null>`MAX(${usageEvents.serverId})`,
       requestCount:   sql<number>`COUNT(*)::int`,
       totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
     })

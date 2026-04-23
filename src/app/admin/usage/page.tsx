@@ -75,6 +75,11 @@ export default async function UsagePage({
       ...(f.serverIds?.length ? { serverIds: f.serverIds.join(',') } : {}),
     }).toString();
 
+  // Base URL of the client app (app.runhq.io in prod). Used to deep-link into
+  // workspaces from the admin breakdowns. Matches the pattern used by
+  // FlyService.ts when constructing cross-app URLs.
+  const appBase = process.env.CLIENT_URL ?? 'https://app.runhq.io';
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <header className="flex items-center justify-between">
@@ -113,6 +118,8 @@ export default async function UsagePage({
           cost: r.totalCostCents,
           requests: r.requestCount,
           extra: `${r.inputTokens.toLocaleString()} in / ${r.outputTokens.toLocaleString()} out`,
+          // Internal admin page — always linkable.
+          href: `/admin/users/${r.userId}`,
         }))}
       />
 
@@ -123,6 +130,9 @@ export default async function UsagePage({
           label: r.serverId ?? '— Unknown —',
           cost: r.totalCostCents,
           requests: r.requestCount,
+          // Deep-link into the workspace on app.runhq.io. Only when serverId
+          // is present — pre-cutover rollups and legacy events have null.
+          href: r.serverId ? `${appBase}/server/${r.serverId}` : undefined,
         }))}
       />
 
@@ -135,6 +145,13 @@ export default async function UsagePage({
             (r.taskId ? r.taskId.substring(0, 12) + '…' : '— No task context —'),
           cost: r.totalCostCents,
           requests: r.requestCount,
+          // Task deep-link needs serverId, channelId, AND taskId — the workspace
+          // URL format is /server/{sid}/channel/{cid}?todo={tid}. If any piece
+          // is missing (old events predating F8, or synthesized rollups), skip.
+          href:
+            r.taskId && r.serverId && r.channelId
+              ? `${appBase}/server/${r.serverId}/channel/${r.channelId}?todo=${r.taskId}`
+              : undefined,
         }))}
       />
 
@@ -147,6 +164,11 @@ export default async function UsagePage({
             (r.agentId ? r.agentId.substring(0, 12) + '…' : '— No agent context —'),
           cost: r.totalCostCents,
           requests: r.requestCount,
+          // Agent deep-link: /server/{sid}/agent/{aid}. Requires both.
+          href:
+            r.agentId && r.serverId
+              ? `${appBase}/server/${r.serverId}/agent/${r.agentId}`
+              : undefined,
         }))}
       />
     </div>

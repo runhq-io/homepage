@@ -4,6 +4,12 @@ interface Row {
   cost: number;
   requests: number;
   extra?: string;
+  /**
+   * Optional deep link. When set, the row's label renders as an anchor.
+   * Same-origin URLs use client-side navigation friendliness; external URLs
+   * (e.g. app.runhq.io) open in a new tab.
+   */
+  href?: string;
 }
 
 interface Props {
@@ -33,20 +39,40 @@ export function BreakdownTable({ title, rows }: Props) {
               </td>
             </tr>
           ) : (
-            rows.map((r) => (
-              <tr key={r.key} className="border-t border-slate-700/60">
-                <td className="px-6 py-3">
+            rows.map((r) => {
+              const external = r.href?.startsWith('http');
+              const labelContent = (
+                <>
                   <div className="font-medium text-slate-100">{r.label}</div>
                   {r.extra && <div className="text-xs text-slate-400">{r.extra}</div>}
-                </td>
-                <td className="px-6 py-3 text-right tabular-nums text-slate-300">
-                  {r.requests.toLocaleString()}
-                </td>
-                <td className="px-6 py-3 text-right font-medium tabular-nums text-white">
-                  ${(r.cost / 100).toFixed(2)}
-                </td>
-              </tr>
-            ))
+                </>
+              );
+              return (
+                <tr key={r.key} className="border-t border-slate-700/60 hover:bg-slate-800/60">
+                  <td className="px-6 py-3">
+                    {r.href ? (
+                      <a
+                        href={r.href}
+                        {...(external
+                          ? { target: '_blank', rel: 'noopener noreferrer' }
+                          : {})}
+                        className="text-slate-100 hover:text-blue-400 hover:underline"
+                      >
+                        {labelContent}
+                      </a>
+                    ) : (
+                      labelContent
+                    )}
+                  </td>
+                  <td className="px-6 py-3 text-right tabular-nums text-slate-300">
+                    {r.requests.toLocaleString()}
+                  </td>
+                  <td className="px-6 py-3 text-right font-medium tabular-nums text-white">
+                    ${(r.cost / 100).toFixed(2)}
+                  </td>
+                </tr>
+              );
+            })
           )}
         </tbody>
       </table>
