@@ -8,6 +8,34 @@
       "when": 1775965913886,
       "tag": "0000_sleepy_turbo",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776929828753,
+      "tag": "0001_demonic_komodo",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776933985820,
+      "tag": "0002_confused_tomas",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1776941029106,
+      "tag": "0003_perpetual_skrulls",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776942336741,
+      "tag": "0004_known_dragon_man",
+      "breakpoints": true
     }
   ]
 }

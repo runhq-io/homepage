@@ -10,6 +10,7 @@ const navigation = [
   { name: 'Agents', href: '/admin/agents', icon: CpuIcon },
   { name: 'Servers', href: '/admin/servers', icon: ServerIcon },
   { name: 'Templates', href: '/admin/templates', icon: TemplateIcon },
+  { name: 'Usage', href: '/admin/usage', icon: ChartIcon },
 ];
 
 interface AdminSidebarProps {
@@ -191,6 +192,14 @@ function TemplateIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
+    </svg>
+  );
+}
+
+function ChartIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3v18h18M7 15l4-4 4 4 5-6" />
     </svg>
   );
 }

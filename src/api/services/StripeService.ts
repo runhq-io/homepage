@@ -313,10 +313,12 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session): Promis
       });
 
       if (subscription) {
-        const newBalance = (subscription.creditBalanceCents || 0) + creditsCents;
+        // creditBalanceCents is numeric — Drizzle returns it as a string; cast first.
+        const newBalance = Number(subscription.creditBalanceCents ?? 0) + creditsCents;
         await db.update(subscriptions)
           .set({
-            creditBalanceCents: newBalance,
+            // numeric column: pass as string.
+            creditBalanceCents: newBalance.toFixed(4),
             stripeCustomerId: customerId || subscription.stripeCustomerId,
             updatedAt: new Date(),
           })

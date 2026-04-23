@@ -12,6 +12,7 @@ import { eq } from 'drizzle-orm';
 const DEFAULT_WORKER_PROMPT = 'You are a helpful assistant.';
 const COMMANDER_SYSTEM_PROMPT = 'You are a commander agent that coordinates tasks.';
 import { seedPlans } from '../api/services/UsageService';
+import { seedDevLocalUser } from './seed-dev-local-user';
 
 // Fixed UUIDs for system personas (deterministic across environments)
 const SYSTEM_DEFAULT_AGENT_ID = '00000000-0000-0000-0000-000000000001';
@@ -140,6 +141,7 @@ export async function runSeeds(): Promise<void> {
   await seedWorkerPersona();
   await seedCommanderPersona();
   await seedPlans();
+  await seedDevLocalUser();
   console.log('[Seed] Database seeds complete');
 }
 

@@ -1,16 +1,18 @@
 'use server';
 
-import { db, subscriptions, usageRecords, inviteCodes, type PlanId } from '@/db';
-import { eq, and, gte, lte } from 'drizzle-orm';
+import { db, subscriptions, inviteCodes, type PlanId } from '@/db';
+import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { auth } from '@/lib/auth';
+import { applyAdjustment } from '@/api/services/UsageAdjustments';
+import { getPeriodSpending } from '@/api/services/UsageService';
 
 async function requireAdmin() {
   const session = await auth();
   if (!(session?.user as any)?.isAdmin) {
     throw new Error('Unauthorized: Admin access required');
   }
-  return session;
+  return session!;
 }
 
 export async function updateUserPlan(userId: string, planId: string) {
@@ -50,36 +52,24 @@ export async function updateUserPlan(userId: string, planId: string) {
   }
 }
 
+/**
+ * Grant bonus credits to a user.
+ *
+ * `cents` is a positive number of cents to add to the user's balance.
+ * Recorded as a negative adjustment (refund/grant) in usage_adjustments
+ * so the full credit history is auditable.
+ */
 export async function addBonusCredits(userId: string, cents: number) {
   try {
-    await requireAdmin();
+    const session = await requireAdmin();
+    const adminUserId = session.user.id;
 
-    // Check if user has a subscription
-    const existing = await db
-      .select()
-      .from(subscriptions)
-      .where(eq(subscriptions.userId, userId))
-      .limit(1);
-
-    if (existing.length > 0) {
-      // Add to existing balance
-      const currentBalance = existing[0].creditBalanceCents || 0;
-      await db
-        .update(subscriptions)
-        .set({
-          creditBalanceCents: currentBalance + cents,
-          updatedAt: new Date(),
-        })
-        .where(eq(subscriptions.userId, userId));
-    } else {
-      // Create subscription with bonus credits
-      await db.insert(subscriptions).values({
-        userId,
-        planId: 'free', // Default to free plan
-        status: 'active',
-        creditBalanceCents: cents,
-      });
-    }
+    await applyAdjustment({
+      userId,
+      adminUserId,
+      amountCents: -cents, // negative = credit grant (balance increases)
+      reason: `Admin bonus credit grant of ${cents} cents`,
+    });
 
     revalidatePath(`/admin/users/${userId}`);
     return { success: true };
@@ -89,31 +79,41 @@ export async function addBonusCredits(userId: string, cents: number) {
   }
 }
 
+/**
+ * Reset the current billing-period spend to zero by applying a negative
+ * adjustment equal to the period's current total cost.
+ *
+ * Usage events are immutable historical records — they are never deleted or
+ * mutated. Instead, this inserts a compensating adjustment into usage_adjustments
+ * so that getPeriodSpending returns ~0 for the current period, while retaining
+ * a complete audit trail of both the original spend and the admin reset.
+ *
+ * If period spending is already $0, this is a no-op.
+ */
 export async function resetMonthlyUsage(userId: string) {
   try {
-    await requireAdmin();
+    const session = await requireAdmin();
+    const adminUserId = session.user.id;
 
     const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-    // Reset current period usage to 0
-    await db
-      .update(usageRecords)
-      .set({
-        inputTokens: 0,
-        outputTokens: 0,
-        totalCostCents: 0,
-        requestCount: 0,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(usageRecords.userId, userId),
-          gte(usageRecords.periodStart, startOfMonth),
-          lte(usageRecords.periodEnd, endOfMonth)
-        )
-      );
+    const spending = await getPeriodSpending(userId, periodStart, periodEnd);
+
+    if (spending.totalCostCents === 0) {
+      // Already at zero — nothing to do
+      revalidatePath(`/admin/users/${userId}`);
+      return { success: true };
+    }
+
+    // Insert a compensating negative adjustment to offset the current period spend
+    await applyAdjustment({
+      userId,
+      adminUserId,
+      amountCents: -spending.totalCostCents, // negative offsets the positive spend
+      reason: `Admin reset of monthly usage (period ${periodStart.toISOString().slice(0, 7)})`,
+    });
 
     revalidatePath(`/admin/users/${userId}`);
     return { success: true };

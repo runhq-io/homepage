@@ -11,15 +11,15 @@ import { db } from '../../db/index';
 import {
   users,
   subscriptions,
-  usageRecords,
+  usageEvents,
+  usageAdjustments,
   plans,
   adminUsers,
   type PlanId,
   type Subscription,
-  type UsageRecord,
   type Plan,
 } from '../../db/schema';
-import type { TokenUsage } from '@runhq/server-protocol';
+import type { TokenCounts } from './pricing';
 
 // ============================================================================
 // Types
@@ -118,22 +118,6 @@ export const PLAN_CONFIG: Record<PlanId, {
 };
 
 // ============================================================================
-// Cost Calculation (based on Claude pricing)
-// ============================================================================
-
-// Pricing per 1M tokens (approximate, adjust as needed)
-const INPUT_TOKEN_COST_PER_MILLION = 300;   // $3.00 per 1M input tokens
-const OUTPUT_TOKEN_COST_PER_MILLION = 1500; // $15.00 per 1M output tokens
-
-export function calculateCostCents(inputTokens: number, outputTokens: number): number {
-  const inputCost = (inputTokens / 1_000_000) * INPUT_TOKEN_COST_PER_MILLION;
-  const outputCost = (outputTokens / 1_000_000) * OUTPUT_TOKEN_COST_PER_MILLION;
-  // Round to nearest cent, minimum 1 cent if any tokens used
-  const totalCents = Math.round(inputCost + outputCost);
-  return inputTokens + outputTokens > 0 ? Math.max(1, totalCents) : 0;
-}
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -145,7 +129,7 @@ function getBillingPeriod(date: Date = new Date()): { start: Date; end: Date } {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function extractUserIdFromToken(token: string): string | null {
+export function extractUserIdFromToken(token: string): string | null {
   let userId: string | null = null;
 
   try {
@@ -204,7 +188,8 @@ export async function getOrCreateSubscription(userId: string): Promise<Subscript
     userId,
     planId: 'free',
     status: 'active',
-    creditBalanceCents: planConfig.monthlyCreditsCents,
+    // numeric column: Drizzle expects a string at write time.
+    creditBalanceCents: planConfig.monthlyCreditsCents.toFixed(4),
     currentPeriodStart: start,
     currentPeriodEnd: end,
   }).returning();
@@ -241,16 +226,18 @@ export async function updateSubscriptionPlan(
     newPlanId !== 'free' &&
     planConfig.signupBonusCents > 0;
 
-  // Add monthly credits + signup bonus to balance
+  // Add monthly credits + signup bonus to balance.
+  // creditBalanceCents comes back from Drizzle as a string (numeric column) — cast first.
   const creditsToAdd = planConfig.monthlyCreditsCents + (grantSignupBonus ? planConfig.signupBonusCents : 0);
-  const newBalance = (existing.creditBalanceCents || 0) + creditsToAdd;
+  const newBalance = Number(existing.creditBalanceCents ?? 0) + creditsToAdd;
 
   const [updated] = await db.update(subscriptions)
     .set({
       planId: newPlanId,
       stripeSubscriptionId: stripeSubscriptionId || existing.stripeSubscriptionId,
       stripeCustomerId: stripeCustomerId || existing.stripeCustomerId,
-      creditBalanceCents: newBalance,
+      // numeric column: pass as string.
+      creditBalanceCents: newBalance.toFixed(4),
       updatedAt: new Date(),
     })
     .where(eq(subscriptions.userId, userId))
@@ -262,120 +249,71 @@ export async function updateSubscriptionPlan(
   return updated;
 }
 
-/**
- * Add credits to user's balance (for purchases or admin grants)
- */
-export async function addCredits(userId: string, amountCents: number): Promise<number> {
-  const subscription = await getOrCreateSubscription(userId);
-  const newBalance = (subscription.creditBalanceCents || 0) + amountCents;
-
-  await db.update(subscriptions)
-    .set({
-      creditBalanceCents: newBalance,
-      updatedAt: new Date(),
-    })
-    .where(eq(subscriptions.userId, userId));
-
-  console.log(`[UsageService] Added $${centsToDollars(amountCents)} to user ${userId}, new balance: $${centsToDollars(newBalance)}`);
-  return newBalance;
-}
-
-// ============================================================================
-// Usage Record Management
-// ============================================================================
-
-/**
- * Get or create the current billing period usage record for a user
- */
-export async function getOrCreateCurrentUsageRecord(userId: string): Promise<UsageRecord> {
-  const { start, end } = getBillingPeriod();
-
-  // Look for existing record for current period
-  const existing = await db.query.usageRecords.findFirst({
-    where: and(
-      eq(usageRecords.userId, userId),
-      gte(usageRecords.periodStart, start),
-      lte(usageRecords.periodEnd, end)
-    ),
-  });
-
-  if (existing) {
-    return existing;
-  }
-
-  // Create new record for this billing period
-  const [newRecord] = await db.insert(usageRecords).values({
-    userId,
-    periodStart: start,
-    periodEnd: end,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalCostCents: 0,
-    requestCount: 0,
-  }).returning();
-
-  return newRecord;
-}
-
 // ============================================================================
 // Usage Tracking
 // ============================================================================
 
+export interface TrackUsageContext {
+  serverId: string | null;
+  taskId: string | null;
+  taskLabel: string | null;
+  channelId: string | null;
+  channelLabel: string | null;
+  agentId: string | null;
+  agentLabel: string | null;
+  conversationId: string | null;
+}
+
+export interface TrackUsageInput {
+  userId: string;
+  model: string;
+  tokens: TokenCounts;
+  costCents: number;               // computed by caller using pricing.calculateCost
+  context: TrackUsageContext;
+  anthropicRequestId: string | null;
+}
+
 /**
- * Track usage and deduct from credit balance
- * Returns the cost and new balance
+ * Persist one Claude-call event and deduct the cost from the user's balance.
+ * Both operations happen in one DB transaction — either both succeed or neither.
+ *
+ * Balance is clamped at 0 (existing behavior; debt is not tracked).
  */
-export async function trackUsage(
-  userToken: string | null | undefined,
-  tokenUsage: TokenUsage
-): Promise<UsageTrackResult> {
-  console.log(`[UsageService] trackUsage called with token: ${userToken ? userToken.substring(0, 30) + '...' : 'none'}`);
-  console.log(`[UsageService] tokenUsage:`, JSON.stringify(tokenUsage));
+export async function trackUsage(input: TrackUsageInput): Promise<void> {
+  const { userId, model, tokens, costCents, context, anthropicRequestId } = input;
 
-  if (!userToken) {
-    console.warn('[UsageService] No user token provided, skipping usage tracking');
-    return { costCents: 0, newBalanceCents: 0 };
-  }
+  await db.transaction(async (tx) => {
+    // Deduct balance atomically using SQL GREATEST(0, balance - cost).
+    // Cost preserved at sub-cent precision via numeric(12,4) column — no rounding.
+    await tx
+      .update(subscriptions)
+      .set({
+        creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${costCents.toFixed(4)}::numeric)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.userId, userId));
 
-  const userId = extractUserIdFromToken(userToken);
-  if (!userId) {
-    console.warn('[UsageService] Could not extract userId from token');
-    return { costCents: 0, newBalanceCents: 0 };
-  }
-
-  console.log(`[UsageService] trackUsage for userId: ${userId}`);
-
-  // Calculate cost
-  const costCents = tokenUsage.costCents > 0
-    ? Math.round(tokenUsage.costCents)
-    : calculateCostCents(tokenUsage.inputTokens, tokenUsage.outputTokens);
-
-  // Deduct from credit balance
-  const subscription = await getOrCreateSubscription(userId);
-  const newBalance = Math.max(0, (subscription.creditBalanceCents || 0) - costCents);
-
-  await db.update(subscriptions)
-    .set({
-      creditBalanceCents: newBalance,
-      updatedAt: new Date(),
-    })
-    .where(eq(subscriptions.userId, userId));
-
-  // Update usage record (for analytics/history)
-  const usageRecord = await getOrCreateCurrentUsageRecord(userId);
-  await db.update(usageRecords)
-    .set({
-      inputTokens: sql`${usageRecords.inputTokens} + ${tokenUsage.inputTokens}`,
-      outputTokens: sql`${usageRecords.outputTokens} + ${tokenUsage.outputTokens}`,
-      totalCostCents: sql`${usageRecords.totalCostCents} + ${costCents}`,
-      requestCount: sql`${usageRecords.requestCount} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(eq(usageRecords.id, usageRecord.id));
-
-  console.log(`[UsageService] User ${userId}: spent $${centsToDollars(costCents)}, balance: $${centsToDollars(newBalance)}`);
-
-  return { costCents, newBalanceCents: newBalance };
+    // Insert the event with full precision cost.
+    await tx.insert(usageEvents).values({
+      userId,
+      serverId: context.serverId,
+      ts: new Date(),
+      model,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+      cacheReadTokens: tokens.cacheReadTokens,
+      cacheCreationTokens: tokens.cacheCreationTokens,
+      costCents: costCents.toFixed(4),  // numeric column expects string
+      taskId: context.taskId,
+      taskLabel: context.taskLabel,
+      channelId: context.channelId,
+      channelLabel: context.channelLabel,
+      agentId: context.agentId,
+      agentLabel: context.agentLabel,
+      conversationId: context.conversationId,
+      anthropicRequestId,
+    });
+  });
 }
 
 
@@ -409,19 +347,22 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
   console.log(`[UsageService] getCreditBalance for userId: ${userId}`);
 
   const subscription = await getOrCreateSubscription(userId);
-  const usageRecord = await getOrCreateCurrentUsageRecord(userId);
+  const period = getBillingPeriod();
+  const spending = await getPeriodSpending(userId, period.start, period.end);
 
-  console.log(`[UsageService] getCreditBalance - periodSpentCents: ${usageRecord.totalCostCents}, requestCount: ${usageRecord.requestCount}`);
+  console.log(`[UsageService] getCreditBalance - periodSpentCents: ${spending.totalCostCents}, requestCount: ${spending.requestCount}`);
 
+  // Drizzle returns numeric as a string — cast once at the boundary.
+  const balanceCents = Number(subscription.creditBalanceCents ?? 0);
   return {
-    balanceCents: subscription.creditBalanceCents || 0,
-    balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
+    balanceCents,
+    balanceDollars: centsToDollars(balanceCents),
     plan: subscription.planId as PlanId,
     hasPaymentMethod: !!subscription.stripeCustomerId,
-    periodSpentCents: usageRecord.totalCostCents || 0,
-    periodRequestCount: usageRecord.requestCount || 0,
-    periodStart: usageRecord.periodStart,
-    periodEnd: usageRecord.periodEnd,
+    periodSpentCents: spending.totalCostCents,
+    periodRequestCount: spending.requestCount,
+    periodStart: period.start,
+    periodEnd: period.end,
   };
 }
 
@@ -447,18 +388,19 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
   const hasPaymentMethod = !!subscription.stripeCustomerId;
   const periodEnd = subscription.currentPeriodEnd;
 
+  // Drizzle returns numeric as a string — cast once at the boundary.
+  const balance = Number(subscription.creditBalanceCents ?? 0);
+
   if (subscription.status === 'past_due') {
     return {
       allowed: false,
       reason: 'past_due',
-      balanceCents: subscription.creditBalanceCents || 0,
+      balanceCents: balance,
       plan: subscription.planId as PlanId,
       hasPaymentMethod,
       periodEnd,
     };
   }
-
-  const balance = subscription.creditBalanceCents || 0;
 
   // Need at least 1 cent to make a request
   if (balance < 1) {
@@ -482,30 +424,39 @@ export async function checkCreditBalance(userToken: string): Promise<CreditCheck
 }
 
 
+export interface UsageHistoryRow {
+  period: string;        // 'YYYY-MM'
+  inputTokens: number;
+  outputTokens: number;
+  totalCostCents: number;
+  requestCount: number;
+}
+
 /**
- * Get usage records for a time period
+ * Get usage history grouped by calendar month for a time period.
+ * Replaces the old usage_records-based getUsageRecords.
  */
-export async function getUsageRecords(
-  userToken: string,
-  startTime?: number,
-  endTime?: number
-): Promise<UsageRecord[]> {
-  const userId = extractUserIdFromToken(userToken);
-  if (!userId) {
-    return [];
-  }
-
-  const start = startTime ? new Date(startTime) : new Date(0);
-  const end = endTime ? new Date(endTime) : new Date();
-
-  return db.query.usageRecords.findMany({
-    where: and(
-      eq(usageRecords.userId, userId),
-      gte(usageRecords.periodStart, start),
-      lte(usageRecords.periodEnd, end)
-    ),
-    orderBy: (records, { desc }) => [desc(records.periodStart)],
-  });
+export async function getUsageHistory(
+  userId: string,
+  start: Date,
+  end: Date,
+): Promise<UsageHistoryRow[]> {
+  return db
+    .select({
+      period:         sql<string>`to_char(date_trunc('month', ${usageEvents.ts}), 'YYYY-MM')`,
+      inputTokens:    sql<number>`COALESCE(SUM(${usageEvents.inputTokens}), 0)::int`,
+      outputTokens:   sql<number>`COALESCE(SUM(${usageEvents.outputTokens}), 0)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+    })
+    .from(usageEvents)
+    .where(and(
+      eq(usageEvents.userId, userId),
+      gte(usageEvents.ts, start),
+      lte(usageEvents.ts, end),
+    ))
+    .groupBy(sql`date_trunc('month', ${usageEvents.ts})`)
+    .orderBy(sql`date_trunc('month', ${usageEvents.ts})`);
 }
 
 // ============================================================================
@@ -581,7 +532,20 @@ export async function isAdmin(userId: string): Promise<boolean> {
 }
 
 /**
- * Grant bonus credits to a user (admin only)
+ * Grant bonus credits to a user (admin only).
+ *
+ * Every admin credit grant MUST produce a usage_adjustments ledger row in the
+ * same transaction. This function delegates to applyAdjustment to satisfy that
+ * invariant. Direct use of addCredits here is prohibited.
+ *
+ * Note on grantCredits sign convention vs applyAdjustment:
+ *   grantCredits(amountCents=1000) means "give the user $10 of credit" →
+ *   balance should INCREASE. applyAdjustment treats negative amountCents as
+ *   a refund/credit-grant (balance up), so we pass -amountCents.
+ *
+ * Circular-import note: UsageAdjustments.ts imports getOrCreateSubscription
+ * from this file, so we cannot top-level import from UsageAdjustments here.
+ * We use a lazy dynamic import inside the function body to avoid the cycle.
  */
 export async function grantCredits(
   adminUserId: string,
@@ -600,8 +564,20 @@ export async function grantCredits(
     return { success: false, error: 'Amount must be positive' };
   }
 
-  // Add credits
-  const newBalance = await addCredits(targetUserId, amountCents);
+  // Delegate to applyAdjustment so that a usage_adjustments ledger row is
+  // written atomically with the balance update in the same transaction.
+  const { applyAdjustment } = await import('./UsageAdjustments');
+  await applyAdjustment({
+    userId: targetUserId,
+    adminUserId,
+    amountCents: -amountCents,   // negative = credit grant (balance increases)
+    reason: reason || 'Admin credit grant',
+  });
+
+  // Re-read balance to report back to the caller.
+  // Drizzle returns numeric as a string — cast at the boundary.
+  const sub = await getOrCreateSubscription(targetUserId);
+  const newBalance = Number(sub.creditBalanceCents ?? 0);
 
   console.log(`[UsageService] Admin ${adminUserId} granted $${centsToDollars(amountCents)} to user ${targetUserId}${reason ? ` (${reason})` : ''}`);
 
@@ -626,19 +602,79 @@ export async function getUserCredits(userId: string): Promise<{
     return null;
   }
 
-  const usageRecord = await getOrCreateCurrentUsageRecord(userId);
+  const period = getBillingPeriod();
+  const [spending, user] = await Promise.all([
+    getPeriodSpending(userId, period.start, period.end),
+    db.query.users.findFirst({ where: eq(users.id, userId) }),
+  ]);
 
-  // Get user email
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, userId),
-  });
-
+  // Drizzle returns numeric as a string — cast once at the boundary.
+  const balanceCents = Number(subscription.creditBalanceCents ?? 0);
   return {
     plan: subscription.planId as PlanId,
-    balanceCents: subscription.creditBalanceCents || 0,
-    balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
-    periodSpentCents: usageRecord.totalCostCents || 0,
+    balanceCents,
+    balanceDollars: centsToDollars(balanceCents),
+    periodSpentCents: spending.totalCostCents,
     email: user?.email || undefined,
+  };
+}
+
+// ============================================================================
+// Period Spending Aggregation
+// ============================================================================
+
+export interface PeriodSpending {
+  inputTokens: number;
+  outputTokens: number;
+  totalCostCents: number;
+  requestCount: number;
+}
+
+/**
+ * Sum spending for one user across a time range, across BOTH Claude-call events
+ * and admin adjustments. Returns totals with sub-cent precision.
+ *
+ * Implemented as two aggregate queries in parallel; at RunHQ's scale this is
+ * sub-millisecond. If usage grows 100x, add a materialized rollup then — not now.
+ */
+export async function getPeriodSpending(
+  userId: string,
+  start: Date,
+  end: Date,
+): Promise<PeriodSpending> {
+  const [eventsAgg, adjAgg] = await Promise.all([
+    db.select({
+      inputTokens:    sql<number>`COALESCE(SUM(${usageEvents.inputTokens}),  0)::int`,
+      outputTokens:   sql<number>`COALESCE(SUM(${usageEvents.outputTokens}), 0)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+    })
+    .from(usageEvents)
+    .where(and(
+      eq(usageEvents.userId, userId),
+      gte(usageEvents.ts, start),
+      lte(usageEvents.ts, end),
+    )),
+
+    db.select({
+      totalAdjustCents: sql<number>`COALESCE(SUM(${usageAdjustments.amountCents}), 0)::double precision`,
+    })
+    .from(usageAdjustments)
+    .where(and(
+      eq(usageAdjustments.userId, userId),
+      gte(usageAdjustments.ts, start),
+      lte(usageAdjustments.ts, end),
+    )),
+  ]);
+
+  const e = eventsAgg[0];
+  const a = adjAgg[0];
+
+  return {
+    inputTokens:  e.inputTokens,
+    outputTokens: e.outputTokens,
+    totalCostCents: e.totalCostCents + a.totalAdjustCents,
+    requestCount: e.requestCount,
   };
 }
 
@@ -663,25 +699,22 @@ export async function listUsersWithUsage(limit = 50, offset = 0): Promise<Array<
     orderBy: (subs, { desc }) => [desc(subs.createdAt)],
   });
 
-  const result = [];
-  for (const sub of allSubscriptions) {
-    const usageRecord = await db.query.usageRecords.findFirst({
-      where: and(
-        eq(usageRecords.userId, sub.userId),
-        gte(usageRecords.periodStart, getBillingPeriod().start),
-      ),
-    });
+  const period = getBillingPeriod();
 
-    result.push({
+  const result = await Promise.all(allSubscriptions.map(async (sub) => {
+    const spending = await getPeriodSpending(sub.userId, period.start, period.end);
+    // Drizzle returns numeric as a string — cast once at the boundary.
+    const balanceCents = Number(sub.creditBalanceCents ?? 0);
+    return {
       userId: sub.userId,
       email: sub.user?.email || 'unknown',
       plan: sub.planId as PlanId,
-      balanceCents: sub.creditBalanceCents || 0,
-      balanceDollars: centsToDollars(sub.creditBalanceCents || 0),
-      periodSpentCents: usageRecord?.totalCostCents || 0,
+      balanceCents,
+      balanceDollars: centsToDollars(balanceCents),
+      periodSpentCents: spending.totalCostCents,
       createdAt: sub.createdAt,
-    });
-  }
+    };
+  }));
 
   return result;
 }
