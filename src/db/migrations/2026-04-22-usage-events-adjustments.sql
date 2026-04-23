@@ -49,7 +49,10 @@ ALTER TABLE "usage_adjustments" ADD CONSTRAINT "usage_adjustments_admin_user_id_
 CREATE INDEX "usage_adjustments_user_ts_idx" ON "usage_adjustments" USING btree ("user_id","ts" DESC NULLS LAST);
 
 -- Backfill usage_events from usage_records as "pre-cutover" rollup rows.
--- ts is coerced to UTC explicitly (period_end is a tz-naive timestamp).
+-- ts is coerced to UTC explicitly (period_end is a tz-naive timestamp)
+-- AND clamped to now() — for ongoing billing periods, (period_end - 1 second)
+-- would place the rollup in the future, outside any sensible query range.
+-- Clamping anchors future-dated period ends to the moment the migration ran.
 -- The usage_records table itself is dropped later, in a follow-up migration,
 -- after all code readers have been migrated off it.
 INSERT INTO usage_events (
@@ -62,7 +65,10 @@ INSERT INTO usage_events (
 SELECT
   user_id,
   NULL,
-  ((period_end - INTERVAL '1 second') AT TIME ZONE 'UTC'),
+  LEAST(
+    (period_end - INTERVAL '1 second') AT TIME ZONE 'UTC',
+    now() AT TIME ZONE 'UTC'
+  ),
   'pre-cutover-rollup',
   input_tokens, output_tokens, 0, 0,
   total_cost_cents::numeric(12,4),
