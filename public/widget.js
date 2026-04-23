@@ -682,6 +682,11 @@
       ".rw-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:" + accent + ";color:#fff;font-size:11px;font-weight:600;margin-left:4px}",
       ".rw-tab-btn:disabled{opacity:.5;cursor:not-allowed}",
       ".rw-edited-marker{color:" + textMuted + ";font-size:11px;margin-left:4px;cursor:help}",
+      ".rw-comment-composer{margin-top:12px;padding:10px;border:1px solid " + border + ";border-radius:8px;background:" + bgAlt + "}",
+      ".rw-comment-composer textarea{width:100%;min-height:60px;resize:vertical}",
+      ".rw-comment-composer-actions{display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px}",
+      ".rw-inline-attach-btn{background:none;border:none;cursor:pointer;font-size:16px;padding:4px 6px;border-radius:4px;color:" + textMuted + ";transition:color 0.15s}",
+      ".rw-inline-attach-btn:hover{color:" + text + "}",
 
       /* Login prompt */
       ".rw-login-prompt{padding:10px 12px;border-radius:8px;background:" + bgAlt + ";text-align:center;font-size:12px;color:" + textMuted + ";margin-bottom:8px}",
@@ -928,6 +933,81 @@
     }
   }
 
+  function renderCommentComposer(ticketId) {
+    var noticeArea = h("div", null);
+    var textarea = h("textarea", {
+      className: "rw-input rw-textarea",
+      placeholder: "Add a comment…",
+      maxlength: "2000",
+    });
+
+    var pendingFiles = [];
+    var preview = h("div", { className: "rw-attach-preview" });
+    var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
+    fileInput.addEventListener("change", function () {
+      Array.prototype.forEach.call(fileInput.files, function (f) {
+        if (!f.type.startsWith("image/")) return;
+        if (pendingFiles.length >= 5) return;
+        pendingFiles.push(f);
+        var reader = new FileReader();
+        reader.onload = function (e) {
+          var thumb = h("div", { className: "rw-edit-attach-item" }, [
+            h("img", { className: "rw-edit-attach-img", src: e.target.result }),
+            h("button", {
+              className: "rw-edit-attach-remove",
+              onClick: function () {
+                var idx = pendingFiles.indexOf(f);
+                if (idx > -1) pendingFiles.splice(idx, 1);
+                thumb.remove();
+              },
+            }, "×"),
+          ]);
+          preview.appendChild(thumb);
+        };
+        reader.readAsDataURL(f);
+      });
+      fileInput.value = "";
+    });
+
+    var attachBtn = h("button", {
+      className: "rw-inline-attach-btn",
+      type: "button",
+      onClick: function () { fileInput.click(); },
+    }, "📎");
+
+    var submitBtn = h("button", { className: "rw-inline-submit", type: "button" }, "Comment");
+    submitBtn.addEventListener("click", function () {
+      var content = textarea.value.trim();
+      if (!content) return;
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Posting…";
+      noticeArea.innerHTML = "";
+      postComment(ticketId, content).then(function (res) {
+        var commentId = res.comment && res.comment.id;
+        if (pendingFiles.length === 0 || !commentId) return;
+        return pendingFiles.reduce(function (chain, f) {
+          return chain.then(function () { return uploadCommentAttachment(ticketId, commentId, f); });
+        }, Promise.resolve());
+      }).then(function () {
+        showTicketDetail(ticketId);
+      }).catch(function (err) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Comment";
+        noticeArea.innerHTML = "";
+        noticeArea.appendChild(renderNotice("error", "Failed to post: " + err.message));
+      });
+    });
+
+    var container = h("div", { className: "rw-comment-composer" }, [
+      noticeArea,
+      textarea,
+      preview,
+      fileInput,
+      h("div", { className: "rw-comment-composer-actions" }, [attachBtn, submitBtn]),
+    ]);
+    return container;
+  }
+
   function renderTicketDetail(data) {
     var ticket = data.ticket;
     var isOwner = data.isOwner;
@@ -1143,6 +1223,15 @@
         timelineEl.appendChild(timelineItem);
       });
       container.appendChild(timelineEl);
+    }
+
+    // Comment composer
+    if (config.isIdentified) {
+      container.appendChild(h("hr", { className: "rw-divider" }));
+      container.appendChild(renderCommentComposer(ticket.id));
+    } else {
+      container.appendChild(h("hr", { className: "rw-divider" }));
+      container.appendChild(h("div", { className: "rw-login-prompt" }, "Log in to comment"));
     }
 
     return container;
