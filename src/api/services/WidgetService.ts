@@ -566,6 +566,50 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   };
 }
 
+async function resolveTicketVisibleToWidget(
+  projectId: string,
+  ticketId: string,
+): Promise<{ serverId: string } | null> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+  const [task] = await db
+    .select({ id: workspaceTasks.id, serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      buildWidgetVisibleFilter(project),
+      eq(workspaceTasks.visibility, 'public'),
+    ))
+    .limit(1);
+  return task ? { serverId: task.serverId } : null;
+}
+
+export async function addWidgetComment(
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string,
+  content: string,
+) {
+  const visible = await resolveTicketVisibleToWidget(projectId, ticketId);
+  if (!visible) throw new Error('Ticket not found');
+
+  const [widgetUser] = await db
+    .select({ name: widgetUsers.name })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.id, widgetUserId))
+    .limit(1);
+
+  const comment = await WorkspaceTaskService.addComment(visible.serverId, ticketId, {
+    content,
+    createdByType: 'external',
+    createdById: widgetUserId,
+    createdByName: widgetUser?.name ?? null,
+  });
+
+  const externalUserIdMap = await resolveExternalUserIds([comment]);
+  return mapCommentToWidgetResponse(comment, externalUserIdMap, widgetUserId);
+}
+
 const ALLOWED_METADATA_KEYS = new Set([
   'url', 'referrer', 'userAgent', 'viewport', 'screenSize',
   'locale', 'timestamp', 'consoleLogs', 'errors',
