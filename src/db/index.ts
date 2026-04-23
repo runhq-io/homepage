@@ -83,5 +83,3 @@ export async function measureQuery<T>(name: string, queryFn: () => Promise<T>): 
 
 // Re-export schema for convenience
 export * from './schema';
-export { usageEvents, usageAdjustments, usageEventsRelations, usageAdjustmentsRelations } from './schema';
-export type { UsageEvent, NewUsageEvent, UsageAdjustment, NewUsageAdjustment } from './schema';

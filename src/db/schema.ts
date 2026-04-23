@@ -154,8 +154,8 @@ export const usageAdjustments = pgTable('usage_adjustments', {
 }));
 
 export const usageAdjustmentsRelations = relations(usageAdjustments, ({ one }) => ({
-  user: one(users, { fields: [usageAdjustments.userId], references: [users.id] }),
-  admin: one(users, { fields: [usageAdjustments.adminUserId], references: [users.id] }),
+  user:  one(users, { fields: [usageAdjustments.userId],      references: [users.id], relationName: 'user' }),
+  admin: one(users, { fields: [usageAdjustments.adminUserId], references: [users.id], relationName: 'admin' }),
 }));
 
 export type UsageEvent = typeof usageEvents.$inferSelect;
@@ -228,8 +228,8 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   subscription: one(subscriptions),
   usageRecords: many(usageRecords),              // keep for now — removed in later task
   usageEvents: many(usageEvents),
-  usageAdjustments: many(usageAdjustments),
-  adjustmentsAsAdmin: many(usageAdjustments, { relationName: 'admin' }),
+  usageAdjustments:    many(usageAdjustments, { relationName: 'user' }),
+  adjustmentsAsAdmin:  many(usageAdjustments, { relationName: 'admin' }),
   payments: many(payments),
   organizationMemberships: many(organizationMembers),
   ownedOrganizations: many(organizations),
