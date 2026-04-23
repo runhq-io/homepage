@@ -132,7 +132,7 @@ function getBillingPeriod(date: Date = new Date()): { start: Date; end: Date } {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function extractUserIdFromToken(token: string): string | null {
+export function extractUserIdFromToken(token: string): string | null {
   let userId: string | null = null;
 
   try {

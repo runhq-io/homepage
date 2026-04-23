@@ -45,6 +45,9 @@ import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSet
 import { eq, lt, sql } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
+import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
+import { calculateCost, type TokenCounts } from './services/pricing';
+import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
@@ -532,23 +535,40 @@ export function createHttpApp() {
       console.log(`[HttpServer] Claude API responded in ${elapsed}ms`);
 
       // Calculate token usage
-      const inputTokens = response.usage?.input_tokens || 0;
-      const outputTokens = response.usage?.output_tokens || 0;
-      const totalTokens = inputTokens + outputTokens;
-      const costCents = calculateCost(model, inputTokens, outputTokens);
+      const rawUsage: any = response.usage || {};
+      const tokens: TokenCounts = {
+        inputTokens:         rawUsage.input_tokens                  || 0,
+        outputTokens:        rawUsage.output_tokens                 || 0,
+        cacheReadTokens:     rawUsage.cache_read_input_tokens       || 0,
+        cacheCreationTokens: rawUsage.cache_creation_input_tokens   || 0,
+      };
+      const totalTokens = tokens.inputTokens + tokens.outputTokens;
+      const costCents = calculateCost(model, tokens);
 
       const tokenUsage: TokenUsage = {
-        inputTokens,
-        outputTokens,
+        inputTokens: tokens.inputTokens,
+        outputTokens: tokens.outputTokens,
         totalTokens,
         model,
         costCents,
       };
 
       // Track usage (async, don't wait)
-      UsageService.trackUsage(token, tokenUsage).catch(err => {
-        console.error('[HttpServer] Failed to track usage:', err);
-      });
+      const _analyzeUserId = UsageService.extractUserIdFromToken(token);
+      if (_analyzeUserId) {
+        const _analyzeContext = readContextHeaders(c);
+        const _analyzeReqId = (response as any)?.id ?? null;
+        trackUsage({
+          userId: _analyzeUserId,
+          model,
+          tokens,
+          costCents,
+          context: _analyzeContext,
+          anthropicRequestId: _analyzeReqId,
+        }).catch(err => {
+          console.error('[HttpServer] trackUsage failed', err);
+        });
+      }
 
       // Parse response
       const textContent = response.content.find(c => c.type === 'text');
@@ -671,6 +691,35 @@ export function createHttpApp() {
       return c.json({ error: 'Failed to load checkpoint' }, 500);
     }
   });
+
+  // Strict ID validation: opaque IDs are alphanumeric + [_-], max 128 chars.
+  // Fly machine IDs, UUIDs, and our own generated IDs all fit.
+  const CONTEXT_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+
+  function readContextHeaders(c: any): TrackUsageContext {
+    const idOrNull = (s: string | undefined): string | null =>
+      (s && CONTEXT_ID_PATTERN.test(s)) ? s : null;
+
+    const labelOrNull = (s: string | undefined, max = 256): string | null => {
+      if (!s) return null;
+      try {
+        return decodeURIComponent(s).slice(0, max);
+      } catch {
+        return null;
+      }
+    };
+
+    return {
+      serverId:       idOrNull(c.req.header('X-Server-Id')),
+      taskId:         idOrNull(c.req.header('X-Task-Id')),
+      taskLabel:      labelOrNull(c.req.header('X-Task-Label')),
+      channelId:      idOrNull(c.req.header('X-Channel-Id')),
+      channelLabel:   labelOrNull(c.req.header('X-Channel-Label')),
+      agentId:        idOrNull(c.req.header('X-Agent-Id')),
+      agentLabel:     labelOrNull(c.req.header('X-Agent-Label')),
+      conversationId: idOrNull(c.req.header('X-Conversation-Id')),
+    };
+  }
 
   // Claude Tools API endpoint (v3 tool-based agent)
   app.post('/api/claude/tools', async (c) => {
@@ -819,17 +868,20 @@ export function createHttpApp() {
       console.log(`[HttpServer] Response blocks: ${textBlockCount} text, ${toolUseCount} tool_use, ${serverToolCount} server_tool_use`);
 
 
-      // Calculate and track usage
-      const inputTokens = response.usage?.input_tokens || 0;
-      const outputTokens = response.usage?.output_tokens || 0;
+      // Extract token counts in all four kinds.
+      const rawUsage: any = response.usage || {};
+      const tokens: TokenCounts = {
+        inputTokens:         rawUsage.input_tokens                  || 0,
+        outputTokens:        rawUsage.output_tokens                 || 0,
+        cacheReadTokens:     rawUsage.cache_read_input_tokens       || 0,
+        cacheCreationTokens: rawUsage.cache_creation_input_tokens   || 0,
+      };
 
       // Log cache stats to verify caching is working
-      const cacheCreation = (response.usage as any)?.cache_creation_input_tokens || 0;
-      const cacheRead = (response.usage as any)?.cache_read_input_tokens || 0;
-      if (cacheCreation > 0 || cacheRead > 0) {
-        console.log(`[HttpServer] CACHE: write=${cacheCreation}, read=${cacheRead} (${cacheRead > 0 ? 'HIT' : 'MISS'})`);
+      if (tokens.cacheCreationTokens > 0 || tokens.cacheReadTokens > 0) {
+        console.log(`[HttpServer] CACHE: write=${tokens.cacheCreationTokens}, read=${tokens.cacheReadTokens} (${tokens.cacheReadTokens > 0 ? 'HIT' : 'MISS'})`);
       } else {
-        console.log(`[HttpServer] CACHE: no cache activity (tokens: ${inputTokens} in, ${outputTokens} out)`);
+        console.log(`[HttpServer] CACHE: no cache activity (tokens: ${tokens.inputTokens} in, ${tokens.outputTokens} out)`);
       }
 
       // Count web searches (billed at $0.01 per search = 1 cent)
@@ -838,7 +890,8 @@ export function createHttpApp() {
       ).length;
       const webSearchCostCents = webSearchCount * 1; // $0.01 per search
 
-      const tokenCostCents = calculateCost(model, inputTokens, outputTokens);
+      // Compute cost once, using the shared pricing module.
+      const tokenCostCents = calculateCost(model, tokens);
       const costCents = tokenCostCents + webSearchCostCents;
 
       if (webSearchCount > 0) {
@@ -846,20 +899,37 @@ export function createHttpApp() {
       }
 
       const tokenUsage: TokenUsage = {
-        inputTokens,
-        outputTokens,
-        totalTokens: inputTokens + outputTokens,
+        inputTokens: tokens.inputTokens,
+        outputTokens: tokens.outputTokens,
+        totalTokens: tokens.inputTokens + tokens.outputTokens,
         model,
         costCents,
       };
 
+      // Resolve userId: the verified JWT claim in prod; the dev-local sentinel in dev bypass.
+      const context = readContextHeaders(c);
+      const userId = token
+        ? UsageService.extractUserIdFromToken(token)
+        : (isDev ? DEV_LOCAL_USER_ID : null);
+
       // Track usage and get updated balance
       let newBalanceCents = 0;
-      try {
-        const trackResult = await UsageService.trackUsage(token, tokenUsage);
-        newBalanceCents = trackResult.newBalanceCents;
-      } catch (err) {
-        console.error('[HttpServer] Failed to track usage:', err);
+      if (userId) {
+        const anthropicRequestId = (response as any)?.id ?? null;
+        try {
+          await trackUsage({
+            userId, model, tokens, costCents, context, anthropicRequestId,
+          });
+        } catch (err) {
+          // Log but do NOT fail the response — the user already got their Claude answer.
+          console.error('[HttpServer] trackUsage failed', err);
+        }
+
+        console.log(
+          `[HttpServer] usage model=${model} user=${userId.substring(0, 8)} server=${context.serverId ?? '-'} ` +
+          `tokens in=${tokens.inputTokens} out=${tokens.outputTokens} cr=${tokens.cacheReadTokens} cc=${tokens.cacheCreationTokens} ` +
+          `cost=${costCents.toFixed(4)}¢`,
+        );
       }
 
       // Return response with cost info for UI display
@@ -867,8 +937,8 @@ export function createHttpApp() {
         content: response.content,
         stop_reason: response.stop_reason,
         usage: {
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
+          input_tokens: tokens.inputTokens,
+          output_tokens: tokens.outputTokens,
         },
         model: response.model,
         // Credit info for UI display
@@ -4969,28 +5039,6 @@ function resolveModel(model: string): string {
   return MODEL_UPGRADES[model] || model;
 }
 
-function calculateCost(model: string, inputTokens: number, outputTokens: number): number {
-  // Prices per 1M tokens in dollars
-  const pricing: Record<string, { input: number; output: number }> = {
-    'claude-3-5-sonnet-20241022': { input: 3, output: 15 },
-    'claude-3-5-sonnet-latest': { input: 3, output: 15 },
-    'claude-3-5-haiku-20241022': { input: 0.8, output: 4 },
-    'claude-3-5-haiku-latest': { input: 0.8, output: 4 },
-    'claude-3-opus-20240229': { input: 15, output: 75 },
-    'claude-3-opus-latest': { input: 15, output: 75 },
-    'claude-sonnet-4-6': { input: 3, output: 15 },
-    'claude-sonnet-4-20250514': { input: 3, output: 15 },
-    'claude-opus-4-6': { input: 5, output: 25 },
-    'claude-opus-4-20250514': { input: 5, output: 25 },
-    'claude-haiku-4-5-20251001': { input: 1, output: 5 },
-  };
-
-  const price = pricing[model] || { input: 3, output: 15 };
-  const inputCostCents = (inputTokens / 1_000_000) * price.input * 100;
-  const outputCostCents = (outputTokens / 1_000_000) * price.output * 100;
-
-  return Math.round((inputCostCents + outputCostCents) * 1000) / 1000;
-}
 
 // ============================================================================
 // Server Start Function
