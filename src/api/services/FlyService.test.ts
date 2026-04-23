@@ -33,6 +33,12 @@ describe('FlyService', () => {
     process.env.FLY_API_TOKEN = 'test-fly-token';
     process.env.FLY_APP_NAME = 'test-app';
     process.env.CLOUD_API_URL = 'https://api.test.com';
+    // createMachine / updateMachineImage now fail-fast without this env var
+    // (the workspace requires it to verify session JWTs). Set a realistic
+    // PEM so assertions can verify it is forwarded to the machine.
+    process.env.SERVER_SESSION_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA0sjXscAx1uBS3Ny36JpFbfQva3FF6Rn5Y1foMvJ0HEY=
+-----END PUBLIC KEY-----`;
     delete process.env.SERVER_MACHINE_AUTOSTOP;
     delete process.env.SERVER_MACHINE_AUTOSTART;
     delete process.env.SERVER_MIN_MACHINES_RUNNING;
@@ -121,27 +127,11 @@ describe('FlyService', () => {
   });
 
   describe('createMachine', () => {
+    // Note: getLatestReleaseImage reads from the DB (systemSettings table),
+    // not from Fly's GraphQL API, so there is no leading GraphQL mock.
+    // getOrCreateVolume goes straight to createVolume when no
+    // existingVolumeId is passed — no listVolumes call.
     it('should create a machine with correct config', async () => {
-      // Mock GraphQL current release image lookup
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({
-          data: {
-            app: {
-              currentRelease: {
-                imageRef: 'registry.fly.io/test-app:deployment-123',
-              },
-            },
-          },
-        }),
-      });
-
-      // Mock listVolumes (for getOrCreateVolume check)
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        text: () => Promise.resolve('[]'), // No existing volumes
-      });
-
       // Mock createVolume
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -174,8 +164,8 @@ describe('FlyService', () => {
       expect(result.url).toContain('.fly.dev');
       expect(result.volumeId).toBe('vol-123');
 
-      // Verify machine creation call
-      const machineCall = mockFetch.mock.calls[3];
+      // Verify machine creation call (createVolume=0, createMachine=1)
+      const machineCall = mockFetch.mock.calls[1];
       expect(machineCall[0]).toBe('https://api.machines.dev/v1/apps/test-app/machines');
       expect(machineCall[1].method).toBe('POST');
 
@@ -184,35 +174,28 @@ describe('FlyService', () => {
       expect(body.config.env.SERVER_TOKEN).toBe('wst_test_token_123');
       expect(body.config.env.SERVER_ID).toBe('proj-id-123');
       expect(body.config.env.AUTH_MODE).toBe('cloud');
+      // The workspace needs the public key to verify BE-signed session JWTs.
+      expect(body.config.env.SERVER_SESSION_PUBLIC_KEY_PEM).toContain('BEGIN PUBLIC KEY');
+      // The legacy shared HMAC secret must NOT be forwarded — that was the
+      // forgery-material vector we closed.
+      expect(body.config.env.SERVER_SESSION_SECRET).toBeUndefined();
       expect(body.config.services[0].internal_port).toBe(61987);
       expect(body.config.services[0].autostop).toBe('suspend');
       expect(body.config.services[0].autostart).toBe(true);
       expect(body.config.services[0].min_machines_running).toBe(0);
-      expect(body.config.guest.memory_mb).toBe(1024);
+      expect(body.config.guest.memory_mb).toBe(2048);
     });
 
-    it('should use existing volume if found', async () => {
-      // Mock GraphQL current release image lookup
+    it('should reuse an existing volume when existingVolumeId is passed and matches the region', async () => {
+      // Mock getVolume (returns a volume in the requested region)
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({
-          data: {
-            app: {
-              currentRelease: {
-                imageRef: 'registry.fly.io/test-app:deployment-123',
-              },
-            },
-          },
-        }),
-      });
-
-      // The volume name is derived from projectId: data_{sanitized_project_id}
-      // For projectId 'proj-id-123', sanitized = 'projid123', so name = 'data_projid123'
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        text: () => Promise.resolve(JSON.stringify([
-          { id: 'existing-vol', name: 'data_projid123', region: 'iad' },
-        ])),
+        text: () => Promise.resolve(JSON.stringify({
+          id: 'existing-vol',
+          name: 'data_projid123',
+          region: 'iad',
+          state: 'created',
+        })),
       });
 
       // Mock createMachine
@@ -230,37 +213,45 @@ describe('FlyService', () => {
         serverId: 'proj-id-123',
         serverToken: 'wst_test_token',
         region: 'iad',
+        existingVolumeId: 'existing-vol',
       });
 
       expect(result.volumeId).toBe('existing-vol');
-      expect(mockFetch).toHaveBeenCalledTimes(3); // GraphQL + listVolumes + createMachine
+      expect(mockFetch).toHaveBeenCalledTimes(2); // getVolume + createMachine (createVolume skipped)
+    });
+
+    it('throws before making any Fly API call when SERVER_SESSION_PUBLIC_KEY_PEM is missing', async () => {
+      // A misconfigured BE (missing public key) must NOT create a machine
+      // that would immediately boot-loop — the workspace fail-fasts without
+      // this env var. Verify the guard fires before any outbound request.
+      delete process.env.SERVER_SESSION_PUBLIC_KEY_PEM;
+      FlyService = await import('./FlyService');
+
+      await expect(
+        FlyService.createMachine({
+          serverId: 'proj-id-123',
+          serverToken: 'wst_test_token',
+          region: 'iad',
+        }),
+      ).rejects.toThrow(/SERVER_SESSION_PUBLIC_KEY_PEM/);
+
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should honor server machine lifecycle env overrides', async () => {
       process.env.SERVER_MACHINE_AUTOSTOP = 'off';
       process.env.SERVER_MACHINE_AUTOSTART = 'false';
       process.env.SERVER_MIN_MACHINES_RUNNING = '1';
+      FlyService = await import('./FlyService');
 
-      // Mock GraphQL current release image lookup
+      // Mock createVolume
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({
-          data: {
-            app: {
-              currentRelease: {
-                imageRef: 'registry.fly.io/test-app:deployment-456',
-              },
-            },
-          },
-        }),
-      });
-
-      // Mock listVolumes with a matching volume
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        text: () => Promise.resolve(JSON.stringify([
-          { id: 'existing-vol', name: 'data_projid123', region: 'iad' },
-        ])),
+        text: () => Promise.resolve(JSON.stringify({
+          id: 'vol-123',
+          name: 'data_projid123',
+          region: 'iad',
+        })),
       });
 
       // Mock createMachine
@@ -280,7 +271,7 @@ describe('FlyService', () => {
         region: 'iad',
       });
 
-      const machineCall = mockFetch.mock.calls[2];
+      const machineCall = mockFetch.mock.calls[1]; // createVolume=0, createMachine=1
       const body = JSON.parse(machineCall[1].body);
 
       expect(body.config.services[0].autostop).toBe('off');
