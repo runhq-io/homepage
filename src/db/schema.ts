@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, unique, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
@@ -98,6 +98,72 @@ export const usageRecordsRelations = relations(usageRecords, ({ one }) => ({
 }));
 
 // ============================================================================
+// Usage Events (per-call event log — source of truth for Claude-call spending)
+// ============================================================================
+
+export const usageEvents = pgTable('usage_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  serverId: text('server_id'),
+  ts: timestamp('ts', { withTimezone: true }).notNull(),
+  model: text('model').notNull(),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  cacheReadTokens: integer('cache_read_tokens').notNull().default(0),
+  cacheCreationTokens: integer('cache_creation_tokens').notNull().default(0),
+  // numeric(12,4) preserves sub-cent precision from calculateCost.
+  // Drizzle returns numeric columns as strings; cast at query boundary.
+  costCents: numeric('cost_cents', { precision: 12, scale: 4 }).notNull().default('0'),
+  // Context (all nullable — best-effort from RunHQ server)
+  taskId: text('task_id'),
+  taskLabel: text('task_label'),
+  channelId: text('channel_id'),
+  channelLabel: text('channel_label'),
+  agentId: text('agent_id'),
+  agentLabel: text('agent_label'),
+  conversationId: text('conversation_id'),
+  anthropicRequestId: text('anthropic_request_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  tsIdx: index('usage_events_ts_idx').on(table.ts.desc()),
+  userTsIdx: index('usage_events_user_ts_idx').on(table.userId, table.ts.desc()),
+  serverTsIdx: index('usage_events_server_ts_idx').on(table.serverId, table.ts.desc()),
+  // Partial indexes for breakdowns — only rows with the ID populated
+  taskIdx: index('usage_events_task_idx').on(table.taskId).where(sql`task_id IS NOT NULL`),
+  agentIdx: index('usage_events_agent_idx').on(table.agentId).where(sql`agent_id IS NOT NULL`),
+}));
+
+export const usageEventsRelations = relations(usageEvents, ({ one }) => ({
+  user: one(users, { fields: [usageEvents.userId], references: [users.id] }),
+}));
+
+// ============================================================================
+// Usage Adjustments (admin-driven balance changes — grants, refunds, clawbacks)
+// ============================================================================
+
+export const usageAdjustments = pgTable('usage_adjustments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  adminUserId: uuid('admin_user_id').references(() => users.id).notNull(),
+  ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
+  // Signed: negative = refund/credit, positive = additional charge/clawback
+  amountCents: numeric('amount_cents', { precision: 12, scale: 4 }).notNull(),
+  reason: text('reason').notNull(),
+}, (table) => ({
+  userTsIdx: index('usage_adjustments_user_ts_idx').on(table.userId, table.ts.desc()),
+}));
+
+export const usageAdjustmentsRelations = relations(usageAdjustments, ({ one }) => ({
+  user: one(users, { fields: [usageAdjustments.userId], references: [users.id] }),
+  admin: one(users, { fields: [usageAdjustments.adminUserId], references: [users.id] }),
+}));
+
+export type UsageEvent = typeof usageEvents.$inferSelect;
+export type NewUsageEvent = typeof usageEvents.$inferInsert;
+export type UsageAdjustment = typeof usageAdjustments.$inferSelect;
+export type NewUsageAdjustment = typeof usageAdjustments.$inferInsert;
+
+// ============================================================================
 // Payments (Stripe payment history)
 // ============================================================================
 
@@ -160,7 +226,10 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   conversations: many(conversations),
   tasks: many(tasks),
   subscription: one(subscriptions),
-  usageRecords: many(usageRecords),
+  usageRecords: many(usageRecords),              // keep for now — removed in later task
+  usageEvents: many(usageEvents),
+  usageAdjustments: many(usageAdjustments),
+  adjustmentsAsAdmin: many(usageAdjustments, { relationName: 'admin' }),
   payments: many(payments),
   organizationMemberships: many(organizationMembers),
   ownedOrganizations: many(organizations),
