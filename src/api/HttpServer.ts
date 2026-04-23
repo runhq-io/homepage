@@ -4749,6 +4749,13 @@ export function createHttpApp() {
     return c.json(stats);
   });
 
+  app.get('/api/widget/tickets/updates', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const result = await WidgetService.listDoneTickets(auth.projectId, auth.widgetUserId);
+    return c.json(result);
+  });
+
   app.get('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
@@ -4865,6 +4872,73 @@ export function createHttpApp() {
       if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
       if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
       if (msg === 'Attachment not found') return c.json({ error: msg }, 404);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.post('/api/widget/tickets/:id/comments', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+    const body = await c.req.json();
+    try {
+      const comment = await WidgetService.addWidgetComment(auth.projectId, c.req.param('id'), auth.widgetUserId, body.content);
+      return c.json({ comment }, 201);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.patch('/api/widget/tickets/:id/comments/:commentId', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json();
+    try {
+      const comment = await WidgetService.updateWidgetComment(auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId, body.content);
+      return c.json({ comment });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Ticket not found' || msg === 'Comment not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.delete('/api/widget/tickets/:id/comments/:commentId', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    try {
+      await WidgetService.deleteWidgetComment(auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Comment not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
+      return c.json({ error: msg }, 400);
+    }
+  });
+
+  app.post('/api/widget/tickets/:id/comments/:commentId/attachments', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    try {
+      const formData = await c.req.raw.formData();
+      const file = formData.get('file');
+      if (!file || typeof (file as any).arrayBuffer !== 'function') {
+        return c.json({ error: 'file field is required' }, 400);
+      }
+      const inputFile = file as globalThis.File;
+      const buffer = Buffer.from(await inputFile.arrayBuffer());
+      const attachment = await WidgetService.addWidgetCommentAttachment(
+        auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId,
+        { buffer, mimeType: inputFile.type || 'application/octet-stream', filename: inputFile.name || 'attachment', originalName: inputFile.name },
+      );
+      return c.json({ attachment }, 201);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg === 'Comment not found' || msg === 'Ticket not found') return c.json({ error: msg }, 404);
+      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
       return c.json({ error: msg }, 400);
     }
   });
