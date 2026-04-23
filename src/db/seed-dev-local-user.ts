@@ -1,5 +1,5 @@
 import { db } from './index';
-import { users } from './schema';
+import { users, subscriptions } from './schema';
 
 // Fixed UUID so the dev-local user's ID is stable across restarts.
 // All-zeros prefix with 'de1' hex suffix makes this recognisable in logs/DB queries.
@@ -17,16 +17,29 @@ export async function seedDevLocalUser(): Promise<void> {
   if (process.env.NODE_ENV === 'production') return;
 
   try {
-    const result = await db.insert(users).values({
+    const userResult = await db.insert(users).values({
       id: DEV_LOCAL_USER_ID,
       email: 'dev-local@runhq.invalid',
       name: 'Dev Local (sentinel)',
     } as any).onConflictDoNothing().returning({ id: users.id });
 
-    if (result.length > 0) {
+    if (userResult.length > 0) {
       console.log(`[seed] Inserted dev-local sentinel user id=${DEV_LOCAL_USER_ID}`);
     }
-    // If result is empty, the row already existed — silent no-op (idempotent).
+
+    // Ensure a subscription exists for the dev user — trackUsage assumes the row
+    // exists (it does raw UPDATE, no getOrCreate). Without this, in-dev calls
+    // write events with no matching balance deduction.
+    const subResult = await db.insert(subscriptions).values({
+      userId: DEV_LOCAL_USER_ID,
+      planId: 'free',
+      status: 'active',
+      creditBalanceCents: 1_000_000, // $10,000 — dev convenience; never hits zero
+    } as any).onConflictDoNothing().returning({ id: subscriptions.id });
+
+    if (subResult.length > 0) {
+      console.log(`[seed] Inserted dev-local subscription for id=${DEV_LOCAL_USER_ID}`);
+    }
   } catch (err) {
     // Match the error-handling pattern of sibling seeds (seedWorkerPersona /
     // seedCommanderPersona): log but don't throw, so server startup isn't blocked.
