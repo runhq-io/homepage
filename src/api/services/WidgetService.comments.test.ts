@@ -70,6 +70,51 @@ describe('addWidgetComment', () => {
     const result = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'second');
     expect(result.authorName).toBe('Author');
   });
+
+  it('allows the owner to comment on their own pending ticket', async () => {
+    const [pendingTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID,
+      title: 'Pending',
+      visibility: 'public',
+      moderationStatus: 'pending',
+      createdByType: 'external',
+      createdById: WIDGET_USER_ID,
+      createdByName: 'Author',
+    }).returning({ id: workspaceTasks.id });
+    const result = await addWidgetComment(PROJECT_ID, pendingTask!.id, WIDGET_USER_ID, 'owner comment on own pending');
+    expect(result.body).toBe('owner comment on own pending');
+  });
+
+  it('allows the owner to comment on their own private ticket', async () => {
+    const [privTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID,
+      title: 'Private',
+      visibility: 'private',
+      moderationStatus: 'approved',
+      createdByType: 'external',
+      createdById: WIDGET_USER_ID,
+      createdByName: 'Author',
+    }).returning({ id: workspaceTasks.id });
+    const result = await addWidgetComment(PROJECT_ID, privTask!.id, WIDGET_USER_ID, 'owner comment on own private');
+    expect(result.body).toBe('owner comment on own private');
+  });
+
+  it('still blocks non-owners from commenting on pending tickets', async () => {
+    const [pendingTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID,
+      title: 'Pending',
+      visibility: 'public',
+      moderationStatus: 'pending',
+      createdByType: 'external',
+      createdById: WIDGET_USER_ID,  // owned by WIDGET_USER_ID
+    }).returning({ id: workspaceTasks.id });
+    const [other] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID, externalUserId: `ext-blk-${RUN_HEX}`, name: 'Other',
+    }).returning({ id: widgetUsers.id });
+    await expect(
+      addWidgetComment(PROJECT_ID, pendingTask!.id, other!.id, 'hostile')
+    ).rejects.toThrow('Ticket not found');
+  });
 });
 
 describe('updateWidgetComment', () => {

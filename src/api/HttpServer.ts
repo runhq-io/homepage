@@ -4913,7 +4913,7 @@ export function createHttpApp() {
       return c.json({ ok: true });
     } catch (err: any) {
       const msg = err?.message || String(err);
-      if (msg === 'Comment not found') return c.json({ error: msg }, 404);
+      if (msg === 'Ticket not found' || msg === 'Comment not found') return c.json({ error: msg }, 404);
       if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
       return c.json({ error: msg }, 400);
     }

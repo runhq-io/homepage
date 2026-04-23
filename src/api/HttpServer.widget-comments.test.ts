@@ -133,4 +133,12 @@ describe('DELETE /api/widget/tickets/:id/comments/:commentId', () => {
     const res = await app.request('/api/widget/tickets/t1/comments/c1', { method: 'DELETE' });
     expect(res.status).toBe(200);
   });
+
+  it('404 when Ticket not found on DELETE', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
+    (WidgetService.deleteWidgetComment as any).mockRejectedValue(new Error('Ticket not found'));
+    const app = makeApp();
+    const res = await app.request('/api/widget/tickets/t1/comments/c1', { method: 'DELETE' });
+    expect(res.status).toBe(404);
+  });
 });

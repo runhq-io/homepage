@@ -123,4 +123,82 @@ describe('getPublicTicketDetail comment payload', () => {
     expect(spoofed.canEdit).toBe(false);
     expect(spoofed.externalUserId).toBeNull();
   });
+
+  it('does not leak externalUserId across widget projects', async () => {
+    // Two widget projects on different servers. A task we insert on SERVER_B
+    // carries a comment whose createdById points at project A's widgetUser.
+    // (Cross-project ID collision is the leak scenario.) Viewing via project B
+    // must not resolve that id to project A's externalUserId.
+    const SERVER_B = `ws_td_b_${RUN_HEX}`;
+    await db.insert(servers).values({ id: SERVER_B, name: `SrvB ${RUN_HEX}`, ownerId: USER_ID }).onConflictDoNothing();
+    const [projectB] = await db.insert(widgetProjects).values({
+      serverId: SERVER_B,
+      name: `Detail Test B ${RUN_HEX}`,
+      slug: `detail-test-b-${RUN_HEX}`,
+      apiKey: `apikey-b-${RUN_HEX}`,
+      apiSecretHash: `secret-b-${RUN_HEX}`,
+      enabled: true,
+      isPublic: true,
+    }).returning({ id: widgetProjects.id });
+
+    try {
+      const [taskB] = await db.insert(workspaceTasks).values({
+        serverId: SERVER_B, title: 'Cross-project task', visibility: 'public', status: 'in_progress',
+      }).returning({ id: workspaceTasks.id });
+
+      // Comment whose createdById references project A's widget user.
+      await db.insert(workspaceTaskComments).values({
+        serverId: SERVER_B,
+        taskId: taskB!.id,
+        content: 'Cross-project external comment',
+        createdByType: 'external',
+        createdById: WIDGET_USER_ID, // project A's widget user
+        createdByName: 'Alice',
+        updatedAt: new Date(),
+      });
+
+      const detail = await getPublicTicketDetail(projectB!.id, taskB!.id);
+      expect(detail).not.toBeNull();
+      const external = detail!.comments.find(c => c.body === 'Cross-project external comment')!;
+      // createdByType is still external (sourced from the comment row), but
+      // the externalUserId must NOT be leaked to project B's viewer.
+      expect(external.createdByType).toBe('external');
+      expect(external.externalUserId).toBeNull();
+    } finally {
+      await db.delete(workspaceTaskComments).where(eq(workspaceTaskComments.serverId, SERVER_B));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_B));
+      await db.delete(widgetProjects).where(eq(widgetProjects.id, projectB!.id));
+      await db.delete(servers).where(eq(servers.id, SERVER_B));
+    }
+  });
+
+  it('channel-scoped widget project cannot resolve a task outside its channel by id', async () => {
+    // Project with a channel scope set cannot fetch details for a ticket
+    // whose workspaceChannelId differs (or is null).
+    const SERVER_C = `ws_td_c_${RUN_HEX}`;
+    await db.insert(servers).values({ id: SERVER_C, name: `SrvC ${RUN_HEX}`, ownerId: USER_ID }).onConflictDoNothing();
+    const [scoped] = await db.insert(widgetProjects).values({
+      serverId: SERVER_C,
+      name: `Scoped ${RUN_HEX}`,
+      slug: `scoped-${RUN_HEX}`,
+      apiKey: `apikey-scoped-${RUN_HEX}`,
+      apiSecretHash: `secret-scoped-${RUN_HEX}`,
+      enabled: true,
+      isPublic: true,
+      channelId: `ch-a-${RUN_HEX}`,
+    }).returning({ id: widgetProjects.id });
+
+    try {
+      // Task with no workspaceChannelId — scoped widget must not see it.
+      const [unscopedTask] = await db.insert(workspaceTasks).values({
+        serverId: SERVER_C, title: 'Unscoped', visibility: 'public',
+      }).returning({ id: workspaceTasks.id });
+      const detail = await getPublicTicketDetail(scoped!.id, unscopedTask!.id);
+      expect(detail).toBeNull();
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_C));
+      await db.delete(widgetProjects).where(eq(widgetProjects.id, scoped!.id));
+      await db.delete(servers).where(eq(servers.id, SERVER_C));
+    }
+  });
 });

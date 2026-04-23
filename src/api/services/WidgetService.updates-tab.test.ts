@@ -80,4 +80,14 @@ describe('listDoneTickets', () => {
     const result = await listDoneTickets(PROJECT_ID, 'fake-widget-user-id');
     expect(result.isIdentified).toBe(true);
   });
+
+  it('exposes completedAt on done ticket cards', async () => {
+    const result = await listDoneTickets(PROJECT_ID);
+    // All done tickets in the seed have completedAt set
+    expect(result.tickets.length).toBeGreaterThan(0);
+    for (const t of result.tickets) {
+      expect(t.completedAt).not.toBeNull();
+      expect(t.completedAt).not.toBeUndefined();
+    }
+  });
 });

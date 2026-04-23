@@ -68,6 +68,7 @@ type WidgetTicketResponse = {
   votingEndsAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  completedAt: Date | null;
   userVote: boolean | null;
   canVote: boolean;
 };
@@ -212,6 +213,7 @@ function mapTaskToWidgetResponse(
     votingEndsAt: task.votingEndsAt,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
+    completedAt: task.completedAt,
     userVote,
     canVote,
   };
@@ -454,6 +456,7 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
 }
 
 async function resolveExternalUserIds(
+  projectId: string,
   rows: Array<Pick<CanonicalTaskComment, 'createdByType' | 'createdById'>>,
 ): Promise<Map<string, string>> {
   const ids = rows
@@ -463,7 +466,10 @@ async function resolveExternalUserIds(
   const dbRows = await db
     .select({ id: widgetUsers.id, externalUserId: widgetUsers.externalUserId })
     .from(widgetUsers)
-    .where(inArray(widgetUsers.id, ids));
+    .where(and(
+      inArray(widgetUsers.id, ids),
+      eq(widgetUsers.projectId, projectId),
+    ));
   const map = new Map<string, string>();
   for (const r of dbRows) map.set(r.id, r.externalUserId);
   return map;
@@ -507,6 +513,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       eq(workspaceTasks.serverId, project.serverId),
       ne(workspaceTasks.moderationStatus, 'rejected'),
       isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
     ))
     .limit(1);
 
@@ -534,7 +541,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     && comments.length === 0
     && activity.length === 0;
 
-  const externalUserIdMap = await resolveExternalUserIds([
+  const externalUserIdMap = await resolveExternalUserIds(project.id, [
     ...comments,
     { createdByType: task.createdByType, createdById: task.createdById },
   ]);
@@ -569,19 +576,46 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
 async function resolveTicketVisibleToWidget(
   projectId: string,
   ticketId: string,
+  widgetUserId: string,
 ): Promise<{ serverId: string } | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
+
   const [task] = await db
-    .select({ id: workspaceTasks.id, serverId: workspaceTasks.serverId })
+    .select({
+      id: workspaceTasks.id,
+      serverId: workspaceTasks.serverId,
+      visibility: workspaceTasks.visibility,
+      moderationStatus: workspaceTasks.moderationStatus,
+      createdByType: workspaceTasks.createdByType,
+      createdById: workspaceTasks.createdById,
+      workspaceChannelId: workspaceTasks.workspaceChannelId,
+    })
     .from(workspaceTasks)
     .where(and(
       eq(workspaceTasks.id, ticketId),
-      buildWidgetVisibleFilter(project),
-      eq(workspaceTasks.visibility, 'public'),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ne(workspaceTasks.moderationStatus, 'rejected'),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
     ))
     .limit(1);
-  return task ? { serverId: task.serverId } : null;
+
+  if (!task) return null;
+
+  const isOwner = task.createdByType === 'external' && task.createdById === widgetUserId;
+
+  // Public + approved → anyone identified can comment
+  if (task.visibility === 'public' && task.moderationStatus === 'approved') {
+    return { serverId: task.serverId };
+  }
+
+  // Pending or private → owner only
+  if (isOwner) {
+    return { serverId: task.serverId };
+  }
+
+  return null;
 }
 
 export async function addWidgetComment(
@@ -590,7 +624,7 @@ export async function addWidgetComment(
   widgetUserId: string,
   content: string,
 ) {
-  const visible = await resolveTicketVisibleToWidget(projectId, ticketId);
+  const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
   if (!visible) throw new Error('Ticket not found');
 
   const [widgetUser] = await db
@@ -606,7 +640,7 @@ export async function addWidgetComment(
     createdByName: widgetUser?.name ?? null,
   });
 
-  const externalUserIdMap = await resolveExternalUserIds([comment]);
+  const externalUserIdMap = await resolveExternalUserIds(projectId, [comment]);
   return mapCommentToWidgetResponse(comment, externalUserIdMap, widgetUserId);
 }
 
@@ -616,7 +650,7 @@ async function loadAndAuthorizeWidgetComment(
   commentId: string,
   widgetUserId: string,
 ): Promise<{ serverId: string }> {
-  const visible = await resolveTicketVisibleToWidget(projectId, ticketId);
+  const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
   if (!visible) throw new Error('Ticket not found');
   const [row] = await db
     .select({
@@ -648,7 +682,7 @@ export async function updateWidgetComment(
   const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
   const updated = await WorkspaceTaskService.updateComment(serverId, ticketId, commentId, { content });
   if (!updated) throw new Error('Comment not found');
-  const externalUserIdMap = await resolveExternalUserIds([updated]);
+  const externalUserIdMap = await resolveExternalUserIds(projectId, [updated]);
   return mapCommentToWidgetResponse(updated, externalUserIdMap, widgetUserId);
 }
 
