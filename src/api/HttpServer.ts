@@ -44,6 +44,7 @@ import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers } from '../db/schema';
 import { eq, lt, sql } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
+export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
