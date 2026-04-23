@@ -394,6 +394,27 @@ export async function addComment(
   return toCanonicalComment(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 
+export async function updateComment(
+  serverId: string,
+  taskId: string,
+  commentId: string,
+  input: { content: string },
+): Promise<CanonicalTaskComment | null> {
+  const [row] = await db
+    .update(workspaceTaskComments)
+    .set({ content: input.content, updatedAt: new Date() })
+    .where(and(
+      eq(workspaceTaskComments.serverId, serverId),
+      eq(workspaceTaskComments.taskId, taskId),
+      eq(workspaceTaskComments.id, commentId),
+      isNull(workspaceTaskComments.deletedAt),
+    ))
+    .returning();
+  if (!row) return null;
+  const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  return toCanonicalComment(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
+}
+
 export async function deleteComment(
   serverId: string,
   taskId: string,
