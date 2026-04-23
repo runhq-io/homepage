@@ -118,6 +118,23 @@ describe('generateServerSessionToken — EdDSA signing', () => {
     expect(decoded).toBeNull();
   });
 
+  it('rejects mismatched public/private halves at load time (rotation-typo guard)', async () => {
+    // Pair the "canonical" test private key with a public key from an
+    // UNRELATED keypair. Loading must fail with a clear error rather than
+    // silently publishing a non-matching JWKS / Fly env var.
+    const { generateKeyPairSync } = await import('node:crypto');
+    const unrelated = generateKeyPairSync('ed25519');
+    const unrelatedPublicPem = unrelated.publicKey.export({ format: 'pem', type: 'spki' }) as string;
+
+    process.env.SERVER_SESSION_PRIVATE_KEY_PEM = TEST_PRIVATE_PEM;
+    process.env.SERVER_SESSION_PUBLIC_KEY_PEM = unrelatedPublicPem;
+    _resetServerSessionKeyPairCache();
+
+    await expect(generateServerSessionToken('u', 's')).rejects.toThrow(
+      /matching Ed25519 pair/,
+    );
+  });
+
   it('rejects HS256-signed tokens outright (no legacy fallback, even if SERVER_SESSION_SECRET is present)', async () => {
     // Phase 2: the HS256 verification path has been removed entirely. Even
     // if the old shared secret env var is still set (e.g. during rollout),

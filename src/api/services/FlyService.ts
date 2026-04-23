@@ -600,6 +600,16 @@ export async function createMachine(
     `[FlyService] Machine lifecycle policy autostop=${autostop}, autostart=${autostart}, min_machines_running=${minMachinesRunning}`
   );
 
+  // Workspaces now fail-fast without a public key in cloud mode, so we
+  // refuse to create a machine that would boot-loop. Also guards against
+  // silently shipping an empty string env var to Fly.
+  const sessionPublicKeyPem = process.env.SERVER_SESSION_PUBLIC_KEY_PEM;
+  if (!sessionPublicKeyPem) {
+    throw new Error(
+      'SERVER_SESSION_PUBLIC_KEY_PEM is not set on the backend. Refusing to create a workspace machine that cannot verify session tokens.',
+    );
+  }
+
   // Get the latest release image and volume in parallel
   const [latestImage, volumeId] = await Promise.all([
     getLatestReleaseImage(),
@@ -619,7 +629,7 @@ export async function createMachine(
         SERVER_NAME: machineName,
         AUTH_MODE: 'cloud',
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
-        SERVER_SESSION_PUBLIC_KEY_PEM: process.env.SERVER_SESSION_PUBLIC_KEY_PEM || '',
+        SERVER_SESSION_PUBLIC_KEY_PEM: sessionPublicKeyPem,
         PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
         CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
         NODE_ENV: 'development',
@@ -788,6 +798,16 @@ export async function updateMachineImage(machineId: string): Promise<void> {
   // even when the tag is the same — the underlying image may have changed.
   console.log(`[FlyService] Updating machine ${machineId} image: ${machine.config.image} → ${latestImage}`);
 
+  // Fail before the Fly API call if the session public key is missing. If we
+  // passed `|| ''` we would overwrite a valid existing public key with an
+  // empty string and brick the machine on next restart.
+  const sessionPublicKeyPem = process.env.SERVER_SESSION_PUBLIC_KEY_PEM;
+  if (!sessionPublicKeyPem) {
+    throw new Error(
+      'SERVER_SESSION_PUBLIC_KEY_PEM is not set on the backend. Refusing to update machine env with an empty public key.',
+    );
+  }
+
   // Fly's machine update API replaces the full `env` map, so omitting a key
   // here removes it from the machine. We deliberately drop the legacy shared
   // HMAC secret (`SERVER_SESSION_SECRET`) from every existing machine so the
@@ -808,7 +828,7 @@ export async function updateMachineImage(machineId: string): Promise<void> {
           PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
           CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
           CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
-          SERVER_SESSION_PUBLIC_KEY_PEM: process.env.SERVER_SESSION_PUBLIC_KEY_PEM || '',
+          SERVER_SESSION_PUBLIC_KEY_PEM: sessionPublicKeyPem,
         },
       },
     }

@@ -20,7 +20,7 @@
  *    must provide real keys.
  */
 
-import { importPKCS8, importSPKI, exportJWK, type JWK } from 'jose';
+import { importPKCS8, importSPKI, exportJWK, SignJWT, jwtVerify, type JWK } from 'jose';
 import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
 
 // jose@6 exports `CryptoKey` but dropped the legacy `KeyLike` type. Derive the
@@ -101,6 +101,23 @@ export function getServerSessionKeyPair(): Promise<EdKeyPair> {
 
     const privateKey = await importPKCS8(normalizePem(privatePem), 'EdDSA');
     const publicKey = await importSPKI(normalizePem(publicPem), 'EdDSA');
+
+    // Verify the two halves are a matching pair. A rotation typo would
+    // otherwise load successfully, mint tokens against the private key,
+    // and publish an unrelated public key via JWKS / Fly env — causing
+    // every verification to silently fail at runtime.
+    try {
+      const probe = await new SignJWT({})
+        .setProtectedHeader({ alg: 'EdDSA' })
+        .sign(privateKey);
+      await jwtVerify(probe, publicKey, { algorithms: ['EdDSA'] });
+    } catch (err) {
+      throw new Error(
+        'SERVER_SESSION_PRIVATE_KEY_PEM and SERVER_SESSION_PUBLIC_KEY_PEM are not a matching Ed25519 pair. ' +
+          `Sign+verify probe failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const publicJwk = await exportJWK(publicKey);
     publicJwk.alg = 'EdDSA';
     publicJwk.use = 'sig';
