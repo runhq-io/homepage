@@ -84,3 +84,33 @@ describe('pricingForModel', () => {
     expect(pricingForModel('claude-unknown-model')).toEqual({ input: 3, output: 15 });
   });
 });
+
+describe('pricing + resolveModel alignment', () => {
+  // Regression: if resolveModel strips a date suffix, the aliased name MUST be
+  // in the pricing table — otherwise we silently fall back to Sonnet pricing
+  // and over/undercharge. This test asserts Haiku 4.5 is priced correctly
+  // under its post-resolveModel name.
+
+  it('prices claude-haiku-4-5 (post-resolveModel alias) at Haiku rates, not Sonnet', () => {
+    // 1M input tokens × $1/MTok × 100 (cents) = 100 cents
+    const cost = calculateCost('claude-haiku-4-5', {
+      inputTokens: 1_000_000, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0,
+    });
+    expect(cost).toBeCloseTo(100, 3);
+    // Would fail at ~300 if Sonnet default were applied.
+  });
+
+  it('claude-haiku-4-5 output is priced at $5/MTok', () => {
+    const cost = calculateCost('claude-haiku-4-5', {
+      inputTokens: 0, outputTokens: 1_000_000,
+      cacheReadTokens: 0, cacheCreationTokens: 0,
+    });
+    expect(cost).toBeCloseTo(500, 3);
+    // Would fail at ~1500 if Sonnet default were applied.
+  });
+
+  it('pricingForModel returns Haiku pricing for claude-haiku-4-5', () => {
+    expect(pricingForModel('claude-haiku-4-5')).toEqual({ input: 1, output: 5 });
+  });
+});
