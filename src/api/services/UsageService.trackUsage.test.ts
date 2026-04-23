@@ -31,6 +31,7 @@ describe('trackUsage', () => {
       tokens: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheCreationTokens: 0 },
       costCents: 10.5,  // sub-cent precision
       context: { serverId: 'test-server-1', taskId: null, taskLabel: null,
+                 jobId: null,
                  channelId: null, channelLabel: null, agentId: null, agentLabel: null,
                  conversationId: null },
       anthropicRequestId: 'req_test_123',
@@ -59,6 +60,7 @@ describe('trackUsage', () => {
       tokens: { inputTokens: 10_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
       costCents: 3000,  // way over balance
       context: { serverId: null, taskId: null, taskLabel: null,
+                 jobId: null,
                  channelId: null, channelLabel: null, agentId: null, agentLabel: null,
                  conversationId: null },
       anthropicRequestId: null,
@@ -81,6 +83,7 @@ describe('trackUsage', () => {
       context: {
         serverId: 'fly-machine-abc',
         taskId: 'task-1',     taskLabel: 'Fix login bug',
+        jobId: 'job-1',
         channelId: 'chan-1',  channelLabel: '#engineering',
         agentId: 'agent-1',   agentLabel: 'QA Bot',
         conversationId: 'conv-1',
@@ -92,6 +95,7 @@ describe('trackUsage', () => {
     expect(e.serverId).toBe('fly-machine-abc');
     expect(e.taskId).toBe('task-1');
     expect(e.taskLabel).toBe('Fix login bug');
+    expect(e.jobId).toBe('job-1');
     expect(e.channelId).toBe('chan-1');
     expect(e.channelLabel).toBe('#engineering');
     expect(e.agentId).toBe('agent-1');
@@ -119,6 +123,7 @@ describe('trackUsage', () => {
         tokens: { inputTokens: 100, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
         costCents: 0.04,
         context: { serverId: null, taskId: null, taskLabel: null,
+                   jobId: null,
                    channelId: null, channelLabel: null, agentId: null, agentLabel: null,
                    conversationId: null },
         anthropicRequestId: null,

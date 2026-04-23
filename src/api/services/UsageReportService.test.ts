@@ -8,6 +8,7 @@ import {
   getBreakdownByServer,
   getBreakdownByTask,
   getBreakdownByAgent,
+  getBreakdownByJob,
 } from './UsageReportService';
 import { inArray } from 'drizzle-orm';
 
@@ -34,21 +35,25 @@ describe('UsageReportService', () => {
     await db.insert(usageEvents).values([
       { userId: u1, ts: new Date('2026-04-10T12:00:00Z'), model: 'claude-sonnet-4-6',
         serverId: 's1', taskId: 't1', taskLabel: 'Task One',
+        jobId: 'job-1',
         agentId: 'a1', agentLabel: 'Agent One',
         inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheCreationTokens: 0,
         costCents: '10.0000' },
       { userId: u1, ts: new Date('2026-04-12T12:00:00Z'), model: 'claude-opus-4-7',
         serverId: 's1', taskId: 't1', taskLabel: 'Task One',
+        jobId: 'job-1',
         agentId: 'a2', agentLabel: 'Agent Two',
         inputTokens: 2000, outputTokens: 1000, cacheReadTokens: 0, cacheCreationTokens: 0,
         costCents: '30.0000' },
       { userId: u2, ts: new Date('2026-04-15T12:00:00Z'), model: 'claude-sonnet-4-6',
         serverId: 's2', taskId: null, taskLabel: null,
+        jobId: 'job-2',
         agentId: null, agentLabel: null,
         inputTokens: 500, outputTokens: 250, cacheReadTokens: 0, cacheCreationTokens: 0,
         costCents: '5.0000' },
       // A pre-cutover rollup row
       { userId: u1, ts: new Date('2026-04-30T23:59:59Z'), model: 'pre-cutover-rollup',
+        jobId: null,
         inputTokens: 10000, outputTokens: 5000, cacheReadTokens: 0, cacheCreationTokens: 0,
         costCents: '100.0000' },
     ] as any);
@@ -112,5 +117,13 @@ describe('UsageReportService', () => {
     const byAgent = Object.fromEntries(rows.map((r) => [r.agentId ?? '__null', r.totalCostCents]));
     expect(byAgent.a1).toBeCloseTo(10, 3);
     expect(byAgent.a2).toBeCloseTo(30, 3);
+  });
+
+  it('getBreakdownByJob groups by jobId and excludes nulls from links', async () => {
+    const rows = await getBreakdownByJob({ ...filter, userIds: [u1, u2], excludePreCutover: true });
+    const byJob = Object.fromEntries(rows.map((r) => [r.jobId ?? '__null', r.totalCostCents]));
+    // job-1: 10 + 30 = 40, job-2: 5
+    expect(byJob['job-1']).toBeCloseTo(40, 3);
+    expect(byJob['job-2']).toBeCloseTo(5, 3);
   });
 });

@@ -91,6 +91,7 @@ export const usageEvents = pgTable('usage_events', {
   // Context (all nullable — best-effort from RunHQ server)
   taskId: text('task_id'),
   taskLabel: text('task_label'),
+  jobId: text('job_id'),
   channelId: text('channel_id'),
   channelLabel: text('channel_label'),
   agentId: text('agent_id'),
@@ -105,6 +106,7 @@ export const usageEvents = pgTable('usage_events', {
   // Partial indexes for breakdowns — only rows with the ID populated
   taskIdx: index('usage_events_task_idx').on(table.taskId).where(sql`task_id IS NOT NULL`),
   agentIdx: index('usage_events_agent_idx').on(table.agentId).where(sql`agent_id IS NOT NULL`),
+  jobIdx: index('usage_events_job_idx').on(table.jobId).where(sql`job_id IS NOT NULL`),
 }));
 
 export const usageEventsRelations = relations(usageEvents, ({ one }) => ({

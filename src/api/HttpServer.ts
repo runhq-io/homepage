@@ -722,6 +722,7 @@ export function createHttpApp() {
       serverId:       idOrNull(c.req.header('X-Server-Id')),
       taskId:         idOrNull(c.req.header('X-Task-Id')),
       taskLabel:      labelOrNull(c.req.header('X-Task-Label')),
+      jobId:          idOrNull(c.req.header('X-Job-Id')),
       channelId:      idOrNull(c.req.header('X-Channel-Id')),
       channelLabel:   labelOrNull(c.req.header('X-Channel-Label')),
       agentId:        idOrNull(c.req.header('X-Agent-Id')),

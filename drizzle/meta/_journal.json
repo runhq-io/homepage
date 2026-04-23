@@ -36,6 +36,13 @@
       "when": 1776942336741,
       "tag": "0004_known_dragon_man",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1776954870523,
+      "tag": "0005_gigantic_shard",
+      "breakpoints": true
     }
   ]
 }

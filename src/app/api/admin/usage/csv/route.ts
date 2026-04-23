@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
     'ts', 'userId', 'serverId', 'model',
     'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens',
     'costCents',
-    'taskId', 'taskLabel', 'channelId', 'channelLabel',
+    'taskId', 'taskLabel', 'jobId', 'channelId', 'channelLabel',
     'agentId', 'agentLabel', 'conversationId', 'anthropicRequestId',
   ];
 
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
             row.userId, row.serverId, row.model,
             row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheCreationTokens,
             row.costCents,
-            row.taskId, row.taskLabel, row.channelId, row.channelLabel,
+            row.taskId, row.taskLabel, row.jobId, row.channelId, row.channelLabel,
             row.agentId, row.agentLabel, row.conversationId, row.anthropicRequestId,
           ].map(escapeCsv).join(',') + '\n';
           controller.enqueue(encoder.encode(line));

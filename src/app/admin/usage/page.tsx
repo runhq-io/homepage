@@ -5,6 +5,7 @@ import {
   getBreakdownByServer,
   getBreakdownByTask,
   getBreakdownByAgent,
+  getBreakdownByJob,
   type UsageFilter,
 } from '@/api/services/UsageReportService';
 import { UsageFilters } from './UsageFilters';
@@ -54,13 +55,14 @@ export default async function UsagePage({
   const sp = await searchParams;
   const f = parseFilter(sp);
 
-  const [summary, daily, byUser, byServer, byTask, byAgent] = await Promise.all([
+  const [summary, daily, byUser, byServer, byTask, byAgent, byJob] = await Promise.all([
     getSummary({ ...f, excludePreCutover: false }),
     getDailyTotals({ ...f }, f.groupBy),
     getBreakdownByUser({ ...f, excludePreCutover: true }),
     getBreakdownByServer({ ...f, excludePreCutover: true }),
     getBreakdownByTask({ ...f, excludePreCutover: true }),
     getBreakdownByAgent({ ...f, excludePreCutover: true }),
+    getBreakdownByJob({ ...f, excludePreCutover: true }),
   ]);
 
   const preCutoverTotal =
@@ -168,6 +170,21 @@ export default async function UsagePage({
           href:
             r.agentId && r.serverId
               ? `${appBase}/server/${r.serverId}/agent/${r.agentId}`
+              : undefined,
+        }))}
+      />
+
+      <BreakdownTable
+        title="By job"
+        rows={byJob.map((r) => ({
+          key: r.jobId ?? '__null',
+          label: r.jobId ? r.jobId.substring(0, 12) + '…' : '— No job context —',
+          cost: r.totalCostCents,
+          requests: r.requestCount,
+          // Deep-link to JobView via the client's /server/{sid}/session/{jobId} route.
+          href:
+            r.jobId && r.serverId
+              ? `${appBase}/server/${r.serverId}/session/${r.jobId}`
               : undefined,
         }))}
       />

@@ -257,6 +257,7 @@ export interface TrackUsageContext {
   serverId: string | null;
   taskId: string | null;
   taskLabel: string | null;
+  jobId: string | null;
   channelId: string | null;
   channelLabel: string | null;
   agentId: string | null;
@@ -306,6 +307,7 @@ export async function trackUsage(input: TrackUsageInput): Promise<void> {
       costCents: costCents.toFixed(4),  // numeric column expects string
       taskId: context.taskId,
       taskLabel: context.taskLabel,
+      jobId: context.jobId,
       channelId: context.channelId,
       channelLabel: context.channelLabel,
       agentId: context.agentId,

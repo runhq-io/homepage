@@ -61,6 +61,15 @@ export interface AgentRow {
   totalCostCents: number;
 }
 
+export interface JobRow {
+  jobId: string | null;
+  // Representative serverId for the deep-link. A job belongs to exactly one
+  // server, so MAX() is the same as "any row's value".
+  serverId: string | null;
+  requestCount: number;
+  totalCostCents: number;
+}
+
 function buildWhere(f: UsageFilter) {
   const parts: ReturnType<typeof gte>[] = [
     gte(usageEvents.ts, f.start),
@@ -182,6 +191,20 @@ export async function getBreakdownByAgent(f: UsageFilter): Promise<AgentRow[]> {
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
 }
 
+export async function getBreakdownByJob(f: UsageFilter): Promise<JobRow[]> {
+  return db
+    .select({
+      jobId:          usageEvents.jobId,
+      serverId:       sql<string | null>`MAX(${usageEvents.serverId})`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+    })
+    .from(usageEvents)
+    .where(buildWhere(f))
+    .groupBy(usageEvents.jobId)
+    .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
+}
+
 export interface UsageEventCsvRow {
   ts: Date;
   userId: string;
@@ -194,6 +217,7 @@ export interface UsageEventCsvRow {
   costCents: number;
   taskId: string | null;
   taskLabel: string | null;
+  jobId: string | null;
   channelId: string | null;
   channelLabel: string | null;
   agentId: string | null;
@@ -223,6 +247,7 @@ export async function* streamEventsForCsv(f: UsageFilter): AsyncIterable<UsageEv
         costCents: sql<number>`${usageEvents.costCents}::double precision`,
         taskId: usageEvents.taskId,
         taskLabel: usageEvents.taskLabel,
+        jobId: usageEvents.jobId,
         channelId: usageEvents.channelId,
         channelLabel: usageEvents.channelLabel,
         agentId: usageEvents.agentId,
