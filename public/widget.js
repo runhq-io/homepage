@@ -942,6 +942,7 @@
       onClick: function () {
         ticketsCache = null;
         mySubmissionsCountCache = null;
+        updatesCache = null;
         showPanelView();
       },
     }, [
@@ -1671,11 +1672,25 @@
       if (isIdentified && mySubmissionsCountCache == null) {
         loadMySubmissions().then(function (mineData) {
           mySubmissionsCountCache = (mineData.tickets || []).length;
-          if (activeTab === "all") renderCurrentTab(isIdentified);
+          // Re-render the current view so the badge updates
+          if (activeTab === "updates") renderUpdatesView(isIdentified);
+          else if (activeTab === "all") renderCurrentTab(isIdentified);
         }).catch(function () {});
       }
     }
 
+    // Default landing is the Updates tab
+    if (activeTab === "updates") {
+      showUpdatesView(isIdentified);
+      loadMyCount();
+      return;
+    }
+    if (activeTab === "mine") {
+      showMySubmissionsView(isIdentified);
+      return;
+    }
+
+    // activeTab === 'all' — existing behavior preserved
     if (ticketsCache) {
       headerTitleEl.textContent = "Help us improve " + (config.projectName || config.projectId);
       renderCurrentTab(isIdentified);
@@ -1731,27 +1746,15 @@
     var statsBanner = renderStats(statsCache);
     if (statsBanner) container.appendChild(statsBanner);
 
-    // --- Action buttons or login prompt ---
     if (isIdentified) {
       container.appendChild(renderInlineForm(submitSuggestion));
     } else {
       container.appendChild(renderLoginPrompt());
     }
-
-    // --- Divider ---
     container.appendChild(h("hr", { className: "rw-divider" }));
 
-    // --- Tabs (below action buttons) ---
-    if (isIdentified) {
-      container.appendChild(renderTabs(function (tab) {
-        activeTab = tab;
-        if (tab === "mine") {
-          showMySubmissionsView(isIdentified);
-        } else {
-          renderCurrentTab(isIdentified);
-        }
-      }, mySubmissionsCountCache));
-    }
+    // Always render tabs; My Tickets is disabled when unidentified
+    container.appendChild(renderTabs(handleTabChange, mySubmissionsCountCache, isIdentified));
 
     if (activeTab === "all") {
       var panelContent = renderTicketList(ticketsCache);
@@ -1772,24 +1775,12 @@
       var statsBanner = renderStats(statsCache);
       if (statsBanner) wrap.appendChild(statsBanner);
 
-      // --- Inline form ---
       if (isIdentified) {
         wrap.appendChild(renderInlineForm(submitSuggestion));
       }
 
-      // --- Divider ---
       wrap.appendChild(h("hr", { className: "rw-divider" }));
-
-      // --- Tabs ---
-      wrap.appendChild(renderTabs(function (tab) {
-        activeTab = tab;
-        if (tab === "all") {
-          renderCurrentTab(isIdentified);
-        } else {
-          showMySubmissionsView(isIdentified);
-        }
-      }, mySubmissionsCountCache));
-
+      wrap.appendChild(renderTabs(handleTabChange, mySubmissionsCountCache, isIdentified));
       wrap.appendChild(renderMySubmissions(myTickets));
       setBodyContent(wrap);
     }).catch(function (err) {
