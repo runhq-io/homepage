@@ -246,24 +246,6 @@ export async function updateSubscriptionPlan(
   return updated;
 }
 
-/**
- * Add credits to user's balance (for purchases or admin grants)
- */
-export async function addCredits(userId: string, amountCents: number): Promise<number> {
-  const subscription = await getOrCreateSubscription(userId);
-  const newBalance = (subscription.creditBalanceCents || 0) + amountCents;
-
-  await db.update(subscriptions)
-    .set({
-      creditBalanceCents: newBalance,
-      updatedAt: new Date(),
-    })
-    .where(eq(subscriptions.userId, userId));
-
-  console.log(`[UsageService] Added $${centsToDollars(amountCents)} to user ${userId}, new balance: $${centsToDollars(newBalance)}`);
-  return newBalance;
-}
-
 // ============================================================================
 // Usage Tracking
 // ============================================================================
@@ -545,7 +527,20 @@ export async function isAdmin(userId: string): Promise<boolean> {
 }
 
 /**
- * Grant bonus credits to a user (admin only)
+ * Grant bonus credits to a user (admin only).
+ *
+ * Every admin credit grant MUST produce a usage_adjustments ledger row in the
+ * same transaction. This function delegates to applyAdjustment to satisfy that
+ * invariant. Direct use of addCredits here is prohibited.
+ *
+ * Note on grantCredits sign convention vs applyAdjustment:
+ *   grantCredits(amountCents=1000) means "give the user $10 of credit" →
+ *   balance should INCREASE. applyAdjustment treats negative amountCents as
+ *   a refund/credit-grant (balance up), so we pass -amountCents.
+ *
+ * Circular-import note: UsageAdjustments.ts imports getOrCreateSubscription
+ * from this file, so we cannot top-level import from UsageAdjustments here.
+ * We use a lazy dynamic import inside the function body to avoid the cycle.
  */
 export async function grantCredits(
   adminUserId: string,
@@ -564,8 +559,19 @@ export async function grantCredits(
     return { success: false, error: 'Amount must be positive' };
   }
 
-  // Add credits
-  const newBalance = await addCredits(targetUserId, amountCents);
+  // Delegate to applyAdjustment so that a usage_adjustments ledger row is
+  // written atomically with the balance update in the same transaction.
+  const { applyAdjustment } = await import('./UsageAdjustments');
+  await applyAdjustment({
+    userId: targetUserId,
+    adminUserId,
+    amountCents: -amountCents,   // negative = credit grant (balance increases)
+    reason: reason || 'Admin credit grant',
+  });
+
+  // Re-read balance to report back to the caller.
+  const sub = await getOrCreateSubscription(targetUserId);
+  const newBalance = sub.creditBalanceCents || 0;
 
   console.log(`[UsageService] Admin ${adminUserId} granted $${centsToDollars(amountCents)} to user ${targetUserId}${reason ? ` (${reason})` : ''}`);
 

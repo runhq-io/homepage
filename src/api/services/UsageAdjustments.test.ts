@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { db, users, subscriptions, usageAdjustments } from '@/db';
+import { db, users, subscriptions, usageAdjustments, adminUsers } from '@/db';
 import { applyAdjustment } from './UsageAdjustments';
-import { getPeriodSpending } from './UsageService';
+import { getPeriodSpending, grantCredits } from './UsageService';
 import { eq } from 'drizzle-orm';
 
 describe('applyAdjustment', () => {
@@ -77,5 +77,51 @@ describe('applyAdjustment', () => {
 
     const rows = await db.select().from(usageAdjustments).where(eq(usageAdjustments.userId, userId));
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('grantCredits', () => {
+  const u = '00000000-0000-0000-0000-000000000ccc';
+  const a = '00000000-0000-0000-0000-000000000ddd';
+
+  beforeEach(async () => {
+    await db.delete(usageAdjustments).where(eq(usageAdjustments.userId, u));
+    await db.delete(subscriptions).where(eq(subscriptions.userId, u));
+    await db.delete(adminUsers).where(eq(adminUsers.userId, a));
+    await db.delete(users).where(eq(users.id, u));
+    await db.delete(users).where(eq(users.id, a));
+    await db.insert(users).values([
+      { id: u, email: 'gc-test@example.com' } as any,
+      { id: a, email: 'gc-admin@example.com' } as any,
+    ]);
+    await db.insert(subscriptions).values({
+      userId: u, planId: 'free', status: 'active', creditBalanceCents: 5000,
+    } as any);
+  });
+
+  afterAll(async () => {
+    await db.delete(usageAdjustments).where(eq(usageAdjustments.userId, u));
+    await db.delete(subscriptions).where(eq(subscriptions.userId, u));
+    await db.delete(adminUsers).where(eq(adminUsers.userId, a));
+    await db.delete(users).where(eq(users.id, u));
+    await db.delete(users).where(eq(users.id, a));
+  });
+
+  it('records a usage_adjustments row (ledger invariant)', async () => {
+    await db.insert(adminUsers).values({ userId: a }).onConflictDoNothing();
+
+    const before = await db.select().from(usageAdjustments)
+      .where(eq(usageAdjustments.userId, u));
+    const countBefore = before.length;
+
+    const result = await grantCredits(a, u, 1000, 'test grant');
+    expect(result.success).toBe(true);
+
+    const after = await db.select().from(usageAdjustments)
+      .where(eq(usageAdjustments.userId, u));
+    expect(after.length).toBe(countBefore + 1);
+
+    // Cleanup admin row
+    await db.delete(adminUsers).where(eq(adminUsers.userId, a));
   });
 });
