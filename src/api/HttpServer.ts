@@ -41,7 +41,7 @@ import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions } from '../db/schema';
 import { eq, lt, sql } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -923,6 +923,20 @@ export function createHttpApp() {
         } catch (err) {
           // Log but do NOT fail the response — the user already got their Claude answer.
           console.error('[HttpServer] trackUsage failed', err);
+        }
+
+        // Fetch the post-deduct balance for the response. trackUsage returns void
+        // now, so we query subscriptions directly (primary-key lookup, trivially fast).
+        try {
+          const [sub] = await db
+            .select({ b: subscriptions.creditBalanceCents })
+            .from(subscriptions)
+            .where(eq(subscriptions.userId, userId))
+            .limit(1);
+          newBalanceCents = sub?.b ?? 0;
+        } catch (err) {
+          console.error('[HttpServer] failed to read post-deduct balance', err);
+          // Leave newBalanceCents as-is (0) rather than fail the response.
         }
 
         console.log(
