@@ -1,6 +1,6 @@
 'use server';
 
-import { db, users, adminUsers, subscriptions, usageRecords, payments, inviteCodes, userAgents, conversations, messages, agentTasks, servers, deviceCodes } from '@/db';
+import { db, users, adminUsers, subscriptions, usageEvents, usageAdjustments, payments, inviteCodes, userAgents, conversations, messages, agentTasks, servers, deviceCodes } from '@/db';
 import { eq, inArray } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { auth } from '@/lib/auth';
@@ -73,7 +73,8 @@ export async function deleteUser(userId: string): Promise<{ success: boolean }> 
     db.delete(conversations).where(eq(conversations.userId, userId)),
     db.delete(userAgents).where(eq(userAgents.userId, userId)),
     db.delete(adminUsers).where(eq(adminUsers.userId, userId)),
-    db.delete(usageRecords).where(eq(usageRecords.userId, userId)),
+    db.delete(usageEvents).where(eq(usageEvents.userId, userId)),
+    db.delete(usageAdjustments).where(eq(usageAdjustments.userId, userId)),
     db.delete(payments).where(eq(payments.userId, userId)),
     db.delete(inviteCodes).where(eq(inviteCodes.createdByUserId, userId)),
     deleteServersAndDependents(userServerIds),

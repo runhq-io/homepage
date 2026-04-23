@@ -1,5 +1,6 @@
-import { db, users, userAgents, agents, subscriptions, plans, usageRecords, inviteCodes } from '@/db';
-import { eq, and, gte, lte, desc } from 'drizzle-orm';
+import { db, users, userAgents, agents, subscriptions, plans, inviteCodes } from '@/db';
+import { getPeriodSpending } from '@/api/services/UsageService';
+import { eq, desc } from 'drizzle-orm';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { SubscriptionManager } from './SubscriptionManager';
@@ -32,18 +33,7 @@ async function getCurrentPeriodUsage(userId: string) {
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-  const result = await db
-    .select()
-    .from(usageRecords)
-    .where(
-      and(
-        eq(usageRecords.userId, userId),
-        gte(usageRecords.periodStart, startOfMonth),
-        lte(usageRecords.periodEnd, endOfMonth)
-      )
-    )
-    .limit(1);
-  return result[0] || null;
+  return getPeriodSpending(userId, startOfMonth, endOfMonth);
 }
 
 async function getUserAgents(userId: string) {
