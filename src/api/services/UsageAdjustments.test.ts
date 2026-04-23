@@ -57,4 +57,25 @@ describe('applyAdjustment', () => {
     const r = await getPeriodSpending(userId, start, end);
     expect(r.totalCostCents).toBeCloseTo(50, 3);
   });
+
+  it('creates a subscription row when one does not exist (new user)', async () => {
+    // Start clean — user exists but has no subscription.
+    await db.delete(subscriptions).where(eq(subscriptions.userId, userId));
+    const before = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId));
+    expect(before).toHaveLength(0);
+
+    // Admin grants 500 cents.
+    await applyAdjustment({
+      userId, adminUserId: adminId, amountCents: -500, reason: 'welcome bonus',
+    });
+
+    const [sub] = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId));
+    expect(sub).toBeDefined();
+    // getOrCreateSubscription seeds new free-tier users with planConfig.monthlyCreditsCents (500).
+    // A -500 adjustment (credit grant) applies GREATEST(0, 500 - (-500)) = 1000.
+    expect(sub.creditBalanceCents).toBe(1000);
+
+    const rows = await db.select().from(usageAdjustments).where(eq(usageAdjustments.userId, userId));
+    expect(rows).toHaveLength(1);
+  });
 });

@@ -1,5 +1,6 @@
 import { db, subscriptions, usageAdjustments } from '@/db';
 import { eq, sql } from 'drizzle-orm';
+import { getOrCreateSubscription } from './UsageService';
 
 export interface ApplyAdjustmentInput {
   userId: string;
@@ -21,6 +22,11 @@ export async function applyAdjustment(input: ApplyAdjustmentInput): Promise<void
   const { userId, adminUserId, amountCents, reason } = input;
   if (!reason.trim()) throw new Error('applyAdjustment: reason is required');
   const wholeAmount = Math.round(amountCents);
+
+  // Ensure a subscription row exists — otherwise UPDATE would silently no-op
+  // for users who haven't made any Claude calls yet (e.g., admin grants to
+  // brand-new users). getOrCreateSubscription creates with default balance 0.
+  await getOrCreateSubscription(userId);
 
   await db.transaction(async (tx) => {
     await tx
