@@ -129,11 +129,13 @@ export default async function UsagePage({
         title="By server"
         rows={byServer.map((r) => ({
           key: r.serverId ?? '__null',
-          label: r.serverId ?? '— Unknown —',
+          // Prefer human name; fall back to the raw ws_ id, then "— Unknown —" for null.
+          label: r.serverName ?? r.serverId ?? '— Unknown —',
+          // Show the id as the secondary line when we have a name (so admins
+          // can still eyeball / copy the ws_... value).
+          extra: r.serverName && r.serverId ? r.serverId : undefined,
           cost: r.totalCostCents,
           requests: r.requestCount,
-          // Deep-link into the workspace on app.runhq.io. Only when serverId
-          // is present — pre-cutover rollups and legacy events have null.
           href: r.serverId ? `${appBase}/server/${r.serverId}` : undefined,
         }))}
       />
@@ -145,11 +147,11 @@ export default async function UsagePage({
           label:
             r.taskLabel ??
             (r.taskId ? r.taskId.substring(0, 12) + '…' : '— No task context —'),
+          // Workspace name tags the task so admins can distinguish tasks with
+          // identical labels across workspaces (e.g. "Fix login" in both envs).
+          extra: r.serverName ?? undefined,
           cost: r.totalCostCents,
           requests: r.requestCount,
-          // Task deep-link needs serverId, channelId, AND taskId — the workspace
-          // URL format is /server/{sid}/channel/{cid}?todo={tid}. If any piece
-          // is missing (old events predating F8, or synthesized rollups), skip.
           href:
             r.taskId && r.serverId && r.channelId
               ? `${appBase}/server/${r.serverId}/channel/${r.channelId}?todo=${r.taskId}`
@@ -164,9 +166,9 @@ export default async function UsagePage({
           label:
             r.agentLabel ??
             (r.agentId ? r.agentId.substring(0, 12) + '…' : '— No agent context —'),
+          extra: r.serverName ?? undefined,
           cost: r.totalCostCents,
           requests: r.requestCount,
-          // Agent deep-link: /server/{sid}/agent/{aid}. Requires both.
           href:
             r.agentId && r.serverId
               ? `${appBase}/server/${r.serverId}/agent/${r.agentId}`
@@ -179,9 +181,9 @@ export default async function UsagePage({
         rows={byJob.map((r) => ({
           key: r.jobId ?? '__null',
           label: r.jobId ? r.jobId.substring(0, 12) + '…' : '— No job context —',
+          extra: r.serverName ?? undefined,
           cost: r.totalCostCents,
           requests: r.requestCount,
-          // Deep-link to JobView via the client's /server/{sid}/session/{jobId} route.
           href:
             r.jobId && r.serverId
               ? `${appBase}/server/${r.serverId}/session/${r.jobId}`

@@ -1,4 +1,4 @@
-import { db, usageEvents, users } from '@/db';
+import { db, usageEvents, users, servers } from '@/db';
 import { and, eq, gte, lte, inArray, ne, sql, desc } from 'drizzle-orm';
 
 export interface UsageFilter {
@@ -35,6 +35,10 @@ export interface UserRow {
 
 export interface ServerRow {
   serverId: string | null;
+  // Human-readable workspace name from servers.name (null if the serverId has
+  // no matching row in `servers`, which can happen for legacy events that
+  // stored a Fly machine ID instead of a ws_ ID).
+  serverName: string | null;
   requestCount: number;
   totalCostCents: number;
 }
@@ -47,6 +51,8 @@ export interface TaskRow {
   // taskId — tasks typically live on one server/channel, so MAX is equivalent
   // to "any row's value".
   serverId: string | null;
+  // Workspace name for the task's server (null if serverId is null or not in `servers`).
+  serverName: string | null;
   channelId: string | null;
   requestCount: number;
   totalCostCents: number;
@@ -57,6 +63,7 @@ export interface AgentRow {
   agentLabel: string | null;
   // Representative serverId for deep-linking into the workspace's agent page.
   serverId: string | null;
+  serverName: string | null;
   requestCount: number;
   totalCostCents: number;
 }
@@ -66,6 +73,7 @@ export interface JobRow {
   // Representative serverId for the deep-link. A job belongs to exactly one
   // server, so MAX() is the same as "any row's value".
   serverId: string | null;
+  serverName: string | null;
   requestCount: number;
   totalCostCents: number;
 }
@@ -151,10 +159,12 @@ export async function getBreakdownByServer(f: UsageFilter): Promise<ServerRow[]>
   return db
     .select({
       serverId:       usageEvents.serverId,
+      serverName:     sql<string | null>`MAX(${servers.name})`,
       requestCount:   sql<number>`COUNT(*)::int`,
       totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
     })
     .from(usageEvents)
+    .leftJoin(servers, eq(usageEvents.serverId, servers.id))
     .where(buildWhere(f))
     .groupBy(usageEvents.serverId)
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
@@ -166,11 +176,13 @@ export async function getBreakdownByTask(f: UsageFilter): Promise<TaskRow[]> {
       taskId:         usageEvents.taskId,
       taskLabel:      sql<string | null>`MAX(${usageEvents.taskLabel})`,
       serverId:       sql<string | null>`MAX(${usageEvents.serverId})`,
+      serverName:     sql<string | null>`MAX(${servers.name})`,
       channelId:      sql<string | null>`MAX(${usageEvents.channelId})`,
       requestCount:   sql<number>`COUNT(*)::int`,
       totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
     })
     .from(usageEvents)
+    .leftJoin(servers, eq(usageEvents.serverId, servers.id))
     .where(buildWhere(f))
     .groupBy(usageEvents.taskId)
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
@@ -182,10 +194,12 @@ export async function getBreakdownByAgent(f: UsageFilter): Promise<AgentRow[]> {
       agentId:        usageEvents.agentId,
       agentLabel:     sql<string | null>`MAX(${usageEvents.agentLabel})`,
       serverId:       sql<string | null>`MAX(${usageEvents.serverId})`,
+      serverName:     sql<string | null>`MAX(${servers.name})`,
       requestCount:   sql<number>`COUNT(*)::int`,
       totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
     })
     .from(usageEvents)
+    .leftJoin(servers, eq(usageEvents.serverId, servers.id))
     .where(buildWhere(f))
     .groupBy(usageEvents.agentId)
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
@@ -196,10 +210,12 @@ export async function getBreakdownByJob(f: UsageFilter): Promise<JobRow[]> {
     .select({
       jobId:          usageEvents.jobId,
       serverId:       sql<string | null>`MAX(${usageEvents.serverId})`,
+      serverName:     sql<string | null>`MAX(${servers.name})`,
       requestCount:   sql<number>`COUNT(*)::int`,
       totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
     })
     .from(usageEvents)
+    .leftJoin(servers, eq(usageEvents.serverId, servers.id))
     .where(buildWhere(f))
     .groupBy(usageEvents.jobId)
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
