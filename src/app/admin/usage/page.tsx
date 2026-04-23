@@ -20,19 +20,29 @@ function parseFilter(
   const now = new Date();
   const defaultStart = new Date(now.getTime() - 30 * 864e5);
 
-  const start = sp.start ? new Date(sp.start) : defaultStart;
-  const end = sp.end ? new Date(sp.end) : now;
+  // Validate date inputs — malformed strings should fall back to defaults, not propagate NaN to Postgres.
+  const parseDate = (s: string | undefined, fallback: Date): Date => {
+    if (!s) return fallback;
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? fallback : d;
+  };
+
+  const start = parseDate(sp.start, defaultStart);
+  const end = parseDate(sp.end, now);
   const groupBy = (['day', 'week', 'month'] as const).find((v) => v === sp.groupBy) ?? 'day';
   const userIds = sp.userIds?.split(',').filter(Boolean);
   const serverIds = sp.serverIds?.split(',').filter(Boolean);
 
+  // excludePreCutover is always true for chart/breakdowns — pre-cutover rollup events
+  // can't be meaningfully placed on a daily/weekly/monthly axis (their ts is synthetic).
+  // The banner separately surfaces the rolled-up total.
   return {
     start,
     end,
     userIds,
     serverIds,
     groupBy,
-    excludePreCutover: groupBy === 'day',
+    excludePreCutover: true,
   };
 }
 
@@ -89,7 +99,7 @@ export default async function UsagePage({
         <SummaryCard label="Servers" value={summary.distinctServers.toString()} />
       </div>
 
-      {preCutoverTotal > 0 && f.groupBy === 'day' && (
+      {preCutoverTotal > 0 && (
         <PreCutoverBanner totalCents={preCutoverTotal} />
       )}
 
