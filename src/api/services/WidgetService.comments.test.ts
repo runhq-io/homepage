@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import { users, servers, workspaceTasks, workspaceTaskComments, widgetProjects, widgetUsers } from '../../db/schema';
-import { addWidgetComment, updateWidgetComment, deleteWidgetComment } from './WidgetService';
+import { addWidgetComment, updateWidgetComment, deleteWidgetComment, addWidgetCommentAttachment } from './WidgetService';
 
 const RUN_HEX = randomBytes(6).toString('hex');
 const SERVER_ID = `ws_cmt_test_${RUN_HEX}`;
@@ -125,5 +125,32 @@ describe('deleteWidgetComment', () => {
     await expect(
       deleteWidgetComment(PROJECT_ID, TASK_ID, created.id, other!.id)
     ).rejects.toThrow('Not the comment author');
+  });
+});
+
+describe('addWidgetCommentAttachment', () => {
+  it('rejects when widgetUserId is not the comment author (auth check runs first)', async () => {
+    const comment = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'with attachment');
+    const [other] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID, externalUserId: `ext-att-${RUN_HEX}`, name: 'O',
+    }).returning({ id: widgetUsers.id });
+    await expect(
+      addWidgetCommentAttachment(PROJECT_ID, TASK_ID, comment.id, other!.id, {
+        buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+        mimeType: 'image/png',
+        filename: 'test.png',
+      })
+    ).rejects.toThrow('Not the comment author');
+  });
+
+  it('rejects invalid mime types for the comment author', async () => {
+    const comment = await addWidgetComment(PROJECT_ID, TASK_ID, WIDGET_USER_ID, 'wrong type');
+    await expect(
+      addWidgetCommentAttachment(PROJECT_ID, TASK_ID, comment.id, WIDGET_USER_ID, {
+        buffer: Buffer.from([0]),
+        mimeType: 'application/x-shellscript',
+        filename: 'evil.sh',
+      })
+    ).rejects.toThrow(/image files are allowed/);
   });
 });

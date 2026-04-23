@@ -972,6 +972,76 @@ export async function uploadTicketAttachment(
   };
 }
 
+const MAX_ATTACHMENTS_PER_COMMENT = 5;
+
+export async function addWidgetCommentAttachment(
+  projectId: string,
+  ticketId: string,
+  commentId: string,
+  widgetUserId: string,
+  file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
+) {
+  const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
+
+  if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
+    throw new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)');
+  }
+  if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
+    throw new Error('File size exceeds 5MB limit');
+  }
+  if (!attachmentStorage.isConfigured()) {
+    throw new Error('Attachment storage is not configured');
+  }
+
+  const [countRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.ownerType, 'comment'),
+      eq(workspaceTaskAttachments.ownerId, commentId),
+    ));
+  if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_COMMENT) {
+    throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_COMMENT} attachments per comment`);
+  }
+
+  const stored = await attachmentStorage.storeUpload({
+    serverId,
+    body: file.buffer,
+    mimeType: file.mimeType,
+    filename: file.filename,
+    originalName: file.originalName ?? file.filename,
+    ownerType: 'comment',
+  });
+
+  const [attachment] = await db
+    .insert(workspaceTaskAttachments)
+    .values({
+      serverId,
+      taskId: ticketId,
+      ownerType: 'comment',
+      ownerId: commentId,
+      storageProvider: stored.storageProvider,
+      storageKey: stored.storageKey,
+      mimeType: stored.mimeType,
+      originalName: stored.originalName ?? null,
+    })
+    .returning();
+
+  const url = await attachmentStorage.createDownloadUrl({
+    storageProvider: stored.storageProvider,
+    storageKey: stored.storageKey,
+    originalName: stored.originalName,
+  });
+
+  return {
+    id: attachment.id,
+    filename: stored.storageKey.split('/').pop(),
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    url,
+  };
+}
+
 export async function deleteTicketAttachment(
   ticketId: string,
   attachmentId: string,
