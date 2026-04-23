@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { db, users, subscriptions, usageEvents, usageAdjustments } from '@/db';
 import { getPeriodSpending } from './UsageService';
 import { eq } from 'drizzle-orm';
@@ -17,6 +17,13 @@ describe('getPeriodSpending', () => {
     await db.delete(subscriptions).where(eq(subscriptions.userId, testUserId));
     await db.delete(users).where(eq(users.id, testUserId));
     await db.insert(users).values({ id: testUserId, email: 'gp-test@example.com' } as any);
+  });
+
+  afterAll(async () => {
+    await db.delete(usageEvents).where(eq(usageEvents.userId, testUserId));
+    await db.delete(usageAdjustments).where(eq(usageAdjustments.userId, testUserId));
+    await db.delete(subscriptions).where(eq(subscriptions.userId, testUserId));
+    await db.delete(users).where(eq(users.id, testUserId));
   });
 
   it('returns zeros when no events exist', async () => {
