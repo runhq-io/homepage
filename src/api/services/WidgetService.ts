@@ -22,7 +22,7 @@ import {
   servers,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
-import type { CanonicalTaskComment } from '@runhq/server-protocol';
+import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
@@ -83,7 +83,7 @@ type PublicAttachmentSummary = {
 export type PublicTicketDetail = {
   ticket: WidgetTicketResponse & {
     attachments?: PublicAttachmentSummary[] | null;
-    createdByType: string;
+    createdByType: CanonicalTaskActorType;
     externalUserId: string | null;
   };
   /** Whether the requesting user owns this ticket */
@@ -94,7 +94,7 @@ export type PublicTicketDetail = {
     id: string;
     body: string;
     authorName: string | null;
-    createdByType: string;
+    createdByType: CanonicalTaskActorType;
     externalUserId: string | null;
     isAuthorOfCurrentUser: boolean;
     canEdit: boolean;
@@ -454,18 +454,18 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
 }
 
 async function resolveExternalUserIds(
-  commentRows: Array<{ createdByType: string; createdById: string | null | undefined }>,
+  rows: Array<Pick<CanonicalTaskComment, 'createdByType' | 'createdById'>>,
 ): Promise<Map<string, string>> {
-  const ids = commentRows
-    .filter(c => c.createdByType === 'external' && c.createdById)
-    .map(c => c.createdById as string);
+  const ids = rows
+    .filter(r => r.createdByType === 'external' && r.createdById)
+    .map(r => r.createdById as string);
   if (ids.length === 0) return new Map();
-  const rows = await db
+  const dbRows = await db
     .select({ id: widgetUsers.id, externalUserId: widgetUsers.externalUserId })
     .from(widgetUsers)
     .where(inArray(widgetUsers.id, ids));
   const map = new Map<string, string>();
-  for (const r of rows) map.set(r.id, r.externalUserId);
+  for (const r of dbRows) map.set(r.id, r.externalUserId);
   return map;
 }
 
@@ -484,7 +484,7 @@ function mapCommentToWidgetResponse(
     id: comment.id,
     body: comment.content,
     authorName: comment.createdByName ?? null,
-    createdByType: comment.createdByType as string,
+    createdByType: comment.createdByType,
     externalUserId,
     isAuthorOfCurrentUser,
     canEdit: isAuthorOfCurrentUser,
@@ -494,18 +494,6 @@ function mapCommentToWidgetResponse(
   };
 }
 
-async function resolveTicketExternalUserId(
-  createdByType: string | null,
-  createdById: string | null,
-): Promise<string | null> {
-  if (createdByType !== 'external' || !createdById) return null;
-  const [row] = await db
-    .select({ externalUserId: widgetUsers.externalUserId })
-    .from(widgetUsers)
-    .where(eq(widgetUsers.id, createdById))
-    .limit(1);
-  return row?.externalUserId ?? null;
-}
 
 export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
@@ -546,15 +534,21 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     && comments.length === 0
     && activity.length === 0;
 
-  const externalUserIdMap = await resolveExternalUserIds(comments);
+  const externalUserIdMap = await resolveExternalUserIds([
+    ...comments,
+    { createdByType: task.createdByType, createdById: task.createdById },
+  ]);
   const mappedComments = comments.map(c => mapCommentToWidgetResponse(c, externalUserIdMap, widgetUserId));
-  const ticketExternalUserId = await resolveTicketExternalUserId(task.createdByType, task.createdById);
+  const ticketExternalUserId =
+    task.createdByType === 'external' && task.createdById
+      ? externalUserIdMap.get(task.createdById) ?? null
+      : null;
 
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
       attachments: (fullTask?.attachments ?? []).map(mapAttachmentSummary),
-      createdByType: task.createdByType ?? 'member',
+      createdByType: task.createdByType,
       externalUserId: ticketExternalUserId,
     },
     isOwner,

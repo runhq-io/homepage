@@ -103,4 +103,24 @@ describe('getPublicTicketDetail comment payload', () => {
     expect(detail!.ticket.externalUserId).toBe(EXTERNAL_USER_ID);
     await db.delete(workspaceTasks).where(eq(workspaceTasks.id, extTask!.id));
   });
+
+  it('does not elevate member comments even if createdById collides with current widgetUserId', async () => {
+    // Attacker scenario: member-authored comment whose createdById string
+    // happens to equal the widget user's id. Guard must block elevation.
+    await db.insert(workspaceTaskComments).values({
+      serverId: SERVER_ID,
+      taskId: TASK_ID,
+      content: 'Spoofed member comment',
+      createdByType: 'member',
+      createdById: WIDGET_USER_ID,  // deliberate collision
+      createdByName: 'Impostor',
+      updatedAt: new Date(),
+    });
+    const detail = await getPublicTicketDetail(PROJECT_ID, TASK_ID, WIDGET_USER_ID);
+    const spoofed = detail!.comments.find(c => c.body === 'Spoofed member comment')!;
+    expect(spoofed.createdByType).toBe('member');
+    expect(spoofed.isAuthorOfCurrentUser).toBe(false);
+    expect(spoofed.canEdit).toBe(false);
+    expect(spoofed.externalUserId).toBeNull();
+  });
 });
