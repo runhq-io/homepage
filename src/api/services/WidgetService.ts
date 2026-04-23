@@ -22,6 +22,7 @@ import {
   servers,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
+import type { CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
@@ -82,6 +83,8 @@ type PublicAttachmentSummary = {
 export type PublicTicketDetail = {
   ticket: WidgetTicketResponse & {
     attachments?: PublicAttachmentSummary[] | null;
+    createdByType: string;
+    externalUserId: string | null;
   };
   /** Whether the requesting user owns this ticket */
   isOwner: boolean;
@@ -91,6 +94,10 @@ export type PublicTicketDetail = {
     id: string;
     body: string;
     authorName: string | null;
+    createdByType: string;
+    externalUserId: string | null;
+    isAuthorOfCurrentUser: boolean;
+    canEdit: boolean;
     createdAt: string;
     updatedAt?: string | null;
     attachments?: PublicAttachmentSummary[] | null;
@@ -446,6 +453,60 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
   };
 }
 
+async function resolveExternalUserIds(
+  commentRows: Array<{ createdByType: string; createdById: string | null | undefined }>,
+): Promise<Map<string, string>> {
+  const ids = commentRows
+    .filter(c => c.createdByType === 'external' && c.createdById)
+    .map(c => c.createdById as string);
+  if (ids.length === 0) return new Map();
+  const rows = await db
+    .select({ id: widgetUsers.id, externalUserId: widgetUsers.externalUserId })
+    .from(widgetUsers)
+    .where(inArray(widgetUsers.id, ids));
+  const map = new Map<string, string>();
+  for (const r of rows) map.set(r.id, r.externalUserId);
+  return map;
+}
+
+function mapCommentToWidgetResponse(
+  comment: CanonicalTaskComment,
+  externalUserIdMap: Map<string, string>,
+  currentWidgetUserId?: string,
+) {
+  const externalUserId = comment.createdByType === 'external' && comment.createdById
+    ? externalUserIdMap.get(comment.createdById) ?? null
+    : null;
+  const isAuthorOfCurrentUser = !!currentWidgetUserId
+    && comment.createdByType === 'external'
+    && comment.createdById === currentWidgetUserId;
+  return {
+    id: comment.id,
+    body: comment.content,
+    authorName: comment.createdByName ?? null,
+    createdByType: comment.createdByType as string,
+    externalUserId,
+    isAuthorOfCurrentUser,
+    canEdit: isAuthorOfCurrentUser,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+    attachments: (comment.attachments ?? []).map(mapAttachmentSummary),
+  };
+}
+
+async function resolveTicketExternalUserId(
+  createdByType: string | null,
+  createdById: string | null,
+): Promise<string | null> {
+  if (createdByType !== 'external' || !createdById) return null;
+  const [row] = await db
+    .select({ externalUserId: widgetUsers.externalUserId })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.id, createdById))
+    .limit(1);
+  return row?.externalUserId ?? null;
+}
+
 export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
@@ -485,21 +546,20 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     && comments.length === 0
     && activity.length === 0;
 
+  const externalUserIdMap = await resolveExternalUserIds(comments);
+  const mappedComments = comments.map(c => mapCommentToWidgetResponse(c, externalUserIdMap, widgetUserId));
+  const ticketExternalUserId = await resolveTicketExternalUserId(task.createdByType, task.createdById);
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
       attachments: (fullTask?.attachments ?? []).map(mapAttachmentSummary),
+      createdByType: task.createdByType ?? 'member',
+      externalUserId: ticketExternalUserId,
     },
     isOwner,
     isEditable,
-    comments: comments.map((comment) => ({
-      id: comment.id,
-      body: comment.content,
-      authorName: comment.createdByName ?? null,
-      createdAt: comment.createdAt,
-      updatedAt: comment.updatedAt,
-      attachments: (comment.attachments ?? []).map(mapAttachmentSummary),
-    })),
+    comments: mappedComments,
     activity: activity.map((entry) => ({
       id: entry.id,
       type: entry.type,
