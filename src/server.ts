@@ -81,18 +81,20 @@ async function main() {
 
     // Routes that go to Next.js:
     //   /api/auth/*   (auth endpoints: login, register, me, web-me, web-token, device)
+    //   /api/admin/usage/csv  (streaming CSV export — uses Next.js session auth)
     //   /_next/*      (Next.js assets)
     //   /login, /auth/*, /join/*, /admin/*, /(dashboard)/*
     //   Everything not matched by Hono patterns below
     const isNextAuthRoute = url.startsWith('/api/auth/'); // legacy variable name; routes auth endpoints to Next.js
+    const isNextAdminCsvRoute = url.startsWith('/api/admin/usage/csv');
     const isNextAsset = url.startsWith('/_next/');
 
     // Routes that go to Hono:
-    //   /api/* (except /api/auth/*)
+    //   /api/* (except /api/auth/* and /api/admin/usage/csv)
     //   /health
     //   /billing/*
     //   /oauth/*
-    const isHonoApiRoute = url.startsWith('/api/') && !isNextAuthRoute;
+    const isHonoApiRoute = url.startsWith('/api/') && !isNextAuthRoute && !isNextAdminCsvRoute;
     const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/') || url.startsWith('/oauth/');
 
     if (isHonoRoute) {
