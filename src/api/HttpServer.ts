@@ -24,6 +24,7 @@ import * as ServerService from './services/ServerService';
 import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
 import * as AutoHealService from './services/AutoHealService';
 import * as ServerSessionService from './services/ServerSessionService';
+import { getServerSessionKeyPair } from './auth/serverSessionKeys';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
@@ -156,6 +157,14 @@ export function createHttpApp() {
     c.header('Cache-Control', 'public, max-age=3600');
     c.header('Access-Control-Allow-Origin', '*');
     return c.body(content);
+  });
+
+  // JWKS — public key(s) used to verify server session JWTs (EdDSA).
+  // Workspaces fetch this to verify tokens without holding the private key.
+  app.get('/.well-known/jwks.json', async (c) => {
+    const { publicJwk } = await getServerSessionKeyPair();
+    c.header('Cache-Control', 'public, max-age=300');
+    return c.json({ keys: [publicJwk] });
   });
 
   // Health check endpoint

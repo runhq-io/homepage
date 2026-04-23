@@ -619,7 +619,7 @@ export async function createMachine(
         SERVER_NAME: machineName,
         AUTH_MODE: 'cloud',
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
-        SERVER_SESSION_SECRET: process.env.SERVER_SESSION_SECRET || '',
+        SERVER_SESSION_PUBLIC_KEY_PEM: process.env.SERVER_SESSION_PUBLIC_KEY_PEM || '',
         PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
         CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
         NODE_ENV: 'development',
@@ -788,7 +788,14 @@ export async function updateMachineImage(machineId: string): Promise<void> {
   // even when the tag is the same — the underlying image may have changed.
   console.log(`[FlyService] Updating machine ${machineId} image: ${machine.config.image} → ${latestImage}`);
 
-  const existingEnv = (machine.config.env as Record<string, string>) || {};
+  // Fly's machine update API replaces the full `env` map, so omitting a key
+  // here removes it from the machine. We deliberately drop the legacy shared
+  // HMAC secret (`SERVER_SESSION_SECRET`) from every existing machine so the
+  // forgery material is physically gone, not just unused by the new code.
+  const rawExistingEnv = (machine.config.env as Record<string, string>) || {};
+  const { SERVER_SESSION_SECRET: _stripped, ...existingEnv } = rawExistingEnv;
+  void _stripped;
+
   await flyRequest<FlyMachine>(
     'POST',
     `/apps/${getServerAppName()}/machines/${machineId}`,
@@ -801,6 +808,7 @@ export async function updateMachineImage(machineId: string): Promise<void> {
           PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
           CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
           CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
+          SERVER_SESSION_PUBLIC_KEY_PEM: process.env.SERVER_SESSION_PUBLIC_KEY_PEM || '',
         },
       },
     }

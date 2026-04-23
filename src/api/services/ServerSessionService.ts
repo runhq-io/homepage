@@ -9,9 +9,17 @@
  * - Have limited scope (only "server:connect", not full API access)
  * - Are short-lived (default 1 hour)
  * - Can be verified by Servers without exposing user's full cloudToken
+ *
+ * ## Signing
+ *
+ * Tokens are signed with **EdDSA** (Ed25519). The private key lives only on
+ * the backend; workspace machines hold the public key and verify without the
+ * ability to sign — closing the forgery path a workspace root user previously
+ * had with a shared HMAC secret.
  */
 
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
+import { getServerSessionKeyPair } from '../auth/serverSessionKeys';
 
 // Session token payload (extends standard JWT claims)
 export interface ServerSessionPayload extends JWTPayload {
@@ -23,21 +31,8 @@ export interface ServerSessionPayload extends JWTPayload {
   serverRole?: 'owner' | 'member';
 }
 
-// Get secret from environment (should be set in production)
-function getSecret(): Uint8Array {
-  const secret = process.env.SERVER_SESSION_SECRET;
-  if (!secret) {
-    // In development, use a default (NOT for production!)
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('SERVER_SESSION_SECRET must be set in production');
-    }
-    return new TextEncoder().encode('dev-server-session-secret-do-not-use-in-production');
-  }
-  return new TextEncoder().encode(secret);
-}
-
 /**
- * Generate a signed server session JWT token
+ * Generate a signed server session JWT token.
  */
 export async function generateServerSessionToken(
   userId: string,
@@ -50,40 +45,43 @@ export async function generateServerSessionToken(
   }
   const ttl = Math.min(expiresInSeconds, 86400);
 
-  const token = await new SignJWT({
+  const claims: ServerSessionPayload = {
     userId,
     serverId,
     scope: 'server:connect',
     ...(options?.userName && { userName: options.userName }),
     ...(options?.userEmail && { userEmail: options.userEmail }),
     ...(options?.serverRole && { serverRole: options.serverRole }),
-  } as ServerSessionPayload)
-    .setProtectedHeader({ alg: 'HS256' })
+  };
+
+  const { privateKey, kid } = await getServerSessionKeyPair();
+
+  return new SignJWT(claims)
+    .setProtectedHeader({ alg: 'EdDSA', kid })
     .setIssuedAt()
     .setExpirationTime(`${ttl}s`)
     .setJti(crypto.randomUUID())
-    .sign(getSecret());
-
-  return token;
+    .sign(privateKey);
 }
 
 /**
- * Verify and decode a server session JWT token
+ * Verify and decode a server session JWT token.
+ *
+ * Only EdDSA is accepted. Any other algorithm (including HS256 or `none`) is
+ * rejected — we do not want to leave the legacy forgery path in place even as
+ * a fallback.
  */
 export async function verifyServerSessionToken(token: string): Promise<ServerSessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, getSecret(), {
-      algorithms: ['HS256'],
-    });
+    const { publicKey } = await getServerSessionKeyPair();
+    const { payload } = await jwtVerify(token, publicKey, { algorithms: ['EdDSA'] });
 
-    // Verify required fields
     const serverPayload = payload as ServerSessionPayload;
     if (!serverPayload.userId || !serverPayload.serverId) {
       console.log('[ServerSessionService] Missing required fields in token');
       return null;
     }
 
-    // Verify scope
     if (serverPayload.scope !== 'server:connect') {
       console.log('[ServerSessionService] Invalid scope');
       return null;
