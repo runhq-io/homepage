@@ -12,6 +12,8 @@ import {
   users,
   subscriptions,
   usageRecords,
+  usageEvents,
+  usageAdjustments,
   plans,
   adminUsers,
   type PlanId,
@@ -639,6 +641,65 @@ export async function getUserCredits(userId: string): Promise<{
     balanceDollars: centsToDollars(subscription.creditBalanceCents || 0),
     periodSpentCents: usageRecord.totalCostCents || 0,
     email: user?.email || undefined,
+  };
+}
+
+// ============================================================================
+// Period Spending Aggregation
+// ============================================================================
+
+export interface PeriodSpending {
+  inputTokens: number;
+  outputTokens: number;
+  totalCostCents: number;
+  requestCount: number;
+}
+
+/**
+ * Sum spending for one user across a time range, across BOTH Claude-call events
+ * and admin adjustments. Returns totals with sub-cent precision.
+ *
+ * Implemented as two aggregate queries in parallel; at RunHQ's scale this is
+ * sub-millisecond. If usage grows 100x, add a materialized rollup then — not now.
+ */
+export async function getPeriodSpending(
+  userId: string,
+  start: Date,
+  end: Date,
+): Promise<PeriodSpending> {
+  const [eventsAgg, adjAgg] = await Promise.all([
+    db.select({
+      inputTokens:    sql<number>`COALESCE(SUM(${usageEvents.inputTokens}),  0)::int`,
+      outputTokens:   sql<number>`COALESCE(SUM(${usageEvents.outputTokens}), 0)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+    })
+    .from(usageEvents)
+    .where(and(
+      eq(usageEvents.userId, userId),
+      gte(usageEvents.ts, start),
+      lte(usageEvents.ts, end),
+    )),
+
+    db.select({
+      totalAdjustCents: sql<number>`COALESCE(SUM(${usageAdjustments.amountCents}), 0)::double precision`,
+    })
+    .from(usageAdjustments)
+    .where(and(
+      eq(usageAdjustments.userId, userId),
+      gte(usageAdjustments.ts, start),
+      lte(usageAdjustments.ts, end),
+    )),
+  ]);
+
+  const e = eventsAgg[0];
+  const a = adjAgg[0];
+
+  return {
+    inputTokens:  e.inputTokens,
+    outputTokens: e.outputTokens,
+    totalCostCents: e.totalCostCents + a.totalAdjustCents,
+    requestCount: e.requestCount,
   };
 }
 
