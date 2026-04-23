@@ -69,35 +69,6 @@ export const subscriptionsRelations = relations(subscriptions, ({ one }) => ({
 }));
 
 // ============================================================================
-// Usage Records (persisted token usage per billing period)
-// ============================================================================
-
-export const usageRecords = pgTable('usage_records', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  userId: uuid('user_id').references(() => users.id).notNull(),
-  // Period tracking (monthly)
-  periodStart: timestamp('period_start').notNull(),
-  periodEnd: timestamp('period_end').notNull(),
-  // Token counts
-  inputTokens: bigint('input_tokens', { mode: 'number' }).notNull().default(0),
-  outputTokens: bigint('output_tokens', { mode: 'number' }).notNull().default(0),
-  // Cost tracking (in cents, with decimal precision)
-  totalCostCents: integer('total_cost_cents').notNull().default(0),
-  // Request count
-  requestCount: integer('request_count').notNull().default(0),
-  // Timestamps
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
-
-export const usageRecordsRelations = relations(usageRecords, ({ one }) => ({
-  user: one(users, {
-    fields: [usageRecords.userId],
-    references: [users.id],
-  }),
-}));
-
-// ============================================================================
 // Usage Events (per-call event log — source of truth for Claude-call spending)
 // ============================================================================
 
@@ -226,7 +197,6 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   conversations: many(conversations),
   tasks: many(tasks),
   subscription: one(subscriptions),
-  usageRecords: many(usageRecords),              // keep for now — removed in later task
   usageEvents: many(usageEvents),
   usageAdjustments:    many(usageAdjustments, { relationName: 'user' }),
   adjustmentsAsAdmin:  many(usageAdjustments, { relationName: 'admin' }),
@@ -494,9 +464,6 @@ export type NewPlan = typeof plans.$inferInsert;
 
 export type Subscription = typeof subscriptions.$inferSelect;
 export type NewSubscription = typeof subscriptions.$inferInsert;
-
-export type UsageRecord = typeof usageRecords.$inferSelect;
-export type NewUsageRecord = typeof usageRecords.$inferInsert;
 
 export type Payment = typeof payments.$inferSelect;
 export type NewPayment = typeof payments.$inferInsert;

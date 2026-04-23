@@ -15,6 +15,13 @@
       "when": 1776929828753,
       "tag": "0001_demonic_komodo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776933985820,
+      "tag": "0002_confused_tomas",
+      "breakpoints": true
     }
   ]
 }
