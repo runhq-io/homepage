@@ -404,6 +404,47 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
   };
 }
 
+export async function listDoneTickets(projectId: string, widgetUserId?: string) {
+  const project = await getWidgetProjectContext(projectId);
+
+  const rows = project
+    ? await db
+        .select()
+        .from(workspaceTasks)
+        .where(and(
+          buildWidgetVisibleFilter(project),
+          eq(workspaceTasks.visibility, 'public'),
+          eq(workspaceTasks.status, 'done'),
+        ))
+        .orderBy(desc(workspaceTasks.completedAt))
+        .limit(20)
+    : [];
+
+  let userVoteMap: Map<string, boolean> = new Map();
+  if (widgetUserId && rows.length > 0) {
+    const taskIds = rows.map((t) => t.id);
+    const votes = await db
+      .select({ taskId: workspaceTaskVotes.taskId, value: workspaceTaskVotes.value })
+      .from(workspaceTaskVotes)
+      .where(and(
+        inArray(workspaceTaskVotes.taskId, taskIds),
+        eq(workspaceTaskVotes.voterId, widgetUserId),
+      ));
+    for (const v of votes) userVoteMap.set(v.taskId, v.value);
+  }
+
+  const tickets = rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true));
+
+  return {
+    projectName: project?.name ?? '',
+    projectSlug: project?.slug ?? '',
+    homepageUrl: getHomepageUrl(),
+    position: project?.widgetPosition ?? null,
+    isIdentified: !!widgetUserId,
+    tickets,
+  };
+}
+
 export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
