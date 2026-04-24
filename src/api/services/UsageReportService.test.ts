@@ -80,14 +80,24 @@ describe('UsageReportService', () => {
     expect(s.requestCount).toBe(3);
   });
 
-  it('getDailyTotals buckets by day', async () => {
+  it('getDailyTotals buckets by day, zero-filling the range', async () => {
     const rows = await getDailyTotals({ ...filter, userIds: [u1, u2], excludePreCutover: true }, 'day');
-    // 2026-04-10: $10, 2026-04-12: $30, 2026-04-15: $5
-    expect(rows).toHaveLength(3);
+    // Filter spans 2026-04-01 .. 2026-05-01 inclusive at both ends, so
+    // generate_series emits 31 buckets. Populated days carry their totals;
+    // every other day shows $0 so the chart x-axis respects the selection.
+    expect(rows).toHaveLength(31);
     const byDay = Object.fromEntries(rows.map((r) => [r.bucket, r.totalCostCents]));
     expect(byDay['2026-04-10']).toBeCloseTo(10, 3);
     expect(byDay['2026-04-12']).toBeCloseTo(30, 3);
     expect(byDay['2026-04-15']).toBeCloseTo(5, 3);
+    expect(byDay['2026-04-01']).toBe(0);
+    expect(byDay['2026-04-11']).toBe(0);
+    expect(byDay['2026-05-01']).toBe(0);
+
+    // Zero-filled buckets contribute zero requests — only populated days report COUNT > 0.
+    const byDayReqs = Object.fromEntries(rows.map((r) => [r.bucket, r.requestCount]));
+    expect(byDayReqs['2026-04-10']).toBe(1);
+    expect(byDayReqs['2026-04-11']).toBe(0);
   });
 
   it('getBreakdownByUser groups + sorts desc', async () => {

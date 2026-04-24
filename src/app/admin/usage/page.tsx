@@ -55,8 +55,16 @@ export default async function UsagePage({
   const sp = await searchParams;
   const f = parseFilter(sp);
 
-  const [summary, daily, byUser, byServer, byTask, byAgent, byJob] = await Promise.all([
+  // Fetch two summaries: one for the post-cutover slice (matches the chart +
+  // breakdowns) and one for the grand total (includes the synthetic
+  // pre-migration rollup rows). The top cards render the post-cutover figures
+  // so they line up with everything below them; the pre-migration total is
+  // surfaced separately in the banner and as a footnote on the Total Spend
+  // card. Before this split, Total Spend silently combined both and looked
+  // impossible next to a chart that excluded the rollup.
+  const [summaryAll, summaryPost, daily, byUser, byServer, byTask, byAgent, byJob] = await Promise.all([
     getSummary({ ...f, excludePreCutover: false }),
+    getSummary({ ...f, excludePreCutover: true }),
     getDailyTotals({ ...f }, f.groupBy),
     getBreakdownByUser({ ...f, excludePreCutover: true }),
     getBreakdownByServer({ ...f, excludePreCutover: true }),
@@ -65,8 +73,8 @@ export default async function UsagePage({
     getBreakdownByJob({ ...f, excludePreCutover: true }),
   ]);
 
-  const preCutoverTotal =
-    summary.totalCostCents - byUser.reduce((s, r) => s + r.totalCostCents, 0);
+  const preCutoverCostCents    = summaryAll.totalCostCents - summaryPost.totalCostCents;
+  const preCutoverRequestCount = summaryAll.requestCount    - summaryPost.requestCount;
 
   const csvHref =
     '/api/admin/usage/csv?' +
@@ -99,15 +107,28 @@ export default async function UsagePage({
       <div className="grid grid-cols-4 gap-4">
         <SummaryCard
           label="Total spend"
-          value={`$${(summary.totalCostCents / 100).toFixed(2)}`}
+          value={`$${(summaryPost.totalCostCents / 100).toFixed(2)}`}
+          footnote={
+            preCutoverCostCents > 0
+              ? `+ $${(preCutoverCostCents / 100).toFixed(2)} pre-migration`
+              : undefined
+          }
         />
-        <SummaryCard label="Requests" value={summary.requestCount.toLocaleString()} />
-        <SummaryCard label="Users" value={summary.distinctUsers.toString()} />
-        <SummaryCard label="Servers" value={summary.distinctServers.toString()} />
+        <SummaryCard
+          label="Requests"
+          value={summaryPost.requestCount.toLocaleString()}
+          footnote={
+            preCutoverRequestCount > 0
+              ? `+ ${preCutoverRequestCount.toLocaleString()} pre-migration`
+              : undefined
+          }
+        />
+        <SummaryCard label="Users" value={summaryPost.distinctUsers.toString()} />
+        <SummaryCard label="Servers" value={summaryPost.distinctServers.toString()} />
       </div>
 
-      {preCutoverTotal > 0 && (
-        <PreCutoverBanner totalCents={preCutoverTotal} />
+      {preCutoverCostCents > 0 && (
+        <PreCutoverBanner totalCents={preCutoverCostCents} />
       )}
 
       <UsageChart data={daily} bucket={f.groupBy} />
@@ -194,11 +215,22 @@ export default async function UsagePage({
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+function SummaryCard({
+  label,
+  value,
+  footnote,
+}: {
+  label: string;
+  value: string;
+  footnote?: string;
+}) {
   return (
     <div className="rounded-lg bg-slate-800 p-6">
       <div className="text-xs font-medium uppercase tracking-wide text-slate-400">{label}</div>
       <div className="mt-2 text-2xl font-bold text-white">{value}</div>
+      {footnote && (
+        <div className="mt-1 text-xs tabular-nums text-slate-400">{footnote}</div>
+      )}
     </div>
   );
 }

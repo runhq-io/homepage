@@ -108,25 +108,37 @@ export async function getDailyTotals(
 ): Promise<DailyPoint[]> {
   // date_trunc requires its granularity argument to be a literal, not a bind
   // parameter. Whitelist to the three valid values so sql.raw() is safe.
-  // We use db.execute with a raw SQL template to avoid Drizzle re-expanding the
-  // bucketing expression in GROUP BY and ORDER BY (which causes Postgres to
-  // complain that the column must appear in GROUP BY).
-  const trunc = bucket === 'day' ? 'day' : bucket === 'week' ? 'week' : 'month';
-  const fmt   = bucket === 'day' ? 'YYYY-MM-DD' : bucket === 'week' ? 'IYYY-"W"IW' : 'YYYY-MM';
+  //
+  // We zero-fill every bucket in [start, end] via generate_series, LEFT JOIN
+  // usage_events on bucketed timestamp, so the chart spans the full selected
+  // range (days with no activity show as $0 instead of being silently omitted,
+  // which would collapse the x-axis to just the populated days).
+  const trunc    = bucket === 'day' ? 'day'        : bucket === 'week' ? 'week'       : 'month';
+  const fmt      = bucket === 'day' ? 'YYYY-MM-DD' : bucket === 'week' ? 'IYYY-"W"IW' : 'YYYY-MM';
+  const interval = bucket === 'day' ? '1 day'      : bucket === 'week' ? '1 week'     : '1 month';
 
   const where = buildWhere(f);
 
   type RawRow = { bucket: string; total_cost_cents: string; request_count: string };
 
   const result = await db.execute<RawRow>(sql`
+    WITH bucket_series AS (
+      SELECT generate_series(
+        date_trunc(${sql.raw(`'${trunc}'`)}, ${f.start}::timestamp),
+        date_trunc(${sql.raw(`'${trunc}'`)}, ${f.end}::timestamp),
+        ${sql.raw(`'${interval}'`)}::interval
+      ) AS bucket_ts
+    )
     SELECT
-      to_char(date_trunc(${sql.raw(`'${trunc}'`)}, ${usageEvents.ts}), ${fmt}) AS bucket,
-      COALESCE(SUM(${usageEvents.costCents}), 0)::double precision              AS total_cost_cents,
-      COUNT(*)::int                                                              AS request_count
-    FROM ${usageEvents}
-    WHERE ${where}
-    GROUP BY 1
-    ORDER BY 1
+      to_char(bs.bucket_ts, ${fmt})                                  AS bucket,
+      COALESCE(SUM(${usageEvents.costCents}), 0)::double precision   AS total_cost_cents,
+      COUNT(${usageEvents.ts})::int                                  AS request_count
+    FROM bucket_series bs
+    LEFT JOIN ${usageEvents}
+      ON date_trunc(${sql.raw(`'${trunc}'`)}, ${usageEvents.ts}) = bs.bucket_ts
+     AND ${where}
+    GROUP BY bs.bucket_ts
+    ORDER BY bs.bucket_ts
   `);
 
   return result.rows.map((r) => ({
