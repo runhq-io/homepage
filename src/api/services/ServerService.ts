@@ -1749,17 +1749,17 @@ export async function wakeRemoteServerInternal(
     }
 
     if (machineState === 'destroyed') {
-      // Machine was destroyed - clear the reference so we can reprovision
-      console.log(`[ServerService] Machine ${server.machineId} was destroyed, clearing reference`);
-      await db
-        .update(servers)
-        .set({
-          machineId: null,
-          status: 'offline',
-          updatedAt: new Date(),
-        })
-        .where(eq(servers.id, serverId));
-      return { success: false, error: 'Machine was destroyed. Please try again to reprovision.' };
+      // Do NOT mutate the DB here. A single provider observation — even a
+      // 'destroyed' state — is not authoritative: Fly's API has been seen
+      // to report destroyed transiently during leader elections and proxy
+      // resyncs. Auto-clearing machine_id on that signal is what disconnected
+      // live servers from their DB rows and triggered cascade reprovisions.
+      // Ground-truth clears belong to an explicit admin action; `/admin/servers`
+      // will surface this as a 'stale' row so it can be resolved deliberately.
+      console.error(
+        `[ServerService] Provider reports machine ${server.machineId} as destroyed for server ${serverId}; DB left intact for admin review`
+      );
+      return { success: false, error: 'Machine reported destroyed by provider. Please retry or contact admin.' };
     }
 
     if (machineState === 'stopped' || machineState === 'suspended') {
@@ -1796,22 +1796,14 @@ export async function wakeRemoteServerInternal(
     return wakeRemoteServerInternal(refreshed);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`[ServerService] Failed to wake machine:`, errorMessage);
-
-    // If the machine was not found (404), handle like "destroyed" - clear stale reference
-    if (errorMessage.includes('404') || errorMessage.includes('not found')) {
-      console.log(`[ServerService] Machine ${server.machineId} not found, clearing reference`);
-      await db
-        .update(servers)
-        .set({
-          machineId: null,
-          status: 'offline',
-          updatedAt: new Date(),
-        })
-        .where(eq(servers.id, serverId));
-      return { success: false, error: 'Machine not found. Please try again to reprovision.' };
-    }
-
+    console.error(`[ServerService] Failed to wake machine ${server.machineId} for server ${serverId}:`, errorMessage);
+    // Never mutate the DB on a wake failure. The previous implementation
+    // wiped machine_id whenever the raw error message contained the strings
+    // "404" or "not found", which fires on every transient Fly API blip
+    // (rate limits, proxy 404s, pooler leader elections) and was the root
+    // cause of live servers being silently disconnected from their DB row.
+    // The error is surfaced to the caller; recovery is an explicit user or
+    // admin action, not a side effect of a single failed wake.
     return { success: false, error: `Failed to wake server: ${errorMessage}` };
   }
 }
@@ -1964,16 +1956,17 @@ export async function reprovisionRemoteServer(
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
+    // Mark provisioning on the status only. We intentionally do NOT pre-wipe
+    // machineId / machineName / serverUrl / tunnelToken here: provisionNewMachine
+    // writes those atomically once the new machine is created (see the DB update
+    // inside provisionNewMachine after provider.createMachine returns). Leaving
+    // the old metadata in place means a failed reprovision ends in a recoverable
+    // state — the DB still points at the previous machine reference that admins
+    // and the admin/servers 'stale' detector can act on — instead of a silently
+    // orphaned row.
     await db
       .update(servers)
-      .set({
-        status: 'provisioning',
-        machineId: null,
-        machineName: null,
-        serverUrl: null,
-        tunnelToken: null,
-        updatedAt: new Date(),
-      })
+      .set({ status: 'provisioning', updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
     // Pass existing volumeId so reprovision reuses the same volume instead of creating a new empty one
@@ -2128,18 +2121,16 @@ export async function changeRegion(
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info (tokenHash updated atomically by provisionNewMachine)
+    // Only bump region — a non-destructive metadata update. We deliberately
+    // leave machineId / machineName / volumeId / serverUrl / tunnelToken
+    // pointing at the old (now-stopped) machine so that if provisionNewMachine
+    // throws, recovery is still possible: the old machine can be restarted
+    // and the forked volume cleaned up, instead of the server being stranded
+    // with NULL metadata. provisionNewMachine writes the new machine's values
+    // atomically only after it is up and healthy.
     await db
       .update(servers)
-      .set({
-        machineId: null,
-        machineName: null,
-        volumeId: null,
-        region: region,
-        serverUrl: null,
-        tunnelToken: null,
-        updatedAt: new Date(),
-      })
+      .set({ region: region, updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
     // Create new machine in new region with forked volume
@@ -2357,19 +2348,17 @@ export async function changeTier(
     const serverToken = generateServerToken();
     const tokenHash = hashServerToken(serverToken);
 
-    // Clear old machine info, set new tier (tokenHash updated atomically by provisionNewMachine).
-    // Keep volumeId pointing to the volume we'll use so recovery is possible if provisioning fails.
+    // Bump tier only — a non-destructive metadata update. The old machineId
+    // has already been deleted at the provider (required to free the volume
+    // for reattach), but we deliberately leave the DB row pointing at it:
+    // provisionNewMachine writes the new machine's metadata atomically once
+    // it is healthy, and on failure the admin 'stale' detector surfaces the
+    // stranded reference so an explicit reprovision can rebuild against the
+    // preserved volumeId. Wiping to NULL made the row indistinguishable from
+    // a never-provisioned server.
     await db
       .update(servers)
-      .set({
-        tier: newTier,
-        machineId: null,
-        machineName: null,
-        volumeId: volumeIdForNewMachine,
-        serverUrl: null,
-        tunnelToken: null,
-        updatedAt: new Date(),
-      })
+      .set({ tier: newTier, updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
     // Create new machine with new tier, reusing volume
