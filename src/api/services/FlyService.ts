@@ -18,7 +18,7 @@ const FLY_API_URL = 'https://api.machines.dev/v1';
 
 // Read env vars at runtime via getters (not module load time, to ensure dotenv has loaded)
 function getFlyAppName(): string {
-  return process.env.FLY_APP_NAME || 'runhq-servers';
+  return process.env.FLY_APP_NAME || 'fishtank-workspaces';
 }
 
 // Server machines are created in a separate app from the API
