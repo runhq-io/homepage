@@ -1,36 +1,42 @@
 /*!
- * RunHQ Widget v1.0.0
- * Embeddable voting widget — vanilla JS, no dependencies
+ * RunHQ Widget v2.0.0
+ * Embeddable feedback widget — vanilla JS, no dependencies.
  * Usage: <script src="/widget.js"></script>
  *        <script>RunHQWidget.init({ token: "rw_..." })</script>
  */
 (function () {
   "use strict";
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Config & state
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   var config = {};
   var consoleLogs = [];
   var capturedErrors = [];
   var MAX_LOG_BUFFER = 50;
 
-  // DOM references
+  var stageEl = null;
   var tabEl = null;
-  var panelEl = null;
-  var overlayEl = null;
-  var panelBodyEl = null;
+  var widgetEl = null;
+  var scrollEl = null;
   var headerTitleEl = null;
-  var isOpen = false;
-  var activeTab = "updates"; // "updates" | "all" | "mine"
-  var statsCache = null;
-  var updatesCache = null;
-  var pendingDetailNotice = null;
+  var themeToggleBtn = null;
+  var footerEl = null;
+  var modalMountEl = null;
 
-  // ---------------------------------------------------------------------------
+  var isOpen = false;
+  var activeTab = "updates"; // "updates" | "top" | "mine"
+  var theme = "dark";
+
+  var topTicketsCache = null;   // /api/widget/tickets
+  var updatesCache = null;      // /api/widget/tickets/updates
+  var myTicketsCache = null;    // /api/widget/tickets/mine
+  var activeModal = null;
+
+  // ===========================================================================
   // Console & error capture
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   function hookConsole() {
     ["log", "warn", "error", "info"].forEach(function (level) {
@@ -53,11 +59,8 @@
     var origOnError = window.onerror;
     window.onerror = function (msg, src, line, col, err) {
       capturedErrors.push({
-        type: "onerror",
-        message: String(msg),
-        source: src,
-        line: line,
-        col: col,
+        type: "onerror", message: String(msg), source: src,
+        line: line, col: col,
         stack: err && err.stack ? err.stack : null,
         ts: new Date().toISOString(),
       });
@@ -76,9 +79,9 @@
     });
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // API
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   var RUNHQ_API = (function () {
     try {
@@ -86,145 +89,115 @@
       var src = scripts[scripts.length - 1].src;
       return src.substring(0, src.lastIndexOf('/'));
     } catch (_) {}
-    return "https://console.runhq.io";
+    return "https://www.runhq.io";
   })();
 
+  function authHeaders(extra) {
+    var headers = extra || {};
+    if (config.token) headers["Authorization"] = "Bearer " + config.token;
+    else if (config.project) headers["X-RW-Project"] = config.project;
+    return headers;
+  }
+
   function api(path, opts) {
-    var headers = { "Content-Type": "application/json" };
-    if (config.token) {
-      headers["Authorization"] = "Bearer " + config.token;
-    } else if (config.project) {
-      headers["X-RW-Project"] = config.project;
-    }
+    var headers = authHeaders({ "Content-Type": "application/json" });
     return fetch(RUNHQ_API + path, {
       method: (opts && opts.method) || "GET",
       headers: headers,
       body: (opts && opts.body) ? JSON.stringify(opts.body) : undefined,
     }).then(function (r) {
-      if (!r.ok) throw new Error("API error: " + r.status);
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (data) {
+          var err = new Error((data && data.error) || ("API error: " + r.status));
+          err.status = r.status;
+          throw err;
+        });
+      }
       return r.json();
     });
   }
 
-  function loadTickets() {
-    return api("/api/widget/tickets");
-  }
-
-  function submitSuggestion(data) {
-    return api("/api/widget/tickets", { method: "POST", body: data });
-  }
-
-  function loadMySubmissions() {
-    return api("/api/widget/tickets/mine");
-  }
-
-  function loadStats() {
-    return api("/api/widget/tickets/stats");
-  }
-
-  function castVote(proposalId, value) {
-    return api("/api/widget/tickets/" + proposalId + "/vote", {
-      method: "POST",
-      body: { value: value },
-    });
-  }
-
-  function retractVote(proposalId) {
-    return api("/api/widget/tickets/" + proposalId + "/vote", {
-      method: "DELETE",
-    });
-  }
-
-  function loadTicketDetail(ticketId) {
-    return api("/api/widget/tickets/" + ticketId);
-  }
-
-  function updateTicket(ticketId, data) {
-    return api("/api/widget/tickets/" + ticketId, { method: "PATCH", body: data });
-  }
-
-  function deleteTicket(ticketId) {
-    return api("/api/widget/tickets/" + ticketId, { method: "DELETE" });
-  }
-
-  function uploadAttachment(ticketId, file) {
-    var formData = new FormData();
-    formData.append("file", file);
-    var headers = {};
-    if (config.token) {
-      headers["Authorization"] = "Bearer " + config.token;
-    } else if (config.project) {
-      headers["X-RW-Project"] = config.project;
-    }
-    return fetch(RUNHQ_API + "/api/widget/tickets/" + ticketId + "/attachments", {
-      method: "POST",
-      headers: headers,
-      body: formData,
-    }).then(function (r) {
-      if (!r.ok) throw new Error("Upload failed: " + r.status);
-      return r.json();
-    });
-  }
-
-  function deleteAttachmentApi(ticketId, attachmentId) {
-    return api("/api/widget/tickets/" + ticketId + "/attachments/" + attachmentId, { method: "DELETE" });
-  }
-
-  function loadUpdates() { return api("/api/widget/tickets/updates"); }
+  function loadTopTickets()       { return api("/api/widget/tickets"); }
+  function loadUpdates()          { return api("/api/widget/tickets/updates"); }
+  function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
+  function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
+  function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
+  function castUpvote(ticketId)   { return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/vote", { method: "POST", body: { value: true } }); }
+  function retractVote(ticketId)  { return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/vote", { method: "DELETE" }); }
   function postComment(ticketId, content) {
-    return api("/api/widget/tickets/" + ticketId + "/comments", { method: "POST", body: { content: content } });
-  }
-  function editComment(ticketId, commentId, content) {
-    return api("/api/widget/tickets/" + ticketId + "/comments/" + commentId, { method: "PATCH", body: { content: content } });
-  }
-  function removeComment(ticketId, commentId) {
-    return api("/api/widget/tickets/" + ticketId + "/comments/" + commentId, { method: "DELETE" });
-  }
-  function uploadCommentAttachment(ticketId, commentId, file) {
-    var formData = new FormData();
-    formData.append("file", file);
-    return fetch(RUNHQ_API + "/api/widget/tickets/" + ticketId + "/comments/" + commentId + "/attachments", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + config.token },
-      body: formData,
-    }).then(function (r) {
-      return r.json().then(function (data) {
-        if (!r.ok) {
-          var msg = (data && data.error) || ("Upload failed with status " + r.status);
-          throw new Error(msg);
-        }
-        return data;
-      });
+    return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/comments", {
+      method: "POST", body: { content: content },
     });
   }
 
-  // ---------------------------------------------------------------------------
+  function uploadTicketAttachment(ticketId, file) {
+    var fd = new FormData();
+    fd.append("file", file, file.name || "upload");
+    return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId) + "/attachments", {
+      method: "POST",
+      headers: authHeaders(),
+      body: fd,
+    }).then(readJsonOrThrow);
+  }
+
+  function uploadCommentAttachment(ticketId, commentId, file) {
+    var fd = new FormData();
+    fd.append("file", file, file.name || "upload");
+    return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId)
+      + "/comments/" + encodeURIComponent(commentId) + "/attachments", {
+      method: "POST",
+      headers: authHeaders(),
+      body: fd,
+    }).then(readJsonOrThrow);
+  }
+
+  function readJsonOrThrow(r) {
+    return r.json().catch(function () { return {}; }).then(function (data) {
+      if (!r.ok) {
+        var err = new Error((data && data.error) || ("Request failed: " + r.status));
+        err.status = r.status;
+        throw err;
+      }
+      return data;
+    });
+  }
+
+  // ===========================================================================
   // DOM helper
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   var SVG_NS = "http://www.w3.org/2000/svg";
   var SVG_TAGS = { svg: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, g: 1 };
 
   function h(tag, attrs, children) {
-    var el = SVG_TAGS[tag]
-      ? document.createElementNS(SVG_NS, tag)
-      : document.createElement(tag);
+    var el = SVG_TAGS[tag] ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
     if (attrs) {
       Object.keys(attrs).forEach(function (k) {
+        var v = attrs[k];
+        if (v == null || v === false) return;
         if (k === "className") {
-          el.setAttribute("class", attrs[k]);
+          el.setAttribute("class", v);
+        } else if (k === "style" && typeof v === "object") {
+          Object.keys(v).forEach(function (sk) { el.style[sk] = v[sk]; });
         } else if (k.slice(0, 2) === "on") {
-          el.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
-        } else if (attrs[k] != null) {
-          el.setAttribute(k, attrs[k]);
+          el.addEventListener(k.slice(2).toLowerCase(), v);
+        } else {
+          el.setAttribute(k, v === true ? "" : v);
         }
       });
     }
     if (children != null) {
-      if (typeof children === "string") {
-        el.textContent = children;
+      if (typeof children === "string" || typeof children === "number") {
+        el.textContent = String(children);
       } else if (Array.isArray(children)) {
-        children.forEach(function (c) { if (c) el.appendChild(c); });
+        children.forEach(function (c) {
+          if (c == null || c === false) return;
+          if (typeof c === "string" || typeof c === "number") {
+            el.appendChild(document.createTextNode(String(c)));
+          } else {
+            el.appendChild(c);
+          }
+        });
       } else {
         el.appendChild(children);
       }
@@ -232,551 +205,591 @@
     return el;
   }
 
-  // ---------------------------------------------------------------------------
-  // Theme detection
-  // ---------------------------------------------------------------------------
+  function clearChildren(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
 
-  function resolveTheme(theme) {
-    if (theme === "dark") return "dark";
-    if (theme === "light") return "light";
-    // auto
-    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
-      ? "dark"
-      : "light";
+  function icon(paths, size, stroke) {
+    size = size || 16;
+    stroke = stroke || 1.6;
+    var svg = h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24",
+      fill: "none", stroke: "currentColor",
+      "stroke-width": stroke, "stroke-linecap": "round", "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    });
+    paths.forEach(function (p) {
+      if (p.tag === "circle") svg.appendChild(h("circle", { cx: p.cx, cy: p.cy, r: p.r }));
+      else if (p.tag === "rect") svg.appendChild(h("rect", { x: p.x, y: p.y, width: p.width, height: p.height, rx: p.rx || 0 }));
+      else svg.appendChild(h("path", { d: p.d }));
+    });
+    return svg;
   }
 
-  // ---------------------------------------------------------------------------
-  // CSS injection
-  // ---------------------------------------------------------------------------
+  var Icons = {
+    close:     function (s) { return icon([{ d: "M6 6l12 12M18 6L6 18" }], s); },
+    plus:      function (s) { return icon([{ d: "M12 5v14M5 12h14" }], s, 2.2); },
+    arrowUp:   function (s) { return icon([{ d: "M12 19V5M5 12l7-7 7 7" }], s, 2); },
+    paperclip: function (s) { return icon([{ d: "M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8" }], s); },
+    lock:      function (s) { return icon([{ tag: "rect", x: 4, y: 11, width: 16, height: 10, rx: 2 }, { d: "M8 11V7a4 4 0 0 1 8 0v4" }], s); },
+    send:      function (s) { return icon([{ d: "M22 2L11 13" }, { d: "M22 2l-7 20-4-9-9-4 20-7z" }], s); },
+    sun:       function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 4 }, { d: "M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" }], s); },
+    moon:      function (s) { return icon([{ d: "M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z" }], s); },
+    link:      function (s) { return icon([{ d: "M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" }, { d: "M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" }], s); },
+    image:     function (s) { return icon([{ tag: "rect", x: 3, y: 4, width: 18, height: 16, rx: 2 }, { tag: "circle", cx: 9, cy: 10, r: 1.5 }, { d: "M21 16l-5-5-8 8" }], s); },
+  };
 
-  function injectStyles(theme, position) {
-    var isDark = theme === "dark";
+  // ===========================================================================
+  // Status palette — maps workspaceTasks.status to design visual
+  // ===========================================================================
 
-    var bg = isDark ? "#1a1a1a" : "#ffffff";
-    var bgAlt = isDark ? "#2a2a2a" : "#fafaf9";
-    var text = isDark ? "#e5e5e5" : "#1a1a1a";
-    var textMuted = isDark ? "#a3a3a3" : "#525252";
-    var textFaint = isDark ? "#737373" : "#a3a3a3";
-    var border = isDark ? "#333333" : "#e5e5e5";
-    var accent = "#f97316";
-    var yesColor = "#16a34a";
-    var noColor = "#dc2626";
-    var shadow = "none";
+  var STATUS = {
+    pending:      { label: "Open",         dot: "#94a3b8", bg: "rgba(148,163,184,0.12)", fg: "#cbd5e1" },
+    planned:      { label: "Planned",      dot: "#818cf8", bg: "rgba(129,140,248,0.14)", fg: "#a5b4fc" },
+    in_progress:  { label: "In progress",  dot: "#f59e0b", bg: "rgba(245,158,11,0.14)",  fg: "#fbbf24" },
+    needs_review: { label: "Needs review", dot: "#22d3ee", bg: "rgba(34,211,238,0.14)",  fg: "#67e8f9" },
+    done:         { label: "Shipped",      dot: "#8b5cf6", bg: "rgba(139,92,246,0.16)",  fg: "#c4b5fd" },
+    cancelled:    { label: "Cancelled",    dot: "#64748b", bg: "rgba(100,116,139,0.10)", fg: "#94a3b8" },
+  };
+  function statusMeta(s) { return STATUS[s] || STATUS.pending; }
+  function renderStatusChip(status) {
+    var s = statusMeta(status);
+    return h("span", { className: "rw-chip", style: { background: s.bg, color: s.fg } }, [
+      h("span", { className: "rw-chip-dot", style: { background: s.dot } }),
+      document.createTextNode(s.label),
+    ]);
+  }
 
+  // ===========================================================================
+  // Theme
+  // ===========================================================================
+
+  function themeStorageKey() {
+    return "rw-theme:" + (config.projectId || config.project || "default");
+  }
+  function resolveInitialTheme(opt) {
+    if (opt === "dark" || opt === "light") return opt;
+    try {
+      var stored = localStorage.getItem(themeStorageKey());
+      if (stored === "dark" || stored === "light") return stored;
+    } catch (_) {}
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) return "light";
+    return "dark";
+  }
+  function applyTheme(next) {
+    theme = next;
+    if (stageEl) stageEl.setAttribute("data-theme", theme);
+    if (widgetEl) widgetEl.setAttribute("data-theme", theme);
+    if (modalMountEl) modalMountEl.setAttribute("data-theme", theme);
+    if (themeToggleBtn) {
+      clearChildren(themeToggleBtn);
+      themeToggleBtn.appendChild(theme === "light" ? Icons.moon(15) : Icons.sun(15));
+      themeToggleBtn.setAttribute("aria-label", theme === "light" ? "Switch to dark mode" : "Switch to light mode");
+      themeToggleBtn.setAttribute("title", theme === "light" ? "Dark mode" : "Light mode");
+    }
+    try { localStorage.setItem(themeStorageKey(), theme); } catch (_) {}
+  }
+  function toggleTheme() { applyTheme(theme === "light" ? "dark" : "light"); }
+
+  // ===========================================================================
+  // Styles
+  // ===========================================================================
+
+  function injectStyles(position) {
     var isRight = position === "right";
 
     var css = [
-      /* Tab */
-      ".rw-tab {",
-      "  position: fixed;",
-      "  top: 50%;",
-      "  " + (isRight ? "right" : "left") + ": 0;",
-      "  transform: translateY(-50%);",
-      "  width: 36px;",
-      "  height: 120px;",
-      "  background: " + accent + ";",
-      "  color: #fff;",
-      "  cursor: pointer;",
-      "  display: flex;",
-      "  align-items: center;",
-      "  justify-content: center;",
-      "  writing-mode: vertical-rl;",
-      "  text-orientation: mixed;",
-      "  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;",
-      "  font-size: 13px;",
-      "  font-weight: 600;",
-      "  letter-spacing: 0.05em;",
-      "  border-radius: " + (isRight ? "8px 0 0 8px" : "0 8px 8px 0") + ";",
-      "  z-index: 2147483646;",
-      "  transition: width 0.2s ease, box-shadow 0.2s ease;",
-      "  box-shadow: 2px 2px 8px rgba(249,115,22,0.4);",
-      "  user-select: none;",
-      "  -webkit-user-select: none;",
-      "}",
-      ".rw-tab:hover {",
-      "  width: 44px;",
-      "  box-shadow: 3px 3px 12px rgba(249,115,22,0.5);",
-      "}",
-      ".rw-tab.rw-open {",
-      "  display: none;",
-      "}",
+      '.rw-stage[data-theme="dark"], .rw-modal-mount[data-theme="dark"] {',
+      '  --rw-bg: #0b0f17; --rw-panel: #10151f; --rw-panel-2: #141a26; --rw-panel-3: #1a2130;',
+      '  --rw-line: rgba(255,255,255,0.07); --rw-line-2: rgba(255,255,255,0.11);',
+      '  --rw-fg: #e6e8ee; --rw-fg-2: #c0c5d1; --rw-muted: #7c8597; --rw-muted-2: #596173;',
+      '  --rw-accent: #ff7a3d;',
+      '}',
+      '.rw-stage[data-theme="light"], .rw-modal-mount[data-theme="light"] {',
+      '  --rw-bg: #f6f7f9; --rw-panel: #ffffff; --rw-panel-2: #f3f4f7; --rw-panel-3: #e9ebf0;',
+      '  --rw-line: rgba(15,20,35,0.08); --rw-line-2: rgba(15,20,35,0.14);',
+      '  --rw-fg: #0f1422; --rw-fg-2: #2a3142; --rw-muted: #6b7385; --rw-muted-2: #939aab;',
+      '  --rw-accent: #ff7a3d;',
+      '}',
 
-      /* Overlay */
-      ".rw-overlay {",
-      "  position: fixed;",
-      "  inset: 0;",
-      "  background: rgba(0,0,0,0.35);",
-      "  z-index: 2147483644;",
-      "  opacity: 0;",
-      "  pointer-events: none;",
-      "  transition: opacity 0.25s ease;",
-      "}",
-      ".rw-overlay.rw-visible {",
-      "  opacity: 1;",
-      "  pointer-events: auto;",
-      "}",
+      '.rw-stage, .rw-modal-mount {',
+      '  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
+      '  font-feature-settings: "ss01", "cv11";',
+      '  -webkit-font-smoothing: antialiased;',
+      '  color: var(--rw-fg); font-size: 13px; line-height: 1.45;',
+      '}',
+      '.rw-stage *, .rw-stage *::before, .rw-stage *::after,',
+      '.rw-modal-mount *, .rw-modal-mount *::before, .rw-modal-mount *::after { box-sizing: border-box; }',
 
-      /* Panel */
-      ".rw-panel {",
-      "  position: fixed;",
-      "  top: 0;",
-      "  " + (isRight ? "right" : "left") + ": 0;",
-      "  width: 360px;",
-      "  max-width: 90vw;",
-      "  height: 100vh;",
-      "  background: " + bg + ";",
-      "  color: " + text + ";",
-      "  z-index: 2147483645;",
-      "  display: flex;",
-      "  flex-direction: column;",
-      "  transform: translateX(" + (isRight ? "100%" : "-100%") + ");",
-      "  transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);",
-      "  box-shadow: " + shadow + ";",
-      "  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;",
-      "  font-size: 14px;",
-      "  line-height: 1.5;",
-      "}",
-      ".rw-panel.rw-open {",
-      "  transform: translateX(0);",
-      "}",
+      /* side opener */
+      '.rw-tab {',
+      '  position: fixed; top: 50%;',
+      '  ' + (isRight ? "right" : "left") + ': 0;',
+      '  transform: translateY(-50%);',
+      '  width: 36px; height: 120px;',
+      '  background: var(--rw-accent); color: #0b0f17;',
+      '  cursor: pointer;',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  writing-mode: vertical-rl; text-orientation: mixed;',
+      '  font: inherit; font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em;',
+      '  text-transform: uppercase; border: none;',
+      '  border-radius: ' + (isRight ? "10px 0 0 10px" : "0 10px 10px 0") + ';',
+      '  z-index: 2147483646;',
+      '  transition: width .2s ease, box-shadow .2s ease, filter .15s ease;',
+      '  box-shadow: 0 8px 24px -6px rgba(249,115,22,0.45), 0 1px 0 rgba(255,255,255,0.2) inset;',
+      '  user-select: none; -webkit-user-select: none;',
+      '}',
+      '.rw-tab:hover { width: 42px; filter: brightness(1.06); }',
+      '.rw-tab.rw-open { display: none; }',
 
-      /* Panel header */
-      ".rw-header {",
-      "  display: flex;",
-      "  align-items: center;",
-      "  justify-content: space-between;",
-      "  padding: 16px 16px 14px;",
-      "  border-bottom: 1px solid " + border + ";",
-      "  flex-shrink: 0;",
-      "}",
-      ".rw-header-title {",
-      "  display: flex;",
-      "  flex-direction: column;",
-      "  gap: 1px;",
-      "}",
-      ".rw-header-title strong {",
-      "  font-size: 15px;",
-      "  font-weight: 700;",
-      "  color: " + accent + ";",
-      "}",
-      ".rw-header-subtitle {",
-      "  font-size: 11px;",
-      "  color: " + textFaint + ";",
-      "}",
-      ".rw-close-btn {",
-      "  background: none;",
-      "  border: none;",
-      "  cursor: pointer;",
-      "  color: " + textMuted + ";",
-      "  padding: 4px;",
-      "  border-radius: 4px;",
-      "  display: flex;",
-      "  align-items: center;",
-      "  justify-content: center;",
-      "  transition: background 0.15s, color 0.15s;",
-      "}",
-      ".rw-close-btn:hover {",
-      "  background: " + bgAlt + ";",
-      "  color: " + text + ";",
-      "}",
+      /* widget shell */
+      '.rw-widget {',
+      '  position: fixed; top: 0;',
+      '  ' + (isRight ? "right" : "left") + ': 0;',
+      '  width: 400px; max-width: 100vw; height: 100vh;',
+      '  background: linear-gradient(180deg, var(--rw-panel) 0%, #0e131c 100%);',
+      '  color: var(--rw-fg);',
+      '  ' + (isRight ? "border-left" : "border-right") + ': 1px solid var(--rw-line);',
+      '  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, ' + (isRight ? "-8px" : "8px") + ' 0 30px -10px rgba(0,0,0,0.5);',
+      '  z-index: 2147483645;',
+      '  display: flex; flex-direction: column;',
+      '  transform: translateX(' + (isRight ? "100%" : "-100%") + ');',
+      '  transition: transform .3s cubic-bezier(0.4,0,0.2,1);',
+      '  overflow: hidden;',
+      '}',
+      '.rw-widget.rw-open { transform: translateX(0); }',
+      '.rw-widget[data-theme="light"] {',
+      '  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);',
+      '  box-shadow: 0 1px 0 rgba(15,20,35,0.04) inset, ' + (isRight ? "-8px" : "8px") + ' 0 30px -10px rgba(15,20,35,0.14);',
+      '}',
 
-      /* Panel body */
-      ".rw-body {",
-      "  flex: 1;",
-      "  overflow-y: auto;",
-      "  overflow-x: hidden;",
-      "  padding: 12px 0;",
-      "}",
-      ".rw-body::-webkit-scrollbar { width: 4px; }",
-      ".rw-body::-webkit-scrollbar-track { background: transparent; }",
-      ".rw-body::-webkit-scrollbar-thumb { background: " + border + "; border-radius: 2px; }",
+      /* header */
+      '.rw-hdr {',
+      '  display: flex; align-items: center; justify-content: space-between;',
+      '  padding: 10px 10px 10px 14px;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '  background: rgba(255,255,255,0.015);',
+      '  flex: 0 0 auto;',
+      '}',
+      '.rw-hdr-title { font-size: 13px; font-weight: 600; color: var(--rw-fg); }',
+      '.rw-hdr-actions { display: inline-flex; align-items: center; gap: 2px; }',
+      '.rw-icon-btn {',
+      '  width: 28px; height: 28px;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  border-radius: 8px; border: 1px solid transparent;',
+      '  background: transparent; color: var(--rw-muted);',
+      '  cursor: pointer; transition: all .15s ease;',
+      '  font: inherit; padding: 0;',
+      '}',
+      '.rw-icon-btn:hover { background: rgba(255,255,255,0.04); color: var(--rw-fg); border-color: var(--rw-line); }',
+      '.rw-widget[data-theme="light"] .rw-icon-btn:hover,',
+      '.rw-modal-mount[data-theme="light"] .rw-icon-btn:hover { background: rgba(15,20,35,0.05); }',
 
-      /* New suggestion button */
-      ".rw-new-btn {",
-      "  display: flex;",
-      "  align-items: center;",
-      "  gap: 6px;",
-      "  width: calc(100% - 24px);",
-      "  margin: 0 12px 16px;",
-      "  padding: 10px 14px;",
-      "  background: none;",
-      "  border: 2px dashed " + border + ";",
-      "  border-radius: 8px;",
-      "  color: " + textMuted + ";",
-      "  font-size: 13px;",
-      "  font-weight: 500;",
-      "  cursor: pointer;",
-      "  transition: border-color 0.15s, color 0.15s, background 0.15s;",
-      "  font-family: inherit;",
-      "}",
-      ".rw-new-btn:hover {",
-      "  border-color: " + accent + ";",
-      "  color: " + accent + ";",
-      "  background: rgba(249,115,22,0.05);",
-      "}",
+      /* scroll */
+      '.rw-scroll {',
+      '  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;',
+      '  padding: 14px 14px 6px;',
+      '  display: flex; flex-direction: column; gap: 12px;',
+      '}',
+      '.rw-scroll::-webkit-scrollbar { width: 10px; }',
+      '.rw-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }',
+      '.rw-widget[data-theme="light"] .rw-scroll::-webkit-scrollbar-thumb { background: rgba(15,20,35,0.15); background-clip: padding-box; }',
 
-      /* Section labels */
-      ".rw-section-label {",
-      "  padding: 0 16px 6px;",
-      "  font-size: 10px;",
-      "  font-weight: 700;",
-      "  letter-spacing: 0.1em;",
-      "  text-transform: uppercase;",
-      "  color: " + textFaint + ";",
-      "}",
+      /* tabs row */
+      '.rw-tabs-bar { display: flex; align-items: center; gap: 8px; min-width: 0; }',
+      '.rw-tabs {',
+      '  display: inline-flex;',
+      '  background: var(--rw-panel-2);',
+      '  border: 1px solid var(--rw-line);',
+      '  padding: 3px; border-radius: 10px; gap: 2px;',
+      '  flex: 0 1 auto; min-width: 0; overflow: hidden;',
+      '}',
+      '.rw-tab-btn {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  height: 26px; padding: 0 9px;',
+      '  background: transparent; border: none; border-radius: 7px;',
+      '  color: var(--rw-muted);',
+      '  cursor: pointer;',
+      '  font: inherit; font-size: 11.5px; font-weight: 500;',
+      '  white-space: nowrap;',
+      '  transition: color .15s ease, background .15s ease, box-shadow .15s ease;',
+      '}',
+      '.rw-tab-btn:hover { color: var(--rw-fg-2); }',
+      '.rw-tab-btn.rw-on {',
+      '  background: var(--rw-panel-3); color: var(--rw-fg);',
+      '  box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset, 0 1px 2px rgba(0,0,0,0.4);',
+      '}',
+      '.rw-widget[data-theme="light"] .rw-tab-btn.rw-on {',
+      '  background: #ffffff;',
+      '  box-shadow: 0 1px 0 rgba(255,255,255,1) inset, 0 1px 2px rgba(15,20,35,0.08), 0 0 0 1px rgba(15,20,35,0.06);',
+      '}',
+      '.rw-tab-badge {',
+      '  min-width: 16px; height: 16px; padding: 0 4px;',
+      '  border-radius: 999px; background: var(--rw-accent); color: #0b0f17;',
+      '  font-size: 10px; font-weight: 700;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  font-variant-numeric: tabular-nums;',
+      '}',
 
-      /* Proposal card */
-      ".rw-proposal {",
-      "  margin: 0 8px 6px;",
-      "  display: flex;",
-      "  align-items: stretch;",
-      "  background: " + bgAlt + ";",
-      "  border: 1px solid " + border + ";",
-      "  border-radius: 6px;",
-      "  overflow: hidden;",
-      "  text-decoration: none;",
-      "  color: inherit;",
-      "  cursor: pointer;",
-      "  transition: border-color 0.15s;",
-      "}",
-      ".rw-proposal:hover {",
-      "  border-color: " + accent + ";",
-      "}",
-      ".rw-vote-col {",
-      "  display: flex;",
-      "  flex-direction: column;",
-      "  align-items: center;",
-      "  justify-content: center;",
-      "  gap: 2px;",
-      "  padding: 6px 10px;",
-      "  border-right: 1px solid " + border + ";",
-      "  min-width: 38px;",
-      "}",
-      ".rw-vote-arrow {",
-      "  display: flex;",
-      "  align-items: center;",
-      "  justify-content: center;",
-      "  width: 16px;",
-      "  height: 16px;",
-      "  border-radius: 3px;",
-      "  border: none;",
-      "  background: none;",
-      "  color: " + textFaint + ";",
-      "  cursor: pointer;",
-      "  transition: all 0.15s;",
-      "  padding: 0;",
-      "}",
-      ".rw-vote-arrow:hover { color: " + yesColor + "; background: " + yesColor + "14; }",
-      ".rw-vote-arrow.rw-down:hover { color: " + noColor + "; background: " + noColor + "14; }",
-      ".rw-vote-arrow.rw-voted { color: " + yesColor + "; }",
-      ".rw-vote-arrow.rw-down.rw-voted { color: " + noColor + "; }",
-      ".rw-vote-arrow.rw-disabled { opacity: 0.45; cursor: default; pointer-events: none; }",
-      ".rw-vote-count {",
-      "  font-size: 13px;",
-      "  font-weight: 700;",
-      "  color: " + text + ";",
-      "  line-height: 1;",
-      "  font-variant-numeric: tabular-nums;",
-      "}",
-      ".rw-proposal-content {",
-      "  flex: 1;",
-      "  min-width: 0;",
-      "  padding: 6px 10px;",
-      "  display: flex;",
-      "  flex-direction: column;",
-      "  justify-content: center;",
-      "}",
-      ".rw-proposal-title {",
-      "  font-size: 13px;",
-      "  font-weight: 600;",
-      "  color: " + text + ";",
-      "  line-height: 1.3;",
-      "}",
-      ".rw-proposal-meta {",
-      "  display: flex;",
-      "  align-items: center;",
-      "  gap: 8px;",
-      "  font-size: 11px;",
-      "  color: " + textFaint + ";",
-      "  flex-wrap: wrap;",
-      "  margin-top: 3px;",
-      "}",
+      /* new ticket button */
+      '.rw-new-ticket-btn {',
+      '  margin-left: auto; flex: 0 0 auto;',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  height: 30px; padding: 0 11px 0 9px;',
+      '  border-radius: 9px; border: none;',
+      '  background: var(--rw-accent); color: #0b0f17;',
+      '  font: inherit; font-size: 12px; font-weight: 600;',
+      '  cursor: pointer; white-space: nowrap;',
+      '  transition: filter .12s ease, transform .1s ease;',
+      '  box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 6px 14px -6px rgba(255,122,61,0.6);',
+      '}',
+      '.rw-new-ticket-btn:hover { filter: brightness(1.06); }',
+      '.rw-new-ticket-btn:active { transform: translateY(1px); }',
 
-      /* Status badges */
-      ".rw-badge {",
-      "  display: inline-flex;",
-      "  align-items: center;",
-      "  padding: 2px 7px;",
-      "  border-radius: 999px;",
-      "  font-size: 10px;",
-      "  font-weight: 600;",
-      "  letter-spacing: 0.03em;",
-      "  text-transform: uppercase;",
-      "}",
-      ".rw-badge-open { background: rgba(22,163,74,0.15); color: #16a34a; }",
-      ".rw-badge-closed { background: " + border + "; color: " + textFaint + "; }",
-      ".rw-badge-pending { background: rgba(249,115,22,0.15); color: " + accent + "; }",
+      /* list */
+      '.rw-list { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }',
 
-      /* Empty state */
-      ".rw-empty {",
-      "  text-align: center;",
-      "  padding: 32px 16px;",
-      "  color: " + textFaint + ";",
-      "  font-size: 13px;",
-      "}",
+      /* card */
+      '.rw-card {',
+      '  display: flex; gap: 10px; padding: 12px;',
+      '  background: var(--rw-panel-2);',
+      '  border: 1px solid var(--rw-line);',
+      '  border-radius: 10px;',
+      '  transition: border-color .15s ease, transform .15s ease, background-color .15s ease, box-shadow .15s ease;',
+      '  cursor: pointer; text-align: left;',
+      '  font: inherit; color: inherit;',
+      '}',
+      '.rw-card:hover { border-color: var(--rw-line-2); background: var(--rw-panel-3); transform: translateY(-1px); }',
+      '.rw-widget[data-theme="light"] .rw-card { background: #ffffff; box-shadow: 0 1px 2px rgba(15,20,35,0.04); }',
+      '.rw-widget[data-theme="light"] .rw-card:hover { background: #ffffff; border-color: var(--rw-line-2); box-shadow: 0 2px 8px rgba(15,20,35,0.06); }',
+      '.rw-card:focus-visible { outline: none; border-color: var(--rw-accent); box-shadow: 0 0 0 3px rgba(255,122,61,0.18); }',
+      '.rw-card-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }',
+      '.rw-card-title { font-size: 13px; font-weight: 600; color: var(--rw-fg); line-height: 1.35; }',
+      '.rw-card-sub {',
+      '  font-size: 12px; color: var(--rw-fg-2); line-height: 1.45;',
+      '  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;',
+      '}',
+      '.rw-card-meta {',
+      '  display: flex; align-items: center; gap: 8px; margin-top: 4px;',
+      '  font-size: 11.5px; color: var(--rw-muted); flex-wrap: wrap;',
+      '}',
+      '.rw-meta-author { color: var(--rw-fg-2); font-weight: 500; }',
+      '.rw-meta-when { color: var(--rw-muted); }',
+      '.rw-meta-dot { color: var(--rw-muted-2); }',
 
-      /* Loading spinner */
-      ".rw-loading {",
-      "  display: flex;",
-      "  align-items: center;",
-      "  justify-content: center;",
-      "  padding: 32px 16px;",
-      "}",
-      "@keyframes rw-spin { to { transform: rotate(360deg); } }",
-      ".rw-spinner {",
-      "  width: 24px;",
-      "  height: 24px;",
-      "  border: 2px solid " + border + ";",
-      "  border-top-color: " + accent + ";",
-      "  border-radius: 50%;",
-      "  animation: rw-spin 0.7s linear infinite;",
-      "}",
+      /* vote */
+      '.rw-vote {',
+      '  flex: 0 0 auto; align-self: flex-start;',
+      '  display: inline-flex; flex-direction: column; align-items: center; justify-content: center;',
+      '  gap: 1px; width: 32px; padding: 6px 0;',
+      '  background: var(--rw-panel);',
+      '  border: 1px solid var(--rw-line);',
+      '  border-radius: 8px; color: var(--rw-fg-2);',
+      '  font: inherit; font-size: 11px; font-weight: 600;',
+      '  cursor: pointer; transition: all .15s ease;',
+      '  font-variant-numeric: tabular-nums;',
+      '}',
+      '.rw-vote:hover:not(:disabled) { background: var(--rw-panel-2); color: var(--rw-fg); border-color: var(--rw-line-2); }',
+      '.rw-vote.rw-voted {',
+      '  background: rgba(255,122,61,0.12);',
+      '  border-color: rgba(255,122,61,0.55);',
+      '  color: var(--rw-accent);',
+      '}',
+      '.rw-vote:disabled { cursor: not-allowed; opacity: 0.55; }',
 
-      /* Suggestion form */
-      ".rw-form {",
-      "  padding: 0 12px;",
-      "}",
-      ".rw-back-btn {",
-      "  display: flex;",
-      "  align-items: center;",
-      "  gap: 6px;",
-      "  background: none;",
-      "  border: none;",
-      "  color: " + textMuted + ";",
-      "  font-size: 13px;",
-      "  cursor: pointer;",
-      "  padding: 4px 0 12px;",
-      "  font-family: inherit;",
-      "  transition: color 0.15s;",
-      "}",
-      ".rw-back-btn:hover { color: " + text + "; }",
-      ".rw-form-label {",
-      "  display: block;",
-      "  font-size: 11px;",
-      "  font-weight: 600;",
-      "  text-transform: uppercase;",
-      "  letter-spacing: 0.06em;",
-      "  color: " + textFaint + ";",
-      "  margin-bottom: 6px;",
-      "}",
-      ".rw-form-group {",
-      "  margin-bottom: 14px;",
-      "}",
-      ".rw-type-row {",
-      "  display: flex;",
-      "  gap: 8px;",
-      "}",
-      ".rw-type-btn {",
-      "  flex: 1;",
-      "  padding: 8px 12px;",
-      "  border: 1px solid " + border + ";",
-      "  border-radius: 6px;",
-      "  background: none;",
-      "  color: " + textMuted + ";",
-      "  font-size: 13px;",
-      "  font-weight: 500;",
-      "  cursor: pointer;",
-      "  transition: all 0.15s;",
-      "  font-family: inherit;",
-      "}",
-      ".rw-type-btn.rw-active {",
-      "  border-color: " + accent + ";",
-      "  background: rgba(249,115,22,0.1);",
-      "  color: " + accent + ";",
-      "}",
-      ".rw-input {",
-      "  width: 100%;",
-      "  padding: 9px 11px;",
-      "  border: 1px solid " + border + ";",
-      "  border-radius: 6px;",
-      "  background: " + bgAlt + ";",
-      "  color: " + text + ";",
-      "  font-size: 13px;",
-      "  font-family: inherit;",
-      "  outline: none;",
-      "  transition: border-color 0.15s;",
-      "  box-sizing: border-box;",
-      "}",
-      ".rw-input:focus { border-color: " + accent + "; }",
-      ".rw-textarea {",
-      "  resize: vertical;",
-      "  min-height: 80px;",
-      "}",
-      ".rw-submit-btn {",
-      "  width: 100%;",
-      "  padding: 10px 16px;",
-      "  background: " + accent + ";",
-      "  color: #fff;",
-      "  border: none;",
-      "  border-radius: 6px;",
-      "  font-size: 14px;",
-      "  font-weight: 600;",
-      "  cursor: pointer;",
-      "  font-family: inherit;",
-      "  transition: opacity 0.15s, transform 0.1s;",
-      "}",
-      ".rw-submit-btn:hover { opacity: 0.9; }",
-      ".rw-submit-btn:active { transform: scale(0.98); }",
-      ".rw-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }",
+      /* chip */
+      '.rw-chip {',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  height: 18px; padding: 0 7px 0 6px;',
+      '  border-radius: 999px; font-size: 10.5px; font-weight: 600;',
+      '  letter-spacing: 0.01em; white-space: nowrap; flex: 0 0 auto;',
+      '}',
+      '.rw-chip-dot { width: 5px; height: 5px; border-radius: 50%; display: inline-block; }',
 
-      /* Success / error notices */
-      ".rw-notice {",
-      "  margin: 0 0 12px;",
-      "  padding: 10px 12px;",
-      "  border-radius: 6px;",
-      "  font-size: 12px;",
-      "  line-height: 1.4;",
-      "}",
-      ".rw-notice-success { background: rgba(22,163,74,0.12); color: #16a34a; border: 1px solid rgba(22,163,74,0.3); }",
-      ".rw-notice-error { background: rgba(220,38,38,0.1); color: #dc2626; border: 1px solid rgba(220,38,38,0.25); }",
+      /* empty / loading */
+      '.rw-empty {',
+      '  display: flex; flex-direction: column; align-items: center;',
+      '  text-align: center; padding: 36px 16px; color: var(--rw-muted); gap: 4px;',
+      '}',
+      '.rw-empty-title { color: var(--rw-fg-2); font-weight: 600; font-size: 12.5px; }',
+      '.rw-empty-sub { font-size: 11.5px; }',
 
-      /* Source line */
-      ".rw-source { font-size: 11px; color: " + textFaint + "; margin: 8px 0 12px; }",
-      ".rw-source a { color: " + accent + "; text-decoration: none; }",
-      ".rw-source a:hover { text-decoration: underline; }",
+      '.rw-loading { display: flex; align-items: center; justify-content: center; padding: 32px 16px; }',
+      '@keyframes rw-spin { to { transform: rotate(360deg); } }',
+      '.rw-spinner {',
+      '  width: 22px; height: 22px;',
+      '  border: 2px solid var(--rw-line);',
+      '  border-top-color: var(--rw-accent);',
+      '  border-radius: 50%; animation: rw-spin 0.7s linear infinite;',
+      '}',
 
-      /* Divider */
-      ".rw-divider { border: none; border-top: 1px solid " + border + "; margin: 16px 0; }",
-      ".rw-show-more { display: block; text-align: center; padding: 12px; margin-top: 8px; font-size: 13px; color: " + accent + "; text-decoration: none; border: 1px solid " + border + "; border-radius: 10px; }",
-      ".rw-show-more:hover { background: " + accent + "11; border-color: " + accent + "; }",
+      '.rw-notice { padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.4; }',
+      '.rw-notice-error { background: rgba(220,38,38,0.1); color: #fca5a5; border: 1px solid rgba(220,38,38,0.25); }',
+      '.rw-modal-mount[data-theme="light"] .rw-notice-error { color: #b91c1c; }',
 
-      /* File attach area */
-      ".rw-attach-area { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: " + bgAlt + "; border: 2px dashed " + border + "; border-radius: 8px; padding: 16px 12px; color: " + textMuted + "; cursor: pointer; font-size: 12px; width: 100%; margin-bottom: 8px; font-family: inherit; box-sizing: border-box; transition: border-color 0.15s, color 0.15s; min-height: 60px; text-align: center; }",
-      ".rw-attach-area:hover, .rw-attach-area.rw-dragover { border-color: " + accent + "; color: " + accent + "; }",
-      ".rw-attach-area input[type=file] { display: none; }",
-      ".rw-attach-preview { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; width: 100%; }",
-      ".rw-attach-thumb { position: relative; width: 48px; height: 48px; border-radius: 4px; overflow: hidden; border: 1px solid " + border + "; }",
-      ".rw-attach-thumb img { width: 100%; height: 100%; object-fit: cover; }",
-      ".rw-attach-remove { position: absolute; top: -4px; right: -4px; width: 16px; height: 16px; background: " + noColor + "; color: #fff; border: none; border-radius: 50%; font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }",
+      '.rw-login-prompt {',
+      '  padding: 10px 12px; border-radius: 8px;',
+      '  background: var(--rw-panel-2); border: 1px solid var(--rw-line);',
+      '  text-align: center; font-size: 12px; color: var(--rw-muted);',
+      '}',
 
-      /* Powered-by link */
-      ".rw-powered { font-size: 11px; color: " + textFaint + "; }",
-      ".rw-powered a { color: " + accent + "; text-decoration: none; font-weight: 600; }",
-      ".rw-powered a:hover { text-decoration: underline; }",
+      /* footer */
+      '.rw-ftr {',
+      '  display: flex; align-items: center; justify-content: flex-start;',
+      '  padding: 9px 14px;',
+      '  border-top: 1px solid var(--rw-line);',
+      '  background: rgba(255,255,255,0.015);',
+      '  font-size: 11px; color: var(--rw-muted);',
+      '  flex: 0 0 auto;',
+      '}',
+      '.rw-ftr-mark { display: inline-flex; align-items: center; gap: 6px; }',
+      '.rw-ftr-mark b { color: var(--rw-fg-2); font-weight: 600; letter-spacing: 0.01em; }',
+      '.rw-ftr-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); box-shadow: 0 0 10px var(--rw-accent); }',
+      '.rw-widget[data-theme="light"] .rw-ftr-dot { box-shadow: none; }',
 
-      /* Inline feedback form */
-      ".rw-inline-form { padding: 0 12px 8px; }",
-      ".rw-inline-title { display: none; }",
-      ".rw-inline-textarea { min-height: 64px; resize: none; }",
-      ".rw-inline-bottom { display: flex; align-items: center; gap: 8px; margin-top: 6px; }",
-      ".rw-inline-bottom-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }",
-      ".rw-attach-btn { background: none; border: none; cursor: pointer; font-size: 16px; padding: 4px 6px; border-radius: 4px; color: " + textMuted + "; transition: color 0.15s; }",
-      ".rw-attach-btn:hover { color: " + text + "; }",
-      ".rw-inline-submit { padding: 5px 14px; background: " + accent + "; color: #fff; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; transition: opacity 0.15s; }",
-      ".rw-inline-submit:hover { opacity: 0.9; }",
-      ".rw-inline-submit:disabled { opacity: 0.5; cursor: not-allowed; }",
-      ".rw-private-label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: " + textMuted + "; cursor: pointer; user-select: none; }",
-      ".rw-private-label input { width: 13px; height: 13px; margin: 0; cursor: pointer; accent-color: " + accent + "; }",
+      /* modal */
+      '.rw-modal-scrim {',
+      '  position: fixed; inset: 0;',
+      '  background: rgba(4,6,11,0.68);',
+      '  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  padding: 24px; z-index: 2147483647;',
+      '  animation: rw-scrim-in .15s ease;',
+      '}',
+      '.rw-modal-mount[data-theme="light"] .rw-modal-scrim { background: rgba(15,20,34,0.58); }',
+      '@keyframes rw-scrim-in { from { opacity: 0; } to { opacity: 1; } }',
 
+      '.rw-modal {',
+      '  width: min(560px, 100%);',
+      '  display: flex; flex-direction: column; gap: 10px;',
+      '  animation: rw-modal-in .2s cubic-bezier(0.16, 1, 0.3, 1);',
+      '  color: var(--rw-fg);',
+      '  max-height: calc(100vh - 48px);',
+      '}',
+      '.rw-modal--detail { width: min(720px, 100%); }',
+      '@keyframes rw-modal-in {',
+      '  from { opacity: 0; transform: translateY(6px) scale(0.99); }',
+      '  to { opacity: 1; transform: none; }',
+      '}',
 
-      /* Stats banner */
-      ".rw-stats-banner{display:flex;align-items:center;gap:6px;padding:8px 12px;margin-bottom:8px;background:rgba(16,185,129,0.08);border-radius:8px;font-size:12px;color:#6ee7b7}",
-      ".rw-stats-sep{color:#374151}",
+      '.rw-modal-topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 4px; }',
+      '.rw-modal-kicker {',
+      '  font-size: 10.5px; font-weight: 600;',
+      '  letter-spacing: 0.12em; text-transform: uppercase;',
+      '  color: rgba(255,255,255,0.78);',
+      '}',
+      '.rw-modal-mount .rw-modal-topbar .rw-icon-btn { color: rgba(255,255,255,0.7); }',
+      '.rw-modal-mount .rw-modal-topbar .rw-icon-btn:hover { color: #fff; background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.16); }',
 
-      /* Tabs */
-      ".rw-tabs{display:flex;gap:4px;margin:0 12px 8px}",
-      ".rw-tab-btn{flex:1;padding:6px 0;border:none;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;background:transparent;color:" + textMuted + ";transition:all .15s}",
-      ".rw-tab-btn:hover{color:" + text + ";background:" + bgAlt + "}",
-      ".rw-tab-active{color:" + text + ";background:" + border + "}",
-      ".rw-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:" + accent + ";color:#fff;font-size:11px;font-weight:600;margin-left:4px}",
-      ".rw-tab-btn:disabled{opacity:.5;cursor:not-allowed}",
-      ".rw-edited-marker{color:" + textMuted + ";font-size:11px;margin-left:4px;cursor:help}",
-      ".rw-comment-composer{margin-top:12px;padding:10px;border:1px solid " + border + ";border-radius:8px;background:" + bgAlt + "}",
-      ".rw-comment-composer textarea{width:100%;min-height:60px;resize:vertical}",
-      ".rw-comment-composer-actions{display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px}",
-      ".rw-inline-attach-btn{background:none;border:none;cursor:pointer;font-size:16px;padding:4px 6px;border-radius:4px;color:" + textMuted + ";transition:color 0.15s}",
-      ".rw-inline-attach-btn:hover{color:" + text + "}",
+      '.rw-modal-card {',
+      '  background: linear-gradient(180deg, #141a26 0%, #11161f 100%);',
+      '  border: 1px solid var(--rw-line-2);',
+      '  border-radius: 14px; overflow: hidden;',
+      '  box-shadow: 0 30px 80px -20px rgba(0,0,0,0.7), 0 10px 30px -10px rgba(0,0,0,0.5);',
+      '  display: flex; flex-direction: column; min-height: 0;',
+      '}',
+      '.rw-modal-mount[data-theme="light"] .rw-modal-card {',
+      '  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);',
+      '  box-shadow: 0 30px 80px -20px rgba(15,20,35,0.25), 0 10px 30px -10px rgba(15,20,35,0.15);',
+      '}',
 
-      /* Login prompt */
-      ".rw-login-prompt{padding:10px 12px;border-radius:8px;background:" + bgAlt + ";text-align:center;font-size:12px;color:" + textMuted + ";margin-bottom:8px}",
-      ".rw-submitting-as{font-size:11px;color:" + textMuted + ";margin-top:8px}",
+      '.rw-modal-url {',
+      '  display: flex; align-items: center; gap: 6px;',
+      '  padding: 10px 14px 8px;',
+      '  font-size: 11.5px; color: var(--rw-muted-2);',
+      '  border-bottom: 1px dashed rgba(255,255,255,0.04);',
+      '  white-space: nowrap; overflow: hidden;',
+      '}',
+      '.rw-modal-mount[data-theme="light"] .rw-modal-url { border-bottom-color: rgba(15,20,35,0.06); }',
+      '.rw-modal-url-label { color: var(--rw-muted); font-weight: 500; flex: 0 0 auto; }',
+      '.rw-modal-url-value {',
+      '  color: var(--rw-muted-2);',
+      '  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;',
+      '  font-size: 11px; overflow: hidden; text-overflow: ellipsis; min-width: 0;',
+      '}',
 
-      /* My Submissions cards */
-      ".rw-submission-card{display:block;padding:10px 12px;border-radius:8px;background:" + bgAlt + ";margin:0 12px 6px;border:1px solid " + border + ";cursor:pointer;text-decoration:none;color:inherit;transition:border-color .15s}",
-      ".rw-submission-card:hover{border-color:" + textMuted + "}",
-      ".rw-submission-title{font-size:13px;font-weight:500;color:" + text + ";margin-bottom:2px}",
-      ".rw-submission-desc{font-size:11px;color:" + textMuted + ";margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".rw-submission-meta{display:flex;align-items:center;gap:8px;font-size:11px}",
-      ".rw-submission-date{color:" + textFaint + ";font-size:10px}",
-      ".rw-status-badge{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600}",
-      ".rw-vote-counts{color:" + textMuted + "}",
+      '.rw-modal-ta {',
+      '  width: 100%; display: block;',
+      '  background: transparent; border: none; outline: none;',
+      '  color: var(--rw-fg);',
+      '  font: inherit; font-size: 13.5px; line-height: 1.55;',
+      '  padding: 14px 14px 12px;',
+      '  resize: none; min-height: 160px; max-height: 300px;',
+      '}',
+      '.rw-modal-ta::placeholder { color: var(--rw-muted); }',
 
-      /* Detail view */
-      ".rw-detail { padding: 0 12px; }",
-      ".rw-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }",
-      ".rw-detail-title { font-size: 16px; font-weight: 700; color: " + text + "; line-height: 1.3; word-break: break-word; }",
-      ".rw-detail-desc { font-size: 13px; color: " + textMuted + "; line-height: 1.5; white-space: pre-wrap; word-break: break-word; margin-bottom: 12px; }",
-      ".rw-detail-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: " + textFaint + "; margin-bottom: 16px; flex-wrap: wrap; }",
-      ".rw-detail-actions { display: flex; gap: 6px; margin-bottom: 16px; }",
-      ".rw-edit-btn { padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + text + "; font-family: inherit; transition: all 0.15s; }",
-      ".rw-edit-btn:hover { border-color: " + accent + "; color: " + accent + "; }",
-      ".rw-delete-btn { padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + noColor + "; font-family: inherit; transition: all 0.15s; }",
-      ".rw-delete-btn:hover { border-color: " + noColor + "; background: " + noColor + "14; }",
-      ".rw-delete-confirm { padding: 10px 12px; border-radius: 8px; background: " + noColor + "14; border: 1px solid " + noColor + "40; margin-bottom: 12px; }",
-      ".rw-delete-confirm p { font-size: 12px; color: " + noColor + "; margin: 0 0 8px; }",
-      ".rw-delete-confirm-actions { display: flex; gap: 6px; }",
-      ".rw-delete-yes { padding: 4px 12px; border-radius: 5px; font-size: 11px; font-weight: 600; cursor: pointer; border: none; background: " + noColor + "; color: #fff; font-family: inherit; }",
-      ".rw-delete-yes:hover { opacity: 0.9; }",
-      ".rw-delete-cancel { padding: 4px 12px; border-radius: 5px; font-size: 11px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + textMuted + "; font-family: inherit; }",
+      '.rw-modal-card-bar {',
+      '  display: flex; align-items: center; justify-content: space-between;',
+      '  padding: 8px 8px 8px 10px;',
+      '  border-top: 1px solid var(--rw-line);',
+      '  background: rgba(255,255,255,0.015); gap: 10px;',
+      '}',
+      '.rw-modal-bar-l { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }',
+      '.rw-modal-bar-r { display: inline-flex; align-items: center; gap: 8px; }',
 
-      /* Timeline */
-      ".rw-timeline-label { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: " + textFaint + "; margin-bottom: 10px; }",
-      ".rw-timeline { position: relative; }",
-      ".rw-timeline-item { position: relative; padding-left: 28px; padding-bottom: 16px; }",
-      ".rw-timeline-item:last-child { padding-bottom: 0; }",
-      ".rw-timeline-line { position: absolute; left: 9px; top: 24px; bottom: 0; width: 1px; background: " + border + "; }",
-      ".rw-timeline-item:last-child .rw-timeline-line { display: none; }",
-      ".rw-timeline-dot { position: absolute; left: 3px; top: 4px; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid " + border + "; background: " + bg + "; display: flex; align-items: center; justify-content: center; font-size: 8px; }",
-      ".rw-timeline-dot-comment { border-color: " + accent + "; }",
-      ".rw-timeline-card { background: " + bgAlt + "; border: 1px solid " + border + "; border-radius: 8px; padding: 8px 10px; }",
-      ".rw-timeline-card-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }",
-      ".rw-timeline-author { font-size: 12px; font-weight: 600; color: " + text + "; }",
-      ".rw-timeline-date { font-size: 10px; color: " + textFaint + "; }",
-      ".rw-timeline-body { font-size: 12px; color: " + textMuted + "; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }",
-      ".rw-timeline-activity { font-size: 11px; color: " + textFaint + "; font-style: italic; }",
-      ".rw-timeline-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}",
+      /* chips */
+      '.rw-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 6px; }',
+      '.rw-chip-attach {',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  padding: 3px 6px 3px 8px; border-radius: 6px;',
+      '  background: rgba(255,255,255,0.04); border: 1px solid var(--rw-line-2);',
+      '  font-size: 11px; color: var(--rw-fg-2);',
+      '  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;',
+      '  max-width: 100%;',
+      '}',
+      '.rw-chip-attach > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.rw-modal-mount[data-theme="light"] .rw-chip-attach { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-attach.rw-uploading { opacity: 0.75; }',
+      '.rw-chip-attach.rw-failed { border-color: rgba(220,38,38,0.55); color: #fca5a5; }',
+      '.rw-chip-mini-spinner {',
+      '  width: 10px; height: 10px;',
+      '  border: 1.5px solid var(--rw-line-2);',
+      '  border-top-color: var(--rw-accent);',
+      '  border-radius: 50%; animation: rw-spin 0.7s linear infinite;',
+      '  display: inline-block;',
+      '}',
+      '.rw-chip-x {',
+      '  width: 16px; height: 16px;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  background: transparent; border: none;',
+      '  color: var(--rw-muted); cursor: pointer;',
+      '  font-size: 14px; line-height: 1; padding: 0; border-radius: 4px;',
+      '}',
+      '.rw-chip-x:hover { color: var(--rw-fg); background: rgba(255,255,255,0.06); }',
 
-      /* Edit form within detail */
-      ".rw-edit-form { margin-bottom: 12px; }",
-      ".rw-edit-form .rw-input { margin-bottom: 8px; }",
-      ".rw-edit-form-actions { display: flex; gap: 6px; }",
-      ".rw-save-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; border: none; background: " + accent + "; color: #fff; font-family: inherit; transition: opacity 0.15s; }",
-      ".rw-save-btn:hover { opacity: 0.9; }",
-      ".rw-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }",
-      ".rw-cancel-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid " + border + "; background: " + bgAlt + "; color: " + textMuted + "; font-family: inherit; }",
+      /* pills + submit */
+      '.rw-pill-btn {',
+      '  height: 26px;',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 0 10px;',
+      '  background: transparent; border: 1px solid var(--rw-line);',
+      '  border-radius: 999px; color: var(--rw-fg-2);',
+      '  cursor: pointer; font: inherit; font-size: 11.5px;',
+      '  transition: all .15s ease;',
+      '}',
+      '.rw-pill-btn:hover:not(:disabled) { background: rgba(255,255,255,0.04); color: var(--rw-fg); border-color: var(--rw-line-2); }',
+      '.rw-modal-mount[data-theme="light"] .rw-pill-btn:hover:not(:disabled) { background: rgba(15,20,35,0.04); }',
+      '.rw-pill-btn.rw-on { color: var(--rw-fg); border-color: rgba(255,122,61,0.55); background: rgba(255,122,61,0.12); }',
+      '.rw-pill-btn:disabled { cursor: not-allowed; opacity: 0.55; }',
 
-      /* Open full page link */
-      ".rw-open-full { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: " + accent + "; text-decoration: none; margin-bottom: 12px; }",
-      ".rw-open-full:hover { text-decoration: underline; }",
+      '.rw-submit-btn {',
+      '  height: 28px;',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 0 12px;',
+      '  border-radius: 999px;',
+      '  border: 1px solid var(--rw-accent);',
+      '  background: var(--rw-accent); color: #0b0f17;',
+      '  font: inherit; font-size: 12px; font-weight: 600;',
+      '  cursor: pointer;',
+      '  transition: transform .12s ease, filter .12s ease, opacity .12s ease;',
+      '}',
+      '.rw-submit-btn:hover:not(:disabled) { filter: brightness(1.06); }',
+      '.rw-submit-btn:active:not(:disabled) { transform: translateY(1px); }',
+      '.rw-submit-btn:disabled { cursor: not-allowed; opacity: 0.75; background: transparent; color: var(--rw-muted); border-color: var(--rw-line); }',
+      '.rw-modal-mount[data-theme="light"] .rw-submit-btn:disabled { color: var(--rw-muted-2); }',
 
-      /* Detail attachments */
-      ".rw-detail-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }",
-      ".rw-detail-attach-img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid " + border + "; cursor: pointer; transition: border-color 0.15s; }",
-      ".rw-detail-attach-img:hover { border-color: " + accent + "; }",
+      /* detail modal head */
+      '.rw-td-head { padding: 16px 18px 14px; border-bottom: 1px solid var(--rw-line); background: rgba(255,255,255,0.015); flex: 0 0 auto; }',
+      '.rw-td-head-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }',
+      '.rw-td-head-ref { display: inline-flex; align-items: center; gap: 8px; }',
+      '.rw-td-ref { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--rw-muted); letter-spacing: 0.04em; }',
+      '.rw-td-title { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: var(--rw-fg); line-height: 1.35; letter-spacing: -0.005em; }',
+      '.rw-td-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--rw-muted); }',
+      '.rw-td-meta-author { color: var(--rw-fg-2); font-weight: 500; }',
 
-      /* Edit attachments */
-      ".rw-edit-attachments { margin-bottom: 10px; }",
-      ".rw-edit-attach-item { display: inline-flex; position: relative; margin: 0 6px 6px 0; }",
-      ".rw-edit-attach-img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; border: 1px solid " + border + "; }",
-      ".rw-edit-attach-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; background: " + noColor + "; color: #fff; border: none; border-radius: 50%; font-size: 11px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }",
+      '.rw-td-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 18px 8px; }',
+      '.rw-td-body::-webkit-scrollbar { width: 10px; }',
+      '.rw-td-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }',
+      '.rw-modal-mount[data-theme="light"] .rw-td-body::-webkit-scrollbar-thumb { background: rgba(15,20,35,0.15); background-clip: padding-box; }',
 
-      /* Comment action row (edit/delete own comments) */
-      ".rw-comment-actions{display:flex;gap:6px;margin-top:6px}",
-      ".rw-comment-action-btn{font-size:11px;color:" + textMuted + ";background:transparent;border:none;cursor:pointer;padding:2px 4px}",
-      ".rw-comment-action-btn:hover{color:" + text + ";text-decoration:underline}",
-      ".rw-comment-edit-form{margin-top:6px}",
-      ".rw-comment-edit-form textarea{width:100%;min-height:50px;resize:vertical}",
-      ".rw-comment-edit-actions{display:flex;gap:6px;margin-top:6px}",
+      /* original post */
+      '.rw-td-post { margin-bottom: 14px; }',
+      '.rw-td-post-hdr { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }',
+      '.rw-td-post-hdr-text { display: flex; flex-direction: column; line-height: 1.25; }',
+      '.rw-td-post-author { font-size: 13px; font-weight: 600; color: var(--rw-fg); }',
+      '.rw-td-post-when { font-size: 11px; color: var(--rw-muted); }',
+      '.rw-td-post-body { color: var(--rw-fg-2); font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; }',
+      '.rw-td-post-body p { margin: 0 0 10px; }',
+      '.rw-td-post-body p:last-child { margin-bottom: 0; }',
+
+      /* thread */
+      '.rw-td-thread { display: flex; flex-direction: column; gap: 14px; padding-top: 12px; border-top: 1px dashed var(--rw-line); margin-top: 6px; }',
+      '.rw-td-thread-title { font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--rw-muted); }',
+      '.rw-td-comment { display: flex; gap: 10px; }',
+      '.rw-td-comment-body { flex: 1 1 auto; min-width: 0; }',
+      '.rw-td-comment-hdr { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }',
+      '.rw-td-comment-author { font-size: 13px; font-weight: 600; color: var(--rw-fg); }',
+      '.rw-td-comment-when { font-size: 11px; color: var(--rw-muted); margin-left: auto; }',
+      '.rw-td-comment-text { color: var(--rw-fg-2); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; }',
+
+      /* events */
+      '.rw-event {',
+      '  display: flex; align-items: center; gap: 8px;',
+      '  padding: 2px 0 2px 4px;',
+      '  font-size: 11.5px; color: var(--rw-muted);',
+      '}',
+      '.rw-event-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--rw-line-2); flex: 0 0 auto; }',
+      '.rw-event-text { flex: 1 1 auto; }',
+      '.rw-event-text b { color: var(--rw-fg-2); font-weight: 600; }',
+      '.rw-event-when { color: var(--rw-muted-2); font-size: 11px; flex: 0 0 auto; }',
+
+      /* avatar */
+      '.rw-avatar {',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  border-radius: 999px; font-weight: 600; letter-spacing: 0.01em;',
+      '  flex: 0 0 auto; line-height: 1; user-select: none; overflow: hidden;',
+      '}',
+      '.rw-avatar img { width: 100%; height: 100%; object-fit: cover; }',
+
+      /* attachment thumbs */
+      '.rw-shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }',
+      '.rw-shots--tight { margin-top: 8px; }',
+      '.rw-shot {',
+      '  position: relative; display: block;',
+      '  width: 100%; max-width: 280px;',
+      '  border-radius: 8px; border: 1px solid var(--rw-line-2);',
+      '  overflow: hidden; background: var(--rw-panel);',
+      '  padding: 0; text-align: left; cursor: zoom-in;',
+      '  transition: transform .15s ease, border-color .15s ease;',
+      '}',
+      '.rw-shot:hover { transform: translateY(-1px); border-color: rgba(255,122,61,0.45); }',
+      '.rw-shot-img { display: block; width: 100%; height: auto; }',
+      '.rw-shot-name {',
+      '  position: absolute; left: 8px; bottom: 8px;',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  padding: 3px 7px; border-radius: 5px;',
+      '  background: rgba(8,10,15,0.72);',
+      '  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);',
+      '  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;',
+      '  font-size: 10.5px; color: rgba(255,255,255,0.78);',
+      '  max-width: calc(100% - 16px);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      '}',
+
+      /* composer */
+      '.rw-td-composer { border-top: 1px solid var(--rw-line); padding: 10px 12px; background: rgba(255,255,255,0.015); flex: 0 0 auto; }',
+      '.rw-td-composer-row { display: flex; gap: 10px; align-items: flex-start; }',
+      '.rw-td-composer-card {',
+      '  flex: 1 1 auto; min-width: 0;',
+      '  background: var(--rw-panel);',
+      '  border: 1px solid var(--rw-line-2);',
+      '  border-radius: 10px; overflow: hidden;',
+      '}',
+      '.rw-td-composer-ta {',
+      '  width: 100%; display: block;',
+      '  background: transparent; border: none; outline: none;',
+      '  color: var(--rw-fg); font: inherit; font-size: 13px; line-height: 1.5;',
+      '  padding: 10px 12px 4px; resize: none; min-height: 56px; max-height: 200px;',
+      '}',
+      '.rw-td-composer-ta::placeholder { color: var(--rw-muted); }',
+      '.rw-td-composer-ta:disabled { opacity: 0.7; cursor: not-allowed; }',
+      '.rw-td-composer-bar {',
+      '  display: flex; align-items: center; justify-content: space-between;',
+      '  padding: 6px 6px 6px 8px; border-top: 1px solid var(--rw-line); gap: 8px;',
+      '}',
+      '.rw-td-composer-bar-l { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }',
+      '.rw-td-composer-hint { font-size: 10.5px; color: var(--rw-muted-2); letter-spacing: 0.01em; }',
+
+      '.rw-stage button:focus-visible, .rw-stage textarea:focus-visible, .rw-stage input:focus-visible,',
+      '.rw-modal-mount button:focus-visible, .rw-modal-mount textarea:focus-visible, .rw-modal-mount input:focus-visible { outline: none; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -785,1332 +798,810 @@
     document.head.appendChild(style);
   }
 
-  // ---------------------------------------------------------------------------
-  // Time helpers
-  // ---------------------------------------------------------------------------
-
-  function timeLeft(endsAt) {
-    if (!endsAt) return null;
-    var diff = new Date(endsAt).getTime() - Date.now();
-    if (diff <= 0) return "ended";
-    var days = Math.floor(diff / 86400000);
-    var hours = Math.floor((diff % 86400000) / 3600000);
-    if (days > 0) return days + "d " + hours + "h left";
-    var mins = Math.floor((diff % 3600000) / 60000);
-    if (hours > 0) return hours + "h " + mins + "m left";
-    return mins + "m left";
-  }
-
-  function formatDate(dateStr) {
-    var d = new Date(dateStr);
-    return d.toLocaleDateString(navigator.language || "en", { month: "short", day: "numeric", year: "numeric" });
-  }
+  // ===========================================================================
+  // Time + identity helpers
+  // ===========================================================================
 
   function timeAgo(dateStr) {
+    if (!dateStr) return "";
     var diff = Date.now() - new Date(dateStr).getTime();
-    var mins = Math.floor(diff / 60000);
-    if (mins < 1) return "just now";
+    if (diff < 0) return "just now";
+    var secs = Math.floor(diff / 1000);
+    if (secs < 45) return "just now";
+    var mins = Math.floor(secs / 60);
     if (mins < 60) return mins + "m ago";
     var hours = Math.floor(mins / 60);
     if (hours < 24) return hours + "h ago";
     var days = Math.floor(hours / 24);
     if (days < 30) return days + "d ago";
     var months = Math.floor(days / 30);
-    return months + "mo ago";
+    if (months < 12) return months + "mo ago";
+    return Math.floor(months / 12) + "y ago";
   }
 
-  // ---------------------------------------------------------------------------
-  // Render helpers
-  // ---------------------------------------------------------------------------
+  function displayNameFromTicket(t) { return t.authorName || "Anonymous"; }
+  function displayNameFromComment(c) { return c.authorName || "Anonymous"; }
 
-  function renderLoading() {
-    return h("div", { className: "rw-loading" }, h("div", { className: "rw-spinner" }));
+  function avatarColor(name) {
+    var hash = 0;
+    for (var i = 0; i < (name || "").length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    var hue = hash % 360;
+    return { bg: "oklch(0.38 0.08 " + hue + ")", fg: "oklch(0.85 0.12 " + hue + ")" };
+  }
+  function renderAvatar(name, size) {
+    size = size || 28;
+    var style = { width: size + "px", height: size + "px", fontSize: Math.round(size * 0.42) + "px" };
+    var c = avatarColor(name || "");
+    style.background = c.bg; style.color = c.fg;
+    return h("span", { className: "rw-avatar", style: style }, (name || "?").slice(0, 1).toUpperCase());
   }
 
-  function renderEmpty(msg) {
-    return h("div", { className: "rw-empty" }, msg || "No tickets yet.");
-  }
+  // ===========================================================================
+  // Generic render helpers
+  // ===========================================================================
 
+  function renderLoading() { return h("div", { className: "rw-loading" }, h("div", { className: "rw-spinner" })); }
+  function renderEmpty(title, sub) {
+    return h("div", { className: "rw-empty" }, [
+      h("div", { className: "rw-empty-title" }, title || "No tickets yet"),
+      sub ? h("div", { className: "rw-empty-sub" }, sub) : null,
+    ]);
+  }
   function renderNotice(type, msg) {
     return h("div", { className: "rw-notice rw-notice-" + type }, msg);
   }
 
-  // ---------------------------------------------------------------------------
-  // Proposal card
-  // ---------------------------------------------------------------------------
-
-  function renderTicket(proposal) {
-    var isClosed = proposal.status === "done" || proposal.status === "cancelled";
-    var isActive = !isClosed;
-    var canVote = proposal.canVote !== false && config.isIdentified && isActive;
-
-    var yes = parseInt(proposal.yesVotes, 10) || 0;
-    var no = parseInt(proposal.noVotes, 10) || 0;
-    var net = yes - no;
-
-    var upVoted = proposal.userVote === true;
-    var downVoted = proposal.userVote === false;
-
-    function handleVote(value, e) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (!canVote) return;
-      var alreadyVoted = (value === true && upVoted) || (value === false && downVoted);
-      var action = alreadyVoted
-        ? retractVote(proposal.id)
-        : castVote(proposal.id, value);
-      action.then(function () {
-        return loadTickets();
-      }).then(function (data) {
-        ticketsCache = data.tickets || [];
-        renderCurrentTab(!!config.isIdentified);
-      }).catch(function () {});
+  function renderShotThumb(att) {
+    // Attachment shape from be/: { id, filename, originalName, mimeType, url, ... }
+    var aspect = att.width && att.height ? (att.width + " / " + att.height) : "16 / 10";
+    var name = att.originalName || att.filename || "image";
+    var isImage = (att.mimeType || att.mime || "").indexOf("image/") === 0;
+    var img = h("img", {
+      className: "rw-shot-img",
+      src: att.url,
+      alt: name, loading: "lazy",
+      style: { aspectRatio: aspect, objectFit: "cover" },
+    });
+    if (!isImage) {
+      // Non-image — render a tile with filename only
+      return h("a", {
+        className: "rw-shot",
+        href: att.url, target: "_blank", rel: "noopener noreferrer",
+        title: name,
+        style: { minHeight: "120px", display: "flex", alignItems: "center", justifyContent: "center", padding: "18px" },
+      }, h("span", { className: "rw-shot-name", style: { position: "static", background: "transparent" } }, name));
     }
-
-    // Vote column: ▲ count ▼ in a row
-    var upArrow = h("button", {
-      className: "rw-vote-arrow" + (upVoted ? " rw-voted" : "") + (!canVote ? " rw-disabled" : ""),
-      onClick: function (e) { handleVote(true, e); },
-      disabled: canVote ? undefined : true,
-      "aria-disabled": canVote ? undefined : "true",
-    },
-      h("svg", { width: "8", height: "6", viewBox: "0 0 14 10", fill: "currentColor" },
-        h("path", { d: "M7 0L13.9282 9.75H0.0717969L7 0Z" })
-      )
-    );
-    var downArrow = h("button", {
-      className: "rw-vote-arrow rw-down" + (downVoted ? " rw-voted" : "") + (!canVote ? " rw-disabled" : ""),
-      onClick: function (e) { handleVote(false, e); },
-      disabled: canVote ? undefined : true,
-      "aria-disabled": canVote ? undefined : "true",
-    },
-      h("svg", { width: "8", height: "6", viewBox: "0 0 14 10", fill: "currentColor" },
-        h("path", { d: "M7 10L0.0717969 0.25H13.9282L7 10Z" })
-      )
-    );
-    var voteCol = h("div", {
-      className: "rw-vote-col",
-      onClick: function (e) { e.preventDefault(); e.stopPropagation(); },
-    }, [
-      upArrow,
-      h("span", { className: "rw-vote-count" }, String(net)),
-      downArrow,
-    ]);
-
-    // Meta row
-    var metaItems = [];
-    if (isClosed) {
-      metaItems.push(h("span", { className: "rw-badge rw-badge-closed" }, "Closed"));
-    }
-    if (proposal.authorName) {
-      metaItems.push(h("span", null, "by " + proposal.authorName));
-    }
-    metaItems.push(h("span", null, timeAgo(proposal.createdAt)));
-
-    // Content column
-    var contentChildren = [
-      h("div", { className: "rw-proposal-title" }, proposal.title),
-      h("div", { className: "rw-proposal-meta" }, metaItems),
-    ];
-    var contentCol = h("div", { className: "rw-proposal-content" }, contentChildren);
-
-    return h("div", {
-      className: "rw-proposal",
-      onClick: function (e) {
-        if (e.defaultPrevented) return;
-        showTicketDetail(proposal.id);
-      },
-    }, [voteCol, contentCol]);
+    return h("a", {
+      className: "rw-shot",
+      href: att.url, target: "_blank", rel: "noopener noreferrer", title: name,
+    }, [img, h("span", { className: "rw-shot-name" }, name)]);
+  }
+  function renderShotGrid(attachments, tight) {
+    if (!attachments || attachments.length === 0) return null;
+    var grid = h("div", { className: "rw-shots" + (tight ? " rw-shots--tight" : "") });
+    attachments.forEach(function (a) { grid.appendChild(renderShotThumb(a)); });
+    return grid;
   }
 
-  // ---------------------------------------------------------------------------
-  // Ticket detail view
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
+  // Vote
+  // ===========================================================================
 
-  function showTicketDetail(ticketId) {
-    setBodyContent(renderLoading());
-    loadTicketDetail(ticketId).then(function (data) {
-      setBodyContent(renderTicketDetail(data));
-    }).catch(function (err) {
-      setBodyContent(renderNotice("error", "Could not load ticket: " + err.message));
-    });
+  function handleVoteClick(ticket, voteBtn, countSpan, e) {
+    e.preventDefault(); e.stopPropagation();
+    if (!config.isIdentified) return;
+    var wasVoted = ticket.userVote === true;
+    var optimistic = (ticket.yesVotes || 0) + (wasVoted ? -1 : 1);
+    countSpan.textContent = String(optimistic);
+    voteBtn.classList.toggle("rw-voted", !wasVoted);
+    voteBtn.disabled = true;
+    var p = wasVoted ? retractVote(ticket.id) : castUpvote(ticket.id);
+    p.then(function () {
+      ticket.yesVotes = optimistic;
+      ticket.userVote = wasVoted ? null : true;
+    }).catch(function () {
+      countSpan.textContent = String(ticket.yesVotes || 0);
+      voteBtn.classList.toggle("rw-voted", wasVoted);
+    }).then(function () { voteBtn.disabled = false; });
   }
 
-  function renderActivityLabel(entry) {
-    var actor = entry.createdByName || "Someone";
-    switch (entry.type) {
-      case "task_created": return actor + " created this task";
-      case "status_change":
-        return actor + " changed status" + (entry.metadata && entry.metadata.to ? " to " + String(entry.metadata.to).replace(/_/g, " ") : "");
-      case "agent_assigned":
-        return actor + " assigned " + (entry.metadata && entry.metadata.agentName ? String(entry.metadata.agentName) : "an agent");
-      case "task_archived": return actor + " archived this task";
-      case "task_unarchived": return actor + " unarchived this task";
-      case "task_deleted": return actor + " deleted this task";
-      default: return entry.content || (actor + " updated this task");
-    }
-  }
+  // ===========================================================================
+  // Ticket card
+  // ===========================================================================
 
-  function renderCommentComposer(ticketId) {
-    var noticeArea = h("div", null);
-    var textarea = h("textarea", {
-      className: "rw-input rw-textarea",
-      placeholder: "Add a comment…",
-      maxlength: "2000",
-    });
-
-    var pendingFiles = [];
-    var preview = h("div", { className: "rw-attach-preview" });
-    var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
-    fileInput.addEventListener("change", function () {
-      Array.prototype.forEach.call(fileInput.files, function (f) {
-        if (!f.type.startsWith("image/")) return;
-        if (pendingFiles.length >= 5) return;
-        pendingFiles.push(f);
-        var reader = new FileReader();
-        reader.onload = function (e) {
-          var thumb = h("div", { className: "rw-edit-attach-item" }, [
-            h("img", { className: "rw-edit-attach-img", src: e.target.result }),
-            h("button", {
-              className: "rw-edit-attach-remove",
-              onClick: function () {
-                var idx = pendingFiles.indexOf(f);
-                if (idx > -1) pendingFiles.splice(idx, 1);
-                thumb.remove();
-              },
-            }, "×"),
-          ]);
-          preview.appendChild(thumb);
-        };
-        reader.readAsDataURL(f);
-      });
-      fileInput.value = "";
-    });
-
-    var attachBtn = h("button", {
-      className: "rw-inline-attach-btn",
+  function renderTicketCard(ticket) {
+    var voted = ticket.userVote === true;
+    var countSpan = h("span", null, String(ticket.yesVotes || 0));
+    var voteBtn = h("button", {
+      className: "rw-vote" + (voted ? " rw-voted" : ""),
       type: "button",
-      onClick: function () { fileInput.click(); },
-    }, "📎");
+      "aria-label": "Upvote ticket",
+      disabled: !config.isIdentified,
+      title: config.isIdentified ? "Upvote" : "Sign in to vote",
+    }, [Icons.arrowUp(12), countSpan]);
+    voteBtn.addEventListener("click", function (e) { handleVoteClick(ticket, voteBtn, countSpan, e); });
 
-    var submitBtn = h("button", { className: "rw-inline-submit", type: "button" }, "Comment");
-    submitBtn.addEventListener("click", function () {
-      var content = textarea.value.trim();
-      if (!content) return;
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Posting…";
-      noticeArea.innerHTML = "";
+    var authorName = displayNameFromTicket(ticket);
+    var metaChildren = [renderStatusChip(ticket.status)];
+    metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+    if (authorName) {
+      metaChildren.push(h("span", { className: "rw-meta-author" }, authorName));
+      metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+    }
+    metaChildren.push(h("span", { className: "rw-meta-when" }, timeAgo(ticket.completedAt || ticket.createdAt)));
 
-      var commentPosted = false;
-      var newCommentId = null;
-      var uploadErrors = [];
+    var bodyChildren = [h("div", { className: "rw-card-title" }, ticket.title)];
+    if (ticket.description) bodyChildren.push(h("div", { className: "rw-card-sub" }, ticket.description));
+    bodyChildren.push(h("div", { className: "rw-card-meta" }, metaChildren));
 
-      postComment(ticketId, content).then(function (res) {
-        commentPosted = true;
-        newCommentId = res.comment && res.comment.id;
-        if (pendingFiles.length === 0 || !newCommentId) return;
-        // Collect per-file failures instead of short-circuiting
-        return pendingFiles.reduce(function (chain, f) {
-          return chain.then(function () {
-            return uploadCommentAttachment(ticketId, newCommentId, f).catch(function (err) {
-              uploadErrors.push(f.name + ": " + (err.message || String(err)));
-            });
-          });
-        }, Promise.resolve());
-      }).then(function () {
-        if (uploadErrors.length > 0) {
-          // Partial success: comment posted, but some attachments failed.
-          pendingDetailNotice = {
-            level: "error",
-            message: "Comment posted, but " + uploadErrors.length + " attachment(s) failed: " + uploadErrors.join("; "),
-          };
-        }
-        showTicketDetail(ticketId);
-      }).catch(function (err) {
-        // Only reached if postComment itself failed (attachment errors are caught inline above).
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Comment";
-        noticeArea.innerHTML = "";
-        if (commentPosted) {
-          // Defensive: shouldn't happen since we catch upload errors inline, but if some other
-          // unexpected failure occurs after the comment persisted, surface it without losing state.
-          pendingDetailNotice = {
-            level: "error",
-            message: "Comment posted, but follow-up action failed: " + (err.message || String(err)),
-          };
-          showTicketDetail(ticketId);
-        } else {
-          noticeArea.appendChild(renderNotice("error", "Failed to post: " + (err.message || String(err))));
-        }
-      });
-    });
+    var card = h("button", {
+      className: "rw-card", type: "button",
+      "aria-label": "Open ticket: " + ticket.title,
+    }, [voteBtn, h("div", { className: "rw-card-body" }, bodyChildren)]);
 
-    var container = h("div", { className: "rw-comment-composer" }, [
-      noticeArea,
-      textarea,
-      preview,
-      fileInput,
-      h("div", { className: "rw-comment-composer-actions" }, [attachBtn, submitBtn]),
-    ]);
-    return container;
+    card.addEventListener("click", function () { openDetailModal(ticket); });
+    return card;
   }
 
-  function renderCommentActions(ticketId, comment) {
-    var actionsRow = h("div", { className: "rw-comment-actions" });
+  function renderFooter() {
+    return h("div", { className: "rw-ftr" }, [
+      h("span", { className: "rw-ftr-mark" }, [
+        h("span", { className: "rw-ftr-dot" }),
+        h("span", null, [document.createTextNode("Powered by "), h("b", null, "RunHQ")]),
+      ]),
+    ]);
+  }
 
-    var editBtn = h("button", { className: "rw-comment-action-btn", type: "button" }, "Edit");
-    editBtn.addEventListener("click", function () {
-      var form = renderCommentEditForm(ticketId, comment);
-      actionsRow.parentNode.replaceChild(form, actionsRow);
-    });
+  // ===========================================================================
+  // Tabs + list
+  // ===========================================================================
 
-    var deleteBtn = h("button", { className: "rw-comment-action-btn", type: "button" }, "Delete");
-    deleteBtn.addEventListener("click", function () {
-      var confirmBox = h("div", { className: "rw-delete-confirm" }, [
-        h("p", null, "Delete this comment?"),
-        h("div", { className: "rw-delete-confirm-actions" }, [
-          h("button", {
-            className: "rw-delete-yes",
-            onClick: function () {
-              removeComment(ticketId, comment.id).then(function () {
-                showTicketDetail(ticketId);
-              }).catch(function (err) {
-                confirmBox.innerHTML = "";
-                confirmBox.appendChild(renderNotice("error", "Failed: " + err.message));
-              });
-            },
-          }, "Delete"),
-          h("button", {
-            className: "rw-delete-cancel",
-            onClick: function () { confirmBox.parentNode.replaceChild(actionsRow, confirmBox); },
-          }, "Cancel"),
-        ]),
+  function renderTabsBar() {
+    var counts = {
+      updates: (updatesCache || []).length,
+      top:     (topTicketsCache || []).length,
+      mine:    (myTicketsCache || []).length,
+    };
+
+    var defs = [
+      { id: "updates", label: "Updates" },
+      { id: "top",     label: "Top" },
+      { id: "mine",    label: "Mine" },
+    ];
+
+    var tabButtons = defs.map(function (t) {
+      var btn = h("button", {
+        className: "rw-tab-btn" + (activeTab === t.id ? " rw-on" : ""),
+        type: "button",
+        role: "tab",
+        "aria-selected": activeTab === t.id ? "true" : "false",
+      }, [
+        h("span", null, t.label),
+        counts[t.id] > 0 ? h("span", { className: "rw-tab-badge" }, String(counts[t.id])) : null,
       ]);
-      actionsRow.parentNode.replaceChild(confirmBox, actionsRow);
+      btn.addEventListener("click", function () {
+        if (activeTab !== t.id) { activeTab = t.id; renderPanelBody(); }
+      });
+      return btn;
     });
 
-    actionsRow.appendChild(editBtn);
-    actionsRow.appendChild(deleteBtn);
-    return actionsRow;
+    var newTicketBtn = h("button", {
+      className: "rw-new-ticket-btn", type: "button",
+    }, [Icons.plus(13), h("span", null, "New ticket")]);
+    newTicketBtn.addEventListener("click", openNewTicketModal);
+
+    return h("div", { className: "rw-tabs-bar" }, [
+      h("div", { className: "rw-tabs", role: "tablist" }, tabButtons),
+      newTicketBtn,
+    ]);
   }
 
-  function renderCommentEditForm(ticketId, comment) {
-    var textarea = h("textarea", {
-      className: "rw-input rw-textarea",
-      maxlength: "2000",
+  function renderList() {
+    var items =
+      activeTab === "updates" ? (updatesCache || []) :
+      activeTab === "top"     ? (topTicketsCache || []) :
+                                (myTicketsCache || []);
+
+    if (items.length === 0) {
+      if (activeTab === "mine" && !config.isIdentified) {
+        return renderEmpty("Sign in to see your tickets", "Your submissions appear here once you're identified.");
+      }
+      if (activeTab === "mine") {
+        return renderEmpty("You haven't submitted any tickets yet", "Click “New ticket” to start.");
+      }
+      if (activeTab === "updates") {
+        return renderEmpty("Nothing shipped recently", "Updates will show up here as tickets are resolved.");
+      }
+      return renderEmpty("No tickets yet", "Be the first to share feedback.");
+    }
+
+    var list = h("div", { className: "rw-list" });
+    items.forEach(function (t) { list.appendChild(renderTicketCard(t)); });
+    return list;
+  }
+
+  function renderPanelBody() {
+    if (!scrollEl) return;
+    clearChildren(scrollEl);
+    scrollEl.appendChild(renderTabsBar());
+    scrollEl.appendChild(renderList());
+    scrollEl.scrollTop = 0;
+  }
+
+  // ===========================================================================
+  // Refresh
+  // ===========================================================================
+
+  function refreshAll() {
+    clearChildren(scrollEl);
+    scrollEl.appendChild(renderLoading());
+
+    var topP = loadTopTickets().then(function (data) {
+      topTicketsCache = data.tickets || [];
+      if (data.projectName) {
+        config.projectName = data.projectName;
+        if (headerTitleEl) headerTitleEl.textContent = config.projectName + " Feedback";
+      }
+      config.isIdentified = !!data.isIdentified;
     });
-    textarea.value = comment.body;
-    var noticeArea = h("div", null);
+    var updP = loadUpdates().then(function (data) {
+      updatesCache = data.tickets || [];
+    }).catch(function () { updatesCache = []; });
+    var mineP = config.token
+      ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
+      : Promise.resolve().then(function () { myTicketsCache = []; });
 
-    var saveBtn = h("button", { className: "rw-save-btn", type: "button" }, "Save");
-    var cancelBtn = h("button", { className: "rw-cancel-btn", type: "button" }, "Cancel");
+    return Promise.all([topP, updP, mineP]).then(function () {
+      renderPanelBody();
+    }).catch(function (err) {
+      clearChildren(scrollEl);
+      scrollEl.appendChild(renderNotice("error", "Could not load tickets: " + err.message));
+    });
+  }
 
-    var form = h("div", { className: "rw-comment-edit-form" }, [
-      noticeArea,
-      textarea,
-      h("div", { className: "rw-comment-edit-actions" }, [saveBtn, cancelBtn]),
+  // ===========================================================================
+  // Modal infra
+  // ===========================================================================
+
+  function closeActiveModal() {
+    if (!activeModal) return;
+    activeModal.close();
+    activeModal = null;
+  }
+  function mountModal(modalEl) {
+    closeActiveModal();
+    var scrim = h("div", { className: "rw-modal-scrim", role: "dialog", "aria-modal": "true" });
+    scrim.appendChild(modalEl);
+    scrim.addEventListener("mousedown", function (e) {
+      if (e.target === scrim) closeActiveModal();
+    });
+    modalMountEl.appendChild(scrim);
+    var onKey = function (e) { if (e.key === "Escape") closeActiveModal(); };
+    document.addEventListener("keydown", onKey);
+    activeModal = {
+      el: scrim,
+      close: function () {
+        document.removeEventListener("keydown", onKey);
+        if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+      },
+    };
+    return activeModal;
+  }
+
+  // ===========================================================================
+  // New-ticket modal — stages files locally, uploads after ticket is created
+  // ===========================================================================
+
+  function openNewTicketModal() {
+    var currentUrl = typeof window !== "undefined" ? window.location.href : "";
+    var noticeSlot = h("div", null);
+
+    var ta = h("textarea", {
+      className: "rw-modal-ta",
+      placeholder: "Write feedback, a proposal, or a bug report…",
+      maxlength: "5000",
+    });
+
+    var entries = []; // { file, state: 'staged' }
+    var chipsEl = h("div", { className: "rw-chips" });
+    chipsEl.style.display = "none";
+    var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
+
+    function renderChips() {
+      clearChildren(chipsEl);
+      if (entries.length === 0) { chipsEl.style.display = "none"; return; }
+      chipsEl.style.display = "flex";
+      entries.forEach(function (entry) {
+        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": "Remove attachment" }, "×");
+        removeBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var i = entries.indexOf(entry);
+          if (i >= 0) entries.splice(i, 1);
+          renderChips(); updateSubmitEnabled();
+        });
+        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
+          Icons.image(11),
+          h("span", null, entry.file.name || "Pasted image"),
+          removeBtn,
+        ]));
+      });
+    }
+    function addFiles(files) {
+      Array.prototype.forEach.call(files, function (file) {
+        if (!file.type || file.type.indexOf("image/") !== 0) return;
+        if (entries.length >= 5) return;
+        entries.push({ file: file, state: "staged" });
+      });
+      renderChips();
+      updateSubmitEnabled();
+    }
+    fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
+    ta.addEventListener("paste", function (e) {
+      if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+        e.preventDefault(); addFiles(e.clipboardData.files);
+      }
+    });
+
+    var submitBtn = h("button", { className: "rw-submit-btn", type: "button", disabled: true }, [
+      h("span", null, "Submit"), Icons.send(12),
     ]);
+    function updateSubmitEnabled() {
+      submitBtn.disabled = !config.isIdentified || ta.value.trim().length === 0;
+    }
+    ta.addEventListener("input", function () {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(300, Math.max(160, ta.scrollHeight)) + "px";
+      updateSubmitEnabled();
+    });
 
-    saveBtn.addEventListener("click", function () {
-      var content = textarea.value.trim();
-      if (!content) {
-        noticeArea.innerHTML = "";
-        noticeArea.appendChild(renderNotice("error", "Content required"));
+    var isPrivate = false;
+    var attachBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Attach image" }, [
+      Icons.paperclip(14), h("span", null, "Attach"),
+    ]);
+    attachBtn.addEventListener("click", function () { fileInput.click(); });
+    var privateBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Only visible to the team" }, [
+      Icons.lock(12), h("span", null, "Private"),
+    ]);
+    privateBtn.addEventListener("click", function () {
+      isPrivate = !isPrivate;
+      privateBtn.classList.toggle("rw-on", isPrivate);
+    });
+
+    submitBtn.addEventListener("click", function () {
+      if (!config.isIdentified) {
+        clearChildren(noticeSlot);
+        noticeSlot.appendChild(renderNotice("error", "You must be signed in to submit a ticket."));
         return;
       }
-      saveBtn.disabled = true;
-      saveBtn.textContent = "Saving…";
-      editComment(ticketId, comment.id, content).then(function () {
-        showTicketDetail(ticketId);
+      var description = ta.value.trim();
+      if (!description) return;
+      submitBtn.disabled = true;
+      submitBtn.firstChild.textContent = "Posting…";
+      clearChildren(noticeSlot);
+
+      createTicket({
+        description: description,
+        isPrivate: isPrivate,
+        context: collectContext(),
+      }).then(function (data) {
+        var ticketId = data && data.ticket && data.ticket.id;
+        if (!ticketId || entries.length === 0) return null;
+        submitBtn.firstChild.textContent = "Uploading…";
+        return Promise.all(entries.map(function (e) {
+          return uploadTicketAttachment(ticketId, e.file).catch(function (err) {
+            console.warn("Attachment failed:", err && err.message);
+            return null;
+          });
+        }));
+      }).then(function () {
+        topTicketsCache = null; updatesCache = null; myTicketsCache = null;
+        closeActiveModal();
+        return refreshAll();
       }).catch(function (err) {
-        saveBtn.disabled = false;
-        saveBtn.textContent = "Save";
-        noticeArea.innerHTML = "";
-        noticeArea.appendChild(renderNotice("error", "Failed: " + err.message));
+        submitBtn.disabled = false;
+        submitBtn.firstChild.textContent = "Submit";
+        clearChildren(noticeSlot);
+        noticeSlot.appendChild(renderNotice("error", "Failed to submit: " + (err.message || "Unknown error")));
       });
     });
 
-    cancelBtn.addEventListener("click", function () {
-      var actions = renderCommentActions(ticketId, comment);
-      form.parentNode.replaceChild(actions, form);
-    });
+    var card = h("div", { className: "rw-modal-card" }, [
+      h("div", { className: "rw-modal-url", title: currentUrl }, [
+        h("span", { className: "rw-modal-url-label" }, "Current URL:"),
+        h("span", { className: "rw-modal-url-value" }, currentUrl),
+      ]),
+      ta,
+      chipsEl,
+      h("div", { className: "rw-modal-card-bar" }, [
+        h("div", { className: "rw-modal-bar-l" }, [attachBtn, privateBtn]),
+        h("div", { className: "rw-modal-bar-r" }, [submitBtn]),
+      ]),
+    ]);
 
-    return form;
+    var closeBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close" }, Icons.close(16));
+    closeBtn.addEventListener("click", closeActiveModal);
+
+    var modal = h("div", { className: "rw-modal" }, [
+      h("div", { className: "rw-modal-topbar" }, [
+        h("span", { className: "rw-modal-kicker" }, "New ticket"),
+        closeBtn,
+      ]),
+      noticeSlot,
+      card,
+      fileInput,
+    ]);
+
+    mountModal(modal);
+    setTimeout(function () { try { ta.focus(); } catch (_) {} }, 30);
   }
 
-  function renderTicketDetail(data) {
+  function collectContext() {
+    return {
+      url: window.location.href,
+      referrer: document.referrer,
+      userAgent: navigator.userAgent,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      screenSize: { width: screen.width, height: screen.height },
+      consoleLogs: consoleLogs.slice(),
+      errors: capturedErrors.slice(),
+      timestamp: new Date().toISOString(),
+      locale: navigator.language,
+    };
+  }
+
+  // ===========================================================================
+  // Detail modal
+  // ===========================================================================
+
+  function openDetailModal(ticketSummary) {
+    var card = h("div", { className: "rw-modal-card" });
+    var closeBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close" }, Icons.close(16));
+    closeBtn.addEventListener("click", closeActiveModal);
+
+    var modal = h("div", { className: "rw-modal rw-modal--detail" }, [
+      h("div", { className: "rw-modal-topbar" }, [
+        h("span", { className: "rw-modal-kicker" }, "Ticket"),
+        closeBtn,
+      ]),
+      card,
+    ]);
+
+    renderDetailInto(card, { ticket: ticketSummary, comments: [], activity: [], isOwner: false, isEditable: false }, true);
+
+    var handle = mountModal(modal);
+
+    loadTicketDetail(ticketSummary.id).then(function (data) {
+      if (handle !== activeModal) return;
+      renderDetailInto(card, data, false);
+    }).catch(function (err) {
+      if (handle !== activeModal) return;
+      clearChildren(card);
+      card.appendChild(h("div", { style: { padding: "16px" } },
+        renderNotice("error", "Could not load ticket: " + (err.message || "Unknown error"))));
+    });
+  }
+
+  function renderDetailInto(card, data, loading) {
+    clearChildren(card);
+
     var ticket = data.ticket;
-    var isOwner = data.isOwner;
-    var isEditable = data.isEditable;
     var comments = data.comments || [];
     var activity = data.activity || [];
 
-    var container = h("div", { className: "rw-detail" });
+    // head
+    var voted = ticket.userVote === true;
+    var countSpan = h("span", null, String(ticket.yesVotes || 0));
+    var voteBtn = h("button", {
+      className: "rw-vote" + (voted ? " rw-voted" : ""),
+      type: "button",
+      "aria-label": "Upvote ticket",
+      disabled: !config.isIdentified,
+    }, [Icons.arrowUp(12), countSpan]);
+    voteBtn.addEventListener("click", function (e) { handleVoteClick(ticket, voteBtn, countSpan, e); });
 
-    // Back button
-    var backBtn = h("button", {
-      className: "rw-back-btn",
-      onClick: function () {
-        ticketsCache = null;
-        mySubmissionsCountCache = null;
-        updatesCache = null;
-        showPanelView();
-      },
-    }, [
-      h("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" }, [
-        h("path", { d: "M19 12H5" }),
-        h("path", { d: "M12 19l-7-7 7-7" }),
+    var refId = String(ticket.id || "").slice(0, 8).toUpperCase();
+    var head = h("div", { className: "rw-td-head" }, [
+      h("div", { className: "rw-td-head-top" }, [
+        h("div", { className: "rw-td-head-ref" }, [
+          h("span", { className: "rw-td-ref" }, "#" + refId),
+          renderStatusChip(ticket.status),
+        ]),
+        voteBtn,
       ]),
-      h("span", null, "Back"),
+      h("h2", { className: "rw-td-title" }, ticket.title),
+      renderHeadMeta(ticket),
     ]);
-    container.appendChild(backBtn);
+    card.appendChild(head);
 
-    // Open full page link
-    var slug = config.projectId || config.project;
-    var fullPageUrl = (config.homepageUrl || RUNHQ_API) + "/project/" + slug + "/proposals/" + ticket.id;
-    container.appendChild(h("a", {
-      className: "rw-open-full",
-      href: fullPageUrl,
-      target: "_blank",
-      rel: "noopener noreferrer",
-    }, [
-      h("span", null, "Open full page"),
-      h("svg", { width: "10", height: "10", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2.5", "stroke-linecap": "round" }, [
-        h("path", { d: "M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" }),
-        h("path", { d: "M15 3h6v6" }),
-        h("path", { d: "M10 14L21 3" }),
+    // body
+    var body = h("div", { className: "rw-td-body" });
+
+    var authorName = displayNameFromTicket(ticket);
+    var postChildren = [
+      h("div", { className: "rw-td-post-hdr" }, [
+        renderAvatar(authorName, 28),
+        h("div", { className: "rw-td-post-hdr-text" }, [
+          h("div", { className: "rw-td-post-author" }, authorName),
+          h("div", { className: "rw-td-post-when" }, timeAgo(ticket.createdAt) + " · Original report"),
+        ]),
       ]),
-    ]));
-
-    // Flash notice from the composer (e.g., "Comment posted, but attachment failed")
-    if (pendingDetailNotice) {
-      container.appendChild(renderNotice(pendingDetailNotice.level, pendingDetailNotice.message));
-      pendingDetailNotice = null;
-    }
-
-    // Title + status
-    var statusText = ticket.status.replace(/_/g, " ");
-    statusText = statusText.charAt(0).toUpperCase() + statusText.slice(1);
-    var statusColor;
-    switch (ticket.status) {
-      case "pending": statusColor = "#f59e0b"; break;
-      case "planned": statusColor = "#3b82f6"; break;
-      case "in_progress": statusColor = "#8b5cf6"; break;
-      case "needs_review": statusColor = "#f59e0b"; break;
-      case "done": statusColor = "#10b981"; break;
-      case "cancelled": statusColor = "#6b7280"; break;
-      default: statusColor = "#6b7280";
-    }
-    if (ticket.moderationStatus === "pending") {
-      statusText = "Awaiting review";
-      statusColor = "#f59e0b";
-    }
-    var badge = h("span", {
-      className: "rw-status-badge",
-      style: "color:" + statusColor + ";background:" + statusColor + "1a",
-    }, statusText);
-
-    var headerRow = h("div", { className: "rw-detail-header" }, [
-      h("div", { className: "rw-detail-title" }, ticket.title),
-      badge,
-    ]);
-    container.appendChild(headerRow);
-
-    // Description
+    ];
     if (ticket.description) {
-      container.appendChild(h("div", { className: "rw-detail-desc" }, ticket.description));
+      var postBody = h("div", { className: "rw-td-post-body" });
+      ticket.description.split(/\n\n+/).forEach(function (para) { postBody.appendChild(h("p", null, para)); });
+      postChildren.push(postBody);
     }
+    var ticketShots = renderShotGrid(ticket.attachments);
+    if (ticketShots) postChildren.push(ticketShots);
+    body.appendChild(h("div", { className: "rw-td-post" }, postChildren));
 
-    // Attachments
-    if (ticket.attachments && ticket.attachments.length > 0) {
-      var attachContainer = h("div", { className: "rw-detail-attachments" });
-      ticket.attachments.forEach(function (att) {
-        if (att.url && att.mimeType && att.mimeType.indexOf("image/") === 0) {
-          var img = h("img", {
-            className: "rw-detail-attach-img",
-            src: att.url,
-            alt: att.originalName || "attachment",
-            onClick: function () { window.open(att.url, "_blank"); },
-          });
-          attachContainer.appendChild(img);
-        }
-      });
-      if (attachContainer.childNodes.length > 0) {
-        container.appendChild(attachContainer);
+    // thread
+    var thread = h("div", { className: "rw-td-thread" });
+    if (loading) {
+      thread.appendChild(renderLoading());
+    } else {
+      var merged = mergeThread(comments, activity);
+      thread.appendChild(h("div", { className: "rw-td-thread-title" },
+        comments.length > 0 ? ("Activity · " + comments.length + " " + (comments.length === 1 ? "comment" : "comments")) : "Activity"));
+      if (merged.length === 0) {
+        thread.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "4px 0" } }, "No activity yet."));
+      } else {
+        merged.forEach(function (node) {
+          if (node.kind === "event") thread.appendChild(renderEventNode(node.event));
+          else thread.appendChild(renderCommentNode(node.comment));
+        });
       }
     }
+    body.appendChild(thread);
+    card.appendChild(body);
 
-    // Meta
-    var metaItems = [];
-    var yes = parseInt(ticket.yesVotes, 10) || 0;
-    var no = parseInt(ticket.noVotes, 10) || 0;
-    metaItems.push(h("span", null, yes + " upvotes"));
-    if (no > 0) metaItems.push(h("span", null, no + " downvotes"));
-    if (ticket.source) {
-      metaItems.push(h("span", null, ticket.source === "workspace" ? "Workspace" : "Widget"));
-    }
-    metaItems.push(h("span", null, formatDate(ticket.createdAt)));
-    container.appendChild(h("div", { className: "rw-detail-meta" }, metaItems));
-
-    // Edit/delete actions (only for owner of editable tickets)
-    if (isOwner && isEditable) {
-      var noticeArea = h("div", null);
-      container.appendChild(noticeArea);
-
-      var editBtn = h("button", {
-        className: "rw-edit-btn",
-        onClick: function () {
-          setBodyContent(renderTicketEdit(data));
-        },
-      }, "Edit");
-
-      var deleteBtn = h("button", {
-        className: "rw-delete-btn",
-        onClick: function () {
-          // Show confirmation inline
-          noticeArea.innerHTML = "";
-          var confirmBox = h("div", { className: "rw-delete-confirm" }, [
-            h("p", null, "Delete this ticket? This cannot be undone."),
-            h("div", { className: "rw-delete-confirm-actions" }, [
-              h("button", {
-                className: "rw-delete-yes",
-                onClick: function () {
-                  deleteTicket(ticket.id).then(function () {
-                    ticketsCache = null;
-                    mySubmissionsCountCache = null;
-                    showPanelView();
-                  }).catch(function (err) {
-                    noticeArea.innerHTML = "";
-                    noticeArea.appendChild(renderNotice("error", "Failed to delete: " + err.message));
-                  });
-                },
-              }, "Delete"),
-              h("button", {
-                className: "rw-delete-cancel",
-                onClick: function () { noticeArea.innerHTML = ""; },
-              }, "Cancel"),
-            ]),
-          ]);
-          noticeArea.appendChild(confirmBox);
-        },
-      }, "Delete");
-
-      container.appendChild(h("div", { className: "rw-detail-actions" }, [editBtn, deleteBtn]));
-    }
-
-    // Divider
-    container.appendChild(h("hr", { className: "rw-divider" }));
-
-    // Timeline
-    var timeline = [];
-    comments.forEach(function (c) {
-      timeline.push({
-        kind: "comment",
-        id: c.id,
-        authorName: c.authorName,
-        externalUserId: c.externalUserId,
-        createdByType: c.createdByType,
-        isAuthorOfCurrentUser: c.isAuthorOfCurrentUser,
-        body: c.body,
-        attachments: c.attachments,
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-      });
-    });
-    activity.forEach(function (a) {
-      timeline.push({ kind: "activity", id: a.id, type: a.type, content: a.content, createdByName: a.createdByName, createdAt: a.createdAt, metadata: a.metadata });
-    });
-    timeline.sort(function (a, b) { return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); });
-
-    container.appendChild(h("div", { className: "rw-timeline-label" }, "Timeline (" + timeline.length + ")"));
-
-    if (timeline.length === 0) {
-      container.appendChild(h("div", { className: "rw-empty", style: "padding: 12px 0;" }, "No activity yet."));
-    } else {
-      var timelineEl = h("div", { className: "rw-timeline" });
-      timeline.forEach(function (item) {
-        var dotClass = "rw-timeline-dot" + (item.kind === "comment" ? " rw-timeline-dot-comment" : "");
-        var headerChildren = [
-          h("span", { className: "rw-timeline-author" },
-            item.kind === "comment"
-              ? formatAuthorName(item.authorName, item.externalUserId, item.createdByType)
-              : (item.createdByName || "System")),
-          h("span", { className: "rw-timeline-date" }, formatDate(item.createdAt)),
-        ];
-        if (item.kind === "comment" && item.updatedAt && item.createdAt
-            && new Date(item.updatedAt).getTime() > new Date(item.createdAt).getTime() + 1000) {
-          headerChildren.push(h("span", {
-            className: "rw-edited-marker",
-            title: "Edited at " + formatDate(item.updatedAt),
-          }, " (edited)"));
-        }
-        var cardHeader = h("div", { className: "rw-timeline-card-header" }, headerChildren);
-        var cardBody;
-        var cardChildren;
-        if (item.kind === "comment") {
-          var bodyChildren = [
-            h("div", { className: "rw-timeline-body" }, item.body),
-          ];
-          if (item.attachments && item.attachments.length > 0) {
-            var attachContainer = h("div", { className: "rw-timeline-attachments" });
-            item.attachments.forEach(function (att) {
-              if (att.url && att.mimeType && att.mimeType.indexOf("image/") === 0) {
-                var img = h("img", {
-                  className: "rw-detail-attach-img",
-                  src: att.url,
-                  alt: att.originalName || "attachment",
-                  onClick: function () { window.open(att.url, "_blank"); },
-                });
-                attachContainer.appendChild(img);
-              }
-            });
-            if (attachContainer.childNodes.length > 0) {
-              bodyChildren.push(attachContainer);
-            }
-          }
-          cardBody = h("div", null, bodyChildren);
-          cardChildren = [cardHeader, cardBody];
-          if (item.isAuthorOfCurrentUser && config.isIdentified) {
-            cardChildren.push(renderCommentActions(ticket.id, item));
-          }
-        } else {
-          cardBody = h("div", { className: "rw-timeline-activity" }, renderActivityLabel(item));
-          cardChildren = [cardHeader, cardBody];
-        }
-        var card = h("div", { className: "rw-timeline-card" }, cardChildren);
-        var timelineItem = h("div", { className: "rw-timeline-item" }, [
-          h("div", { className: "rw-timeline-line" }),
-          h("div", { className: dotClass }),
-          card,
-        ]);
-        timelineEl.appendChild(timelineItem);
-      });
-      container.appendChild(timelineEl);
-    }
-
-    // Comment composer
-    container.appendChild(h("hr", { className: "rw-divider" }));
-    if (ticket.commentsDisabled) {
-      container.appendChild(h("div", { className: "rw-login-prompt" }, "Comments are disabled for this ticket"));
-    } else if (config.isIdentified) {
-      container.appendChild(renderCommentComposer(ticket.id));
-    } else {
-      container.appendChild(h("div", { className: "rw-login-prompt" }, "Log in to comment"));
-    }
-
-    return container;
+    // composer
+    card.appendChild(renderComposer(ticket, function (newComment) {
+      comments.push(newComment);
+      renderDetailInto(card, { ticket: ticket, comments: comments, activity: activity, isOwner: data.isOwner, isEditable: data.isEditable }, false);
+    }));
   }
 
-  function renderTicketEdit(data) {
-    var ticket = data.ticket;
-    var container = h("div", { className: "rw-detail" });
-    var pendingDeletes = []; // attachment IDs to delete on save
-    var pendingUploads = []; // File objects to upload on save
+  function renderHeadMeta(ticket) {
+    var authorName = displayNameFromTicket(ticket);
+    var metaChildren = [];
+    if (authorName) {
+      metaChildren.push(renderAvatar(authorName, 20));
+      metaChildren.push(h("span", { className: "rw-td-meta-author" }, authorName));
+      metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+    }
+    metaChildren.push(h("span", null, timeAgo(ticket.createdAt)));
+    if (ticket.completedAt && ticket.status === "done") {
+      metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      metaChildren.push(h("span", null, "shipped " + timeAgo(ticket.completedAt)));
+    }
+    return h("div", { className: "rw-td-head-meta" }, metaChildren);
+  }
 
-    // Back button (goes back to detail, not list)
-    var backBtn = h("button", {
-      className: "rw-back-btn",
-      onClick: function () { showTicketDetail(ticket.id); },
-    }, [
-      h("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" }, [
-        h("path", { d: "M19 12H5" }),
-        h("path", { d: "M12 19l-7-7 7-7" }),
+  function mergeThread(comments, activity) {
+    var nodes = [];
+    for (var i = 0; i < comments.length; i++) {
+      nodes.push({ kind: "comment", comment: comments[i], at: new Date(comments[i].createdAt).getTime() });
+    }
+    for (var j = 0; j < activity.length; j++) {
+      // Skip event types that duplicate things we render elsewhere
+      var e = activity[j];
+      if (e.type === "comment_added" || e.type === "comment_edited" || e.type === "comment_deleted") continue;
+      if (e.type === "attachment_added") continue;
+      nodes.push({ kind: "event", event: e, at: new Date(e.createdAt).getTime() });
+    }
+    nodes.sort(function (a, b) { return a.at - b.at; });
+    return nodes;
+  }
+
+  function describeEvent(e) {
+    var m = e.metadata || {};
+    if (e.type === "status_changed") {
+      var from = statusMeta(m.from || "").label;
+      var to = statusMeta(m.to || "").label;
+      return "changed status" + (from ? " from " + from : "") + (to ? " to " + to : "");
+    }
+    if (e.type === "moderation_changed") {
+      return "changed moderation to " + (m.to || "unknown");
+    }
+    if (e.type === "assigned")       return "assigned the ticket" + (m.assignee ? " to " + m.assignee : "");
+    if (e.type === "unassigned")     return "unassigned the ticket";
+    if (e.type === "ticket_created") return "opened the ticket";
+    if (e.type === "ticket_edited")  return "edited the ticket";
+    if (e.type === "ticket_deleted") return "deleted the ticket";
+    return e.content || e.type;
+  }
+
+  function renderEventNode(e) {
+    var actorName = e.createdByName || "Team";
+    return h("div", { className: "rw-event" }, [
+      h("span", { className: "rw-event-dot" }),
+      h("span", { className: "rw-event-text" }, [
+        h("b", null, actorName),
+        document.createTextNode(" " + describeEvent(e)),
       ]),
-      h("span", null, "Cancel editing"),
-    ]);
-    container.appendChild(backBtn);
-
-    container.appendChild(h("div", { className: "rw-section-label", style: "padding-left: 0;" }, "Edit Ticket"));
-
-    var noticeArea = h("div", null);
-    container.appendChild(noticeArea);
-
-    // Title input
-    var titleInput = h("input", {
-      className: "rw-input",
-      type: "text",
-      value: ticket.title || "",
-      placeholder: "Title",
-      maxlength: "200",
-    });
-
-    // Description textarea
-    var descInput = h("textarea", {
-      className: "rw-input rw-textarea",
-      placeholder: "Description",
-      maxlength: "2000",
-    });
-    descInput.value = ticket.description || "";
-
-    // Existing attachments with remove buttons
-    var existingAttachEl = h("div", { className: "rw-edit-attachments" });
-    var existingAttachments = (ticket.attachments || []).slice();
-    function renderExistingAttachments() {
-      existingAttachEl.innerHTML = "";
-      existingAttachments.forEach(function (att) {
-        if (pendingDeletes.indexOf(att.id) !== -1) return;
-        if (!att.url || !att.mimeType || att.mimeType.indexOf("image/") !== 0) return;
-        var item = h("div", { className: "rw-edit-attach-item" }, [
-          h("img", { className: "rw-edit-attach-img", src: att.url, alt: att.originalName || "attachment" }),
-          h("button", {
-            className: "rw-edit-attach-remove",
-            onClick: function () {
-              pendingDeletes.push(att.id);
-              renderExistingAttachments();
-            },
-          }, "\u00d7"),
-        ]);
-        existingAttachEl.appendChild(item);
-      });
-    }
-    renderExistingAttachments();
-
-    // New file upload area
-    var newFileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
-    var newPreview = h("div", { className: "rw-attach-preview" });
-
-    function addNewFiles(files) {
-      var currentCount = existingAttachments.length - pendingDeletes.length + pendingUploads.length;
-      Array.prototype.forEach.call(files, function (file) {
-        if (!file.type.startsWith("image/")) return;
-        if (currentCount >= 5) return;
-        pendingUploads.push(file);
-        currentCount++;
-        var reader = new FileReader();
-        reader.onload = function (e) {
-          var thumb = h("div", { className: "rw-edit-attach-item" }, [
-            h("img", { className: "rw-edit-attach-img", src: e.target.result }),
-            h("button", {
-              className: "rw-edit-attach-remove",
-              onClick: function () {
-                var idx = pendingUploads.indexOf(file);
-                if (idx > -1) pendingUploads.splice(idx, 1);
-                thumb.remove();
-              },
-            }, "\u00d7"),
-          ]);
-          newPreview.appendChild(thumb);
-        };
-        reader.readAsDataURL(file);
-      });
-    }
-
-    var addBtn = h("button", {
-      className: "rw-edit-btn",
-      style: "margin-bottom: 10px;",
-      onClick: function () { newFileInput.click(); },
-    }, "+ Add images");
-    newFileInput.addEventListener("change", function () { addNewFiles(newFileInput.files); newFileInput.value = ""; });
-
-    var saveBtn = h("button", { className: "rw-save-btn" }, "Save changes");
-    var cancelBtn = h("button", {
-      className: "rw-cancel-btn",
-      onClick: function () { showTicketDetail(ticket.id); },
-    }, "Cancel");
-
-    saveBtn.addEventListener("click", function () {
-      var newTitle = titleInput.value.trim();
-      var newDesc = descInput.value.trim();
-      if (!newTitle && !newDesc) {
-        noticeArea.innerHTML = "";
-        noticeArea.appendChild(renderNotice("error", "Title or description is required."));
-        return;
-      }
-      saveBtn.disabled = true;
-      saveBtn.textContent = "Saving\u2026";
-      noticeArea.innerHTML = "";
-
-      // 1. Update title/description
-      var chain = updateTicket(ticket.id, {
-        title: newTitle || undefined,
-        description: newDesc,
-      });
-
-      // 2. Delete removed attachments
-      pendingDeletes.forEach(function (attId) {
-        chain = chain.then(function () { return deleteAttachmentApi(ticket.id, attId); });
-      });
-
-      // 3. Upload new attachments
-      if (pendingUploads.length > 0) {
-        saveBtn.textContent = "Uploading\u2026";
-        pendingUploads.forEach(function (file) {
-          chain = chain.then(function () { return uploadAttachment(ticket.id, file); });
-        });
-      }
-
-      chain.then(function () {
-        ticketsCache = null;
-        mySubmissionsCountCache = null;
-        showTicketDetail(ticket.id);
-      }).catch(function (err) {
-        noticeArea.innerHTML = "";
-        noticeArea.appendChild(renderNotice("error", "Failed to save: " + err.message));
-        saveBtn.disabled = false;
-        saveBtn.textContent = "Save changes";
-      });
-    });
-
-    var form = h("div", { className: "rw-edit-form" }, [
-      titleInput,
-      descInput,
-      existingAttachEl,
-      newPreview,
-      addBtn,
-      newFileInput,
-      h("div", { className: "rw-edit-form-actions" }, [saveBtn, cancelBtn]),
-    ]);
-    container.appendChild(form);
-
-    return container;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Unified panel body: form at top + proposals below
-  // ---------------------------------------------------------------------------
-
-  // ---------------------------------------------------------------------------
-  // Inline feedback form
-  // ---------------------------------------------------------------------------
-
-  // ---------------------------------------------------------------------------
-  // Duration, stats, tabs, my-submissions renderers
-  // ---------------------------------------------------------------------------
-
-  function handleTabChange(tab) {
-    activeTab = tab;
-    var isIdentified = !!config.isIdentified;
-    if (tab === "updates") showUpdatesView(isIdentified);
-    else if (tab === "mine") showMySubmissionsView(isIdentified);
-    else renderCurrentTab(isIdentified);
-  }
-
-  function formatDuration(ms) {
-    if (!ms || ms <= 0) return "";
-    var hours = Math.floor(ms / 3600000);
-    var days = Math.floor(hours / 24);
-    var remainHours = hours % 24;
-    if (days > 0) return days + "d " + remainHours + "h";
-    if (hours > 0) return hours + "h";
-    return "<1h";
-  }
-
-  function formatRelativeTime(isoOrMs) {
-    if (!isoOrMs) return "";
-    var t = typeof isoOrMs === "string" ? Date.parse(isoOrMs) : isoOrMs;
-    if (isNaN(t)) return "";
-    var diff = Date.now() - t;
-    if (diff < 60000) return "just now";
-    if (diff < 3600000) return Math.floor(diff / 60000) + "m ago";
-    if (diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
-    if (diff < 86400000 * 30) return Math.floor(diff / 86400000) + "d ago";
-    return new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-  }
-
-  function formatAuthorName(authorName, externalUserId, createdByType) {
-    if (createdByType === "member") return authorName || "RunHQ member";
-    if (authorName && externalUserId) return authorName + " (app-user id:" + externalUserId + ")";
-    if (authorName) return authorName;
-    if (externalUserId) return "app-user (id:" + externalUserId + ")";
-    return "Anonymous";
-  }
-
-  function renderStats(stats) {
-    if (!stats || !stats.avgResolutionMs) return null;
-    return h("div", { className: "rw-stats-banner" }, [
-      h("span", null, "Avg resolution: " + formatDuration(stats.avgResolutionMs)),
-      h("span", { className: "rw-stats-sep" }, "\u00b7"),
-      h("span", null, stats.totalResolved + " resolved"),
+      h("span", { className: "rw-event-when" }, timeAgo(e.createdAt)),
     ]);
   }
 
-  function renderTabs(onTabChange, myCount, isIdentified) {
-    var updatesBtn = h("button", {
-      className: "rw-tab-btn" + (activeTab === "updates" ? " rw-tab-active" : ""),
-      onClick: function () { onTabChange("updates"); },
-    }, "Updates");
-    var allBtn = h("button", {
-      className: "rw-tab-btn" + (activeTab === "all" ? " rw-tab-active" : ""),
-      onClick: function () { onTabChange("all"); },
-    }, "Recent Tickets");
-    var mineChildren = [h("span", null, "My Tickets")];
-    if (myCount != null && myCount > 0) {
-      mineChildren.push(h("span", { className: "rw-tab-badge" }, String(myCount)));
-    }
-    var mineBtnAttrs = {
-      className: "rw-tab-btn" + (activeTab === "mine" ? " rw-tab-active" : ""),
-      onClick: function () { if (isIdentified) onTabChange("mine"); },
-    };
-    if (!isIdentified) {
-      mineBtnAttrs.disabled = true;
-      mineBtnAttrs.title = "Log in to view your tickets";
-    }
-    var mineBtn = h("button", mineBtnAttrs, mineChildren);
-    return h("div", { className: "rw-tabs" }, [updatesBtn, allBtn, mineBtn]);
+  function renderCommentNode(c) {
+    var authorName = displayNameFromComment(c);
+    var bodyChildren = [
+      h("div", { className: "rw-td-comment-hdr" }, [
+        h("span", { className: "rw-td-comment-author" }, authorName),
+        h("span", { className: "rw-td-comment-when" }, timeAgo(c.createdAt)),
+      ]),
+      h("div", { className: "rw-td-comment-text" }, c.body || ""),
+    ];
+    var shots = renderShotGrid(c.attachments, /* tight */ true);
+    if (shots) bodyChildren.push(shots);
+    var bodyEl = h("div", { className: "rw-td-comment-body" }, bodyChildren);
+    return h("article", { className: "rw-td-comment" }, [renderAvatar(authorName, 28), bodyEl]);
   }
 
-  function renderUpdatesList(tickets) {
-    if (!tickets || tickets.length === 0) {
-      return renderEmpty("Nothing shipped yet.");
-    }
-    var container = h("div", null);
-    tickets.forEach(function (p) {
-      var desc = (p.description || "").length > 140
-        ? p.description.slice(0, 140) + "…"
-        : (p.description || "");
-      var badge = h("span", {
-        className: "rw-status-badge",
-        style: "color:#10b981;background:#10b9811a",
-      }, "Done");
-      var relTime = p.completedAt ? "Shipped " + formatRelativeTime(p.completedAt) : "";
-      var metaItems = [badge];
-      if (relTime) metaItems.push(h("span", { className: "rw-submission-date" }, relTime));
-      var cardChildren = [h("div", { className: "rw-submission-title" }, p.title)];
-      if (desc) cardChildren.push(h("div", { className: "rw-submission-desc" }, desc));
-      cardChildren.push(h("div", { className: "rw-submission-meta" }, metaItems));
-      var card = h("div", {
-        className: "rw-submission-card",
-        onClick: (function (ticketId) {
-          return function () { showTicketDetail(ticketId); };
-        })(p.id),
-      }, cardChildren);
-      container.appendChild(card);
-    });
-    return container;
-  }
-
-  function renderMySubmissions(tickets) {
-    if (!tickets || tickets.length === 0) {
-      return renderEmpty("You haven't submitted any tickets yet.");
-    }
-    var container = h("div", null);
-    tickets.forEach(function (p) {
-      var statusText, statusColor;
-      if (p.moderationStatus === "pending") {
-        statusText = "Awaiting review"; statusColor = "#f59e0b";
-      } else if (p.status === "pending") {
-        statusText = "Pending"; statusColor = "#f59e0b";
-      } else if (p.status === "planned") {
-        statusText = "Planned"; statusColor = "#3b82f6";
-      } else if (p.status === "in_progress") {
-        statusText = "In Progress"; statusColor = "#8b5cf6";
-      } else if (p.status === "needs_review") {
-        statusText = "Needs Review"; statusColor = "#f59e0b";
-      } else if (p.status === "done") {
-        statusText = "Done"; statusColor = "#10b981";
-      } else if (p.status === "cancelled") {
-        statusText = "Cancelled"; statusColor = "#6b7280";
-      } else {
-        statusText = p.status; statusColor = "#6b7280";
-      }
-      var badge = h("span", {
-        className: "rw-status-badge",
-        style: "color:" + statusColor + ";background:" + statusColor + "1a",
-      }, statusText);
-      var dateStr = p.createdAt ? new Date(p.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
-      var metaItems = [badge];
-      if (p.moderationStatus !== "pending") {
-        metaItems.push(h("span", { className: "rw-vote-counts" }, p.yesVotes + " yes / " + p.noVotes + " no"));
-      }
-      if (dateStr) {
-        metaItems.push(h("span", { className: "rw-submission-date" }, dateStr));
-      }
-      var meta = h("div", { className: "rw-submission-meta" }, metaItems);
-      var cardChildren = [
-        h("div", { className: "rw-submission-title" }, p.title),
-      ];
-      if (p.description) {
-        cardChildren.push(h("div", { className: "rw-submission-desc" }, p.description));
-      }
-      cardChildren.push(meta);
-      var card = h("div", {
-        className: "rw-submission-card",
-        onClick: (function (ticketId) {
-          return function () { showTicketDetail(ticketId); };
-        })(p.id),
-      }, cardChildren);
-      container.appendChild(card);
-    });
-    return container;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Unified panel body: action buttons + proposals
-  // ---------------------------------------------------------------------------
-
-  function renderLoginPrompt() {
-    return h("div", { className: "rw-login-prompt" }, [
-      h("span", null, "Log in to submit tickets and vote"),
-    ]);
-  }
-
-  function renderTicketList(proposals) {
-    var container = h("div", null);
-
-    if (!proposals || proposals.length === 0) {
-      container.appendChild(renderEmpty("No tickets yet."));
-    } else {
-      var open = proposals.filter(function (p) {
-        return p.status !== "done" && p.status !== "cancelled";
-      });
-
-      if (open.length > 0) {
-        open.forEach(function (p) {
-          container.appendChild(renderTicket(p));
-        });
-      } else {
-        container.appendChild(renderEmpty("No active tickets."));
-      }
-    }
-
-    // --- Show more link ---
-    var showMoreLink = h("a", {
-      className: "rw-show-more",
-      href: (config.homepageUrl || RUNHQ_API) + "/project/" + (config.projectId || config.project),
-      target: "_blank",
-      rel: "noopener noreferrer",
-    }, "Show more \u2192");
-    container.appendChild(showMoreLink);
-
-    return container;
-  }
-
-  function renderInlineForm(onSubmit) {
-    var noticeContainer = h("div", null);
-
-    var descInput = h("textarea", {
-      className: "rw-input rw-textarea rw-inline-textarea",
-      placeholder: "Write your feedback, proposal, or bug report here\u2026",
-      maxlength: "2000",
-    });
-
-    // --- File attach ---
-    var attachedFiles = [];
+  function renderComposer(ticket, onPosted) {
+    var noticeSlot = h("div", null);
+    var entries = [];
+    var chipsEl = h("div", { className: "rw-chips" });
+    chipsEl.style.display = "none";
     var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
-    var previewContainer = h("div", { className: "rw-attach-preview" });
 
+    var disabled = !config.isIdentified || !!ticket.commentsDisabled;
+    var placeholder = !config.isIdentified ? "Sign in to reply"
+                    : ticket.commentsDisabled ? "Comments are disabled"
+                    : "Write a comment…  (⌘V to paste a screenshot)";
+
+    var ta = h("textarea", { className: "rw-td-composer-ta", placeholder: placeholder, disabled: disabled });
+
+    var submitBtn = h("button", { className: "rw-submit-btn", type: "button", disabled: true }, [
+      h("span", null, "Comment"), Icons.send(12),
+    ]);
+    var attachBtn = h("button", { className: "rw-pill-btn", type: "button", disabled: disabled }, [
+      Icons.paperclip(14), h("span", null, "Attach"),
+    ]);
+    attachBtn.addEventListener("click", function () { fileInput.click(); });
+
+    function updateSubmitEnabled() {
+      if (disabled) { submitBtn.disabled = true; return; }
+      var hasText = ta.value.trim().length > 0;
+      var hasStaged = entries.length > 0;
+      submitBtn.disabled = !hasText && !hasStaged;
+    }
+    function renderChips() {
+      clearChildren(chipsEl);
+      if (entries.length === 0) { chipsEl.style.display = "none"; return; }
+      chipsEl.style.display = "flex";
+      entries.forEach(function (entry) {
+        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": "Remove" }, "×");
+        removeBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var i = entries.indexOf(entry);
+          if (i >= 0) entries.splice(i, 1);
+          renderChips(); updateSubmitEnabled();
+        });
+        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
+          Icons.image(11),
+          h("span", null, entry.file.name || "Pasted image"),
+          removeBtn,
+        ]));
+      });
+    }
     function addFiles(files) {
       Array.prototype.forEach.call(files, function (file) {
-        if (!file.type.startsWith("image/")) return;
-        if (attachedFiles.length >= 5) return;
-        attachedFiles.push(file);
-        var reader = new FileReader();
-        reader.onload = function (e) {
-          var thumb = h("div", { className: "rw-attach-thumb" }, [
-            h("img", { src: e.target.result }),
-          ]);
-          var removeBtn = h("button", { className: "rw-attach-remove" }, "\u00d7");
-          removeBtn.addEventListener("click", function (ev) {
-            ev.stopPropagation();
-            var i = attachedFiles.indexOf(file);
-            if (i > -1) attachedFiles.splice(i, 1);
-            thumb.remove();
-          });
-          thumb.appendChild(removeBtn);
-          previewContainer.appendChild(thumb);
-        };
-        reader.readAsDataURL(file);
+        if (!file.type || file.type.indexOf("image/") !== 0) return;
+        if (entries.length >= 5) return;
+        entries.push({ file: file });
       });
+      renderChips(); updateSubmitEnabled();
     }
-
-    var attachSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    attachSvg.setAttribute("width", "18");
-    attachSvg.setAttribute("height", "18");
-    attachSvg.setAttribute("viewBox", "0 0 24 24");
-    attachSvg.setAttribute("fill", "none");
-    attachSvg.setAttribute("stroke", "currentColor");
-    attachSvg.setAttribute("stroke-width", "2");
-    attachSvg.setAttribute("stroke-linecap", "round");
-    attachSvg.setAttribute("stroke-linejoin", "round");
-    var attachPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    attachPath.setAttribute("d", "M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48");
-    attachSvg.appendChild(attachPath);
-    var attachBtn = h("button", { className: "rw-attach-btn", type: "button" }, attachSvg);
-    attachBtn.addEventListener("click", function () { fileInput.click(); });
     fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
-
-    // Paste support on textarea
-    descInput.addEventListener("paste", function (e) {
+    ta.addEventListener("paste", function (e) {
       if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
-        addFiles(e.clipboardData.files);
+        e.preventDefault(); addFiles(e.clipboardData.files);
       }
     });
-
-    // Ctrl+Enter / Cmd+Enter to submit
-    descInput.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        submitBtn.click();
-      }
+    ta.addEventListener("input", function () {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(200, Math.max(56, ta.scrollHeight)) + "px";
+      updateSubmitEnabled();
     });
 
-    // --- Submit button ---
-    var submitBtn = h("button", { className: "rw-inline-submit", type: "button" }, "Submit");
     submitBtn.addEventListener("click", function () {
-      var description = descInput.value.trim();
-      if (!description) {
-        noticeContainer.innerHTML = "";
-        noticeContainer.appendChild(renderNotice("error", "Please describe your feedback."));
-        descInput.focus();
-        return;
-      }
-
+      if (disabled) return;
+      var text = ta.value.trim();
+      if (!text && entries.length === 0) return;
       submitBtn.disabled = true;
-      submitBtn.textContent = "Posting\u2026";
-      noticeContainer.innerHTML = "";
-
-      var context = {
-        url: window.location.href,
-        referrer: document.referrer,
-        userAgent: navigator.userAgent,
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-        screenSize: { width: screen.width, height: screen.height },
-        consoleLogs: consoleLogs.slice(),
-        errors: capturedErrors.slice(),
-        timestamp: new Date().toISOString(),
-        locale: navigator.language,
-      };
-
-      onSubmit({
-        description: description,
-        type: "feedback",
-        context: context,
-        isPrivate: privateCheckbox.checked,
-      }).then(function (result) {
-        var ticketId = result && result.ticket && result.ticket.id;
-        if (!ticketId || attachedFiles.length === 0) return result;
-        // Upload attachments sequentially
-        submitBtn.textContent = "Uploading files\u2026";
-        var chain = Promise.resolve();
-        attachedFiles.forEach(function (file) {
-          chain = chain.then(function () { return uploadAttachment(ticketId, file); });
+      submitBtn.firstChild.textContent = "Posting…";
+      clearChildren(noticeSlot);
+      postComment(ticket.id, text || "").then(function (data) {
+        var newComment = data && data.comment;
+        if (!newComment) throw new Error("Malformed response");
+        if (entries.length === 0) return newComment;
+        submitBtn.firstChild.textContent = "Uploading…";
+        return Promise.all(entries.map(function (e) {
+          return uploadCommentAttachment(ticket.id, newComment.id, e.file)
+            .then(function (r) { return r && r.attachment; })
+            .catch(function (err) { console.warn("Comment attach failed:", err && err.message); return null; });
+        })).then(function (attachments) {
+          var real = attachments.filter(function (a) { return !!a; });
+          newComment.attachments = (newComment.attachments || []).concat(real);
+          return newComment;
         });
-        return chain;
-      }).then(function () {
-        descInput.value = "";
-        privateCheckbox.checked = false;
-        attachedFiles.length = 0;
-        previewContainer.innerHTML = "";
-        noticeContainer.innerHTML = "";
-        noticeContainer.appendChild(renderNotice("success", "Thanks for your feedback!"));
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Submit";
-        // Refresh proposals
-        ticketsCache = null;
-        showPanelView();
+      }).then(function (newComment) {
+        ta.value = "";
+        ta.style.height = "auto";
+        entries.length = 0;
+        renderChips();
+        submitBtn.firstChild.textContent = "Comment";
+        updateSubmitEnabled();
+        if (onPosted) onPosted(newComment);
       }).catch(function (err) {
-        noticeContainer.innerHTML = "";
-        noticeContainer.appendChild(renderNotice("error", "Failed to submit: " + err.message));
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Submit";
+        submitBtn.firstChild.textContent = "Comment";
+        updateSubmitEnabled();
+        noticeSlot.appendChild(renderNotice("error", "Failed to post: " + (err.message || "Unknown error")));
       });
     });
 
-    var privateCheckbox = h("input", { type: "checkbox", id: "rw-private-cb" });
-    var privateLabel = h("label", { className: "rw-private-label", htmlFor: "rw-private-cb" }, [
-      privateCheckbox,
-      h("span", null, "private"),
+    var composerCard = h("div", { className: "rw-td-composer-card" }, [
+      ta,
+      chipsEl,
+      h("div", { className: "rw-td-composer-bar" }, [
+        h("div", { className: "rw-td-composer-bar-l" }, [
+          attachBtn,
+          h("span", { className: "rw-td-composer-hint" }, "Paste screenshots with ⌘V"),
+        ]),
+        submitBtn,
+      ]),
     ]);
 
-    var bottomRight = h("div", { className: "rw-inline-bottom-right" }, [
-      privateLabel,
-      submitBtn,
-    ]);
-
-    var bottomRow = h("div", { className: "rw-inline-bottom" }, [
-      attachBtn,
-      bottomRight,
-    ]);
-
-    var formChildren = [noticeContainer, descInput, previewContainer, bottomRow, fileInput];
-
-    var form = h("div", { className: "rw-inline-form" }, formChildren);
-
-    // Drag-and-drop on the whole form
-    form.addEventListener("dragover", function (e) { e.preventDefault(); form.classList.add("rw-dragover"); });
-    form.addEventListener("dragleave", function () { form.classList.remove("rw-dragover"); });
-    form.addEventListener("drop", function (e) { e.preventDefault(); form.classList.remove("rw-dragover"); addFiles(e.dataTransfer.files); });
-
-    return form;
+    var composer = h("div", { className: "rw-td-composer" });
+    if (!config.isIdentified) {
+      composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, "Sign in to post a comment."));
+    } else if (ticket.commentsDisabled) {
+      composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, "Comments are disabled on this ticket."));
+    }
+    composer.appendChild(noticeSlot);
+    composer.appendChild(h("div", { className: "rw-td-composer-row" }, [
+      renderAvatar("You", 26),
+      composerCard,
+      fileInput,
+    ]));
+    return composer;
   }
 
-  // ---------------------------------------------------------------------------
-  // Panel body: load & render
-  // ---------------------------------------------------------------------------
-
-  var ticketsCache = null;
-  var mySubmissionsCountCache = null;
-
-  function setBodyContent(el) {
-    panelBodyEl.innerHTML = "";
-    panelBodyEl.appendChild(el);
-    panelBodyEl.scrollTop = 0;
-  }
-
-  function showPanelView() {
-    var isIdentified = !!config.isIdentified;
-
-    function loadMyCount() {
-      if (isIdentified && mySubmissionsCountCache == null) {
-        loadMySubmissions().then(function (mineData) {
-          mySubmissionsCountCache = (mineData.tickets || []).length;
-          // Re-render the current view so the badge updates
-          if (activeTab === "updates") renderUpdatesView(isIdentified);
-          else if (activeTab === "all") renderCurrentTab(isIdentified);
-        }).catch(function () {});
-      }
-    }
-
-    // Default landing is the Updates tab
-    if (activeTab === "updates") {
-      showUpdatesView(isIdentified);
-      loadMyCount();
-      return;
-    }
-    if (activeTab === "mine") {
-      showMySubmissionsView(isIdentified);
-      return;
-    }
-
-    // activeTab === 'all' — existing behavior preserved
-    if (ticketsCache) {
-      headerTitleEl.textContent = "Help us improve " + (config.projectName || config.projectId);
-      renderCurrentTab(isIdentified);
-      loadMyCount();
-      return;
-    }
-    setBodyContent(renderLoading());
-    loadTickets().then(function (data) {
-      ticketsCache = data.tickets || [];
-      if (data.projectName) {
-        config.projectName = data.projectName;
-        headerTitleEl.textContent = "Help us improve " + data.projectName;
-      }
-      renderCurrentTab(isIdentified);
-      loadMyCount();
-    }).catch(function (err) {
-      setBodyContent(renderNotice("error", "Could not load proposals: " + err.message));
-    });
-  }
-
-  function showUpdatesView(isIdentified) {
-    if (updatesCache) {
-      renderUpdatesView(isIdentified);
-      return;
-    }
-    setBodyContent(renderLoading());
-    loadUpdates().then(function (data) {
-      updatesCache = data.tickets || [];
-      renderUpdatesView(isIdentified);
-    }).catch(function (err) {
-      setBodyContent(renderNotice("error", "Could not load updates: " + err.message));
-    });
-  }
-
-  function renderUpdatesView(isIdentified) {
-    var container = h("div", null);
-    var statsBanner = renderStats(statsCache);
-    if (statsBanner) container.appendChild(statsBanner);
-
-    if (isIdentified) {
-      container.appendChild(renderInlineForm(submitSuggestion));
-    } else {
-      container.appendChild(renderLoginPrompt());
-    }
-    container.appendChild(h("hr", { className: "rw-divider" }));
-    container.appendChild(renderTabs(handleTabChange, mySubmissionsCountCache, isIdentified));
-    container.appendChild(renderUpdatesList(updatesCache));
-    setBodyContent(container);
-  }
-
-  function renderCurrentTab(isIdentified) {
-    var container = h("div", null);
-    var statsBanner = renderStats(statsCache);
-    if (statsBanner) container.appendChild(statsBanner);
-
-    if (isIdentified) {
-      container.appendChild(renderInlineForm(submitSuggestion));
-    } else {
-      container.appendChild(renderLoginPrompt());
-    }
-    container.appendChild(h("hr", { className: "rw-divider" }));
-
-    // Always render tabs; My Tickets is disabled when unidentified
-    container.appendChild(renderTabs(handleTabChange, mySubmissionsCountCache, isIdentified));
-
-    if (activeTab === "all") {
-      var panelContent = renderTicketList(ticketsCache);
-      while (panelContent.firstChild) {
-        container.appendChild(panelContent.firstChild);
-      }
-    }
-    setBodyContent(container);
-  }
-
-  function showMySubmissionsView(isIdentified) {
-    setBodyContent(renderLoading());
-    loadMySubmissions().then(function (data) {
-      var myTickets = data.tickets || [];
-      mySubmissionsCountCache = myTickets.length;
-
-      var wrap = h("div", null);
-      var statsBanner = renderStats(statsCache);
-      if (statsBanner) wrap.appendChild(statsBanner);
-
-      if (isIdentified) {
-        wrap.appendChild(renderInlineForm(submitSuggestion));
-      }
-
-      wrap.appendChild(h("hr", { className: "rw-divider" }));
-      wrap.appendChild(renderTabs(handleTabChange, mySubmissionsCountCache, isIdentified));
-      wrap.appendChild(renderMySubmissions(myTickets));
-      setBodyContent(wrap);
-    }).catch(function (err) {
-      setBodyContent(renderNotice("error", "Could not load submissions: " + err.message));
-    });
-  }
-
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Panel open/close
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   function openPanel() {
     if (isOpen) return;
     isOpen = true;
-    panelEl.classList.add("rw-open");
-    overlayEl.classList.add("rw-visible");
+    widgetEl.classList.add("rw-open");
     tabEl.classList.add("rw-open");
-    showPanelView();
+    refreshAll();
   }
-
   function closePanel() {
     if (!isOpen) return;
     isOpen = false;
-    panelEl.classList.remove("rw-open");
-    overlayEl.classList.remove("rw-visible");
+    widgetEl.classList.remove("rw-open");
     tabEl.classList.remove("rw-open");
+    closeActiveModal();
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Mount DOM
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   function mountDOM() {
     var isRight = config.position === "right";
 
-    // Tab
-    tabEl = h("div", {
-      className: "rw-tab",
-      role: "button",
-      tabindex: "0",
-      "aria-label": "Open RunHQ Widget panel",
-      onClick: function () { isOpen ? closePanel() : openPanel(); },
-      onKeydown: function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); isOpen ? closePanel() : openPanel(); } },
-    }, "SUBMIT A TICKET");
+    stageEl = h("div", { className: "rw-stage", "data-theme": theme });
 
-    // Apply offset (vertical position)
+    tabEl = h("button", {
+      className: "rw-tab", type: "button",
+      "aria-label": "Open feedback panel",
+    }, "Submit a ticket");
     if (config.offset === "auto") {
-      // Bottom position — horizontal tab along the bottom edge
       tabEl.style.top = "auto";
       tabEl.style.bottom = "0";
       tabEl.style.left = isRight ? "auto" : "24px";
@@ -2122,74 +1613,55 @@
       tabEl.style.height = "36px";
       tabEl.style.paddingLeft = "16px";
       tabEl.style.paddingRight = "16px";
-      tabEl.style.borderRadius = "8px 8px 0 0";
+      tabEl.style.borderRadius = "10px 10px 0 0";
     } else if (config.offset != null) {
       tabEl.style.top = config.offset;
       tabEl.style.transform = "none";
     }
+    tabEl.addEventListener("click", function () { isOpen ? closePanel() : openPanel(); });
 
-    // Overlay
-    overlayEl = h("div", { className: "rw-overlay", onClick: closePanel });
+    headerTitleEl = h("div", { className: "rw-hdr-title" }, (config.projectName || config.project || "") + " Feedback");
 
-    // Header (title gets updated when project name loads)
-    headerTitleEl = h("strong", null, "Help us improve " + (config.projectName || config.projectId || ""));
-    var poweredByEl = h("span", { className: "rw-powered" }, [
-      document.createTextNode("powered by "),
-      h("a", { href: (config.homepageUrl || RUNHQ_API) + "/project/" + (config.projectId || config.project), target: "_blank", rel: "noopener noreferrer" }, "RunHQWidget"),
-    ]);
-    var header = h("div", { className: "rw-header" }, [
-      h("div", { className: "rw-header-title" }, [
-        headerTitleEl,
-        poweredByEl,
-      ]),
-      h("button", {
-        className: "rw-close-btn",
-        "aria-label": "Close panel",
-        onClick: closePanel,
-      }, [
-        // ✕ icon via SVG
-        (function () {
-          var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-          svg.setAttribute("width", "18");
-          svg.setAttribute("height", "18");
-          svg.setAttribute("viewBox", "0 0 24 24");
-          svg.setAttribute("fill", "none");
-          svg.setAttribute("stroke", "currentColor");
-          svg.setAttribute("stroke-width", "2");
-          svg.setAttribute("stroke-linecap", "round");
-          var l1 = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          l1.setAttribute("x1", "18"); l1.setAttribute("y1", "6"); l1.setAttribute("x2", "6"); l1.setAttribute("y2", "18");
-          var l2 = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          l2.setAttribute("x1", "6"); l2.setAttribute("y1", "6"); l2.setAttribute("x2", "18"); l2.setAttribute("y2", "18");
-          svg.appendChild(l1);
-          svg.appendChild(l2);
-          return svg;
-        })(),
-      ]),
+    themeToggleBtn = h("button", { className: "rw-icon-btn", type: "button" });
+    themeToggleBtn.addEventListener("click", toggleTheme);
+
+    var closeHdrBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close panel" }, Icons.close(16));
+    closeHdrBtn.addEventListener("click", closePanel);
+
+    var header = h("div", { className: "rw-hdr" }, [
+      headerTitleEl,
+      h("div", { className: "rw-hdr-actions" }, [themeToggleBtn, closeHdrBtn]),
     ]);
 
-    // Body
-    panelBodyEl = h("div", { className: "rw-body" });
+    scrollEl = h("div", { className: "rw-scroll" });
+    footerEl = renderFooter();
 
-    // Panel
-    panelEl = h("div", { className: "rw-panel", role: "dialog", "aria-modal": "true", "aria-label": "RunHQWidget" }, [
-      header,
-      panelBodyEl,
-    ]);
+    widgetEl = h("div", {
+      className: "rw-widget", role: "dialog",
+      "aria-label": "Feedback panel",
+      "data-theme": theme,
+    }, [header, scrollEl, footerEl]);
 
-    document.body.appendChild(overlayEl);
-    document.body.appendChild(panelEl);
-    document.body.appendChild(tabEl);
+    modalMountEl = h("div", { className: "rw-modal-mount", "data-theme": theme });
 
-    // Close on Escape
+    stageEl.appendChild(tabEl);
+    stageEl.appendChild(widgetEl);
+    stageEl.appendChild(modalMountEl);
+    document.body.appendChild(stageEl);
+
+    applyTheme(theme);
+
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" && isOpen) closePanel();
+      if (e.key === "Escape") {
+        if (activeModal) { closeActiveModal(); return; }
+        if (isOpen) closePanel();
+      }
     });
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Public API
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   window.RunHQWidget = {
     init: function (opts) {
@@ -2197,7 +1669,6 @@
         console.warn("RunHQWidget.init: token or project is required.");
         return;
       }
-
       if (opts.server) {
         RUNHQ_API = opts.server.replace(/\/+$/, "");
       } else {
@@ -2215,23 +1686,30 @@
 
       hookConsole();
 
-      // Load config from API (position, project name), then mount
-      loadTickets().then(function (data) {
-        ticketsCache = data.tickets || [];
+      loadTopTickets().then(function (data) {
+        topTicketsCache = data.tickets || [];
         config.projectId = data.projectSlug || config.project;
-        config.homepageUrl = data.homepageUrl || RUNHQ_API;
         config.projectName = data.projectName || config.project;
-        // Parse compound position like "middle-right", "bottom-right", "top-left"
+        config.isIdentified = !!data.isIdentified;
+
         var pos = (data.position || "middle-right").split("-");
-        var vPos = pos[0] || "middle"; // top, middle, bottom
-        var hPos = pos[1] || "right";  // left, right
+        var vPos = pos[0] || "middle";
+        var hPos = pos[1] || "right";
         config.position = hPos;
         config.offset = vPos === "bottom" ? "auto" : vPos === "top" ? "80px" : null;
-        config.isIdentified = data.isIdentified || false;
-        config.theme = resolveTheme(opts.theme || "auto");
-        if (data.stats) statsCache = data.stats;
-        injectStyles(config.theme, config.position);
+
+        theme = resolveInitialTheme(opts.theme);
+
+        injectStyles(config.position);
         mountDOM();
+
+        if (config.token) {
+          loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});
+          loadUpdates().then(function (d) { updatesCache = d.tickets || []; }).catch(function () {});
+        } else {
+          myTicketsCache = [];
+          loadUpdates().then(function (d) { updatesCache = d.tickets || []; }).catch(function () { updatesCache = []; });
+        }
       }).catch(function (err) {
         console.error("RunHQWidget: failed to initialize", err);
       });
