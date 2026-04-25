@@ -377,6 +377,7 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
         .where(and(
           buildWidgetVisibleFilter(project),
           eq(workspaceTasks.visibility, 'public'),
+          sql`${workspaceTasks.status} in ('pending','planned','in_progress','needs_review')`,
         ))
         .orderBy(desc(workspaceTasks.createdAt))
         .limit(50)
