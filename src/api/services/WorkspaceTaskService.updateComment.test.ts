@@ -23,6 +23,7 @@ afterAll(async () => {
   await db.delete(workspaceTaskComments).where(eq(workspaceTaskComments.serverId, SERVER_ID));
   await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(servers).where(eq(servers.id, SERVER_ID));
+  await db.delete(users).where(eq(users.id, USER_ID));
 });
 
 describe('updateComment', () => {

@@ -43,6 +43,7 @@ afterAll(async () => {
   await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_ID));
   await db.delete(servers).where(eq(servers.id, SERVER_ID));
+  await db.delete(users).where(eq(users.id, USER_ID));
 });
 
 describe('listDoneTickets', () => {
