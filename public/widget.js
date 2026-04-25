@@ -302,15 +302,19 @@
     return n;
   }
 
-  function computeTabLabel() {
+  function buildTabContent() {
     var n = unreadUpdatesCount();
-    return n > 0 ? "Updates (" + n + ")" : "Updates";
+    var nodes = [document.createTextNode("Updates")];
+    if (n > 0) {
+      nodes.push(h("span", { className: "rw-tab-count" }, n > 99 ? "99+" : String(n)));
+    }
+    return nodes;
   }
 
   function refreshTabLabel() {
     if (!tabEl) return;
     clearChildren(tabEl);
-    tabEl.appendChild(document.createTextNode(computeTabLabel()));
+    buildTabContent().forEach(function (c) { tabEl.appendChild(c); });
   }
   function resolveInitialTheme(opt) {
     if (opt === "dark" || opt === "light") return opt;
@@ -405,6 +409,18 @@
       '}',
       '.rw-tab:hover { width: 42px; filter: brightness(1.06); }',
       '.rw-tab.rw-open { display: none; }',
+      '.rw-tab-count {',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  min-width: 18px; height: 18px; padding: 0 5px;',
+      '  margin-top: 8px;',
+      '  border-radius: 999px;',
+      '  background: var(--rw-accent-ink);',
+      '  color: var(--rw-accent);',
+      '  font-size: 11px; font-weight: 700;',
+      '  font-variant-numeric: tabular-nums; letter-spacing: 0;',
+      '  writing-mode: horizontal-tb; text-orientation: mixed;',
+      '  box-shadow: 0 1px 2px rgba(0,0,0,0.18);',
+      '}',
 
       /* widget shell */
       '.rw-widget {',
@@ -1672,7 +1688,7 @@
     tabEl = h("button", {
       className: "rw-tab", type: "button",
       "aria-label": "Open feedback panel",
-    }, computeTabLabel());
+    }, buildTabContent());
     if (config.offset === "auto") {
       tabEl.style.top = "auto";
       tabEl.style.bottom = "0";
