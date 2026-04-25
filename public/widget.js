@@ -265,6 +265,53 @@
   function themeStorageKey() {
     return "rw-theme:" + (config.projectId || config.project || "default");
   }
+
+  // ===========================================================================
+  // Unread-updates tracking for the side tab label
+  // ===========================================================================
+
+  var WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+  function lastOpenedKey() {
+    return "rw-last-opened:" + (config.projectId || config.project || "default");
+  }
+  function getLastOpenedAt() {
+    try {
+      var raw = localStorage.getItem(lastOpenedKey());
+      var n = raw ? parseInt(raw, 10) : 0;
+      return isNaN(n) ? 0 : n;
+    } catch (_) { return 0; }
+  }
+  function markPanelOpened() {
+    try { localStorage.setItem(lastOpenedKey(), String(Date.now())); } catch (_) {}
+    refreshTabLabel();
+  }
+
+  function unreadUpdatesCount() {
+    var rows = updatesCache || [];
+    if (rows.length === 0) return 0;
+    var lastOpened = getLastOpenedAt();
+    var weekAgo = Date.now() - WEEK_MS;
+    var threshold = Math.max(lastOpened, weekAgo);
+    var n = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i];
+      var when = new Date(t.completedAt || t.createdAt || 0).getTime();
+      if (when > threshold) n++;
+    }
+    return n;
+  }
+
+  function computeTabLabel() {
+    var n = unreadUpdatesCount();
+    return n > 0 ? "Updates (" + n + ")" : "Updates";
+  }
+
+  function refreshTabLabel() {
+    if (!tabEl) return;
+    clearChildren(tabEl);
+    tabEl.appendChild(document.createTextNode(computeTabLabel()));
+  }
   function resolveInitialTheme(opt) {
     if (opt === "dark" || opt === "light") return opt;
     try {
@@ -1076,6 +1123,7 @@
 
     return Promise.all([topP, updP, mineP]).then(function () {
       renderPanelBody();
+      refreshTabLabel();
     }).catch(function (err) {
       clearChildren(scrollEl);
       scrollEl.appendChild(renderNotice("error", "Could not load tickets: " + err.message));
@@ -1601,6 +1649,7 @@
     isOpen = true;
     widgetEl.classList.add("rw-open");
     tabEl.classList.add("rw-open");
+    markPanelOpened();
     refreshAll();
   }
   function closePanel() {
@@ -1623,7 +1672,7 @@
     tabEl = h("button", {
       className: "rw-tab", type: "button",
       "aria-label": "Open feedback panel",
-    }, "Submit a ticket");
+    }, computeTabLabel());
     if (config.offset === "auto") {
       tabEl.style.top = "auto";
       tabEl.style.bottom = "0";
@@ -1728,10 +1777,10 @@
 
         if (config.token) {
           loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});
-          loadUpdates().then(function (d) { updatesCache = d.tickets || []; }).catch(function () {});
+          loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
         } else {
           myTicketsCache = [];
-          loadUpdates().then(function (d) { updatesCache = d.tickets || []; }).catch(function () { updatesCache = []; });
+          loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () { updatesCache = []; });
         }
       }).catch(function (err) {
         console.error("RunHQWidget: failed to initialize", err);
