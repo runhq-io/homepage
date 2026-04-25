@@ -412,7 +412,8 @@
       '.rw-tab-count {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  min-width: 18px; height: 18px; padding: 0 5px;',
-      '  margin-top: 8px;',
+      '  margin-inline-start: 8px;', /* logical: margin-top in vertical, margin-left in horizontal */
+      '  vertical-align: middle;',
       '  border-radius: 999px;',
       '  background: var(--rw-accent-ink);',
       '  color: var(--rw-accent);',
@@ -420,6 +421,11 @@
       '  font-variant-numeric: tabular-nums; letter-spacing: 0;',
       '  writing-mode: horizontal-tb; text-orientation: mixed;',
       '  box-shadow: 0 1px 2px rgba(0,0,0,0.18);',
+      '  flex: 0 0 auto;',
+      '}',
+      /* Horizontal (bottom-position) tab: lay out as a flex row */
+      '.rw-tab.rw-tab--horizontal {',
+      '  display: inline-flex; align-items: center; justify-content: center;',
       '}',
 
       /* widget shell */
@@ -1690,6 +1696,7 @@
       "aria-label": "Open feedback panel",
     }, buildTabContent());
     if (config.offset === "auto") {
+      tabEl.classList.add("rw-tab--horizontal");
       tabEl.style.top = "auto";
       tabEl.style.bottom = "0";
       tabEl.style.left = isRight ? "auto" : "24px";
