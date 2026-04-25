@@ -1378,9 +1378,17 @@ export async function registerServer(
     updatedAt: new Date(),
   };
 
-  // Update machineId if provided (e.g. after Fly migration creates a new machine)
+  // Only update machineId if:
+  // 1. The server doesn't have a machineId yet (fresh provision), OR
+  // 2. The registering machine matches the one already on record.
+  // This prevents a rogue/temp machine with the same token from hijacking the record.
   if (machineId && typeof machineId === 'string') {
-    updates.machineId = machineId;
+    if (!server.machineId || server.machineId === machineId) {
+      updates.machineId = machineId;
+    } else {
+      console.warn(`[ServerService] Rejecting machineId update for server ${server.id}: incoming=${machineId}, existing=${server.machineId}`);
+      return { success: false, error: 'Machine ID mismatch — server already has a different machine assigned' };
+    }
   }
 
   const [updated] = await db
@@ -1416,6 +1424,13 @@ export async function updateServerHeartbeat(serverToken: string, machineId?: str
   }
 
   if (!server) {
+    return false;
+  }
+
+  // Reject heartbeat from a machine that doesn't match the server's assigned machine.
+  // This prevents rogue/temp machines from affecting the real server's status.
+  if (machineId && server.machineId && server.machineId !== machineId) {
+    console.warn(`[ServerService] Rejecting heartbeat for server ${server.id}: incoming machineId=${machineId}, assigned=${server.machineId}`);
     return false;
   }
 
