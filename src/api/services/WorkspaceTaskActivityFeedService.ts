@@ -245,7 +245,7 @@ export async function memberStats(
         userName:       sql<string | null>`max(${workspaceTaskActivity.createdByName}) FILTER (WHERE ${workspaceTaskActivity.createdByName} IS NOT NULL)`,
         isAgent:        sql<boolean>`bool_or(${workspaceTaskActivity.createdByType} = 'agent')`,
         tasksCreated:   sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'task_created')::int`,
-        tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' IN ('done', 'cancelled'))::int`,
+        tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' IN ('done', 'deployed', 'cancelled'))::int`,
         agentsAssigned: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'agent_assigned')::int`,
       })
       .from(workspaceTaskActivity)
@@ -375,7 +375,7 @@ export async function memberActivity(
         max(created_by_name) FILTER (WHERE created_by_name IS NOT NULL) AS user_name,
         bool_or(created_by_type = 'agent') AS is_agent,
         count(*) FILTER (WHERE type = 'task_created')::int    AS created,
-        count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' IN ('done', 'cancelled'))::int AS completed,
+        count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' IN ('done', 'deployed', 'cancelled'))::int AS completed,
         count(*) FILTER (WHERE type = 'agent_assigned')::int  AS assigned
       FROM workspace_task_activity
       WHERE server_id     = ${serverId}

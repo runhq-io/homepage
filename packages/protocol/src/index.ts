@@ -143,7 +143,7 @@ export interface ServiceCredentialWithContent extends ServiceCredential {
 
 // --- Todos (project todo list items) ---
 
-export type TodoStatus = 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
+export type TodoStatus = 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled';
 export type TodoType = 'regular' | 'delayed' | 'scheduled';
 export type TodoVisibility = 'public' | 'private';
 

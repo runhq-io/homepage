@@ -57,7 +57,7 @@ type WidgetTicketResponse = {
   id: string;
   title: string;
   description: string | null;
-  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
+  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled';
   moderationStatus: 'pending' | 'approved' | 'rejected';
   isPrivate: boolean;
   source: string;
@@ -424,7 +424,7 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
         .where(and(
           buildWidgetVisibleFilter(project),
           eq(workspaceTasks.visibility, 'public'),
-          eq(workspaceTasks.status, 'done'),
+          sql`${workspaceTasks.status} in ('done', 'deployed')`,
           isNotNull(workspaceTasks.completedAt),
         ))
         .orderBy(desc(workspaceTasks.completedAt))
@@ -1172,8 +1172,8 @@ export async function getTicketStats(projectId: string) {
 
   const [result] = await db
     .select({
-      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'cancelled'))`,
-      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} = 'done')`,
+      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'deployed', 'cancelled'))`,
+      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} in ('done', 'deployed'))`,
     })
     .from(workspaceTasks)
     .where(and(...conditions));
@@ -1190,7 +1190,7 @@ export async function getTicketStats(projectId: string) {
       .from(workspaceTasks)
       .where(and(
         ...conditions,
-        eq(workspaceTasks.status, 'done'),
+        sql`${workspaceTasks.status} in ('done', 'deployed')`,
         sql`${workspaceTasks.completedAt} is not null`,
       ));
     avgResolutionMs = avgResult?.avg ? Math.round(Number(avgResult.avg)) : null;
