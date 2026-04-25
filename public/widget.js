@@ -413,7 +413,6 @@
       '  user-select: none; -webkit-user-select: none;',
       '}',
       '.rw-tab:hover { width: 42px; filter: brightness(1.06); }',
-      '.rw-tab.rw-open { display: none; }',
       '.rw-tab-count {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  min-width: 18px; height: 18px; padding: 0 5px;',
@@ -432,6 +431,8 @@
       '.rw-tab.rw-tab--horizontal {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '}',
+      /* Open state hides the launcher; declared last so it wins over all variants */
+      '.rw-tab.rw-open { display: none; }',
 
       /* widget shell */
       '.rw-widget {',
@@ -1524,10 +1525,12 @@
 
   function describeEvent(e) {
     var m = e.metadata || {};
-    if (e.type === "status_changed") {
-      var from = statusMeta(m.from || "").label;
-      var to = statusMeta(m.to || "").label;
-      return "changed status" + (from ? " from " + from : "") + (to ? " to " + to : "");
+    if (e.type === "status_change") {
+      var fromLabel = m.from && STATUS[m.from] ? STATUS[m.from].label : null;
+      var toLabel = m.to && STATUS[m.to] ? STATUS[m.to].label : null;
+      if (fromLabel && toLabel) return "status change [" + fromLabel + "] → [" + toLabel + "]";
+      if (toLabel) return "status change → [" + toLabel + "]";
+      return "changed status";
     }
     if (e.type === "moderation_changed") {
       return "changed moderation to " + (m.to || "unknown");
