@@ -16,6 +16,8 @@
   var capturedErrors = [];
   var MAX_LOG_BUFFER = 50;
 
+  var shadowHostEl = null;
+  var shadowRoot = null;
   var stageEl = null;
   var tabEl = null;
   var widgetEl = null;
@@ -344,23 +346,26 @@
   // Styles
   // ===========================================================================
 
-  function injectStyles(position) {
-    var isRight = position === "right";
+  // Fonts are loaded into document.head, NOT the shadow root. @font-face
+  // declarations are registered on the document and apply across all shadow
+  // trees, so a single load benefits both the host page and the widget.
+  function ensureFonts() {
+    if (document.getElementById("rw-fonts")) return;
+    var preconnect1 = document.createElement("link");
+    preconnect1.rel = "preconnect"; preconnect1.href = "https://fonts.googleapis.com";
+    var preconnect2 = document.createElement("link");
+    preconnect2.rel = "preconnect"; preconnect2.href = "https://fonts.gstatic.com"; preconnect2.crossOrigin = "anonymous";
+    var fontLink = document.createElement("link");
+    fontLink.id = "rw-fonts";
+    fontLink.rel = "stylesheet";
+    fontLink.href = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap";
+    document.head.appendChild(preconnect1);
+    document.head.appendChild(preconnect2);
+    document.head.appendChild(fontLink);
+  }
 
-    // Load Inter + Fraunces from Google Fonts (idempotent — guarded by id)
-    if (!document.getElementById("rw-fonts")) {
-      var preconnect1 = document.createElement("link");
-      preconnect1.rel = "preconnect"; preconnect1.href = "https://fonts.googleapis.com";
-      var preconnect2 = document.createElement("link");
-      preconnect2.rel = "preconnect"; preconnect2.href = "https://fonts.gstatic.com"; preconnect2.crossOrigin = "anonymous";
-      var fontLink = document.createElement("link");
-      fontLink.id = "rw-fonts";
-      fontLink.rel = "stylesheet";
-      fontLink.href = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap";
-      document.head.appendChild(preconnect1);
-      document.head.appendChild(preconnect2);
-      document.head.appendChild(fontLink);
-    }
+  function injectStyles(position, target) {
+    var isRight = position === "right";
 
     var css = [
       /* Direction A · Warm paper (default) */
@@ -887,7 +892,37 @@
     var style = document.createElement("style");
     style.id = "rw-styles";
     style.textContent = css;
-    document.head.appendChild(style);
+    target.appendChild(style);
+  }
+
+  // ===========================================================================
+  // Shadow DOM host
+  //
+  // The widget is mounted inside a shadow root so host-page CSS (Tailwind
+  // focus rings, body { box-sizing }, generic input styles, etc.) cannot
+  // bleed in. This is what production embeddable widgets do (Intercom, Drift,
+  // Crisp, HubSpot) — anything less leaks visually the moment a host page
+  // adds a generic `:focus-visible`, `*`, or `textarea` rule.
+  // ===========================================================================
+
+  function createShadowHost() {
+    // <runhq-widget-host> is an unknown element so the host page's element
+    // selectors don't accidentally target it. The host itself takes no space;
+    // children inside the shadow root use position: fixed and own their layout.
+    var host = document.createElement("runhq-widget-host");
+    host.style.cssText = [
+      "all: initial",
+      "position: fixed",
+      "top: 0",
+      "left: 0",
+      "width: 0",
+      "height: 0",
+      // Max int z-index on the host stacking context so the widget is reliably
+      // above host content even if the host page uses high z-indexes.
+      "z-index: 2147483647",
+    ].join(";");
+    var root = host.attachShadow({ mode: "open" });
+    return { host: host, root: root };
   }
 
   // ===========================================================================
@@ -1689,6 +1724,13 @@
   function mountDOM() {
     var isRight = config.position === "right";
 
+    var hostInfo = createShadowHost();
+    shadowHostEl = hostInfo.host;
+    shadowRoot = hostInfo.root;
+
+    ensureFonts();
+    injectStyles(config.position, shadowRoot);
+
     stageEl = h("div", { className: "rw-stage", "data-theme": theme });
 
     tabEl = h("button", {
@@ -1742,7 +1784,8 @@
     stageEl.appendChild(tabEl);
     stageEl.appendChild(widgetEl);
     stageEl.appendChild(modalMountEl);
-    document.body.appendChild(stageEl);
+    shadowRoot.appendChild(stageEl);
+    document.body.appendChild(shadowHostEl);
 
     applyTheme(theme);
 
@@ -1795,7 +1838,6 @@
 
         theme = resolveInitialTheme(opts.theme);
 
-        injectStyles(config.position);
         mountDOM();
 
         if (config.token) {
