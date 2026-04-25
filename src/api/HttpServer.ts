@@ -3789,24 +3789,15 @@ export function createHttpApp() {
           console.log(`[HttpServer] Waking machine for server ${serverId} before session...`);
           const wakeResult = await ServerService.wakeRemoteServerInternal(server);
           if (!wakeResult.success) {
-            // If wake failed due to destroyed machine, try to reprovision
-            if (wakeResult.error?.includes('destroyed') || wakeResult.error?.includes('not found')) {
-              // Gate reprovisioning behind payment method check
-              const subscription = await UsageService.getOrCreateSubscription(userId);
-              if (!subscription.stripeCustomerId) {
-                console.log(`[HttpServer] No payment method for user ${userId}, blocking reprovision of server ${serverId}`);
-                return c.json({ error: 'Payment method required before provisioning', needsPayment: true }, 402);
-              }
-              console.log(`[HttpServer] Machine was destroyed, starting background reprovision...`);
-              await ServerService.setServerStatus(serverId, 'provisioning');
-              ServerService.reprovisionRemoteServer(serverId, userId).catch(err => {
-                console.error(`[HttpServer] Background reprovision failed for ${serverId}:`, err);
-              });
-              return c.json({ error: 'Server is provisioning. Please try again shortly.', serverName: server.name }, 503);
-            } else {
-              console.error(`[HttpServer] Failed to wake machine: ${wakeResult.error}`);
-              return c.json({ error: wakeResult.error || 'Failed to wake server', serverName: server.name }, 503);
-            }
+            // Never auto-reprovision based on a wake error string. String
+            // matching on "destroyed" / "not found" is how transient Fly API
+            // errors used to cascade into destructive reprovisions that wiped
+            // the DB reference to live running machines. The error is surfaced
+            // as-is; if the machine really is gone, `/admin/servers` will
+            // classify the row as 'stale' and an admin can trigger an explicit
+            // reprovision deliberately.
+            console.error(`[HttpServer] Failed to wake machine for server ${serverId}: ${wakeResult.error}`);
+            return c.json({ error: wakeResult.error || 'Failed to wake server', serverName: server.name }, 503);
           } else {
             if (wakeResult.wasAlreadyRunning) {
               console.log(`[HttpServer] Machine was already running, skipping wait`);
