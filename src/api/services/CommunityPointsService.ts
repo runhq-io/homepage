@@ -264,8 +264,23 @@ export class CommunityPointsService {
     let oldRank: number | null = null;
     let newBalanceValue = 0;
     let newRank: number | null = null;
+    let notificationId: string | null = null;
 
     await this.db.transaction(async (tx) => {
+      // Cross-tenant guard: verify the widget user belongs to this project
+      const [verifiedUser] = await tx
+        .select({ id: widgetUsers.id })
+        .from(widgetUsers)
+        .where(
+          and(
+            eq(widgetUsers.id, args.widgetUserId),
+            eq(widgetUsers.projectId, args.projectId),
+          ),
+        );
+      if (!verifiedUser) {
+        throw new Error('Widget user does not belong to this project');
+      }
+
       // Idempotent insert
       const [inserted] = await tx
         .insert(pointGrants)
@@ -346,21 +361,25 @@ export class CommunityPointsService {
       newRank = reranked?.rank ?? null;
 
       // Insert points.bonus notification
-      await tx.insert(widgetUserNotifications).values({
-        widgetUserId: args.widgetUserId,
-        projectId: args.projectId,
-        type: 'points.bonus',
-        payload: {
-          grantId: inserted.id,
-          amount: args.amount,
-          reason: args.reason,
-          reasonCode: args.reasonCode,
-          oldBalance,
-          newBalance: newBalanceValue,
-          oldRank,
-          newRank,
-        },
-      });
+      const [notification] = await tx
+        .insert(widgetUserNotifications)
+        .values({
+          widgetUserId: args.widgetUserId,
+          projectId: args.projectId,
+          type: 'points.bonus',
+          payload: {
+            grantId: inserted.id,
+            amount: args.amount,
+            reason: args.reason,
+            reasonCode: args.reasonCode,
+            oldBalance,
+            newBalance: newBalanceValue,
+            oldRank,
+            newRank,
+          },
+        })
+        .returning({ id: widgetUserNotifications.id });
+      notificationId = notification!.id;
     });
 
     // Post-commit pubsub — only on fresh insert
@@ -376,6 +395,7 @@ export class CommunityPointsService {
       });
       this.publish(`community:widget_user:${args.widgetUserId}`, {
         type: 'notification',
+        notificationId,
       });
     }
 
@@ -397,25 +417,12 @@ export class CommunityPointsService {
     grantedByUserId?: string;
     clientRequestId: string;
   }): Promise<ReverseGrantResult> {
-    // Load the original grant (outside transaction — read-only lookup)
-    const [original] = await this.db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.id, args.grantId));
-
-    if (!original) {
-      throw new Error('Grant not found');
-    }
-
-    if (original.source === 'reversal') {
-      throw new Error('Cannot reverse a reversal grant');
-    }
-
     const idempotencyKey = reversalIdempotencyKey(args.grantId);
     const now = this.now();
 
     let reversal: PointGrant | null = null;
     let isIdempotentHit = false;
+    let original: PointGrant | null = null;
 
     let oldBalance = 0;
     let oldRank: number | null = null;
@@ -423,6 +430,16 @@ export class CommunityPointsService {
     let newRank: number | null = null;
 
     await this.db.transaction(async (tx) => {
+      // Load and validate the original grant INSIDE the transaction to prevent
+      // non-repeatable reads and to enforce the cross-tenant ownership check atomically.
+      const [orig] = await tx.select().from(pointGrants).where(eq(pointGrants.id, args.grantId));
+      if (!orig) throw new Error('Grant not found');
+      if (orig.projectId !== args.projectId) {
+        throw new Error('Grant does not belong to this project');
+      }
+      if (orig.source === 'reversal') throw new Error('Cannot reverse a reversal grant');
+      original = orig;
+
       const [inserted] = await tx
         .insert(pointGrants)
         .values({
@@ -500,7 +517,7 @@ export class CommunityPointsService {
     if (!isIdempotentHit) {
       this.publish(`community:${args.projectId}`, {
         type: 'balance_changed',
-        widgetUserId: original.widgetUserId,
+        widgetUserId: original!.widgetUserId,
         oldBalance,
         newBalance,
         oldRank,

@@ -554,6 +554,198 @@ describe('reverseGrant', () => {
 });
 
 // ---------------------------------------------------------------------------
+// reverseGrant cross-tenant guard
+// ---------------------------------------------------------------------------
+describe('reverseGrant cross-tenant guard', () => {
+  let PROJECT_B_ID: string;
+  let WIDGET_USER_B_ID: string;
+  const SERVER_B_ID = `cps_test_b_${RUN_HEX}`;
+
+  beforeAll(async () => {
+    // Each project requires a distinct server (unique constraint on server_id).
+    await db
+      .insert(servers)
+      .values({ id: SERVER_B_ID, name: `CPS Srv B ${RUN_HEX}`, ownerId: USER_ID })
+      .onConflictDoNothing();
+
+    const [projB] = await db
+      .insert(widgetProjects)
+      .values({
+        serverId: SERVER_B_ID,
+        name: `CPS Project B ${RUN_HEX}`,
+        slug: `cps-b-${RUN_HEX}`,
+        apiKey: `apikey-cps-b-${RUN_HEX}`,
+        apiSecretHash: `secret-cps-b-${RUN_HEX}`,
+        enabled: true,
+        isPublic: true,
+      })
+      .returning({ id: widgetProjects.id });
+    PROJECT_B_ID = projB!.id;
+
+    const [wu] = await db
+      .insert(widgetUsers)
+      .values({ projectId: PROJECT_B_ID, externalUserId: `ext-b-cross-${RUN_HEX}`, name: 'CrossB' })
+      .returning({ id: widgetUsers.id });
+    WIDGET_USER_B_ID = wu!.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(widgetUserNotifications).where(eq(widgetUserNotifications.projectId, PROJECT_B_ID));
+    await db.delete(widgetUserBalances).where(eq(widgetUserBalances.projectId, PROJECT_B_ID));
+    await db.delete(pointGrants).where(eq(pointGrants.projectId, PROJECT_B_ID));
+    await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_B_ID));
+    await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_B_ID));
+    await db.delete(servers).where(eq(servers.id, SERVER_B_ID));
+  });
+
+  it('throws when grantId belongs to a different project', async () => {
+    const { service } = makeService();
+
+    // Create a grant under project B
+    const { grant: grantB } = await service.grantBonus({
+      projectId: PROJECT_B_ID,
+      widgetUserId: WIDGET_USER_B_ID,
+      amount: 20,
+      reason: 'Project B bonus',
+      clientRequestId: `cross-grant-${randomBytes(4).toString('hex')}`,
+    });
+
+    // Attempt to reverse the project-B grant using project A's projectId
+    await expect(
+      service.reverseGrant({
+        projectId: PROJECT_ID,
+        grantId: grantB.id,
+        reason: 'Cross-tenant attack',
+        grantedByUserId: USER_ID,
+        clientRequestId: `cross-rev-${randomBytes(4).toString('hex')}`,
+      }),
+    ).rejects.toThrow('Grant does not belong to this project');
+
+    // Verify no reversal row was inserted under either project
+    const reversalsInA = await db
+      .select()
+      .from(pointGrants)
+      .where(and(eq(pointGrants.projectId, PROJECT_ID), eq(pointGrants.source, 'reversal')));
+    expect(reversalsInA).toHaveLength(0);
+
+    const reversalsInB = await db
+      .select()
+      .from(pointGrants)
+      .where(and(eq(pointGrants.projectId, PROJECT_B_ID), eq(pointGrants.source, 'reversal')));
+    expect(reversalsInB).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// grantBonus cross-tenant guard
+// ---------------------------------------------------------------------------
+describe('grantBonus cross-tenant guard', () => {
+  let PROJECT_C_ID: string;
+  let WIDGET_USER_C_ID: string;
+  // widget_projects has a unique constraint on server_id, so each project needs its own server.
+  const SERVER_C_ID = `cps_test_c_${RUN_HEX}`;
+
+  beforeAll(async () => {
+    // Create a dedicated server + isolated project + widget user for cross-tenant tests.
+    await db
+      .insert(servers)
+      .values({ id: SERVER_C_ID, name: `CPS Srv C ${RUN_HEX}`, ownerId: USER_ID })
+      .onConflictDoNothing();
+
+    const [projC] = await db
+      .insert(widgetProjects)
+      .values({
+        serverId: SERVER_C_ID,
+        name: `CPS Project C ${RUN_HEX}`,
+        slug: `cps-c-${RUN_HEX}`,
+        apiKey: `apikey-cps-c-${RUN_HEX}`,
+        apiSecretHash: `secret-cps-c-${RUN_HEX}`,
+        enabled: true,
+        isPublic: true,
+      })
+      .returning({ id: widgetProjects.id });
+    PROJECT_C_ID = projC!.id;
+
+    const [wu] = await db
+      .insert(widgetUsers)
+      .values({ projectId: PROJECT_C_ID, externalUserId: `ext-c-cross-${RUN_HEX}`, name: 'CrossC' })
+      .returning({ id: widgetUsers.id });
+    WIDGET_USER_C_ID = wu!.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(widgetUserNotifications).where(eq(widgetUserNotifications.projectId, PROJECT_C_ID));
+    await db.delete(widgetUserBalances).where(eq(widgetUserBalances.projectId, PROJECT_C_ID));
+    await db.delete(pointGrants).where(eq(pointGrants.projectId, PROJECT_C_ID));
+    await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_C_ID));
+    await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_C_ID));
+    await db.delete(servers).where(eq(servers.id, SERVER_C_ID));
+  });
+
+  it('throws when widgetUserId belongs to a different project', async () => {
+    const { service } = makeService();
+
+    // Attempt to grant a bonus against project A's projectId but using project C's widgetUserId
+    await expect(
+      service.grantBonus({
+        projectId: PROJECT_ID,
+        widgetUserId: WIDGET_USER_C_ID,
+        amount: 50,
+        reason: 'Cross-tenant attack',
+        clientRequestId: `cross-bonus-${randomBytes(4).toString('hex')}`,
+      }),
+    ).rejects.toThrow('Widget user does not belong to this project');
+
+    // No grant row inserted under either project
+    const grantsInA = await db
+      .select()
+      .from(pointGrants)
+      .where(eq(pointGrants.projectId, PROJECT_ID));
+    expect(grantsInA).toHaveLength(0);
+
+    const grantsInC = await db
+      .select()
+      .from(pointGrants)
+      .where(eq(pointGrants.projectId, PROJECT_C_ID));
+    expect(grantsInC).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// grantBonus pubsub payload includes notificationId
+// ---------------------------------------------------------------------------
+describe('grantBonus pubsub payload', () => {
+  it('includes notificationId in the per-user notification topic', async () => {
+    const { service, published } = makeService();
+
+    await service.grantBonus({
+      projectId: PROJECT_ID,
+      widgetUserId: WIDGET_USER_ID,
+      amount: 25,
+      reason: 'Pubsub notificationId test',
+      clientRequestId: `notif-id-${randomBytes(4).toString('hex')}`,
+    });
+
+    // Find the per-user notification event
+    const userEvt = published.find(
+      (p: any) => p.topic === `community:widget_user:${WIDGET_USER_ID}`,
+    ) as any;
+    expect(userEvt).toBeDefined();
+    expect(userEvt.payload.type).toBe('notification');
+    expect(typeof userEvt.payload.notificationId).toBe('string');
+    expect(userEvt.payload.notificationId).toBeTruthy();
+
+    // Verify the notificationId matches the actual inserted row
+    const notifs = await db
+      .select()
+      .from(widgetUserNotifications)
+      .where(eq(widgetUserNotifications.widgetUserId, WIDGET_USER_ID));
+    expect(notifs).toHaveLength(1);
+    expect(notifs[0]!.id).toBe(userEvt.payload.notificationId);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Rank computation and tie-breaking
 // ---------------------------------------------------------------------------
 describe('rank tie-breaking', () => {
