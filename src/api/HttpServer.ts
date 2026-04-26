@@ -5457,6 +5457,7 @@ export function createHttpApp() {
       .where(and(eq(widgetUsers.projectId, projectId), eq(widgetUsers.status, 'active')));
     const unreadNotificationCount = await communityNotificationService.unreadCount(widgetUserId);
     return c.json({
+      widgetUserId,
       rank: bal?.rank ?? null,
       totalMembers: countRow?.totalMembers ?? 0,
       balance: bal?.balance ?? 0,
