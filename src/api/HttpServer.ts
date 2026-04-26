@@ -40,6 +40,7 @@ import * as PreviewCoordinator from './services/PreviewCoordinator';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
+import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions } from '../db/schema';
@@ -104,6 +105,33 @@ function getBuildInfo(): BuildInfo | null {
 }
 
 // ============================================================================
+// Widget constants injection
+// ============================================================================
+//
+// The embeddable widget (public/widget.js) renders status chips for tickets.
+// To prevent the widget's vocabulary from drifting away from the protocol's
+// TodoStatus union (the regression that caused 'deployed' to render as
+// 'Open'), we inject the canonical TODO_STATUS_DISPLAY registry into the
+// served widget body. The widget then reads from window.__RW_CONSTANTS__
+// instead of carrying its own hand-maintained STATUS table.
+//
+// The header is computed once at module load — the registry is static at
+// runtime, only changes on deploy.
+
+let cachedWidgetConstantsHeader: string | null = null;
+
+function renderWidgetConstantsHeader(): string {
+  if (cachedWidgetConstantsHeader !== null) return cachedWidgetConstantsHeader;
+  const payload = JSON.stringify({ status: TODO_STATUS_DISPLAY });
+  cachedWidgetConstantsHeader =
+    `/* RunHQ widget constants — injected from @runhq/server-protocol TODO_STATUS_DISPLAY */\n` +
+    `;(function(){if(typeof window==='undefined')return;` +
+    `var c=window.__RW_CONSTANTS__=window.__RW_CONSTANTS__||{};` +
+    `var p=${payload};for(var k in p){c[k]=p[k];}})();\n`;
+  return cachedWidgetConstantsHeader;
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -149,14 +177,18 @@ export function createHttpApp() {
     allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-RW-Project', 'X-Server-Token'],
   }));
 
-  // Serve widget.js as static file
+  // Serve widget.js with the canonical status registry injected at the
+  // top of the body. The widget reads from window.__RW_CONSTANTS__.status
+  // rather than carrying its own STATUS table — this guarantees the
+  // displayed labels stay in lockstep with the protocol's TodoStatus union.
   app.get('/widget.js', (c) => {
     const filePath = path.join(process.cwd(), 'public', 'widget.js');
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const widgetSource = fs.readFileSync(filePath, 'utf-8');
+    const body = renderWidgetConstantsHeader() + widgetSource;
     c.header('Content-Type', 'application/javascript');
     c.header('Cache-Control', 'public, max-age=3600');
     c.header('Access-Control-Allow-Origin', '*');
-    return c.body(content);
+    return c.body(body);
   });
 
   // JWKS — public key(s) used to verify server session JWTs (EdDSA).

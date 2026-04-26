@@ -240,18 +240,33 @@
   };
 
   // ===========================================================================
-  // Status palette — maps workspaceTasks.status to design visual
+  // Status palette — sourced from window.__RW_CONSTANTS__.status, which is
+  // injected by the /widget.js route handler from the protocol's canonical
+  // TODO_STATUS_DISPLAY registry. The widget MUST NOT carry its own table
+  // here; doing so reintroduces drift (the 'deployed' regression that
+  // rendered as 'Open').
   // ===========================================================================
 
-  var STATUS = {
-    pending:      { label: "Open",         dot: "#8a857d", bg: "rgba(85,80,74,0.08)",     fg: "#55504a" },
-    planned:      { label: "Planned",      dot: "#7a8aa3", bg: "rgba(122,138,163,0.10)",  fg: "#4f5a70" },
-    in_progress:  { label: "In progress",  dot: "#a97432", bg: "rgba(169,116,50,0.12)",   fg: "#a97432" },
-    needs_review: { label: "Needs review", dot: "#5b8a96", bg: "rgba(91,138,150,0.12)",   fg: "#3d6470" },
-    done:         { label: "Shipped",      dot: "#6b8a6a", bg: "rgba(107,138,106,0.14)",  fg: "#556e54" },
-    cancelled:    { label: "Cancelled",    dot: "#b0aa9f", bg: "rgba(176,170,159,0.10)",  fg: "#8a857d" },
-  };
-  function statusMeta(s) { return STATUS[s] || STATUS.pending; }
+  function getStatusRegistry() {
+    var c = (typeof window !== "undefined" && window.__RW_CONSTANTS__) || null;
+    return (c && c.status) || null;
+  }
+  // Last-resort visual when the registry is unavailable (cached pre-injection
+  // bundle, mounted via an unexpected path, etc.). Surfaces the raw status
+  // value so divergence is visible rather than silently mislabeled.
+  var STATUS_FALLBACK = { label: "", dot: "#8a857d", bg: "rgba(85,80,74,0.08)", fg: "#55504a" };
+  function statusMeta(s) {
+    var R = getStatusRegistry();
+    if (R && R[s]) return R[s];
+    return { label: String(s == null ? "unknown" : s), dot: STATUS_FALLBACK.dot, bg: STATUS_FALLBACK.bg, fg: STATUS_FALLBACK.fg };
+  }
+  // Returns the display label for a status, or null if no registry entry
+  // exists. Used by activity-row formatting where we want to omit the
+  // label rather than render a synthesized one.
+  function statusLabel(s) {
+    var R = getStatusRegistry();
+    return R && R[s] ? R[s].label : null;
+  }
   function renderStatusChip(status) {
     var s = statusMeta(status);
     return h("span", { className: "rw-chip", style: { background: s.bg, color: s.fg } }, [
@@ -1597,8 +1612,8 @@
   function describeEvent(e) {
     var m = e.metadata || {};
     if (e.type === "status_change") {
-      var fromLabel = m.from && STATUS[m.from] ? STATUS[m.from].label : null;
-      var toLabel = m.to && STATUS[m.to] ? STATUS[m.to].label : null;
+      var fromLabel = m.from ? statusLabel(m.from) : null;
+      var toLabel = m.to ? statusLabel(m.to) : null;
       if (fromLabel && toLabel) return "status change [" + fromLabel + "] → [" + toLabel + "]";
       if (toLabel) return "status change → [" + toLabel + "]";
       return "changed status";

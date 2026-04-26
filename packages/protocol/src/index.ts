@@ -147,6 +147,50 @@ export type TodoStatus = 'pending' | 'planned' | 'in_progress' | 'needs_review' 
 export type TodoType = 'regular' | 'delayed' | 'scheduled';
 export type TodoVisibility = 'public' | 'private';
 
+/**
+ * Visual metadata for rendering a TodoStatus chip in customer-facing UIs
+ * (embeddable widget, public ticket views).
+ */
+export interface TodoStatusDisplay {
+  /** Human-readable label. MUST mirror the canonical RunHQ status vocabulary. */
+  label: string;
+  /** Hex color for the chip's leading dot indicator. */
+  dot: string;
+  /** rgba background tint for the chip body. */
+  bg: string;
+  /** Hex color for the chip's foreground/text. */
+  fg: string;
+}
+
+/**
+ * Single source of truth for status display metadata across all surfaces
+ * (widget, embeds, dashboards). Adding a new TodoStatus value to the union
+ * above is a compile error here until an entry is registered, which is the
+ * point — `Record<TodoStatus, ...>` enforces exhaustiveness so the widget
+ * cannot silently fall back to an incorrect label (the `'deployed'`
+ * regression that previously rendered as `'Open'`).
+ *
+ * Labels MUST mirror RunHQ's canonical status vocabulary — do not invent
+ * synonyms (no "Open" for pending, no "Shipped" for done).
+ */
+export const TODO_STATUS_DISPLAY: Record<TodoStatus, TodoStatusDisplay> = {
+  pending:      { label: 'Pending',      dot: '#8a857d', bg: 'rgba(85,80,74,0.08)',    fg: '#55504a' },
+  planned:      { label: 'Planned',      dot: '#7a8aa3', bg: 'rgba(122,138,163,0.10)', fg: '#4f5a70' },
+  in_progress:  { label: 'In progress',  dot: '#a97432', bg: 'rgba(169,116,50,0.12)',  fg: '#a97432' },
+  needs_review: { label: 'Needs review', dot: '#5b8a96', bg: 'rgba(91,138,150,0.12)',  fg: '#3d6470' },
+  done:         { label: 'Done',         dot: '#6b8a6a', bg: 'rgba(107,138,106,0.14)', fg: '#556e54' },
+  deployed:     { label: 'Deployed',     dot: '#4a7558', bg: 'rgba(74,117,88,0.16)',   fg: '#3a5a44' },
+  cancelled:    { label: 'Cancelled',    dot: '#b0aa9f', bg: 'rgba(176,170,159,0.10)', fg: '#8a857d' },
+};
+
+/**
+ * Ordered list of TodoStatus values in display order. Derived from the
+ * registry keys so the two cannot drift; insertion order in
+ * TODO_STATUS_DISPLAY is the canonical display order.
+ */
+export const TODO_STATUS_ORDER: ReadonlyArray<TodoStatus> =
+  Object.keys(TODO_STATUS_DISPLAY) as TodoStatus[];
+
 export interface TodoAttachment {
   filename: string;
   mimeType: string;
