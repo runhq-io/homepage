@@ -36,6 +36,13 @@
   var myTicketsCache = null;    // /api/widget/tickets/mine
   var activeModal = null;
 
+  // Community / notifications state
+  var meCommunity = null;          // { rank, totalMembers, balance, payoutsCount, unreadNotificationCount }
+  var notificationsCache = null;   // { notifications: [], nextCursor }
+  var notificationsPanelOpen = false;
+  var widgetUserId = null;         // set after auth; used for WS subscription
+  var communitySocket = null;      // WebSocket instance for community topic
+
   // ===========================================================================
   // Console & error capture
   // ===========================================================================
@@ -162,6 +169,34 @@
       }
       return data;
     });
+  }
+
+  // ===========================================================================
+  // Community / notifications API helpers
+  // ===========================================================================
+
+  function loadMeCommunity() {
+    return api("/api/widget/me/community").then(function (r) {
+      meCommunity = r;
+      if (r.widgetUserId) widgetUserId = r.widgetUserId;
+      renderRankLine();
+      renderBellBadge();
+      connectCommunitySocket();
+    }).catch(function () { /* silent — endpoint may not exist on older /be deploys */ });
+  }
+
+  function loadNotifications() {
+    return api("/api/widget/notifications").then(function (r) {
+      notificationsCache = r;
+      if (notificationsPanelOpen) renderNotifications();
+    }).catch(function () {});
+  }
+
+  function markAllNotificationsRead() {
+    return api("/api/widget/notifications/read-all", { method: "POST" }).then(function () {
+      if (meCommunity) meCommunity.unreadNotificationCount = 0;
+      renderBellBadge();
+    }).catch(function () {});
   }
 
   // ===========================================================================
@@ -933,6 +968,58 @@
 
       '.rw-stage button:focus-visible, .rw-stage textarea:focus-visible, .rw-stage input:focus-visible,',
       '.rw-modal-mount button:focus-visible, .rw-modal-mount textarea:focus-visible, .rw-modal-mount input:focus-visible { outline: none; }',
+
+      /* bell icon */
+      '.rw-bell {',
+      '  position: relative; padding: 0;',
+      '  background: none; border: none; cursor: pointer;',
+      '  color: var(--rw-muted);',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  width: 28px; height: 28px; border-radius: 8px;',
+      '  transition: color .15s ease, background .15s ease;',
+      '}',
+      '.rw-bell:hover { color: var(--rw-fg); background: rgba(255,255,255,0.04); }',
+      '.rw-widget[data-theme="light"] .rw-bell:hover { background: rgba(15,20,35,0.05); }',
+      '.rw-bell-badge {',
+      '  position: absolute; top: 2px; right: 2px;',
+      '  background: #dc2626; color: #fff;',
+      '  font-size: 10px; font-weight: 700;',
+      '  padding: 2px 5px; border-radius: 10px;',
+      '  min-width: 14px; text-align: center;',
+      '  display: none; line-height: 1.2;',
+      '}',
+      '.rw-bell-badge[data-count]:not([data-count="0"]) { display: inline-block; }',
+
+      /* notifications slide-in panel */
+      '.rw-notifications-panel {',
+      '  position: absolute; top: 0; right: -360px; bottom: 0; width: 360px;',
+      '  background: var(--rw-bg); border-left: 1px solid var(--rw-panel-3);',
+      '  transition: right 0.2s ease; z-index: 5;',
+      '  display: flex; flex-direction: column;',
+      '}',
+      '.rw-widget[data-theme="light"] .rw-notifications-panel { background: #ffffff; }',
+      '.rw-notifications-panel.rw-open { right: 0; }',
+      '.rw-notifications-header {',
+      '  display: flex; justify-content: space-between; align-items: center;',
+      '  padding: 12px 16px; border-bottom: 1px solid var(--rw-panel-3);',
+      '  font-weight: 600; color: var(--rw-fg); flex: 0 0 auto;',
+      '}',
+      '.rw-notifications-close {',
+      '  background: none; border: none; color: var(--rw-fg-2); cursor: pointer;',
+      '  font-size: 18px; line-height: 1; padding: 0 4px;',
+      '}',
+      '.rw-notifications-close:hover { color: var(--rw-fg); }',
+      '.rw-rank-line {',
+      '  padding: 10px 16px; font-size: 12px; color: var(--rw-fg-2);',
+      '  border-bottom: 1px solid var(--rw-panel-3); flex: 0 0 auto;',
+      '}',
+      '.rw-notifications-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }',
+      '.rw-notification-item {',
+      '  padding: 10px 16px; border-bottom: 1px solid var(--rw-panel-3);',
+      '  font-size: 13px; color: var(--rw-fg);',
+      '}',
+      '.rw-notification-item .rw-amount { font-weight: 700; color: #16a34a; }',
+      '.rw-notification-meta { font-size: 11px; color: var(--rw-fg-2); margin-top: 2px; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -1095,6 +1182,234 @@
     var grid = h("div", { className: "rw-shots" + (tight ? " rw-shots--tight" : "") });
     attachments.forEach(function (a) { grid.appendChild(renderShotThumb(a)); });
     return grid;
+  }
+
+  // ===========================================================================
+  // Bell icon + notifications panel
+  // ===========================================================================
+
+  function buildBellIcon(parentEl) {
+    var btn = document.createElement('button');
+    btn.className = 'rw-bell';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', 'Notifications');
+
+    var svgNs = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '18');
+    svg.setAttribute('height', '18');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+
+    var path1 = document.createElementNS(svgNs, 'path');
+    path1.setAttribute('d', 'M12 3a6 6 0 0 0-6 6v3.5a2 2 0 0 1-.6 1.4L4 15.4h16l-1.4-1.5a2 2 0 0 1-.6-1.4V9a6 6 0 0 0-6-6Z');
+    svg.appendChild(path1);
+
+    var path2 = document.createElementNS(svgNs, 'path');
+    path2.setAttribute('d', 'M9 18a3 3 0 0 0 6 0');
+    svg.appendChild(path2);
+
+    btn.appendChild(svg);
+
+    var badge = document.createElement('span');
+    badge.className = 'rw-bell-badge';
+    badge.setAttribute('data-count', '0');
+    btn.appendChild(badge);
+
+    btn.addEventListener('click', toggleNotificationsPanel);
+    parentEl.appendChild(btn);
+  }
+
+  function buildNotificationsPanel(rootEl) {
+    var aside = document.createElement('aside');
+    aside.className = 'rw-notifications-panel';
+    aside.setAttribute('aria-label', 'Notifications');
+
+    var header = document.createElement('header');
+    header.className = 'rw-notifications-header';
+
+    var title = document.createElement('span');
+    title.textContent = 'Notifications';
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'rw-notifications-close';
+    closeBtn.type = 'button';
+    closeBtn.setAttribute('aria-label', 'Close notifications');
+    closeBtn.textContent = '×'; // ×
+    closeBtn.addEventListener('click', closeNotificationsPanel);
+
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    aside.appendChild(header);
+
+    var rankLine = document.createElement('div');
+    rankLine.className = 'rw-rank-line';
+    aside.appendChild(rankLine);
+
+    var ul = document.createElement('ul');
+    ul.className = 'rw-notifications-list';
+    aside.appendChild(ul);
+
+    rootEl.appendChild(aside);
+  }
+
+  function toggleNotificationsPanel() {
+    notificationsPanelOpen = !notificationsPanelOpen;
+    var panel = widgetEl ? widgetEl.querySelector('.rw-notifications-panel') : null;
+    if (!panel) return;
+    if (notificationsPanelOpen) {
+      panel.classList.add('rw-open');
+      loadNotifications();
+      markAllNotificationsRead();
+    } else {
+      panel.classList.remove('rw-open');
+    }
+  }
+
+  function closeNotificationsPanel() {
+    notificationsPanelOpen = false;
+    var panel = widgetEl ? widgetEl.querySelector('.rw-notifications-panel') : null;
+    if (panel) panel.classList.remove('rw-open');
+  }
+
+  function renderBellBadge() {
+    var badge = widgetEl ? widgetEl.querySelector('.rw-bell-badge') : null;
+    if (!badge) return;
+    var count = meCommunity ? (meCommunity.unreadNotificationCount || 0) : 0;
+    badge.setAttribute('data-count', String(count));
+    badge.textContent = count > 99 ? '99+' : String(count);
+  }
+
+  function renderRankLine() {
+    var el = widgetEl ? widgetEl.querySelector('.rw-rank-line') : null;
+    if (!el || !meCommunity) return;
+    while (el.firstChild) el.removeChild(el.firstChild);
+    if ((meCommunity.payoutsCount || 0) === 0) {
+      el.textContent = 'Submit and ship to start earning.';
+    } else {
+      el.textContent = "You're #" + meCommunity.rank + " of " + meCommunity.totalMembers + " — " + meCommunity.balance + " pts";
+    }
+  }
+
+  function renderNotifications() {
+    var ul = widgetEl ? widgetEl.querySelector('.rw-notifications-list') : null;
+    if (!ul || !notificationsCache) return;
+    while (ul.firstChild) ul.removeChild(ul.firstChild);
+    if (!notificationsCache.notifications || notificationsCache.notifications.length === 0) {
+      var empty = document.createElement('li');
+      empty.className = 'rw-notification-item';
+      empty.style.color = 'var(--rw-fg-2)';
+      empty.textContent = 'No notifications yet.';
+      ul.appendChild(empty);
+      return;
+    }
+    notificationsCache.notifications.forEach(function (n) {
+      var li = renderNotificationItem(n);
+      if (li) ul.appendChild(li);
+    });
+  }
+
+  function renderNotificationItem(n) {
+    var li = document.createElement('li');
+    li.className = 'rw-notification-item';
+
+    if (n.type === 'points.awarded') {
+      var headline = document.createElement('div');
+      headline.appendChild(document.createTextNode('Your ticket shipped! '));
+      var amt = document.createElement('span');
+      amt.className = 'rw-amount';
+      amt.textContent = '+' + (n.payload && n.payload.amount != null ? n.payload.amount : 0) + ' pts';
+      headline.appendChild(amt);
+      li.appendChild(headline);
+
+      var meta = document.createElement('div');
+      meta.className = 'rw-notification-meta';
+      meta.textContent = new Date(n.createdAt).toLocaleString();
+      li.appendChild(meta);
+      return li;
+    }
+
+    if (n.type === 'points.bonus') {
+      var headline2 = document.createElement('div');
+      headline2.appendChild(document.createTextNode('Bonus: '));
+      var amt2 = document.createElement('span');
+      amt2.className = 'rw-amount';
+      amt2.textContent = '+' + (n.payload && n.payload.amount != null ? n.payload.amount : 0) + ' pts';
+      headline2.appendChild(amt2);
+      li.appendChild(headline2);
+
+      if (n.payload && n.payload.reason) {
+        var reason = document.createElement('div');
+        reason.textContent = n.payload.reason; // textContent is XSS-safe
+        li.appendChild(reason);
+      }
+
+      var meta2 = document.createElement('div');
+      meta2.className = 'rw-notification-meta';
+      meta2.textContent = new Date(n.createdAt).toLocaleString();
+      li.appendChild(meta2);
+      return li;
+    }
+
+    return null;
+  }
+
+  // ===========================================================================
+  // Community WebSocket
+  // ===========================================================================
+
+  function connectCommunitySocket() {
+    if (!widgetUserId) return;
+    if (communitySocket && communitySocket.readyState < 2) return; // already open or connecting
+
+    var wsBase = RUNHQ_API.replace(/^http/, 'ws');
+    var wsUrl = wsBase + '/ws/widget?token=' + encodeURIComponent(config.token || '');
+    try {
+      communitySocket = new WebSocket(wsUrl);
+    } catch (e) {
+      return; // WebSocket not available or URL malformed
+    }
+
+    communitySocket.addEventListener('open', function () {
+      var sub = JSON.stringify({ type: 'subscribe', topic: 'community:widget_user:' + widgetUserId });
+      communitySocket.send(sub);
+    });
+
+    communitySocket.addEventListener('message', function (event) {
+      var msg;
+      try { msg = JSON.parse(event.data); } catch (_) { return; }
+      if (!msg || !msg.topic) return;
+      if (msg.topic.indexOf('community:widget_user:') !== 0) return;
+
+      var payload = msg.payload;
+      if (!payload) return;
+
+      if (payload.type === 'notification') {
+        if (meCommunity) meCommunity.unreadNotificationCount = (meCommunity.unreadNotificationCount || 0) + 1;
+        renderBellBadge();
+        if (notificationsPanelOpen) loadNotifications();
+      }
+      if (payload.type === 'rank_changed') {
+        if (meCommunity) {
+          if (payload.newRank != null) meCommunity.rank = payload.newRank;
+          if (payload.newBalance != null) meCommunity.balance = payload.newBalance;
+        }
+        renderRankLine();
+      }
+    });
+
+    communitySocket.addEventListener('close', function () {
+      communitySocket = null;
+      // Reconnect after 10 s if still authenticated
+      setTimeout(function () {
+        if (widgetUserId) connectCommunitySocket();
+      }, 10000);
+    });
   }
 
   // ===========================================================================
@@ -1854,10 +2169,16 @@
     var closeHdrBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close panel" }, Icons.close(16));
     closeHdrBtn.addEventListener("click", closePanel);
 
+    var hdrActions = h("div", { className: "rw-hdr-actions" }, [themeToggleBtn, closeHdrBtn]);
+
     var header = h("div", { className: "rw-hdr" }, [
       headerTitleEl,
-      h("div", { className: "rw-hdr-actions" }, [themeToggleBtn, closeHdrBtn]),
+      hdrActions,
     ]);
+
+    // Build bell icon and insert before theme toggle so it reads: bell | theme | close
+    buildBellIcon(hdrActions);
+    hdrActions.insertBefore(hdrActions.lastChild, themeToggleBtn);
 
     scrollEl = h("div", { className: "rw-scroll" });
     footerEl = renderFooter();
@@ -1867,6 +2188,9 @@
       "aria-label": "Feedback panel",
       "data-theme": theme,
     }, [header, scrollEl, footerEl]);
+
+    // Append notifications panel into widget (slides in from right edge)
+    buildNotificationsPanel(widgetEl);
 
     modalMountEl = h("div", { className: "rw-modal-mount", "data-theme": theme });
 
@@ -1932,6 +2256,7 @@
         if (config.token) {
           loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
+          loadMeCommunity();
         } else {
           myTicketsCache = [];
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () { updatesCache = []; });
