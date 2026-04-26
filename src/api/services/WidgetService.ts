@@ -369,6 +369,85 @@ export async function authenticateWidget(
   return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
 }
 
+/**
+ * Verify a signed widget-user JWT without a Hono request context.
+ * Only Mode 3 (signed JWT) is supported — anonymous/API-key sessions cannot
+ * authenticate via WebSocket because they carry no user identity.
+ *
+ * Returns a WidgetAuthResult on success, or null if the token is invalid,
+ * expired, or the project is disabled.
+ */
+export async function verifyWidgetUserJwt(token: string): Promise<WidgetAuthResult | null> {
+  const decoded = decodeJwtPayload(token);
+  if (!decoded || typeof decoded.fp !== 'string') return null;
+
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      slug: widgetProjects.slug,
+      enabled: widgetProjects.enabled,
+      apiSecretHash: widgetProjects.apiSecretHash,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.apiKey, decoded.fp))
+    .limit(1);
+
+  if (!project || !project.enabled) return null;
+
+  let payload: jose.JWTPayload;
+  try {
+    const secret = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, secret, {
+      algorithms: ['HS256'],
+    });
+    if (verified.type !== 'widget_user') return null;
+    payload = verified;
+  } catch {
+    return null;
+  }
+
+  // Upsert the widget user so the session gets a stable widgetUserId.
+  let widgetUserId: string | undefined;
+  const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
+  const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
+  const providedName = rawName.length > 0 ? rawName : undefined;
+  if (sub) {
+    const [existing] = await db
+      .select({ id: widgetUsers.id })
+      .from(widgetUsers)
+      .where(
+        and(
+          eq(widgetUsers.projectId, project.id),
+          eq(widgetUsers.externalUserId, sub)
+        )
+      )
+      .limit(1);
+
+    if (existing) {
+      if (providedName) {
+        await db
+          .update(widgetUsers)
+          .set({ name: providedName })
+          .where(eq(widgetUsers.id, existing.id));
+      }
+      widgetUserId = existing.id;
+    } else {
+      const insertName = providedName ?? fallbackDisplayName(sub);
+      const [inserted] = await db
+        .insert(widgetUsers)
+        .values({
+          projectId: project.id,
+          externalUserId: sub,
+          name: insertName,
+        })
+        .returning({ id: widgetUsers.id });
+      widgetUserId = inserted.id;
+    }
+  }
+
+  return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
+}
+
 // ============================================================================
 // Ticket Operations
 // ============================================================================

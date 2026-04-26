@@ -1553,6 +1553,12 @@ export interface AgentConfigWithMCP {
 // Job identifier
 export type JobId = string;
 
+/**
+ * WebSocket session identifier — a stable string ID that a client presents
+ * during auth so reconnects are keyed to the same session slot.
+ */
+export type SessionId = string;
+
 // ============================================================================
 // Cloud Data Types
 // ============================================================================
@@ -1643,6 +1649,27 @@ export interface AuthResultMessage {
   serverName?: string;
   /** ISO-8601 timestamp of the MFA grace-period deadline (only set when error === 'MFA_REQUIRED'). */
   deadline?: string;
+  timestamp: number;
+}
+
+/**
+ * Authenticate a WS connection as a widget user.
+ * The token is the signed widget-user JWT issued by WidgetService.signWidgetUserJwt.
+ * projectSlug is required for project lookup.
+ */
+export interface AuthWidgetMessage {
+  type: 'auth_widget';
+  token: string;
+  projectSlug: string;
+}
+
+/** Ack for auth_widget */
+export interface AuthWidgetResultMessage {
+  type: 'auth_widget_result';
+  success: boolean;
+  widgetUserId?: string;
+  projectId?: string;
+  error?: string;
   timestamp: number;
 }
 
@@ -2173,11 +2200,55 @@ export interface ActionResultMessage {
 }
 
 // ============================================================================
+// Community WebSocket Messages
+// ============================================================================
+
+/**
+ * Subscribe a RunHQ staff user to the full leaderboard for a widget project.
+ * Server validates that the user is an admin on the server that owns the project.
+ */
+export interface SubscribeCommunityMessage {
+  type: 'subscribe_community';
+  /** widget_projects.id */
+  projectId: string;
+  timestamp?: number;
+}
+
+/**
+ * Subscribe a widget user to their personal community notification topic.
+ * Server validates that the WS session owns this widgetUserId.
+ */
+export interface SubscribeCommunityWidgetUserMessage {
+  type: 'subscribe_community_widget_user';
+  widgetUserId: string;
+  timestamp?: number;
+}
+
+/** Ack for subscribe_community */
+export interface CommunitySubscribedMessage {
+  type: 'community_subscribed';
+  projectId: string;
+  success: boolean;
+  error?: string;
+  timestamp: number;
+}
+
+/** Ack for subscribe_community_widget_user */
+export interface CommunityWidgetUserSubscribedMessage {
+  type: 'community_widget_user_subscribed';
+  widgetUserId: string;
+  success: boolean;
+  error?: string;
+  timestamp: number;
+}
+
+// ============================================================================
 // Cloud WebSocket Union Types
 // ============================================================================
 
 export type DesktopToCloudMessage =
   | AuthMessage
+  | AuthWidgetMessage
   | GetAgentsMessage
   | CreateAgentMessage
   | UpdateAgentMessage
@@ -2210,6 +2281,8 @@ export type DesktopToCloudMessage =
   | AgentActionMessage
   | StartAgentMessage
   | StopAgentMessage
+  | SubscribeCommunityMessage
+  | SubscribeCommunityWidgetUserMessage
   | { type: 'heartbeat' };
 
 export type CloudToDesktopMessage =
@@ -2245,4 +2318,7 @@ export type CloudToDesktopMessage =
   | TaskFileWriteRelayMessage
   | TaskRemoteInputRelayMessage
   | TaskFileWriteResultMessage
-  | ActionResultMessage;
+  | ActionResultMessage
+  | AuthWidgetResultMessage
+  | CommunitySubscribedMessage
+  | CommunityWidgetUserSubscribedMessage;
