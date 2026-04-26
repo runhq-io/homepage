@@ -434,8 +434,8 @@
       '  margin-inline-start: 8px;', /* logical: margin-top in vertical, margin-left in horizontal */
       '  vertical-align: middle;',
       '  border-radius: 999px;',
-      '  background: var(--rw-accent-ink);',
-      '  color: var(--rw-accent);',
+      '  background: #dc2626;', /* red-600: contrasts strongly in both themes; same color regardless of light/dark */
+      '  color: #ffffff;',
       '  font-size: 11px; font-weight: 700;',
       '  font-variant-numeric: tabular-nums; letter-spacing: 0;',
       '  writing-mode: horizontal-tb; text-orientation: mixed;',
