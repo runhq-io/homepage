@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
@@ -1293,9 +1293,11 @@ export const widgetUsers = pgTable('widget_users', {
   avatarUrl: text('avatar_url'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
-  status: text('status').notNull().default('active'),
+  status: text('status').$type<'active' | 'deleted'>().notNull().default('active'),
 }, (t) => [
   { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
+  // widget_users_project_active_idx is a partial index (WHERE status = 'active')
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
 ]);
 
 // Legacy widget tables — kept in schema to prevent db:push from dropping them.
@@ -1345,17 +1347,22 @@ export const pointGrants = pgTable('point_grants', {
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
   amount: integer('amount').notNull(),
-  source: text('source').notNull(),
+  source: text('source').$type<'auto_completion' | 'admin_grant' | 'reversal' | 'backfill'>().notNull(),
   reason: text('reason'),
   reasonCode: text('reason_code'),
   ticketId: uuid('ticket_id'),
   // Self-reference: a reversal grant points back to the grant it cancels.
-  // The explicit (): any cast breaks the circular-reference inference loop that TS cannot resolve.
-  reversesGrantId: uuid('reverses_grant_id').references((): any => pointGrants.id),
+  // The explicit (): AnyPgColumn cast breaks the circular-reference inference loop that TS cannot resolve.
+  reversesGrantId: uuid('reverses_grant_id').references((): AnyPgColumn => pointGrants.id),
   grantedByUserId: uuid('granted_by_user_id'),
   metadata: jsonb('metadata').notNull().default({}),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  userIdx: index('point_grants_user_idx').on(t.projectId, t.widgetUserId),
+  createdIdx: index('point_grants_created_idx').on(t.createdAt.desc()),
+  // point_grants_ticket_idx is a partial index (WHERE ticket_id IS NOT NULL)
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
+}));
 
 // CQRS balance projection — maintained transactionally alongside point_grants.
 export const widgetUserBalances = pgTable('widget_user_balances', {
@@ -1365,7 +1372,10 @@ export const widgetUserBalances = pgTable('widget_user_balances', {
   payoutsCount: integer('payouts_count').notNull().default(0),
   lastPayoutAt: timestamp('last_payout_at'),
   rank: integer('rank'),
-});
+}, (t) => ({
+  rankIdx: index('widget_user_balances_rank_idx').on(t.projectId, t.rank),
+  balanceIdx: index('widget_user_balances_balance_idx').on(t.projectId, t.balance.desc()),
+}));
 
 // Generic notification primitive — used for point awards, rank changes, etc.
 export const widgetUserNotifications = pgTable('widget_user_notifications', {
@@ -1376,8 +1386,22 @@ export const widgetUserNotifications = pgTable('widget_user_notifications', {
   payload: jsonb('payload').notNull(),
   readAt: timestamp('read_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  userIdx: index('widget_user_notifications_user_idx').on(t.widgetUserId, t.createdAt.desc()),
+  // widget_user_notifications_unread_idx is a partial index (WHERE read_at IS NULL)
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
+}));
 
 export type WidgetProject = typeof widgetProjects.$inferSelect;
 export type NewWidgetProject = typeof widgetProjects.$inferInsert;
 export type WidgetUser = typeof widgetUsers.$inferSelect;
+export type NewWidgetUser = typeof widgetUsers.$inferInsert;
+
+export type PointGrant = typeof pointGrants.$inferSelect;
+export type NewPointGrant = typeof pointGrants.$inferInsert;
+
+export type WidgetUserBalance = typeof widgetUserBalances.$inferSelect;
+export type NewWidgetUserBalance = typeof widgetUserBalances.$inferInsert;
+
+export type WidgetUserNotification = typeof widgetUserNotifications.$inferSelect;
+export type NewWidgetUserNotification = typeof widgetUserNotifications.$inferInsert;
