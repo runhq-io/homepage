@@ -1292,6 +1292,8 @@ export const widgetUsers = pgTable('widget_users', {
   username: text('username'),
   avatarUrl: text('avatar_url'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+  status: text('status').notNull().default('active'),
 }, (t) => [
   { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
 ]);
@@ -1334,6 +1336,46 @@ export const widgetComments = pgTable('widget_comments', {
   body: text('body').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Append-only point ledger — one row per award/reversal event.
+export const pointGrants = pgTable('point_grants', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  idempotencyKey: text('idempotency_key').notNull().unique(),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  amount: integer('amount').notNull(),
+  source: text('source').notNull(),
+  reason: text('reason'),
+  reasonCode: text('reason_code'),
+  ticketId: uuid('ticket_id'),
+  // Self-reference: a reversal grant points back to the grant it cancels.
+  // The explicit (): any cast breaks the circular-reference inference loop that TS cannot resolve.
+  reversesGrantId: uuid('reverses_grant_id').references((): any => pointGrants.id),
+  grantedByUserId: uuid('granted_by_user_id'),
+  metadata: jsonb('metadata').notNull().default({}),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// CQRS balance projection — maintained transactionally alongside point_grants.
+export const widgetUserBalances = pgTable('widget_user_balances', {
+  widgetUserId: uuid('widget_user_id').primaryKey().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  balance: integer('balance').notNull().default(0),
+  payoutsCount: integer('payouts_count').notNull().default(0),
+  lastPayoutAt: timestamp('last_payout_at'),
+  rank: integer('rank'),
+});
+
+// Generic notification primitive — used for point awards, rank changes, etc.
+export const widgetUserNotifications = pgTable('widget_user_notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(),
+  payload: jsonb('payload').notNull(),
+  readAt: timestamp('read_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
 export type WidgetProject = typeof widgetProjects.$inferSelect;
