@@ -326,7 +326,8 @@ export async function authenticateWidget(
   // If sub is provided, upsert a widgetUser for identified submissions
   let widgetUserId: string | undefined;
   const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
-  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
+  const providedName = rawName.length > 0 ? rawName : undefined;
   if (sub) {
     const [existing] = await db
       .select({ id: widgetUsers.id })
@@ -340,20 +341,25 @@ export async function authenticateWidget(
       .limit(1);
 
     if (existing) {
-      if (name) {
+      // Only overwrite an existing name when the JWT carries a real one.
+      // Re-signing without 'name' must not clobber a previously-stored real name.
+      if (providedName) {
         await db
           .update(widgetUsers)
-          .set({ name })
+          .set({ name: providedName })
           .where(eq(widgetUsers.id, existing.id));
       }
       widgetUserId = existing.id;
     } else {
+      // First-sight insert: fall back to a stable pseudonymous label so every
+      // member has a distinguishable display string in the leaderboard / drawer.
+      const insertName = providedName ?? fallbackDisplayName(sub);
       const [inserted] = await db
         .insert(widgetUsers)
         .values({
           projectId: project.id,
           externalUserId: sub,
-          name,
+          name: insertName,
         })
         .returning({ id: widgetUsers.id });
       widgetUserId = inserted.id;
@@ -1277,6 +1283,14 @@ export async function retractVote(ticketId: string, widgetUserId: string) {
 /** Derive a fingerprint from the secret for JWT fp field / project lookup. */
 function deriveFingerprint(secret: string): string {
   return createHash('sha256').update(secret).digest('hex').slice(0, 32);
+}
+
+// Stable pseudonymous label for widget users whose host app didn't supply a JWT 'name'.
+// Must be deterministic: re-deriving on every interaction yields the same label.
+// Exported for unit tests.
+export function fallbackDisplayName(externalUserId: string): string {
+  const suffix = createHash('sha256').update(externalUserId).digest('hex').slice(0, 6);
+  return `Anonymous (${suffix})`;
 }
 
 function generateSlug(name: string, suffix: string): string {
