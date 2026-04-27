@@ -1,6 +1,7 @@
 node_modules/
 .next/
 dist/
+types/
 .env
 *.local
 do-app-spec.yaml
