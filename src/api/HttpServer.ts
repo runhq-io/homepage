@@ -1954,6 +1954,12 @@ export function createHttpApp() {
   // Create a new server
   app.post('/api/servers', async (c) => {
     try {
+      const settings = await getSettings();
+      if (settings.serverCreationDisabled) {
+        console.warn('[HttpServer] Server create blocked: kill-switch enabled');
+        return c.json({ error: settings.serverCreationDisabledMessage }, 503);
+      }
+
       const authHeader = c.req.header('Authorization');
       let userId: string | null = null;
 
