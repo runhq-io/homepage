@@ -187,6 +187,14 @@ export class FlyProvider implements IProvider {
     await FlyService.deleteApp(appName);
   }
 
+  async allocateIPs(appName: string, opts?: { sharedV4?: boolean; v6?: boolean }): Promise<void> {
+    await FlyService.allocateIPs(appName, opts);
+  }
+
+  async addCertificate(appName: string, hostname: string): Promise<void> {
+    await FlyService.addCertificate(appName, hostname);
+  }
+
   // ---- Machine lifecycle ----
 
   async createMachine(options: CreateMachineOptions): Promise<ProvisionResult> {

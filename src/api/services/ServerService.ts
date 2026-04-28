@@ -160,6 +160,13 @@ async function provisionNewMachine(
   // the case where a prior createApp crashed mid-flight.
   if (flyAppName && flyNetworkName) {
     await provider.createApp(flyAppName, flyNetworkName);
+    // Public-ingress prereq for per-tenant apps: allocate anycast IPs so the
+    // app's own `.fly.dev` hostname resolves and Fly's edge can route TLS
+    // traffic to it. POST /v1/apps doesn't auto-allocate; without this, the
+    // CF DNS CNAME we install below would point at an unreachable hostname
+    // and the workspace would 504 from outside (see
+    // runhq/docs/per-app-isolation-migration.md, Path A).
+    await provider.allocateIPs(flyAppName);
   }
 
   // Create Cloudflare tunnel for all providers (routes traffic through CF for TLS + IP hiding)
@@ -199,11 +206,37 @@ async function provisionNewMachine(
     throw error;
   }
 
-  // Add server ingress rule + DNS record so the tunnel routes to localhost:61987
+  // Public ingress setup. Two paths depending on whether this is a per-tenant
+  // workspace or a legacy shared-app one:
+  //
+  //   PER-TENANT: install a CF DNS CNAME `srv-<machineId>.<domain>` →
+  //   `<perTenantApp>.fly.dev` so traffic for this specific machine routes to
+  //   its own per-tenant Fly app's anycast (overriding the wildcard
+  //   `*.<domain>` CNAME that points at the legacy shared app and would
+  //   otherwise land traffic on the wrong app — Fly can't fly-replay across
+  //   apps). Also issue a Fly cert for the subdomain so TLS terminates with
+  //   a valid certificate. The CF tunnel ingress rule is still added because
+  //   cloudflared inside the workspace handles preview-port forwarding (and
+  //   any other tunnel-based feature) regardless of how user→workspace
+  //   ingress is routed.
+  //
+  //   LEGACY: rely on the wildcard `*.<domain>` CNAME → shared app + Fly's
+  //   intra-app fly-replay. Create the cfargotunnel CNAME for the
+  //   addIngressRule path used by preview ports etc.
   if (tunnelId && provisionResult.machineId) {
     const serverSubdomain = `srv-${provisionResult.machineId}`;
     await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
-    await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+
+    if (flyAppName) {
+      const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
+      const fullHostname = `${serverSubdomain}.${previewDomain}`;
+      await CloudflareTunnelService.createCnameRecord(serverSubdomain, `${flyAppName}.fly.dev`);
+      // Issue Fly cert for the subdomain. Fly validates via ACME HTTP-01 over
+      // the CF proxy we just installed, so this must come AFTER the CNAME.
+      await provider.addCertificate(flyAppName, fullHostname);
+    } else {
+      await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+    }
   }
 
   // Save machine details immediately to prevent orphaned machines if wait times out.

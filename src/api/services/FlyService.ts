@@ -263,6 +263,38 @@ export interface CreateMachineResult {
 // API Helpers
 // ============================================================================
 
+// IP allocation, certs, and a few other resources still live on Fly's older
+// GraphQL endpoint rather than the Machines REST API.
+const FLY_GRAPHQL_URL = 'https://api.fly.io/graphql';
+
+async function flyGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  const token = getFlyApiToken();
+  if (!token) {
+    throw new Error('FLY_API_TOKEN is not configured');
+  }
+
+  const response = await fetch(FLY_GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query, variables }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Fly.io GraphQL API error: ${response.status} - ${errorText}`);
+  }
+
+  const json = await response.json() as { data?: T; errors?: Array<{ message: string }> };
+  if (json.errors && json.errors.length > 0) {
+    throw new Error(`Fly.io GraphQL errors: ${json.errors.map(e => e.message).join('; ')}`);
+  }
+  return json.data as T;
+}
+
 async function flyRequest<T>(
   method: string,
   path: string,
@@ -361,6 +393,73 @@ export async function createApp(appName: string, networkName: string): Promise<v
     const message = err instanceof Error ? err.message : String(err);
     if (/422/.test(message) && /taken/i.test(message)) {
       console.log(`[FlyService] App ${appName} already exists; reusing`);
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Allocate public IP addresses for an app so it's reachable on its
+ * `<app>.fly.dev` anycast. Defaults to one shared IPv4 (free) + one
+ * dedicated IPv6 (free).
+ *
+ * Per-tenant apps need this in addition to a machine: without IPs, Fly's
+ * edge has nowhere to route public traffic for `<app>.fly.dev`. Legacy apps
+ * have IPs allocated at app-create time; new apps via `POST /v1/apps` do
+ * NOT auto-allocate, so we do it explicitly here.
+ *
+ * Idempotent — Fly returns "already allocated" which we treat as success.
+ */
+export async function allocateIPs(
+  appName: string,
+  opts?: { sharedV4?: boolean; v6?: boolean },
+): Promise<void> {
+  const wantsV6 = opts?.v6 ?? true;
+  const wantsSharedV4 = opts?.sharedV4 ?? true;
+
+  const allocate = async (type: 'v6' | 'shared_v4') => {
+    try {
+      await flyGraphQL(
+        `mutation Allocate($input: AllocateIPAddressInput!) {
+          allocateIpAddress(input: $input) {
+            ipAddress { id type address }
+          }
+        }`,
+        { input: { appId: appName, type } },
+      );
+      console.log(`[FlyService] Allocated ${type} IP for app ${appName}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/already|exist/i.test(message)) {
+        console.log(`[FlyService] ${type} IP already allocated for ${appName}`);
+        return;
+      }
+      throw err;
+    }
+  };
+
+  if (wantsSharedV4) await allocate('shared_v4');
+  if (wantsV6) await allocate('v6');
+}
+
+/**
+ * Issue a TLS certificate for `hostname` on a Fly app. Fly auto-validates
+ * via ACME (HTTP-01 by default) — the caller must have already pointed the
+ * hostname's DNS at this app, otherwise validation will sit pending.
+ *
+ * Idempotent on "hostname has already been taken" (Fly's response when the
+ * cert exists).
+ */
+export async function addCertificate(appName: string, hostname: string): Promise<void> {
+  try {
+    await flyRequest<unknown>('POST', `/apps/${appName}/certificates`, { hostname });
+    console.log(`[FlyService] Added cert for ${hostname} on ${appName}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Fly returns 422 with "has already been taken" or similar when the cert exists.
+    if (/422/.test(message) && /(taken|already|exist)/i.test(message)) {
+      console.log(`[FlyService] Cert for ${hostname} on ${appName} already exists`);
       return;
     }
     throw err;

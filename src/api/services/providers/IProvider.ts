@@ -45,6 +45,18 @@ export interface IProvider {
   createApp(appName: string, networkName: string): Promise<void>;
   deleteApp(appName: string): Promise<void>;
 
+  // Allocate public IP addresses on an app so its `<app>.fly.dev` (or
+  // equivalent) hostname is reachable from the public internet. Per-tenant
+  // apps need this in addition to a machine — `POST /v1/apps` does not
+  // auto-allocate. Idempotent.
+  allocateIPs(appName: string, opts?: { sharedV4?: boolean; v6?: boolean }): Promise<void>;
+
+  // Issue a TLS certificate for `hostname` on an app (Fly: ACME via Fly's
+  // edge proxy). Used so per-tenant workspaces can present a valid cert
+  // for their `srv-<machineId>.<domain>` subdomain. Idempotent on
+  // already-exists.
+  addCertificate(appName: string, hostname: string): Promise<void>;
+
   // ---------------------------------------------------------------------------
   // Machine lifecycle
   //
