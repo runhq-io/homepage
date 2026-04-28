@@ -30,6 +30,10 @@ export interface HealthCheckTarget {
   machineId: string | null;
   serverUrl: string | null;
   provider: string | null;
+  // Per-tenant Fly app this workspace lives in. Null for legacy machines on
+  // the shared app — `getRoutingInfo` falls back to env-based default in
+  // that case. See docs/per-app-isolation-migration.md.
+  flyAppName?: string | null;
 }
 
 export interface MachineHealthRequest {
@@ -56,7 +60,7 @@ export function buildMachineHealthRequest(target: HealthCheckTarget): MachineHea
 
   if (target.machineId) {
     const provider = getProvider((target.provider || 'fly') as ProviderId);
-    const routing = provider.getRoutingInfo(target.machineId);
+    const routing = provider.getRoutingInfo(target.machineId, target.flyAppName);
     url = routing.serverUrl;
     if (routing.routingToken && routing.requiresRoutingHeaders) {
       headers['fly-force-instance-id'] = routing.routingToken;

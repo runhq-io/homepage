@@ -140,7 +140,7 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
   // Objective signal #1: what does the provider think the machine is doing?
   let machineState: MachineState;
   try {
-    machineState = await provider.getMachineState(server.machineId);
+    machineState = await provider.getMachineState(server.machineId, server.flyAppName);
   } catch (err) {
     const errMsg = String(err);
     const is404 = /\b404\b/.test(errMsg);
@@ -171,12 +171,13 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
       serverUrl: server.serverUrl,
       machineId: server.machineId,
       provider: server.provider,
+      flyAppName: server.flyAppName,
       // If already starting, no provider call — just open an attempt row
       // so the poller watches it come online. Otherwise issue startMachine
       // for stopped/suspended (Fly auto-suspend path).
       run: alreadyStarting
         ? async () => { /* already starting */ }
-        : () => provider.startMachine(server.machineId!),
+        : () => provider.startMachine(server.machineId!, server.flyAppName),
     });
   }
 
@@ -199,6 +200,7 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
     machineId: server.machineId,
     serverUrl: server.serverUrl,
     provider: server.provider,
+    flyAppName: server.flyAppName,
   };
   const firstProbeOk = await confirmHealthy(healthTarget);
 
@@ -230,7 +232,8 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
     serverUrl: server.serverUrl,
     machineId: server.machineId,
     provider: server.provider,
-    run: () => provider.restartMachine(server.machineId!),
+    flyAppName: server.flyAppName,
+    run: () => provider.restartMachine(server.machineId!, server.flyAppName),
   });
 }
 
@@ -302,6 +305,7 @@ interface StartAttemptInput {
   serverUrl: string;
   machineId: string;
   provider: string | null;
+  flyAppName?: string | null;
   run: () => Promise<void>;
 }
 
@@ -360,6 +364,7 @@ async function startAttempt(input: StartAttemptInput): Promise<ReportUnreachable
     machineId,
     serverUrl,
     provider: input.provider,
+    flyAppName: input.flyAppName,
   });
   return { status: 202, body: { action, attemptId, heartbeatFresh } };
 }
@@ -368,6 +373,7 @@ async function confirmHealthy(server: {
   machineId: string | null;
   serverUrl: string | null;
   provider: string | null;
+  flyAppName?: string | null;
 }): Promise<boolean> {
   const req = buildMachineHealthRequest(server);
   if (!req) return false;

@@ -43,6 +43,13 @@
       "when": 1776954870523,
       "tag": "0005_gigantic_shard",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777319520947,
+      "tag": "0006_careful_post",
+      "breakpoints": true
     }
   ]
 }
