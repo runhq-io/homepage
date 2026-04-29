@@ -47,8 +47,13 @@ function getFlyOrgSlug(): string | undefined {
  */
 export function workspaceAppName(serverId: string): string {
   // Fly app names: lowercase, alphanumeric + dashes, max 30 chars. Server ids
-  // already match (e.g. ws_xxx). Replace `_` since Fly disallows underscores.
-  return `ws-${serverId.replace(/_/g, '-').toLowerCase()}`;
+  // are minted as `ws_<timestamp>_<rand>` (HttpServer.ts / wsHandlers.ts), so
+  // strip the leading `ws_` before re-prepending `ws-` to avoid the
+  // historical `ws-ws-*` doubling. Existing apps already named `ws-ws-*`
+  // keep their stored flyAppName — Fly app names are immutable post-create
+  // and lookups read `server.flyAppName`, never recompute.
+  const slug = serverId.replace(/^ws_/, '').replace(/_/g, '-').toLowerCase();
+  return `ws-${slug}`;
 }
 
 export function workspaceNetworkName(serverId: string): string {

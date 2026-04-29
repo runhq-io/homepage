@@ -525,7 +525,7 @@ describe('migrateWorkspaceToOwnApp — pre-cutover failures must drop the gate',
 
     // App was created but volume restore threw — cleanup must delete the empty app.
     expect(providerMock.deleteApp).toHaveBeenCalledTimes(1);
-    expect(providerMock.deleteApp).toHaveBeenCalledWith('ws-ws-test');
+    expect(providerMock.deleteApp).toHaveBeenCalledWith('ws-test');
 
     // No new volume was created, so no deleteVolume.
     expect(providerMock.deleteVolume).not.toHaveBeenCalled();
@@ -559,8 +559,8 @@ describe('migrateWorkspaceToOwnApp — post-cutover failures must NOT clean up',
   const postCutoverServer = {
     ...legacyServer,
     machineId: 'mach_new',
-    flyAppName: 'ws-ws-test',
-    flyNetworkName: 'ws-ws-test-net',
+    flyAppName: 'ws-test',
+    flyNetworkName: 'ws-test-net',
     status: 'provisioning' as const,
   };
 
@@ -576,11 +576,11 @@ describe('migrateWorkspaceToOwnApp — post-cutover failures must NOT clean up',
     providerMock.createMachine.mockResolvedValueOnce({
       machineId: 'mach_new',
       machineName: 'srv-new',
-      serverUrl: 'https://ws-ws-test.fly.dev',
+      serverUrl: 'https://ws-test.fly.dev',
       region: 'iad',
       volumeId: 'vol_new',
-      appName: 'ws-ws-test',
-      networkName: 'ws-ws-test-net',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
     });
     providerMock.waitForState.mockResolvedValueOnce(undefined);
     // Health check fails — this is the post-cutover failure point.
@@ -625,8 +625,8 @@ describe('reprovisionRemoteServer — first-provision retry stays per-tenant', (
       provider: 'fly',
       ownerId: 'user_test',
       status: 'error' as const,
-      flyAppName: 'ws-ws-test',
-      flyNetworkName: 'ws-ws-test-net',
+      flyAppName: 'ws-test',
+      flyNetworkName: 'ws-test-net',
       tokenHash: 'old_hash',
     };
     // 1st select: checkServerPermission's serverMembers lookup (owner).
@@ -637,11 +637,11 @@ describe('reprovisionRemoteServer — first-provision retry stays per-tenant', (
     providerMock.createMachine.mockResolvedValueOnce({
       machineId: 'mach_new',
       machineName: 'srv-new',
-      serverUrl: 'https://ws-ws-test.fly.dev',
+      serverUrl: 'https://ws-test.fly.dev',
       region: 'iad',
       volumeId: 'vol_new',
-      appName: 'ws-ws-test',
-      networkName: 'ws-ws-test-net',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
     });
     providerMock.waitForState.mockResolvedValueOnce(undefined);
     providerMock.waitForHealthy.mockResolvedValueOnce(undefined);
@@ -654,12 +654,12 @@ describe('reprovisionRemoteServer — first-provision retry stays per-tenant', (
     // per-tenant app, NOT the legacy shared app (NOT undefined / null).
     expect(providerMock.createMachine).toHaveBeenCalledTimes(1);
     const createMachineArgs = providerMock.createMachine.mock.calls[0][0];
-    expect(createMachineArgs.appName).toBe('ws-ws-test');
-    expect(createMachineArgs.networkName).toBe('ws-ws-test-net');
+    expect(createMachineArgs.appName).toBe('ws-test');
+    expect(createMachineArgs.networkName).toBe('ws-test-net');
 
     // And the idempotent createApp inside provisionNewMachine ran once with
     // the persisted name (so a retry that lost the Fly app side-effect from
     // the original createServer flight still recovers).
-    expect(providerMock.createApp).toHaveBeenCalledWith('ws-ws-test', 'ws-ws-test-net');
+    expect(providerMock.createApp).toHaveBeenCalledWith('ws-test', 'ws-test-net');
   });
 });
