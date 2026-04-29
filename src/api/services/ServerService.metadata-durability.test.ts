@@ -96,6 +96,13 @@ const providerMock = {
   createVolumeFromSnapshot: vi.fn(async () => ({ id: 'vol-restored' })),
   createApp: vi.fn(),
   deleteApp: vi.fn(),
+  // Phase 6: per-tenant ingress setup. provisionNewMachine calls these
+  // when flyAppName is set, so any test that drives a per-tenant flow
+  // (reprovisionRemoteServer with persisted flyAppName, the post-cutover
+  // migration test) needs them mocked or the call would fail with
+  // "provider.allocateIPs is not a function".
+  allocateIPs: vi.fn(),
+  addCertificate: vi.fn(),
   getRoutingInfo: vi.fn(() => ({ serverUrl: '' })),
   id: 'fly',
 };

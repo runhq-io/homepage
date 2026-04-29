@@ -480,7 +480,7 @@ export async function getServerByMachineId(machineId: string): Promise<Server | 
 export async function ensureServerTunnelConnector(
   serverId: string,
   options: { requireMachineUpdate?: boolean } = {},
-): Promise<{ tunnelId: string } | null> {
+): Promise<{ tunnelId: string; warnings: string[] } | null> {
   const server = await getServer(serverId);
   if (!server || server.deploymentType !== 'remote') {
     return null;
@@ -489,6 +489,12 @@ export async function ensureServerTunnelConnector(
   if (!CloudflareTunnelService.isConfigured()) {
     return null;
   }
+
+  // Per-step warnings collected here are returned to the caller so admin
+  // backfill / public-port-creation paths can surface partial-success
+  // results instead of reporting a blanket "ok" when (e.g.) allocateIPs
+  // failed silently.
+  const warnings: string[] = [];
 
   const { tunnelId, tunnelToken } = await getOrCreateTunnelCredentials(serverId, server.tunnelId);
 
@@ -511,7 +517,9 @@ export async function ensureServerTunnelConnector(
       if (options.requireMachineUpdate) {
         throw error;
       }
-      console.warn(`[ServerService] Failed to ensure tunnel token on machine ${server.machineId}:`, error);
+      const msg = `Failed to ensure tunnel token on machine ${server.machineId}: ${error instanceof Error ? error.message : String(error)}`;
+      console.warn(`[ServerService] ${msg}`);
+      warnings.push(msg);
     }
 
     // Add server routing ingress rule + DNS record (backfill for existing servers).
@@ -540,7 +548,9 @@ export async function ensureServerTunnelConnector(
         try {
           await provider.allocateIPs(server.flyAppName);
         } catch (allocErr) {
-          console.warn(`[ServerService] allocateIPs during backfill failed for ${server.flyAppName}:`, allocErr);
+          const msg = `allocateIPs failed for ${server.flyAppName}: ${allocErr instanceof Error ? allocErr.message : String(allocErr)}`;
+          console.warn(`[ServerService] ${msg}`);
+          warnings.push(msg);
         }
 
         const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
@@ -549,17 +559,21 @@ export async function ensureServerTunnelConnector(
         try {
           await provider.addCertificate(server.flyAppName, fullHostname);
         } catch (certErr) {
-          console.warn(`[ServerService] addCertificate during backfill failed for ${fullHostname}:`, certErr);
+          const msg = `addCertificate failed for ${fullHostname}: ${certErr instanceof Error ? certErr.message : String(certErr)}`;
+          console.warn(`[ServerService] ${msg}`);
+          warnings.push(msg);
         }
       } else {
         await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
       }
     } catch (error) {
-      console.warn(`[ServerService] Failed to add server ingress rule during backfill for ${server.machineId}:`, error);
+      const msg = `Failed to add server ingress rule for ${server.machineId}: ${error instanceof Error ? error.message : String(error)}`;
+      console.warn(`[ServerService] ${msg}`);
+      warnings.push(msg);
     }
   }
 
-  return { tunnelId };
+  return { tunnelId, warnings };
 }
 
 

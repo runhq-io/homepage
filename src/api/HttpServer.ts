@@ -1751,17 +1751,38 @@ export function createHttpApp() {
       const withMachine = remoteServers.filter(s => s.machineId);
       console.log(`[HttpServer] Backfilling tunnel DNS for ${withMachine.length} remote servers (${remoteServers.length} total remote)`);
 
-      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string }> = [];
+      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string; warnings?: string[] }> = [];
       for (const server of withMachine) {
         try {
           const result = await ServerService.ensureServerTunnelConnector(server.id);
+          if (!result) {
+            results.push({
+              serverId: server.id,
+              machineId: server.machineId!,
+              name: server.name,
+              status: 'skipped',
+            });
+            console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): skipped`);
+            continue;
+          }
+          // Per-server status reflects partial success: any non-fatal warning
+          // collected by ensureServerTunnelConnector (e.g. allocateIPs failure
+          // for a per-tenant workspace) is surfaced here so the operator
+          // doesn't see a blanket "ok" when public ingress wasn't actually
+          // healed.
+          const hasWarnings = result.warnings.length > 0;
           results.push({
             serverId: server.id,
             machineId: server.machineId!,
             name: server.name,
-            status: result ? `ok (tunnel=${result.tunnelId})` : 'skipped',
+            status: hasWarnings
+              ? `partial (tunnel=${result.tunnelId})`
+              : `ok (tunnel=${result.tunnelId})`,
+            warnings: hasWarnings ? result.warnings : undefined,
           });
-          console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): ${result ? 'ok' : 'skipped'}`);
+          console.log(
+            `[HttpServer] Backfill ${server.id} (${server.machineId}): ${hasWarnings ? `partial (${result.warnings.length} warnings)` : 'ok'}`,
+          );
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
