@@ -466,13 +466,17 @@ export async function allocateIPs(
  */
 export async function addCertificate(appName: string, hostname: string): Promise<void> {
   try {
+    // Fly's addCertificate mutation takes appId + hostname as direct args,
+    // NOT through an input wrapper (verified against flyctl source). The
+    // appId field accepts the app slug (e.g. "ws-ws-foo"), not the GraphQL
+    // node ID.
     await flyGraphQL<{ addCertificate: { certificate: { id: string; hostname: string } } }>(
-      `mutation Add($input: AddCertificateInput!) {
-        addCertificate(input: $input) {
+      `mutation Add($appId: ID!, $hostname: String!) {
+        addCertificate(appId: $appId, hostname: $hostname) {
           certificate { id hostname }
         }
       }`,
-      { input: { appId: appName, hostname } },
+      { appId: appName, hostname },
     );
     console.log(`[FlyService] Added cert for ${hostname} on ${appName}`);
   } catch (err) {

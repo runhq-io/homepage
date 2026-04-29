@@ -261,13 +261,7 @@ export async function removeIngressRule(tunnelId: string, subdomain: string): Pr
 }
 
 /**
- * Create or update a DNS CNAME record at `<subdomain>.<PUBLIC_PORTS_DOMAIN>`
- * pointing at an arbitrary target. Used for both:
- *   • CF Tunnel routes — target = `<tunnelId>.cfargotunnel.com`
- *   • Per-tenant Fly app routes — target = `<perTenantApp>.fly.dev`, which
- *     overrides the wildcard `*.<PUBLIC_PORTS_DOMAIN>` CNAME so traffic for
- *     a specific machine reaches its per-tenant app's anycast instead of
- *     the legacy shared one (see runhq/docs/per-app-isolation-migration.md).
+ * Internal: create or update a DNS CNAME on a specific Cloudflare zone.
  *
  * `proxied: true` keeps Cloudflare's edge in front (wildcard cert, DDoS,
  * WAF, ACME HTTP-01 forwarding to the origin during cert issuance).
@@ -276,14 +270,16 @@ export async function removeIngressRule(tunnelId: string, subdomain: string): Pr
  * different content (e.g. an old cfargotunnel target), this PATCHes it to
  * the new content rather than failing or returning the stale record's ID.
  */
-export async function createCnameRecord(subdomain: string, target: string): Promise<string> {
+async function createCnameOnZone(
+  hostname: string,
+  target: string,
+  zoneApi: () => string,
+): Promise<string> {
   if (!isConfigured()) {
     throw new Error('[CloudflareTunnel] Not configured');
   }
 
-  const hostname = `${subdomain}.${PUBLIC_PORTS_DOMAIN}`;
-
-  const res = await fetch(`${publicPortsZoneApiBase()}/dns_records`, {
+  const res = await fetch(`${zoneApi()}/dns_records`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({
@@ -299,14 +295,14 @@ export async function createCnameRecord(subdomain: string, target: string): Prom
     const alreadyExists = data.errors?.some(e => e.code === 81053);
 
     if (alreadyExists) {
-      const existing = await findDnsRecord(hostname);
+      const existing = await findDnsRecordOnZone(hostname, zoneApi);
       if (existing) {
         if (existing.content === target) {
           console.log(`[CloudflareTunnel] DNS CNAME already correct for ${hostname} → ${target} (record: ${existing.id})`);
           return existing.id;
         }
         console.log(`[CloudflareTunnel] DNS CNAME exists for ${hostname} → ${existing.content}, updating to → ${target}`);
-        const patchRes = await fetch(`${publicPortsZoneApiBase()}/dns_records/${existing.id}`, {
+        const patchRes = await fetch(`${zoneApi()}/dns_records/${existing.id}`, {
           method: 'PATCH',
           headers: getHeaders(),
           body: JSON.stringify({ content: target }),
@@ -332,11 +328,36 @@ export async function createCnameRecord(subdomain: string, target: string): Prom
 }
 
 /**
- * Create a DNS CNAME record pointing subdomain.runhq.io → tunnelId.cfargotunnel.com.
+ * Create or update a DNS CNAME at `<subdomain>.<PUBLIC_PORTS_DOMAIN>`
+ * pointing at `target` — the public-ports zone (CLOUDFLARE_PUBLIC_PORTS_ZONE_ID,
+ * default runhq.io). Used by the existing public-ports / cfargotunnel flows.
+ */
+export async function createCnameRecord(subdomain: string, target: string): Promise<string> {
+  const hostname = `${subdomain}.${PUBLIC_PORTS_DOMAIN}`;
+  return createCnameOnZone(hostname, target, publicPortsZoneApiBase);
+}
+
+/**
+ * Create or update a DNS CNAME on the WORKSPACE zone (CLOUDFLARE_ZONE_ID,
+ * e.g. tank.fish / staging.tank.fish) at the full hostname `name`. This is
+ * the right zone for `srv-<machineId>.<previewDomain>` records used by the
+ * Phase 6 per-tenant ingress override of the wildcard `*.<previewDomain>`.
  *
- * @deprecated for per-tenant Fly apps — use `createCnameRecord(subdomain,
- * '<app>.fly.dev')` instead. Kept for the legacy CF Tunnel ingress flow
- * used by existing shared-app workspaces.
+ * Caller passes the full hostname because the workspace domain is set per
+ * environment (PREVIEW_DOMAIN env var on the BE) and may differ from
+ * PUBLIC_PORTS_DOMAIN.
+ */
+export async function createWorkspaceCnameRecord(name: string, target: string): Promise<string> {
+  return createCnameOnZone(name, target, zoneApiBase);
+}
+
+/**
+ * Create a DNS CNAME record pointing subdomain.<PUBLIC_PORTS_DOMAIN> →
+ * tunnelId.cfargotunnel.com.
+ *
+ * @deprecated for per-tenant Fly apps — use `createWorkspaceCnameRecord` to
+ * write to the workspace zone with a fly.dev target instead. Kept for the
+ * legacy CF Tunnel ingress flow used by existing shared-app workspaces.
  */
 export async function createDnsRecord(subdomain: string, tunnelId: string): Promise<string> {
   return createCnameRecord(subdomain, `${tunnelId}.cfargotunnel.com`);
@@ -371,9 +392,12 @@ export async function deleteDnsRecord(dnsRecordId: string): Promise<void> {
 /**
  * Find an existing DNS record by hostname.
  */
-async function findDnsRecord(hostname: string): Promise<{ id: string; type: string; content: string } | null> {
+async function findDnsRecordOnZone(
+  hostname: string,
+  zoneApi: () => string,
+): Promise<{ id: string; type: string; content: string } | null> {
   const res = await fetch(
-    `${publicPortsZoneApiBase()}/dns_records?name=${encodeURIComponent(hostname)}`,
+    `${zoneApi()}/dns_records?name=${encodeURIComponent(hostname)}`,
     { method: 'GET', headers: getHeaders() },
   );
 

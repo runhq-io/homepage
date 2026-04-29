@@ -269,7 +269,11 @@ async function provisionNewMachine(
       if (flyAppName) {
         const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
         const fullHostname = `${serverSubdomain}.${previewDomain}`;
-        await CloudflareTunnelService.createCnameRecord(serverSubdomain, `${flyAppName}.fly.dev`);
+        // Write the override CNAME on the WORKSPACE zone (the same zone as
+        // the wildcard *.<previewDomain> we need to override), NOT the
+        // public-ports zone (runhq.io) which the legacy createDnsRecord
+        // targets and which would put our record in the wrong place.
+        await CloudflareTunnelService.createWorkspaceCnameRecord(fullHostname, `${flyAppName}.fly.dev`);
         // Issue Fly cert for the subdomain. Fly validates via ACME (HTTP-01
         // through CF proxy or Fly's own challenge), so this comes AFTER the
         // CNAME. addCertificate is best-effort internally — a pending/failed
@@ -555,7 +559,10 @@ export async function ensureServerTunnelConnector(
 
         const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
         const fullHostname = `${serverSubdomain}.${previewDomain}`;
-        await CloudflareTunnelService.createCnameRecord(serverSubdomain, `${server.flyAppName}.fly.dev`);
+        // Same zone choice as provisionNewMachine — must be the workspace
+        // zone (CLOUDFLARE_ZONE_ID) so the override actually shadows the
+        // wildcard *.<previewDomain>.
+        await CloudflareTunnelService.createWorkspaceCnameRecord(fullHostname, `${server.flyAppName}.fly.dev`);
         try {
           await provider.addCertificate(server.flyAppName, fullHostname);
         } catch (certErr) {
