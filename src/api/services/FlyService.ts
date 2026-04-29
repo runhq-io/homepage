@@ -55,6 +55,23 @@ export function workspaceNetworkName(serverId: string): string {
   return `${workspaceAppName(serverId)}-net`;
 }
 
+/**
+ * Resolve the PREVIEW_DOMAIN env var that should be injected into a workspace
+ * machine. Per-tenant workspaces always use the bare `tank.fish` zone — the
+ * Cloudflare preview-router Worker (`*.tank.fish/*`) routes per-tenant staging
+ * URLs by parsing a `-${flyAppName}-staging` suffix on the leftmost label
+ * (added by the workspace's `getPreviewHostExtraSuffix()`), so a separate
+ * `staging.tank.fish` zone is unnecessary. Legacy single-app workspaces keep
+ * the existing `process.env.PREVIEW_DOMAIN` behaviour, which is `tank.fish`
+ * in prod and `staging.tank.fish` in staging.
+ */
+function resolvePreviewDomainForWorkspace(appName?: string | null): string {
+  if (appName) {
+    return 'tank.fish';
+  }
+  return process.env.PREVIEW_DOMAIN ?? 'tank.fish';
+}
+
 type FlyAutostopMode = 'off' | 'stop' | 'suspend';
 type FlyMachineLifecyclePolicy = {
   autostop: FlyAutostopMode;
@@ -849,7 +866,7 @@ export async function createMachine(
         AUTH_MODE: 'cloud',
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
         SERVER_SESSION_PUBLIC_KEY_PEM: sessionPublicKeyPem,
-        PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
+        PREVIEW_DOMAIN: resolvePreviewDomainForWorkspace(appName),
         CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
         NODE_ENV: 'development',
         PORT: '61987',
@@ -1044,7 +1061,7 @@ export async function updateMachineImage(machineId: string, appName?: string | n
         image: latestImage,
         env: {
           ...existingEnv,
-          PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
+          PREVIEW_DOMAIN: resolvePreviewDomainForWorkspace(appName),
           CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
           CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
           SERVER_SESSION_PUBLIC_KEY_PEM: sessionPublicKeyPem,
