@@ -274,6 +274,7 @@ async function createCnameOnZone(
   hostname: string,
   target: string,
   zoneApi: () => string,
+  proxied: boolean,
 ): Promise<string> {
   if (!isConfigured()) {
     throw new Error('[CloudflareTunnel] Not configured');
@@ -286,7 +287,7 @@ async function createCnameOnZone(
       type: 'CNAME',
       name: hostname,
       content: target,
-      proxied: true,
+      proxied,
     }),
   });
 
@@ -297,15 +298,16 @@ async function createCnameOnZone(
     if (alreadyExists) {
       const existing = await findDnsRecordOnZone(hostname, zoneApi);
       if (existing) {
-        if (existing.content === target) {
+        const proxiedMismatch = existing.proxied !== proxied;
+        if (existing.content === target && !proxiedMismatch) {
           console.log(`[CloudflareTunnel] DNS CNAME already correct for ${hostname} → ${target} (record: ${existing.id})`);
           return existing.id;
         }
-        console.log(`[CloudflareTunnel] DNS CNAME exists for ${hostname} → ${existing.content}, updating to → ${target}`);
+        console.log(`[CloudflareTunnel] DNS CNAME exists for ${hostname} → ${existing.content} (proxied=${existing.proxied}), updating to → ${target} (proxied=${proxied})`);
         const patchRes = await fetch(`${zoneApi()}/dns_records/${existing.id}`, {
           method: 'PATCH',
           headers: getHeaders(),
-          body: JSON.stringify({ content: target }),
+          body: JSON.stringify({ content: target, proxied }),
         });
         if (!patchRes.ok) {
           const patchData = (await patchRes.json()) as CloudflareApiResponse<unknown>;
@@ -330,25 +332,31 @@ async function createCnameOnZone(
 /**
  * Create or update a DNS CNAME at `<subdomain>.<PUBLIC_PORTS_DOMAIN>`
  * pointing at `target` — the public-ports zone (CLOUDFLARE_PUBLIC_PORTS_ZONE_ID,
- * default runhq.io). Used by the existing public-ports / cfargotunnel flows.
+ * default runhq.io). Proxied through Cloudflare because this zone routes
+ * through cfargotunnel.com, which is CF infrastructure and requires CF in
+ * the path. Used by the existing public-ports / cfargotunnel flows.
  */
 export async function createCnameRecord(subdomain: string, target: string): Promise<string> {
   const hostname = `${subdomain}.${PUBLIC_PORTS_DOMAIN}`;
-  return createCnameOnZone(hostname, target, publicPortsZoneApiBase);
+  return createCnameOnZone(hostname, target, publicPortsZoneApiBase, /* proxied */ true);
 }
 
 /**
  * Create or update a DNS CNAME on the WORKSPACE zone (CLOUDFLARE_ZONE_ID,
- * e.g. tank.fish / staging.tank.fish) at the full hostname `name`. This is
- * the right zone for `srv-<machineId>.<previewDomain>` records used by the
- * Phase 6 per-tenant ingress override of the wildcard `*.<previewDomain>`.
+ * e.g. tank.fish / staging.tank.fish) at the full hostname `name`, NOT
+ * proxied (gray cloud). This matches the existing wildcard
+ * `*.<previewDomain>` setup, which is also gray cloud, so Fly's anycast
+ * receives the request directly and Fly's per-app TLS cert handles
+ * termination — CF's universal SSL doesn't cover two-level wildcards
+ * (`*.staging.tank.fish`) and would TLS-handshake-fail if proxied. Used
+ * by the Phase 6 per-tenant ingress override.
  *
  * Caller passes the full hostname because the workspace domain is set per
  * environment (PREVIEW_DOMAIN env var on the BE) and may differ from
  * PUBLIC_PORTS_DOMAIN.
  */
 export async function createWorkspaceCnameRecord(name: string, target: string): Promise<string> {
-  return createCnameOnZone(name, target, zoneApiBase);
+  return createCnameOnZone(name, target, zoneApiBase, /* proxied */ false);
 }
 
 /**
@@ -395,7 +403,7 @@ export async function deleteDnsRecord(dnsRecordId: string): Promise<void> {
 async function findDnsRecordOnZone(
   hostname: string,
   zoneApi: () => string,
-): Promise<{ id: string; type: string; content: string } | null> {
+): Promise<{ id: string; type: string; content: string; proxied: boolean } | null> {
   const res = await fetch(
     `${zoneApi()}/dns_records?name=${encodeURIComponent(hostname)}`,
     { method: 'GET', headers: getHeaders() },
@@ -406,10 +414,10 @@ async function findDnsRecordOnZone(
     return null;
   }
 
-  const data = (await res.json()) as CloudflareApiResponse<Array<{ id: string; type: string; content: string }>>;
+  const data = (await res.json()) as CloudflareApiResponse<Array<{ id: string; type: string; content: string; proxied: boolean }>>;
   const record = data.result?.[0];
   if (record) {
-    console.log(`[CloudflareTunnel] Found existing ${record.type} record for ${hostname} (id: ${record.id}, content: ${record.content})`);
+    console.log(`[CloudflareTunnel] Found existing ${record.type} record for ${hostname} (id: ${record.id}, content: ${record.content}, proxied: ${record.proxied})`);
   }
   return record || null;
 }
