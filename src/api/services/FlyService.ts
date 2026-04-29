@@ -444,25 +444,46 @@ export async function allocateIPs(
 }
 
 /**
- * Issue a TLS certificate for `hostname` on a Fly app. Fly auto-validates
- * via ACME (HTTP-01 by default) — the caller must have already pointed the
- * hostname's DNS at this app, otherwise validation will sit pending.
+ * Issue a TLS certificate for `hostname` on a Fly app. Uses Fly's GraphQL
+ * `addCertificate` mutation (the same path `flyctl certs add` uses);
+ * Fly's REST endpoint for cert creation is documented as
+ * `/apps/{app}/certificates/acme`, but the GraphQL mutation works
+ * uniformly across cert states and is what the official CLI exercises.
  *
- * Idempotent on "hostname has already been taken" (Fly's response when the
- * cert exists).
+ * Validation: Fly attempts ACME automatically. With CF in front of the
+ * subdomain (proxied: true), Cloudflare may break the HTTP-01 path; in
+ * that case the cert sits in "Not verified" state and the operator can
+ * fall back to the `_fly-ownership` TXT record validation that
+ * `flyctl certs setup` documents. Critically, an unverified cert does NOT
+ * block user traffic in our setup: CF presents its own edge cert
+ * (universal SSL or wildcard) to browsers, and Fly's origin connection
+ * uses the standing `*.fly.dev` cert.
+ *
+ * This function therefore treats failures as warnings — best-effort. The
+ * provisioning flow will not fail because of a cert hiccup.
+ *
+ * Idempotent on "hostname has already been taken".
  */
 export async function addCertificate(appName: string, hostname: string): Promise<void> {
   try {
-    await flyRequest<unknown>('POST', `/apps/${appName}/certificates`, { hostname });
+    await flyGraphQL<{ addCertificate: { certificate: { id: string; hostname: string } } }>(
+      `mutation Add($input: AddCertificateInput!) {
+        addCertificate(input: $input) {
+          certificate { id hostname }
+        }
+      }`,
+      { input: { appId: appName, hostname } },
+    );
     console.log(`[FlyService] Added cert for ${hostname} on ${appName}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Fly returns 422 with "has already been taken" or similar when the cert exists.
-    if (/422/.test(message) && /(taken|already|exist)/i.test(message)) {
+    if (/(taken|already|exist|duplicate)/i.test(message)) {
       console.log(`[FlyService] Cert for ${hostname} on ${appName} already exists`);
       return;
     }
-    throw err;
+    // Anything else is a soft failure — log and continue. CF's edge cert
+    // covers user-facing TLS regardless of Fly cert state.
+    console.warn(`[FlyService] addCertificate(${hostname}, ${appName}) failed (best-effort, not blocking):`, message);
   }
 }
 

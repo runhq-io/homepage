@@ -206,39 +206,6 @@ async function provisionNewMachine(
     throw error;
   }
 
-  // Public ingress setup. Two paths depending on whether this is a per-tenant
-  // workspace or a legacy shared-app one:
-  //
-  //   PER-TENANT: install a CF DNS CNAME `srv-<machineId>.<domain>` →
-  //   `<perTenantApp>.fly.dev` so traffic for this specific machine routes to
-  //   its own per-tenant Fly app's anycast (overriding the wildcard
-  //   `*.<domain>` CNAME that points at the legacy shared app and would
-  //   otherwise land traffic on the wrong app — Fly can't fly-replay across
-  //   apps). Also issue a Fly cert for the subdomain so TLS terminates with
-  //   a valid certificate. The CF tunnel ingress rule is still added because
-  //   cloudflared inside the workspace handles preview-port forwarding (and
-  //   any other tunnel-based feature) regardless of how user→workspace
-  //   ingress is routed.
-  //
-  //   LEGACY: rely on the wildcard `*.<domain>` CNAME → shared app + Fly's
-  //   intra-app fly-replay. Create the cfargotunnel CNAME for the
-  //   addIngressRule path used by preview ports etc.
-  if (tunnelId && provisionResult.machineId) {
-    const serverSubdomain = `srv-${provisionResult.machineId}`;
-    await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
-
-    if (flyAppName) {
-      const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
-      const fullHostname = `${serverSubdomain}.${previewDomain}`;
-      await CloudflareTunnelService.createCnameRecord(serverSubdomain, `${flyAppName}.fly.dev`);
-      // Issue Fly cert for the subdomain. Fly validates via ACME HTTP-01 over
-      // the CF proxy we just installed, so this must come AFTER the CNAME.
-      await provider.addCertificate(flyAppName, fullHostname);
-    } else {
-      await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
-    }
-  }
-
   // Save machine details immediately to prevent orphaned machines if wait times out.
   // Also atomically update tokenHash here (not before provisioning) so the old machine
   // can still register if provisioning fails — prevents orphaned-token mismatches.
@@ -246,6 +213,12 @@ async function provisionNewMachine(
   // per-tenant app — for legacy callers (null) we must leave the existing columns
   // untouched so we don't accidentally flip a row to per-tenant or null out an
   // already-migrated row.
+  //
+  // CRITICAL ORDERING: this DB write MUST come before any further provisioning
+  // step (DNS, cert, waits). Any step after this can fail and leave the
+  // workspace in a partial-but-recoverable state — the row already references
+  // the new machine, so reprovision/restart paths can re-run the missing
+  // setup via ensureServerTunnelConnector. Phase 5's invariant.
   const machineUpdate: Record<string, unknown> = {
     serverUrl: provisionResult.serverUrl,
     machineId: provisionResult.machineId,
@@ -267,6 +240,53 @@ async function provisionNewMachine(
     .update(servers)
     .set(machineUpdate)
     .where(eq(servers.id, serverId));
+
+  // Public ingress setup. Two paths depending on per-tenant vs legacy:
+  //
+  //   PER-TENANT (flyAppName set): install a CF DNS CNAME
+  //   `srv-<machineId>.<domain>` → `<perTenantApp>.fly.dev` to override the
+  //   wildcard `*.<domain>` (which points at the legacy shared app and
+  //   would land traffic on the wrong Fly app — fly-replay can't cross
+  //   apps). Also issue a Fly cert. The CF tunnel ingress rule is added
+  //   either way because cloudflared inside the workspace also handles
+  //   preview-port forwarding.
+  //
+  //   LEGACY (flyAppName null): rely on the wildcard CNAME → shared app +
+  //   Fly's intra-app fly-replay; cfargotunnel CNAME for the ingress-rule
+  //   path used by preview ports.
+  //
+  // BEST-EFFORT: this runs AFTER the DB cutover above. Any failure here
+  // leaves the workspace with a real machine + DB row referencing it but
+  // possibly broken public routing. Subsequent restart / wake / admin
+  // backfill calls ensureServerTunnelConnector which re-runs the same
+  // logic idempotently. Better than throwing and stranding a healthy
+  // machine over a transient CF or Fly API blip.
+  if (tunnelId && provisionResult.machineId) {
+    const serverSubdomain = `srv-${provisionResult.machineId}`;
+    try {
+      await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
+
+      if (flyAppName) {
+        const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
+        const fullHostname = `${serverSubdomain}.${previewDomain}`;
+        await CloudflareTunnelService.createCnameRecord(serverSubdomain, `${flyAppName}.fly.dev`);
+        // Issue Fly cert for the subdomain. Fly validates via ACME (HTTP-01
+        // through CF proxy or Fly's own challenge), so this comes AFTER the
+        // CNAME. addCertificate is best-effort internally — a pending/failed
+        // validation doesn't block user traffic because CF's edge wildcard
+        // cert handles user-facing TLS regardless.
+        await provider.addCertificate(flyAppName, fullHostname);
+      } else {
+        await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+      }
+    } catch (ingressErr) {
+      console.error(
+        `[ServerService] Public-ingress setup failed for server ${serverId} (machine ${provisionResult.machineId}). ` +
+        `Workspace row references the new machine; subsequent restart/admin-backfill will retry via ensureServerTunnelConnector. ` +
+        `Error:`, ingressErr
+      );
+    }
+  }
 
   // Wait for machine to start
   await provider.waitForState(provisionResult.machineId, ['running'], 180000, flyAppName);
@@ -494,11 +514,46 @@ export async function ensureServerTunnelConnector(
       console.warn(`[ServerService] Failed to ensure tunnel token on machine ${server.machineId}:`, error);
     }
 
-    // Add server routing ingress rule + DNS record (backfill for existing servers)
+    // Add server routing ingress rule + DNS record (backfill for existing servers).
+    //
+    // The DNS record target depends on whether this is a per-tenant or legacy
+    // workspace. Important: with per-tenant apps the wildcard CNAME
+    // *.<domain> → legacy app would silently misroute traffic for this
+    // machine; we install a SPECIFIC record overriding the wildcard.
+    //
+    // This branch is also the recovery path for pre-Phase-6 per-tenant
+    // workspaces (those created in the Phase 2-only window before the
+    // public-ingress code existed): admins can run the
+    // /api/admin/backfill-tunnel-dns endpoint and it self-heals via the
+    // calls below — allocateIPs (idempotent), CNAME (overrides wildcard),
+    // certificate (idempotent).
     try {
       const serverSubdomain = `srv-${server.machineId}`;
       await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
-      await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+
+      if (server.flyAppName) {
+        const provider = getProvider((server.provider || 'fly') as ProviderId);
+        // Make sure the per-tenant app has public IPs. For workspaces created
+        // pre-Phase-6 the app was created without IPs and `<app>.fly.dev`
+        // doesn't resolve; without this, the CNAME below would point at an
+        // unreachable hostname.
+        try {
+          await provider.allocateIPs(server.flyAppName);
+        } catch (allocErr) {
+          console.warn(`[ServerService] allocateIPs during backfill failed for ${server.flyAppName}:`, allocErr);
+        }
+
+        const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
+        const fullHostname = `${serverSubdomain}.${previewDomain}`;
+        await CloudflareTunnelService.createCnameRecord(serverSubdomain, `${server.flyAppName}.fly.dev`);
+        try {
+          await provider.addCertificate(server.flyAppName, fullHostname);
+        } catch (certErr) {
+          console.warn(`[ServerService] addCertificate during backfill failed for ${fullHostname}:`, certErr);
+        }
+      } else {
+        await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+      }
     } catch (error) {
       console.warn(`[ServerService] Failed to add server ingress rule during backfill for ${server.machineId}:`, error);
     }
