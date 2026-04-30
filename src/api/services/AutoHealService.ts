@@ -135,6 +135,16 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
     return { status: 410, body: { action: 'missing' } };
   }
 
+  // Refuse to heal during structural provisioning (migration / region change /
+  // tier change / fresh provision). The runner has explicitly stopped the
+  // machine and disabled autostart; an autoheal-triggered startMachine would
+  // race-restart it mid-snapshot and corrupt the migration target volume.
+  // Same gate applied to wakeRemoteServerInternal — see ServerService.ts.
+  if (server.status === 'provisioning') {
+    logEvent('auto_heal.skipped_provisioning', { serverId, userId });
+    return { status: 503, body: { action: 'provider_unavailable' } };
+  }
+
   const provider = getProvider((server.provider || 'fly') as ProviderId);
 
   // Objective signal #1: what does the provider think the machine is doing?

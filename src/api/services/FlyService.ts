@@ -1147,19 +1147,31 @@ export async function stopMachine(
           autostop: 'off',
           min_machines_running: 0,
         }));
+        // Setting autostart=false alone isn't sufficient — workspace
+        // machines also have `restart.policy = "on-failure"`, so when
+        // the workspace process exits with non-zero status (SIGKILL,
+        // OOM, container abort) Fly auto-restarts the machine. Setting
+        // policy to "no" makes the stop fully durable. The migrator
+        // deletes the machine at step 7 so we don't need to restore
+        // either flag.
+        const updatedConfig = {
+          ...machine.config,
+          services: updatedServices,
+          restart: { policy: 'no' as const, max_retries: 0 },
+        };
         const payload = {
           name: machine.name,
-          config: { ...machine.config, services: updatedServices },
+          config: updatedConfig,
         };
         await flyRequest<FlyMachine>(
           'POST',
           `/apps/${getServerAppName(appName)}/machines/${machineId}`,
           payload,
         );
-        console.log(`[FlyService] Disabled autostart on ${machineId} before stop`);
+        console.log(`[FlyService] Disabled autostart + restart policy on ${machineId} before stop`);
       }
     } catch (err) {
-      console.warn(`[FlyService] Failed to disable autostart on ${machineId} before stop: ${err}`);
+      console.warn(`[FlyService] Failed to disable autostart/restart on ${machineId} before stop: ${err}`);
     }
   }
 
