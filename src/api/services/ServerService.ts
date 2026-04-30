@@ -1907,6 +1907,20 @@ export async function wakeRemoteServerInternal(
     return { success: false, error: 'No machine associated with this server' };
   }
 
+  // Gate: refuse wake if a structural provisioning is in progress
+  // (createServer, reprovision, region/tier change, migration). Without
+  // this, a parallel client request — either through the explicit
+  // `/wake` HTTP endpoint or any other internal caller — can race-start
+  // the legacy machine mid-migration, defeating the runner's stopMachine
+  // step, keeping the volume busy and stalling the snapshot. Observed
+  // live during the per-app-isolation prod migration where every
+  // explicit `flyctl machine stop` was reverted within ~30s by the
+  // BE's wake path. The session-endpoint gate at HttpServer.ts:3899
+  // covers the workspace-load flow but missed the explicit wake API.
+  if (server.status === 'provisioning') {
+    return { success: false, error: 'Server is being provisioned (migration / region change / etc.). Please try again once it completes.' };
+  }
+
   // Legacy backfill: ensure remote servers have tunnel metadata and connector on the machine.
   if (!server.tunnelId) {
     try {
