@@ -1907,16 +1907,9 @@ export async function wakeRemoteServerInternal(
     return { success: false, error: 'No machine associated with this server' };
   }
 
-  // Gate: refuse wake if a structural provisioning is in progress
-  // (createServer, reprovision, region/tier change, migration). Without
-  // this, a parallel client request — either through the explicit
-  // `/wake` HTTP endpoint or any other internal caller — can race-start
-  // the legacy machine mid-migration, defeating the runner's stopMachine
-  // step, keeping the volume busy and stalling the snapshot. Observed
-  // live during the per-app-isolation prod migration where every
-  // explicit `flyctl machine stop` was reverted within ~30s by the
-  // BE's wake path. The session-endpoint gate at HttpServer.ts:3899
-  // covers the workspace-load flow but missed the explicit wake API.
+  // Status check (passed-in `server` may be stale — see refetch before
+  // startMachine below). This is the fast path that refuses the wake
+  // when the caller already passed a provisioning row.
   if (server.status === 'provisioning') {
     return { success: false, error: 'Server is being provisioned (migration / region change / etc.). Please try again once it completes.' };
   }
@@ -1975,6 +1968,20 @@ export async function wakeRemoteServerInternal(
     }
 
     if (machineState === 'stopped' || machineState === 'suspended') {
+      // TOCTOU guard: re-read status right before the side-effecting
+      // startMachine call. Callers like the session endpoint at
+      // HttpServer.ts:3926 load `server` early in the request and pass
+      // it down. If a structural provisioning op (migration, region
+      // change, etc.) flipped the row to 'provisioning' between that
+      // load and this point, the passed-in `server.status` would be
+      // stale (still 'online'). Reading fresh state here is what
+      // actually keeps a migration-in-progress workspace from being
+      // race-restarted by a concurrent wake request.
+      const fresh = await getServer(serverId);
+      if (fresh?.status === 'provisioning') {
+        return { success: false, error: 'Server is being provisioned (migration / region change / etc.). Please try again once it completes.' };
+      }
+
       console.log(`[ServerService] Waking machine ${server.machineId} (state: ${machineState})`);
 
       // Start the machine
