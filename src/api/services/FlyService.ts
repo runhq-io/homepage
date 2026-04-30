@@ -351,7 +351,13 @@ async function flyRequest<T>(
       'Content-Type': 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000),
+    // Default 60s (was 30s). During the per-app-isolation rollout, even
+    // simple Fly Machines API POSTs (createApp, allocateIPs, createMachine)
+    // were intermittently slower than 30s during IAD congestion. 60s
+    // gives more headroom without significantly affecting fast-fail
+    // behavior on real outages. Volume ops use VOLUME_OP_TIMEOUT_MS
+    // (10 min) — see createVolume / createVolumeFromSnapshot / forkVolume.
+    signal: AbortSignal.timeout(options?.timeoutMs ?? 60_000),
   });
 
   if (!response.ok) {

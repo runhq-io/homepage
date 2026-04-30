@@ -292,11 +292,21 @@ async function provisionNewMachine(
     }
   }
 
-  // Wait for machine to start
-  await provider.waitForState(provisionResult.machineId, ['running'], 180000, flyAppName);
+  // Wait for machine to start. 10 min cap (was 3 min) — during the
+  // per-app-isolation rollout, Fly's machine boot scheduling has been
+  // observed taking many minutes during IAD congestion. The migration
+  // runner needs the machine up before it can proceed with cutover, so
+  // a longer cap is preferable to failing mid-flight on a transient
+  // queue delay. The orphan resources and recovery path handle a
+  // genuine boot failure cleanly.
+  await provider.waitForState(provisionResult.machineId, ['running'], 600_000, flyAppName);
 
-  // Wait for health checks
-  await provider.waitForHealthy(provisionResult.machineId, 60000, flyAppName);
+  // Wait for health checks. 5 min cap (was 1 min) — same reasoning as
+  // the boot-state wait above. waitForHealthy returns silently on
+  // timeout (without throwing), so the migration / provision can
+  // complete even if the first health check is slow; this just gives
+  // the machine more time to settle in for routing.
+  await provider.waitForHealthy(provisionResult.machineId, 300_000, flyAppName);
 
   // Update status to online
   await db
