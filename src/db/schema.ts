@@ -723,6 +723,12 @@ export const servers = pgTable('servers', {
   region: text('region'), // Provider region (e.g., 'iad', 'fsn1')
   volumeId: text('volume_id'), // Provider volume ID for persistent storage
   provider: text('provider').$type<'fly'>().notNull().default('fly'), // Infrastructure provider
+  // Fly app + private network owning this workspace's machine. Per-tenant
+  // isolation: each workspace lives in its own Fly app on a dedicated 6PN
+  // network so peers cannot reach each other. Null = legacy machine in the
+  // shared FLY_APP_NAME app (see docs/per-app-isolation-migration.md).
+  flyAppName: text('fly_app_name'),
+  flyNetworkName: text('fly_network_name'),
   tier: text('tier').$type<ServerTier>().default('shared-cpu-1x'), // Machine tier based on hardware specs
   iconUrl: text('icon_url'), // Custom server icon (base64 data URL)
   // Auto-suspend settings

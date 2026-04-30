@@ -177,6 +177,24 @@ export class FlyProvider implements IProvider {
     ];
   }
 
+  // ---- App / network lifecycle ----
+
+  async createApp(appName: string, networkName: string): Promise<void> {
+    await FlyService.createApp(appName, networkName);
+  }
+
+  async deleteApp(appName: string): Promise<void> {
+    await FlyService.deleteApp(appName);
+  }
+
+  async allocateIPs(appName: string, opts?: { sharedV4?: boolean; v6?: boolean }): Promise<void> {
+    await FlyService.allocateIPs(appName, opts);
+  }
+
+  async addCertificate(appName: string, hostname: string): Promise<void> {
+    await FlyService.addCertificate(appName, hostname);
+  }
+
   // ---- Machine lifecycle ----
 
   async createMachine(options: CreateMachineOptions): Promise<ProvisionResult> {
@@ -189,6 +207,7 @@ export class FlyProvider implements IProvider {
       tier: flyTier,
       existingVolumeId: options.existingVolumeId,
       autoSuspendEnabled: options.autoSuspendEnabled,
+      appName: options.appName,
     });
 
     return {
@@ -197,98 +216,109 @@ export class FlyProvider implements IProvider {
       serverUrl: result.url,
       region: result.region,
       volumeId: result.volumeId,
+      appName: options.appName ?? null,
+      networkName: options.networkName ?? null,
     };
   }
 
-  async getMachineState(machineId: string): Promise<MachineState> {
-    const machine = await FlyService.getMachine(machineId);
+  async getMachineState(machineId: string, appName?: string | null): Promise<MachineState> {
+    const machine = await FlyService.getMachine(machineId, appName);
     return mapFlyState(machine.state);
   }
 
-  async getMachineInfo(machineId: string): Promise<MachineInfo> {
-    const machine = await FlyService.getMachine(machineId);
+  async getMachineInfo(machineId: string, appName?: string | null): Promise<MachineInfo> {
+    const machine = await FlyService.getMachine(machineId, appName);
     return mapFlyMachine(machine);
   }
 
-  async startMachine(machineId: string): Promise<void> {
-    await FlyService.startMachine(machineId);
+  async startMachine(machineId: string, appName?: string | null): Promise<void> {
+    await FlyService.startMachine(machineId, appName);
   }
 
-  async stopMachine(machineId: string): Promise<void> {
-    await FlyService.stopMachine(machineId);
+  async stopMachine(
+    machineId: string,
+    appName?: string | null,
+    options?: { disableAutostart?: boolean },
+  ): Promise<void> {
+    await FlyService.stopMachine(machineId, appName, options);
   }
 
-  async suspendMachine(machineId: string): Promise<void> {
-    await FlyService.suspendMachine(machineId);
+  async suspendMachine(machineId: string, appName?: string | null): Promise<void> {
+    await FlyService.suspendMachine(machineId, appName);
   }
 
-  async restartMachine(machineId: string): Promise<void> {
-    await FlyService.restartMachine(machineId);
+  async restartMachine(machineId: string, appName?: string | null): Promise<void> {
+    await FlyService.restartMachine(machineId, appName);
   }
 
-  async updateMachineImage(machineId: string): Promise<void> {
-    await FlyService.updateMachineImage(machineId);
+  async updateMachineImage(machineId: string, appName?: string | null): Promise<void> {
+    await FlyService.updateMachineImage(machineId, appName);
   }
 
-  async deleteMachine(machineId: string): Promise<void> {
-    await FlyService.deleteMachine(machineId);
+  async deleteMachine(machineId: string, appName?: string | null): Promise<void> {
+    await FlyService.deleteMachine(machineId, appName);
   }
 
   // ---- Volume management ----
 
-  async createVolume(name: string, region: string, sizeGb?: number): Promise<VolumeInfo> {
-    const vol = await FlyService.createVolume(name, region, sizeGb);
+  async createVolume(name: string, region: string, sizeGb?: number, appName?: string | null): Promise<VolumeInfo> {
+    const vol = await FlyService.createVolume(name, region, sizeGb, appName);
     return { id: vol.id, name: vol.name, state: vol.state, sizeGb: vol.size_gb, region: vol.region };
   }
 
-  async getVolume(volumeId: string): Promise<VolumeInfo | null> {
-    const vol = await FlyService.getVolume(volumeId);
+  async getVolume(volumeId: string, appName?: string | null): Promise<VolumeInfo | null> {
+    const vol = await FlyService.getVolume(volumeId, appName);
     if (!vol) return null;
     return { id: vol.id, name: vol.name, state: vol.state, sizeGb: vol.size_gb, region: vol.region };
   }
 
-  async extendVolume(volumeId: string, newSizeGb: number): Promise<void> {
-    await FlyService.extendVolume(volumeId, newSizeGb);
+  async extendVolume(volumeId: string, newSizeGb: number, appName?: string | null): Promise<void> {
+    await FlyService.extendVolume(volumeId, newSizeGb, appName);
   }
 
-  async createVolumeFromSnapshot(snapshotId: string, name: string, region: string, sizeGb: number): Promise<VolumeInfo> {
-    const vol = await FlyService.createVolumeFromSnapshot(snapshotId, name, region, sizeGb);
+  async createVolumeFromSnapshot(snapshotId: string, name: string, region: string, sizeGb: number, appName?: string | null): Promise<VolumeInfo> {
+    const vol = await FlyService.createVolumeFromSnapshot(snapshotId, name, region, sizeGb, appName);
     return { id: vol.id, name: vol.name, state: vol.state, sizeGb: vol.size_gb, region: vol.region };
   }
 
-  async forkVolume(sourceVolumeId: string, name: string, region: string, sizeGb?: number): Promise<VolumeInfo> {
-    const vol = await FlyService.forkVolume(sourceVolumeId, name, region, sizeGb);
+  async forkVolume(sourceVolumeId: string, name: string, region: string, sizeGb?: number, appName?: string | null): Promise<VolumeInfo> {
+    const vol = await FlyService.forkVolume(sourceVolumeId, name, region, sizeGb, appName);
     return { id: vol.id, name: vol.name, state: vol.state, sizeGb: vol.size_gb, region: vol.region };
   }
 
-  async createSnapshot(volumeId: string): Promise<SnapshotInfo> {
-    return FlyService.createSnapshot(volumeId);
+  async createSnapshot(volumeId: string, appName?: string | null): Promise<SnapshotInfo> {
+    return FlyService.createSnapshot(volumeId, appName);
   }
 
-  async deleteVolume(volumeId: string): Promise<void> {
-    await FlyService.deleteVolume(volumeId);
+  async deleteVolume(volumeId: string, appName?: string | null): Promise<void> {
+    await FlyService.deleteVolume(volumeId, appName);
+  }
+
+  async waitForVolumeReady(volumeId: string, appName?: string | null, timeoutMs?: number): Promise<void> {
+    await FlyService.waitForVolumeReady(volumeId, appName, timeoutMs);
   }
 
   // ---- Health / waiting ----
 
-  async waitForState(machineId: string, targetStates: MachineState[], timeoutMs?: number): Promise<void> {
+  async waitForState(machineId: string, targetStates: MachineState[], timeoutMs?: number, appName?: string | null): Promise<void> {
     // Expand normalized states into Fly states
     const flyStates = targetStates.flatMap(machineStateToFlyStates);
-    await FlyService.waitForMachine(machineId, flyStates, timeoutMs);
+    await FlyService.waitForMachine(machineId, flyStates, timeoutMs, appName);
   }
 
-  async waitForHealthy(machineId: string, timeoutMs?: number): Promise<void> {
-    await FlyService.waitForMachineHealthy(machineId, timeoutMs);
+  async waitForHealthy(machineId: string, timeoutMs?: number, appName?: string | null): Promise<void> {
+    await FlyService.waitForMachineHealthy(machineId, timeoutMs, appName);
   }
 
   // ---- Routing ----
 
-  getRoutingInfo(machineId: string): RoutingInfo {
+  getRoutingInfo(machineId: string, appName?: string | null): RoutingInfo {
     // TODO: Switch to per-machine Cloudflare Tunnel URLs once all machines are backfilled.
     // For now, use Fly's shared proxy — tunnel DNS records (srv-{machineId}.runhq.io) don't
     // exist yet for most machines. The ensureServerTunnelConnector() backfill creates them
     // during wake/provision, but we need a one-time backfill for existing machines first.
-    const serverUrl = `https://${FlyService.getServerAppNamePublic()}.fly.dev`;
+    const app = appName || FlyService.getServerAppNamePublic();
+    const serverUrl = `https://${app}.fly.dev`;
     return {
       serverUrl,
       routingToken: machineId,
@@ -298,21 +328,21 @@ export class FlyProvider implements IProvider {
 
   // ---- Machine config updates ----
 
-  async updateAutoSuspendPolicy(machineId: string, autoSuspendEnabled: boolean): Promise<void> {
-    await FlyService.updateMachineAutoSuspend(machineId, autoSuspendEnabled);
+  async updateAutoSuspendPolicy(machineId: string, autoSuspendEnabled: boolean, appName?: string | null): Promise<void> {
+    await FlyService.updateMachineAutoSuspend(machineId, autoSuspendEnabled, appName);
   }
 
-  async updateMachineEnv(machineId: string, env: Record<string, string>): Promise<void> {
+  async updateMachineEnv(machineId: string, env: Record<string, string>, appName?: string | null): Promise<void> {
     // Use ensureMachineTunnelToken for TUNNEL_TOKEN, or updateMachineConfig for generic env
     if (env.TUNNEL_TOKEN) {
-      await FlyService.ensureMachineTunnelToken(machineId, env.TUNNEL_TOKEN);
+      await FlyService.ensureMachineTunnelToken(machineId, env.TUNNEL_TOKEN, appName);
     }
   }
 
   // ---- Fleet ----
 
-  async listMachines(): Promise<MachineInfo[]> {
-    const machines = await FlyService.listMachines();
+  async listMachines(appName?: string | null): Promise<MachineInfo[]> {
+    const machines = await FlyService.listMachines(appName);
     return machines.map(mapFlyMachine);
   }
 }

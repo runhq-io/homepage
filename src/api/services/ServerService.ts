@@ -40,7 +40,8 @@ import * as ServerSessionService from './ServerSessionService';
 import { getUserByEmail } from '../../db/services';
 import { getProvider, isAnyProviderConfigured, getDefaultProviderId } from './providers/registry';
 import { flyTierToTierId, tierIdToFlyTier } from './providers/FlyProvider';
-import type { ProviderId } from './providers/types';
+import { workspaceAppName, workspaceNetworkName } from './FlyService';
+import type { ProviderId, VolumeInfo } from './providers/types';
 import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
 
 // Server is considered offline after 60 seconds without heartbeat
@@ -134,9 +135,39 @@ async function provisionNewMachine(
   existingTunnelId?: string | null,
   providerId?: ProviderId,
   tokenHash?: string,
+  // Target Fly app for the new machine. Caller's responsibility to pick:
+  //   • null  → use legacy shared app (env-default). For pre-migration
+  //     workspaces undergoing changeRegion / changeTier / reprovision, this
+  //     keeps the new machine in the same app as the existing volume so
+  //     getOrCreateVolume can reuse it instead of creating an empty one
+  //     (which would orphan real data — see docs/per-app-isolation-migration.md).
+  //   • set  → use this per-tenant app. The app must already exist; the
+  //     `createWorkspaceApp` helper used by createServer / migrate handles
+  //     that. provisionNewMachine no longer auto-creates the app, so this
+  //     argument is the only thing that determines target app.
+  flyAppName?: string | null,
+  flyNetworkName?: string | null,
 ): Promise<{ machineId: string; machineName: string; url: string; region: string; volumeId: string }> {
   const resolvedProviderId = providerId || getDefaultProviderId();
   const provider = getProvider(resolvedProviderId);
+
+  // When a per-tenant target was supplied, ensure the Fly app exists. Idempotent —
+  // createApp treats "already taken" as success — so this is safe whether the
+  // app was already created (createServer pre-flight, prior retry, migration
+  // step 3) or this is the first call. Keeping the call inside provisionNewMachine
+  // means callers don't have to remember to create the app separately and
+  // retries from any code path (reprovisionRemoteServer included) self-heal
+  // the case where a prior createApp crashed mid-flight.
+  if (flyAppName && flyNetworkName) {
+    await provider.createApp(flyAppName, flyNetworkName);
+    // Public-ingress prereq for per-tenant apps: allocate anycast IPs so the
+    // app's own `.fly.dev` hostname resolves and Fly's edge can route TLS
+    // traffic to it. POST /v1/apps doesn't auto-allocate; without this, the
+    // CF DNS CNAME we install below would point at an unreachable hostname
+    // and the workspace would 504 from outside (see
+    // runhq/docs/per-app-isolation-migration.md, Path A).
+    await provider.allocateIPs(flyAppName);
+  }
 
   // Create Cloudflare tunnel for all providers (routes traffic through CF for TLS + IP hiding)
   let tunnelId: string | null = null;
@@ -161,6 +192,8 @@ async function provisionNewMachine(
       tier: tierId,
       autoSuspendEnabled,
       existingVolumeId,
+      appName: flyAppName ?? null,
+      networkName: flyNetworkName ?? null,
     });
   } catch (error) {
     if (createdTunnelId) {
@@ -173,16 +206,19 @@ async function provisionNewMachine(
     throw error;
   }
 
-  // Add server ingress rule + DNS record so the tunnel routes to localhost:61987
-  if (tunnelId && provisionResult.machineId) {
-    const serverSubdomain = `srv-${provisionResult.machineId}`;
-    await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
-    await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
-  }
-
   // Save machine details immediately to prevent orphaned machines if wait times out.
   // Also atomically update tokenHash here (not before provisioning) so the old machine
   // can still register if provisioning fails — prevents orphaned-token mismatches.
+  // Only write flyAppName / flyNetworkName when the caller explicitly targeted a
+  // per-tenant app — for legacy callers (null) we must leave the existing columns
+  // untouched so we don't accidentally flip a row to per-tenant or null out an
+  // already-migrated row.
+  //
+  // CRITICAL ORDERING: this DB write MUST come before any further provisioning
+  // step (DNS, cert, waits). Any step after this can fail and leave the
+  // workspace in a partial-but-recoverable state — the row already references
+  // the new machine, so reprovision/restart paths can re-run the missing
+  // setup via ensureServerTunnelConnector. Phase 5's invariant.
   const machineUpdate: Record<string, unknown> = {
     serverUrl: provisionResult.serverUrl,
     machineId: provisionResult.machineId,
@@ -193,6 +229,10 @@ async function provisionNewMachine(
     tunnelToken: null,
     updatedAt: new Date(),
   };
+  if (flyAppName) {
+    machineUpdate.flyAppName = flyAppName;
+    machineUpdate.flyNetworkName = flyNetworkName ?? null;
+  }
   if (tokenHash) {
     machineUpdate.tokenHash = tokenHash;
   }
@@ -201,11 +241,62 @@ async function provisionNewMachine(
     .set(machineUpdate)
     .where(eq(servers.id, serverId));
 
+  // Public ingress setup. Two paths depending on per-tenant vs legacy:
+  //
+  //   PER-TENANT (flyAppName set): install a CF DNS CNAME
+  //   `srv-<machineId>.<domain>` → `<perTenantApp>.fly.dev` to override the
+  //   wildcard `*.<domain>` (which points at the legacy shared app and
+  //   would land traffic on the wrong Fly app — fly-replay can't cross
+  //   apps). Also issue a Fly cert. The CF tunnel ingress rule is added
+  //   either way because cloudflared inside the workspace also handles
+  //   preview-port forwarding.
+  //
+  //   LEGACY (flyAppName null): rely on the wildcard CNAME → shared app +
+  //   Fly's intra-app fly-replay; cfargotunnel CNAME for the ingress-rule
+  //   path used by preview ports.
+  //
+  // BEST-EFFORT: this runs AFTER the DB cutover above. Any failure here
+  // leaves the workspace with a real machine + DB row referencing it but
+  // possibly broken public routing. Subsequent restart / wake / admin
+  // backfill calls ensureServerTunnelConnector which re-runs the same
+  // logic idempotently. Better than throwing and stranding a healthy
+  // machine over a transient CF or Fly API blip.
+  if (tunnelId && provisionResult.machineId) {
+    const serverSubdomain = `srv-${provisionResult.machineId}`;
+    try {
+      await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
+
+      if (flyAppName) {
+        const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
+        const fullHostname = `${serverSubdomain}.${previewDomain}`;
+        // Write the override CNAME on the WORKSPACE zone (the same zone as
+        // the wildcard *.<previewDomain> we need to override), NOT the
+        // public-ports zone (runhq.io) which the legacy createDnsRecord
+        // targets and which would put our record in the wrong place.
+        await CloudflareTunnelService.createWorkspaceCnameRecord(fullHostname, `${flyAppName}.fly.dev`);
+        // Issue Fly cert for the subdomain. Fly validates via ACME (HTTP-01
+        // through CF proxy or Fly's own challenge), so this comes AFTER the
+        // CNAME. addCertificate is best-effort internally — a pending/failed
+        // validation doesn't block user traffic because CF's edge wildcard
+        // cert handles user-facing TLS regardless.
+        await provider.addCertificate(flyAppName, fullHostname);
+      } else {
+        await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+      }
+    } catch (ingressErr) {
+      console.error(
+        `[ServerService] Public-ingress setup failed for server ${serverId} (machine ${provisionResult.machineId}). ` +
+        `Workspace row references the new machine; subsequent restart/admin-backfill will retry via ensureServerTunnelConnector. ` +
+        `Error:`, ingressErr
+      );
+    }
+  }
+
   // Wait for machine to start
-  await provider.waitForState(provisionResult.machineId, ['running'], 180000);
+  await provider.waitForState(provisionResult.machineId, ['running'], 180000, flyAppName);
 
   // Wait for health checks
-  await provider.waitForHealthy(provisionResult.machineId, 60000);
+  await provider.waitForHealthy(provisionResult.machineId, 60000, flyAppName);
 
   // Update status to online
   await db
@@ -257,6 +348,16 @@ export async function createServer(
 
   const providerId = (data.provider || getDefaultProviderId()) as ProviderId;
 
+  // Pre-compute the per-tenant Fly app + network names for remote workspaces
+  // and persist them on the row at insert time. The names are deterministic
+  // from data.id, so this is idempotent and durable across retries: if first
+  // provisioning fails before the machine row write, the row still records
+  // "this workspace is destined for ws-<id>" so reprovisionRemoteServer
+  // (kicked off by the session endpoint when machineId is missing) targets
+  // the correct app instead of falling back to the legacy shared one.
+  const flyAppName = deploymentType === 'remote' ? workspaceAppName(data.id) : null;
+  const flyNetworkName = deploymentType === 'remote' ? workspaceNetworkName(data.id) : null;
+
   const [server] = await db
     .insert(servers)
     .values({
@@ -270,6 +371,8 @@ export async function createServer(
       region: data.region || 'ash',
       autoSuspendEnabled: true,
       status: deploymentType === 'remote' ? 'offline' : null,
+      flyAppName,
+      flyNetworkName,
     })
     .returning();
 
@@ -295,7 +398,25 @@ export async function createServer(
         .update(servers)
         .set({ status: 'provisioning', updatedAt: new Date() })
         .where(eq(servers.id, server.id));
-      provisionNewMachine(server.id, serverToken, data.region || 'ash', data.tier, server.autoSuspendEnabled ?? true, undefined, undefined, providerId).catch(async (error) => {
+      // provisionNewMachine creates the per-tenant Fly app itself (idempotent)
+      // when called with non-null flyAppName/flyNetworkName, so we just pass
+      // the names persisted at row insert above. If this attempt fails, the
+      // names remain on the row and the session-endpoint-driven retry path
+      // (reprovisionRemoteServer) picks up the same app name — no shared-app
+      // fallback.
+      provisionNewMachine(
+        server.id,
+        serverToken,
+        data.region || 'ash',
+        data.tier,
+        server.autoSuspendEnabled ?? true,
+        undefined,
+        undefined,
+        providerId,
+        undefined,
+        flyAppName,
+        flyNetworkName,
+      ).catch(async (error) => {
         console.error(`[ServerService] Background provisioning failed for ${server.id}:`, error);
         await db
           .update(servers)
@@ -363,7 +484,7 @@ export async function getServerByMachineId(machineId: string): Promise<Server | 
 export async function ensureServerTunnelConnector(
   serverId: string,
   options: { requireMachineUpdate?: boolean } = {},
-): Promise<{ tunnelId: string } | null> {
+): Promise<{ tunnelId: string; warnings: string[] } | null> {
   const server = await getServer(serverId);
   if (!server || server.deploymentType !== 'remote') {
     return null;
@@ -372,6 +493,12 @@ export async function ensureServerTunnelConnector(
   if (!CloudflareTunnelService.isConfigured()) {
     return null;
   }
+
+  // Per-step warnings collected here are returned to the caller so admin
+  // backfill / public-port-creation paths can surface partial-success
+  // results instead of reporting a blanket "ok" when (e.g.) allocateIPs
+  // failed silently.
+  const warnings: string[] = [];
 
   const { tunnelId, tunnelToken } = await getOrCreateTunnelCredentials(serverId, server.tunnelId);
 
@@ -389,25 +516,71 @@ export async function ensureServerTunnelConnector(
   if (server.machineId) {
     try {
       const provider = getProvider((server.provider || 'fly') as ProviderId);
-      await provider.updateMachineEnv(server.machineId, { TUNNEL_TOKEN: tunnelToken });
+      await provider.updateMachineEnv(server.machineId, { TUNNEL_TOKEN: tunnelToken }, server.flyAppName);
     } catch (error) {
       if (options.requireMachineUpdate) {
         throw error;
       }
-      console.warn(`[ServerService] Failed to ensure tunnel token on machine ${server.machineId}:`, error);
+      const msg = `Failed to ensure tunnel token on machine ${server.machineId}: ${error instanceof Error ? error.message : String(error)}`;
+      console.warn(`[ServerService] ${msg}`);
+      warnings.push(msg);
     }
 
-    // Add server routing ingress rule + DNS record (backfill for existing servers)
+    // Add server routing ingress rule + DNS record (backfill for existing servers).
+    //
+    // The DNS record target depends on whether this is a per-tenant or legacy
+    // workspace. Important: with per-tenant apps the wildcard CNAME
+    // *.<domain> → legacy app would silently misroute traffic for this
+    // machine; we install a SPECIFIC record overriding the wildcard.
+    //
+    // This branch is also the recovery path for pre-Phase-6 per-tenant
+    // workspaces (those created in the Phase 2-only window before the
+    // public-ingress code existed): admins can run the
+    // /api/admin/backfill-tunnel-dns endpoint and it self-heals via the
+    // calls below — allocateIPs (idempotent), CNAME (overrides wildcard),
+    // certificate (idempotent).
     try {
       const serverSubdomain = `srv-${server.machineId}`;
       await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
-      await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+
+      if (server.flyAppName) {
+        const provider = getProvider((server.provider || 'fly') as ProviderId);
+        // Make sure the per-tenant app has public IPs. For workspaces created
+        // pre-Phase-6 the app was created without IPs and `<app>.fly.dev`
+        // doesn't resolve; without this, the CNAME below would point at an
+        // unreachable hostname.
+        try {
+          await provider.allocateIPs(server.flyAppName);
+        } catch (allocErr) {
+          const msg = `allocateIPs failed for ${server.flyAppName}: ${allocErr instanceof Error ? allocErr.message : String(allocErr)}`;
+          console.warn(`[ServerService] ${msg}`);
+          warnings.push(msg);
+        }
+
+        const previewDomain = process.env.PREVIEW_DOMAIN ?? 'tank.fish';
+        const fullHostname = `${serverSubdomain}.${previewDomain}`;
+        // Same zone choice as provisionNewMachine — must be the workspace
+        // zone (CLOUDFLARE_ZONE_ID) so the override actually shadows the
+        // wildcard *.<previewDomain>.
+        await CloudflareTunnelService.createWorkspaceCnameRecord(fullHostname, `${server.flyAppName}.fly.dev`);
+        try {
+          await provider.addCertificate(server.flyAppName, fullHostname);
+        } catch (certErr) {
+          const msg = `addCertificate failed for ${fullHostname}: ${certErr instanceof Error ? certErr.message : String(certErr)}`;
+          console.warn(`[ServerService] ${msg}`);
+          warnings.push(msg);
+        }
+      } else {
+        await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
+      }
     } catch (error) {
-      console.warn(`[ServerService] Failed to add server ingress rule during backfill for ${server.machineId}:`, error);
+      const msg = `Failed to add server ingress rule for ${server.machineId}: ${error instanceof Error ? error.message : String(error)}`;
+      console.warn(`[ServerService] ${msg}`);
+      warnings.push(msg);
     }
   }
 
-  return { tunnelId };
+  return { tunnelId, warnings };
 }
 
 
@@ -548,7 +721,7 @@ export async function updateServer(
   ) {
     try {
       const provider = getProvider((server.provider || 'fly') as ProviderId);
-      await provider.updateAutoSuspendPolicy(server.machineId, data.autoSuspendEnabled);
+      await provider.updateAutoSuspendPolicy(server.machineId, data.autoSuspendEnabled, server.flyAppName);
     } catch (error) {
       console.error(`[ServerService] Failed to update machine autostop config:`, error);
       // Don't fail the update -- DB is already updated
@@ -1642,7 +1815,7 @@ export async function checkAutoSuspend(): Promise<void> {
 
     try {
       const provider = getProvider((server.provider || 'fly') as ProviderId);
-      await provider.suspendMachine(server.machineId!);
+      await provider.suspendMachine(server.machineId!, server.flyAppName);
 
       // Stop billing and mark offline
       await MachineUsageService.onMachineStopped(server.id);
@@ -1736,7 +1909,7 @@ export async function wakeRemoteServerInternal(
   // Check current machine status
   const provider = getProvider((server.provider || 'fly') as ProviderId);
   try {
-    const machineState = await provider.getMachineState(server.machineId);
+    const machineState = await provider.getMachineState(server.machineId, server.flyAppName);
 
     if (machineState === 'running') {
       // Already running - no wait needed
@@ -1746,8 +1919,8 @@ export async function wakeRemoteServerInternal(
     if (machineState === 'starting') {
       // Already starting - just wait for it to be ready
       console.log(`[ServerService] Machine ${server.machineId} is already starting, waiting...`);
-      await provider.waitForState(server.machineId, ['running'], 90000);
-      await provider.waitForHealthy(server.machineId, 60000);
+      await provider.waitForState(server.machineId, ['running'], 90000, server.flyAppName);
+      await provider.waitForHealthy(server.machineId, 60000, server.flyAppName);
 
       // Update status — clear idleSince so fresh idle tracking starts
       await db
@@ -1781,11 +1954,11 @@ export async function wakeRemoteServerInternal(
       console.log(`[ServerService] Waking machine ${server.machineId} (state: ${machineState})`);
 
       // Start the machine
-      await provider.startMachine(server.machineId);
+      await provider.startMachine(server.machineId, server.flyAppName);
 
       // Wait for it to be ready and healthy
-      await provider.waitForState(server.machineId, ['running'], 90000);
-      await provider.waitForHealthy(server.machineId, 60000);
+      await provider.waitForState(server.machineId, ['running'], 90000, server.flyAppName);
+      await provider.waitForHealthy(server.machineId, 60000, server.flyAppName);
 
       // Update status — clear idleSince so fresh idle tracking starts
       await db
@@ -1803,7 +1976,7 @@ export async function wakeRemoteServerInternal(
 
     // Machine is in another state (stopping, etc.) - wait and retry
     console.log(`[ServerService] Machine ${server.machineId} is in ${machineState} state, waiting...`);
-    await provider.waitForState(server.machineId, ['running', 'stopped', 'suspended'], 90000);
+    await provider.waitForState(server.machineId, ['running', 'stopped', 'suspended'], 90000, server.flyAppName);
 
     // Retry after waiting - re-fetch server for fresh state
     const refreshed = await getServer(serverId);
@@ -1877,11 +2050,11 @@ export async function restartRemoteServer(
     const provider = getProvider((server.provider || 'fly') as ProviderId);
     console.log(`[ServerService] Restarting machine ${server.machineId} for server ${serverId} (with image update)`);
 
-    await provider.updateMachineImage(server.machineId);
+    await provider.updateMachineImage(server.machineId, server.flyAppName);
 
     // Wait for it to be ready and healthy
-    await provider.waitForState(server.machineId, ['running'], 30000);
-    await provider.waitForHealthy(server.machineId, 45000);
+    await provider.waitForState(server.machineId, ['running'], 30000, server.flyAppName);
+    await provider.waitForHealthy(server.machineId, 45000, server.flyAppName);
 
     // Update status
     await db
@@ -1951,7 +2124,7 @@ export async function reprovisionRemoteServer(
   if (server.machineId) {
     try {
       const provider = getProvider((server.provider || 'fly') as ProviderId);
-      const machineState = await provider.getMachineState(server.machineId);
+      const machineState = await provider.getMachineState(server.machineId, server.flyAppName);
       if (machineState !== 'destroyed') {
         console.log(`[ServerService] Machine ${server.machineId} exists, waking instead of reprovisioning`);
         return wakeRemoteServer(serverId, userId);
@@ -1984,7 +2157,11 @@ export async function reprovisionRemoteServer(
       .set({ status: 'provisioning', updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
-    // Pass existing volumeId so reprovision reuses the same volume instead of creating a new empty one
+    // Pass existing volumeId so reprovision reuses the same volume instead of creating a new empty one.
+    // Pass through the server's existing Fly app — null for legacy (machine + volume in shared app),
+    // ws-<id> for already-migrated (machine + volume in that per-tenant app). Critically, we do NOT
+    // auto-promote a legacy workspace to per-tenant here: the existing volume lives in the shared
+    // app and would be orphaned. Promotion is the migration tool's job.
     const result = await provisionNewMachine(
       server.id,
       serverToken,
@@ -1995,6 +2172,8 @@ export async function reprovisionRemoteServer(
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
       tokenHash,
+      server.flyAppName,
+      server.flyNetworkName,
     );
 
     return { success: true, status: 'online', url: result.url };
@@ -2052,6 +2231,377 @@ export async function validateChangeRegion(
   }
 
   return { success: true };
+}
+
+// ============================================================================
+// Per-tenant Fly app migration
+// ============================================================================
+
+export interface MigrationResult {
+  serverId: string;
+  oldAppName: string;
+  newAppName: string;
+  oldMachineId: string;
+  newMachineId: string;
+  oldVolumeId: string;
+  newVolumeId: string;
+  snapshotId: string;
+  durationMs: number;
+}
+
+/**
+ * Return server IDs that still live on the legacy shared Fly app
+ * (i.e. `flyAppName IS NULL`). Drives the bulk-migration runner.
+ */
+export async function listLegacyWorkspaceServerIds(): Promise<Array<{
+  id: string;
+  name: string;
+  status: ServerStatusType | null;
+  region: string | null;
+  machineId: string | null;
+  volumeId: string | null;
+}>> {
+  const rows = await db
+    .select({
+      id: servers.id,
+      name: servers.name,
+      status: servers.status,
+      region: servers.region,
+      machineId: servers.machineId,
+      volumeId: servers.volumeId,
+    })
+    .from(servers)
+    .where(and(
+      eq(servers.deploymentType, 'remote'),
+      isNull(servers.flyAppName),
+    ));
+  return rows;
+}
+
+/**
+ * Migrate a legacy workspace from the shared Fly app to its own per-tenant
+ * app on a dedicated 6PN network (see docs/per-app-isolation-migration.md).
+ *
+ * Fly does not allow changing an app's network in-place, so the migration
+ * must recreate the machine + volume under a new app:
+ *
+ *   1. Stop the old machine cleanly so the volume snapshot is consistent.
+ *   2. Snapshot the old volume.
+ *   3. Create the new per-tenant app + network.
+ *   4. Restore the snapshot as a new volume in the new app.
+ *   5. Provision a new machine in the new app, mounting the restored volume.
+ *      `provisionNewMachine` (Phase 2) already wires up the per-tenant app
+ *      and persists `flyAppName` / `flyNetworkName` on the server row, so
+ *      step 5 is the atomic cutover point: until it returns, the DB still
+ *      points at the old (now-stopped) machine and we can safely abort.
+ *   6. Delete old machine + volume from the shared app.
+ *
+ * Per-workspace downtime ≈ 2–3 minutes (between step 1 and step 5 succeeding).
+ *
+ * Idempotent on retry where it can be: createApp is idempotent, and
+ * `provisionNewMachine` will reuse the restored volume by id. If the
+ * function fails after step 5 but before step 6, the next invocation will
+ * see `flyAppName` populated and short-circuit (already migrated) — leaving
+ * a stale old machine + volume that an operator can reap manually.
+ */
+export async function migrateWorkspaceToOwnApp(serverId: string): Promise<MigrationResult> {
+  const startedAt = Date.now();
+  const server = await getServer(serverId);
+  if (!server) {
+    throw new Error(`Server ${serverId} not found`);
+  }
+  if (server.deploymentType !== 'remote') {
+    throw new Error(`Server ${serverId} is not a remote workspace`);
+  }
+  if (server.flyAppName) {
+    throw new Error(`Server ${serverId} is already on per-tenant app ${server.flyAppName}; nothing to migrate`);
+  }
+  if (!server.machineId || !server.volumeId) {
+    throw new Error(`Server ${serverId} has no machine or volume to migrate from`);
+  }
+
+  const oldMachineId = server.machineId;
+  const oldVolumeId = server.volumeId;
+  const region = server.region || 'iad';
+  const oldAppName = process.env.SERVER_APP || process.env.FLY_APP_NAME || 'fishtank-workspaces';
+  const newAppName = workspaceAppName(serverId);
+  const newNetworkName = workspaceNetworkName(serverId);
+  const provider = getProvider((server.provider || 'fly') as ProviderId);
+
+  console.log(`[ServerService] Migrating ${serverId} from ${oldAppName} to ${newAppName}`);
+
+  // Gate concurrent traffic for the duration of the migration. The session
+  // endpoint blocks wakes when status === 'provisioning'; without this flip,
+  // a user request mid-migration would call wakeRemoteServerInternal →
+  // startMachine on the legacy machine after the snapshot was already taken,
+  // and any writes the user makes between then and cutover would land only
+  // in the old volume and disappear when migration completes. changeRegion
+  // and changeTier already use this gate; migration does the same.
+  await db
+    .update(servers)
+    .set({ status: 'provisioning', updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  // Track partial state so a single outer recovery handler knows what to
+  // clean up depending on which step threw. ANY failure between this point
+  // and a successful provisionNewMachine() must drop the provisioning gate
+  // we just set, otherwise the workspace is permanently un-wakeable and
+  // operators have to intervene by hand.
+  let snapshot: { id: string } | undefined;
+  let appCreated = false;
+  let newVolume: VolumeInfo | undefined;
+  let provisionResult: { machineId: string; machineName: string; url: string; region: string; volumeId: string } | undefined;
+
+  try {
+    // Stop billing for the old machine before we begin teardown — we'll start a
+    // fresh tick for the new machine via provisionNewMachine.
+    await MachineUsageService.onMachineStopped(serverId);
+
+    // 1. Stop the old machine so the volume is quiesced before snapshot.
+    //
+    // `disableAutostart: true` is critical here. Workspace machines have
+    // `autostart: true` on their services so Fly's edge auto-wakes them
+    // on incoming traffic. An open browser tab pointed at the workspace
+    // (WebSocket, terminal, file editor, preview port) keeps generating
+    // traffic, which would race-restart the machine mid-snapshot — the
+    // volume would never quiesce, Fly's snapshot stays in `running`
+    // state past our poll timeout, and step 4 fails with "snapshot not
+    // found". Disabling autostart makes the stop durable for the
+    // duration of the snapshot. The machine is deleted at step 7
+    // anyway, so we don't need to restore the flag.
+    try {
+      await provider.stopMachine(oldMachineId, oldAppName, { disableAutostart: true });
+      await provider.waitForState(oldMachineId, ['stopped'], 60_000, oldAppName);
+    } catch (err) {
+      console.warn(`[ServerService] Could not stop old machine ${oldMachineId} cleanly: ${err}. Proceeding with snapshot anyway.`);
+    }
+
+    // 2. Snapshot old volume. createSnapshot polls until ready (~1–2 min).
+    snapshot = await provider.createSnapshot(oldVolumeId, oldAppName);
+    console.log(`[ServerService] Snapshotted ${oldVolumeId} → ${snapshot.id}`);
+
+    // 3. Create per-tenant app + network. Idempotent; safe to retry.
+    await provider.createApp(newAppName, newNetworkName);
+    appCreated = true;
+
+    // 4. Restore the snapshot as a new volume inside the new app.
+    const oldVolume = await provider.getVolume(oldVolumeId, oldAppName);
+    const sizeGb = oldVolume?.sizeGb ?? 1;
+    const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+    newVolume = await provider.createVolumeFromSnapshot(
+      snapshot.id,
+      `data_${sanitizedId}`,
+      region,
+      sizeGb,
+      newAppName,
+    );
+    console.log(`[ServerService] Restored snapshot into ${newVolume.id} (${newAppName})`);
+
+    // 4b. Wait for the restored volume to finish hydrating before
+    // mounting it. createVolumeFromSnapshot returns the volume ID
+    // immediately; Fly populates the data in the background, with the
+    // volume's `state` field staying `restoring` until done.
+    //
+    // Without this wait, the next step's call into provisionNewMachine
+    // → getOrCreateVolume would see `state !== 'created'` and create a
+    // fresh EMPTY volume instead, silently dropping the restored data
+    // — observed once on a staging migration where the new machine
+    // ended up mounted on an empty 40 GiB volume while the actual
+    // restored data sat orphaned in a different (created-state)
+    // volume. See docs/per-app-isolation-migration.md and the
+    // commit message for ServerService waitForVolumeReady wiring.
+    await provider.waitForVolumeReady(newVolume.id, newAppName);
+
+    // 5. Provision a new machine in the new app, mounting the restored volume.
+    // The new app was already created in step 3; provisionNewMachine consumes
+    // newAppName / newNetworkName as the target. It writes the new
+    // machineId / volumeId / flyAppName / flyNetworkName / tokenHash to the
+    // server row immediately on createMachine success and BEFORE the
+    // wait-for-healthy steps — the outer catch below uses the row's
+    // flyAppName to detect whether the cutover crossed that line.
+    const newToken = generateServerToken();
+    const newTokenHash = hashServerToken(newToken);
+
+    provisionResult = await provisionNewMachine(
+      serverId,
+      newToken,
+      region,
+      server.tier as ServerTier | undefined,
+      server.autoSuspendEnabled ?? true,
+      newVolume.id,
+      server.tunnelId,
+      (server.provider || 'fly') as ProviderId,
+      newTokenHash,
+      newAppName,
+      newNetworkName,
+    );
+  } catch (err) {
+    console.error(`[ServerService] Migration failed for ${serverId} after status=provisioning:`, err);
+
+    // Recovery splits into two cases based on whether the provisionNewMachine
+    // DB write happened (cutover):
+    //
+    //   POST-cutover (refreshed.flyAppName === newAppName): the row already
+    //   references the new machine + new app + rotated tokenHash. Deleting
+    //   the new resources here would brick the workspace AND make it invisible
+    //   to retry runs (legacy-workspaces query filters on flyAppName IS NULL).
+    //   Leave everything intact, leave status='provisioning', surface a loud
+    //   warning so an operator inspects the new machine manually. Old machine
+    //   + volume in the shared app remain as a fallback.
+    //
+    //   PRE-cutover (everything else — including throws from onMachineStopped,
+    //   createSnapshot, createApp, createVolumeFromSnapshot, or provisionNewMachine
+    //   before its DB write): the row still references the old machine. Best-
+    //   effort delete any partial new resources we created (volume, app),
+    //   then drop the provisioning gate to status='offline' so the user can
+    //   wake the still-intact old machine in the shared app.
+    const refreshed = await getServer(serverId);
+    if (refreshed?.flyAppName === newAppName) {
+      console.error(
+        `[ServerService] Migration POST-CUTOVER failure for ${serverId}: ` +
+        `DB row already points at ${newAppName} (machine ${refreshed.machineId}). ` +
+        `New machine likely unhealthy. NOT deleting new resources. ` +
+        `Old machine ${oldMachineId} and volume ${oldVolumeId} remain in ${oldAppName} as fallback. ` +
+        `Status remains 'provisioning' so the workspace is gated until an operator investigates.`
+      );
+      throw err;
+    }
+
+    if (newVolume) {
+      try {
+        await provider.deleteVolume(newVolume.id, newAppName);
+      } catch (e) { console.warn(`[ServerService]   cleanup deleteVolume(${newVolume.id}) failed: ${e}`); }
+    }
+    if (appCreated) {
+      try {
+        await provider.deleteApp(newAppName);
+      } catch (e) { console.warn(`[ServerService]   cleanup deleteApp(${newAppName}) failed: ${e}`); }
+    }
+    // Note: orphaned snapshot (when failure happens between createSnapshot
+    // and createApp) is left for Fly's default retention to reap (~5 days).
+    // We don't have a deleteSnapshot in the provider abstraction yet.
+
+    await db
+      .update(servers)
+      .set({ status: 'offline', updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+
+    throw err;
+  }
+
+  // 6. Delete old machine + volume from the shared app. Independent of each
+  // other and best-effort: a failure here just leaks resources, the
+  // workspace itself is already on the new app.
+  try {
+    await provider.deleteMachine(oldMachineId, oldAppName);
+    console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
+  } catch (err) {
+    console.error(`[ServerService] Failed to delete old machine ${oldMachineId}:`, err);
+  }
+  try {
+    await provider.deleteVolume(oldVolumeId, oldAppName);
+    console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
+  } catch (err) {
+    console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, err);
+  }
+
+  const durationMs = Date.now() - startedAt;
+  console.log(`[ServerService] Migration complete for ${serverId}: ${oldAppName} → ${newAppName} in ${Math.round(durationMs / 1000)}s`);
+
+  return {
+    serverId,
+    oldAppName,
+    newAppName,
+    oldMachineId,
+    newMachineId: provisionResult.machineId,
+    oldVolumeId,
+    newVolumeId: newVolume.id,
+    snapshotId: snapshot.id,
+    durationMs,
+  };
+}
+
+/**
+ * Create a workspace in legacy shape — provisioned in the shared Fly app
+ * (`runhq-workspaces-staging` / `fishtank-workspaces`) with `fly_app_name`
+ * NULL on the row, exactly like a pre-Phase-2 workspace. Lets operators
+ * synthesize a migration target without redeploying master, so the
+ * `migrateWorkspaceToOwnApp` flow can be tested end-to-end on staging
+ * without disturbing already-migrated workspaces in the same env.
+ *
+ * Synchronous (awaits provisioning, unlike `createServer` which fires
+ * provisioning in the background with .catch). The admin caller wants
+ * to know whether the legacy machine actually came up before they try
+ * to migrate it.
+ *
+ * Skips the Stripe subscription gate that `createServer` enforces —
+ * this is an admin/operator path, not a self-serve user flow.
+ */
+export async function createLegacyTestServer(
+  ownerId: string,
+  name: string,
+  region: string = 'iad',
+  tier: ServerTier = 'shared-cpu-4x' as ServerTier,
+): Promise<{ serverId: string; machineId: string; serverUrl: string }> {
+  const serverId = `ws_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const serverToken = generateServerToken();
+  const tokenHash = hashServerToken(serverToken);
+
+  // Row is inserted with fly_app_name=NULL — that's what makes this a
+  // legacy-shape workspace. provisionNewMachine called with null flyAppName
+  // routes the machine into the env-default (shared) app and uses the
+  // legacy CloudflareTunnel.createDnsRecord ingress flow rather than the
+  // per-tenant CNAME flow.
+  await db.insert(servers).values({
+    id: serverId,
+    name,
+    ownerId,
+    tokenHash,
+    deploymentType: 'remote',
+    provider: 'fly',
+    tier,
+    region,
+    autoSuspendEnabled: true,
+    status: 'provisioning',
+    flyAppName: null,
+    flyNetworkName: null,
+  });
+
+  await db.insert(serverMembers).values({
+    serverId,
+    userId: ownerId,
+    role: 'owner',
+  });
+
+  console.log(`[ServerService] Created LEGACY test server ${serverId} for user ${ownerId} in shared Fly app`);
+
+  try {
+    const result = await provisionNewMachine(
+      serverId,
+      serverToken,
+      region,
+      tier,
+      true,
+      undefined,
+      undefined,
+      'fly',
+      undefined,
+      null, // flyAppName=null → legacy shared-app provisioning
+      null, // flyNetworkName=null
+    );
+    console.log(`[ServerService] LEGACY test server ${serverId} provisioned: machine ${result.machineId} at ${result.url}`);
+    return {
+      serverId,
+      machineId: result.machineId,
+      serverUrl: result.url,
+    };
+  } catch (err) {
+    await db
+      .update(servers)
+      .set({ status: 'error', updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+    throw err;
+  }
 }
 
 /**
@@ -2114,10 +2664,10 @@ export async function changeRegion(
     if (oldVolumeId) {
       const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
       const volumeName = `data_${sanitizedId}`;
-      const oldVolume = await provider.getVolume(oldVolumeId);
+      const oldVolume = await provider.getVolume(oldVolumeId, server.flyAppName);
       const sizeGb = oldVolume?.sizeGb || 1;
 
-      const forkedVolume = await provider.forkVolume(oldVolumeId, volumeName, region, sizeGb);
+      const forkedVolume = await provider.forkVolume(oldVolumeId, volumeName, region, sizeGb, server.flyAppName);
       forkedVolumeId = forkedVolume.id;
       console.log(`[ServerService] Forked volume ${oldVolumeId} -> ${forkedVolumeId} in ${region}`);
     }
@@ -2125,7 +2675,7 @@ export async function changeRegion(
     // Stop old machine (don't delete yet — volume fork may still be hydrating from source)
     if (oldMachineId) {
       try {
-        await provider.stopMachine(oldMachineId);
+        await provider.stopMachine(oldMachineId, server.flyAppName);
       } catch {
         // Machine may already be stopped
       }
@@ -2148,7 +2698,10 @@ export async function changeRegion(
       .set({ region: region, updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
-    // Create new machine in new region with forked volume
+    // Create new machine in new region with forked volume. forkVolume is intra-app
+    // (Fly's source_volume_id requires same app), so the forked volume lives in
+    // server.flyAppName — we pass that through so the new machine targets the
+    // same app as the volume. Legacy (null) → shared app; per-tenant → ws-<id>.
     const result = await provisionNewMachine(
       server.id,
       serverToken,
@@ -2159,14 +2712,18 @@ export async function changeRegion(
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
       tokenHash,
+      server.flyAppName,
+      server.flyNetworkName,
     );
 
     console.log(`[ServerService] Region changed to ${region}, new machine at ${result.url}`);
 
-    // Clean up old infrastructure after new machine is healthy
+    // Clean up old infrastructure after new machine is healthy.
+    // Old machine + volume live in the same per-tenant Fly app (workspaceAppName
+    // is deterministic from serverId, so changeRegion reuses the same app).
     if (oldMachineId) {
       try {
-        await provider.deleteMachine(oldMachineId);
+        await provider.deleteMachine(oldMachineId, server.flyAppName);
         console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
       } catch (cleanupError) {
         console.error(`[ServerService] Failed to delete old machine ${oldMachineId}:`, cleanupError);
@@ -2174,7 +2731,7 @@ export async function changeRegion(
     }
     if (oldVolumeId) {
       try {
-        await provider.deleteVolume(oldVolumeId);
+        await provider.deleteVolume(oldVolumeId, server.flyAppName);
         console.log(`[ServerService] Deleted old volume ${oldVolumeId}`);
       } catch (cleanupError) {
         console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, cleanupError);
@@ -2331,11 +2888,11 @@ export async function changeTier(
     // Stop and delete old machine (must be stopped before volume can be reattached)
     if (oldMachineId) {
       try {
-        await provider.stopMachine(oldMachineId);
+        await provider.stopMachine(oldMachineId, server.flyAppName);
       } catch {
         // Machine may already be stopped
       }
-      await provider.deleteMachine(oldMachineId);
+      await provider.deleteMachine(oldMachineId, server.flyAppName);
       console.log(`[ServerService] Deleted old machine ${oldMachineId}`);
     }
 
@@ -2347,12 +2904,12 @@ export async function changeTier(
       const tierSpec = provider.getTierSpecs().find(t => t.tierId === tierId);
       const newSizeGb = tierSpec?.diskGb || 1;
 
-      const currentVolume = await provider.getVolume(oldVolumeId);
+      const currentVolume = await provider.getVolume(oldVolumeId, server.flyAppName);
       const currentSizeGb = currentVolume?.sizeGb || 0;
 
       if (newSizeGb > currentSizeGb) {
         console.log(`[ServerService] Extending volume ${oldVolumeId} from ${currentSizeGb}GB to ${newSizeGb}GB`);
-        await provider.extendVolume(oldVolumeId, newSizeGb);
+        await provider.extendVolume(oldVolumeId, newSizeGb, server.flyAppName);
         console.log(`[ServerService] Volume extended successfully`);
       } else {
         console.log(`[ServerService] Reusing existing volume ${oldVolumeId} (${currentSizeGb}GB)`);
@@ -2376,7 +2933,10 @@ export async function changeTier(
       .set({ tier: newTier, updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
-    // Create new machine with new tier, reusing volume
+    // Create new machine with new tier, reusing volume. Volume + new machine
+    // must live in the same Fly app — pass server.flyAppName through so the
+    // legacy workspace stays on the shared app and the per-tenant workspace
+    // stays on ws-<id>. Same constraint as changeRegion above.
     const result = await provisionNewMachine(
       server.id,
       serverToken,
@@ -2387,6 +2947,8 @@ export async function changeTier(
       server.tunnelId,
       (server.provider || getDefaultProviderId()) as ProviderId,
       tokenHash,
+      server.flyAppName,
+      server.flyNetworkName,
     );
 
     console.log(`[ServerService] Tier changed to ${newTier}, new machine at ${result.url}`);
@@ -2441,7 +3003,7 @@ export async function extendServerVolume(
   }
 
   const provider = getProvider(server.provider as ProviderId);
-  const currentVolume = await provider.getVolume(server.volumeId);
+  const currentVolume = await provider.getVolume(server.volumeId, server.flyAppName);
   if (!currentVolume) {
     return { success: false, error: 'Volume not found' };
   }
@@ -2451,7 +3013,7 @@ export async function extendServerVolume(
   }
 
   try {
-    await provider.extendVolume(server.volumeId, newSizeGb);
+    await provider.extendVolume(server.volumeId, newSizeGb, server.flyAppName);
     console.log(`[ServerService] Extended volume for server ${serverId} from ${currentVolume.sizeGb}GB to ${newSizeGb}GB`);
     return { success: true, newSizeGb };
   } catch (err) {
@@ -2479,7 +3041,7 @@ export async function getRemoteServerStatus(
 
   try {
     const provider = getProvider((server.provider || 'fly') as ProviderId);
-    const machineState = await provider.getMachineState(server.machineId);
+    const machineState = await provider.getMachineState(server.machineId, server.flyAppName);
 
     // Map normalized machine state to our status
     let status: ServerStatusType;
@@ -2538,7 +3100,7 @@ export async function deleteRemoteServer(serverId: string): Promise<boolean> {
   // Snapshot volume before deletion (safety net for data recovery)
   if (server.volumeId) {
     try {
-      const snapshot = await provider.createSnapshot(server.volumeId);
+      const snapshot = await provider.createSnapshot(server.volumeId, server.flyAppName);
       console.log(`[ServerService] Created snapshot ${snapshot.id} of volume ${server.volumeId} before deletion`);
     } catch (snapshotError) {
       console.error(`[ServerService] Failed to snapshot volume before deletion:`, snapshotError);
@@ -2549,7 +3111,7 @@ export async function deleteRemoteServer(serverId: string): Promise<boolean> {
   if (server.machineId) {
     try {
       console.log(`[ServerService] Deleting machine ${server.machineId} (provider: ${server.provider})`);
-      await provider.deleteMachine(server.machineId);
+      await provider.deleteMachine(server.machineId, server.flyAppName);
       console.log(`[ServerService] Machine ${server.machineId} deleted`);
     } catch (error) {
       console.error(`[ServerService] Failed to delete machine ${server.machineId}:`, error);
@@ -2561,10 +3123,26 @@ export async function deleteRemoteServer(serverId: string): Promise<boolean> {
   if (server.volumeId) {
     try {
       console.log(`[ServerService] Deleting volume ${server.volumeId} (provider: ${server.provider})`);
-      await provider.deleteVolume(server.volumeId);
+      await provider.deleteVolume(server.volumeId, server.flyAppName);
       console.log(`[ServerService] Volume ${server.volumeId} deleted`);
     } catch (error) {
       console.error(`[ServerService] Failed to delete volume ${server.volumeId}:`, error);
+      success = false;
+    }
+  }
+
+  // Delete the per-tenant Fly app shell after machine + volume are gone. Only
+  // applies to workspaces that were provisioned under per-app isolation;
+  // legacy machines (flyAppName=null) lived in the shared app and we leave
+  // that alone. Idempotent — a 404 (already deleted) is treated as success
+  // by FlyService.deleteApp.
+  if (server.flyAppName) {
+    try {
+      console.log(`[ServerService] Deleting per-tenant Fly app ${server.flyAppName}`);
+      await provider.deleteApp(server.flyAppName);
+      console.log(`[ServerService] App ${server.flyAppName} deleted`);
+    } catch (error) {
+      console.error(`[ServerService] Failed to delete app ${server.flyAppName}:`, error);
       success = false;
     }
   }
@@ -3014,7 +3592,7 @@ async function buildServerFetchHeaders(
 
   if (server.machineId) {
     const provider = getProvider((server.provider || 'fly') as ProviderId);
-    const routing = provider.getRoutingInfo(server.machineId);
+    const routing = provider.getRoutingInfo(server.machineId, server.flyAppName);
     url = routing.serverUrl;
     if (routing.routingToken && routing.requiresRoutingHeaders) {
       headers['fly-force-instance-id'] = routing.routingToken;

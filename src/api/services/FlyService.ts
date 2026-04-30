@@ -21,13 +21,60 @@ function getFlyAppName(): string {
   return process.env.FLY_APP_NAME || 'fishtank-workspaces';
 }
 
-// Server machines are created in a separate app from the API
-function getServerAppName(): string {
+// Server machines are created in a separate app from the API. When `override`
+// is set (the per-tenant Fly app name from `servers.flyAppName`), it wins —
+// this is how every Fly API call gets scoped to the right per-workspace app
+// (see docs/per-app-isolation-migration.md). Legacy machines with NULL
+// `flyAppName` fall through to the env-based shared-app default.
+function getServerAppName(override?: string | null): string {
+  if (override) return override;
   return process.env.SERVER_APP || getFlyAppName();
 }
 
 function getFlyApiToken(): string | undefined {
   return process.env.FLY_API_TOKEN;
+}
+
+function getFlyOrgSlug(): string | undefined {
+  return process.env.FLY_ORG_SLUG;
+}
+
+/**
+ * Per-workspace Fly app + network names. Each workspace lives in its own Fly
+ * app on a dedicated 6PN network so peers cannot reach each other (see
+ * docs/per-app-isolation-migration.md). Names are deterministic from the
+ * server id so a workspace can be re-provisioned idempotently.
+ */
+export function workspaceAppName(serverId: string): string {
+  // Fly app names: lowercase, alphanumeric + dashes, max 30 chars. Server ids
+  // are minted as `ws_<timestamp>_<rand>` (HttpServer.ts / wsHandlers.ts), so
+  // strip the leading `ws_` before re-prepending `ws-` to avoid the
+  // historical `ws-ws-*` doubling. Existing apps already named `ws-ws-*`
+  // keep their stored flyAppName — Fly app names are immutable post-create
+  // and lookups read `server.flyAppName`, never recompute.
+  const slug = serverId.replace(/^ws_/, '').replace(/_/g, '-').toLowerCase();
+  return `ws-${slug}`;
+}
+
+export function workspaceNetworkName(serverId: string): string {
+  return `${workspaceAppName(serverId)}-net`;
+}
+
+/**
+ * Resolve the PREVIEW_DOMAIN env var that should be injected into a workspace
+ * machine. Per-tenant workspaces always use the bare `tank.fish` zone — the
+ * Cloudflare preview-router Worker (`*.tank.fish/*`) routes per-tenant staging
+ * URLs by parsing a `-${flyAppName}-staging` suffix on the leftmost label
+ * (added by the workspace's `getPreviewHostExtraSuffix()`), so a separate
+ * `staging.tank.fish` zone is unnecessary. Legacy single-app workspaces keep
+ * the existing `process.env.PREVIEW_DOMAIN` behaviour, which is `tank.fish`
+ * in prod and `staging.tank.fish` in staging.
+ */
+function resolvePreviewDomainForWorkspace(appName?: string | null): string {
+  if (appName) {
+    return 'tank.fish';
+  }
+  return process.env.PREVIEW_DOMAIN ?? 'tank.fish';
 }
 
 type FlyAutostopMode = 'off' | 'stop' | 'suspend';
@@ -220,6 +267,10 @@ export interface CreateMachineOptions {
   tier?: ServerTier;
   existingVolumeId?: string | null;
   autoSuspendEnabled?: boolean;
+  // Per-tenant Fly app name (from `servers.flyAppName`). When provided, the
+  // machine + volume are created in this app instead of the legacy shared one.
+  // Caller is responsible for having created the app first via createApp().
+  appName?: string | null;
 }
 
 export interface CreateMachineResult {
@@ -233,6 +284,38 @@ export interface CreateMachineResult {
 // ============================================================================
 // API Helpers
 // ============================================================================
+
+// IP allocation, certs, and a few other resources still live on Fly's older
+// GraphQL endpoint rather than the Machines REST API.
+const FLY_GRAPHQL_URL = 'https://api.fly.io/graphql';
+
+async function flyGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  const token = getFlyApiToken();
+  if (!token) {
+    throw new Error('FLY_API_TOKEN is not configured');
+  }
+
+  const response = await fetch(FLY_GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query, variables }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Fly.io GraphQL API error: ${response.status} - ${errorText}`);
+  }
+
+  const json = await response.json() as { data?: T; errors?: Array<{ message: string }> };
+  if (json.errors && json.errors.length > 0) {
+    throw new Error(`Fly.io GraphQL errors: ${json.errors.map(e => e.message).join('; ')}`);
+  }
+  return json.data as T;
+}
 
 async function flyRequest<T>(
   method: string,
@@ -300,14 +383,165 @@ async function getLatestReleaseImage(): Promise<string> {
 }
 
 // ============================================================================
+// App Management
+// ============================================================================
+
+/**
+ * Create a Fly app on its own dedicated 6PN network. The network is created
+ * implicitly by passing `network` in the request body; if a network with that
+ * name already exists in the org it is reused (Fly's idempotent semantics).
+ *
+ * Used to provision a per-workspace app so tenant machines cannot reach each
+ * other on Fly's private IPv6 mesh. See docs/per-app-isolation-migration.md.
+ *
+ * Idempotent: if the app already exists, returns without error.
+ */
+export async function createApp(appName: string, networkName: string): Promise<void> {
+  const orgSlug = getFlyOrgSlug();
+  if (!orgSlug) {
+    throw new Error('FLY_ORG_SLUG is not configured');
+  }
+
+  try {
+    await flyRequest<{ id: string }>('POST', '/apps', {
+      app_name: appName,
+      org_slug: orgSlug,
+      network: networkName,
+    });
+  } catch (err) {
+    // Fly returns 422 with body containing "already taken" / "name has already
+    // been taken" if the app exists. Treat as success so the caller can retry
+    // provisioning safely.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/422/.test(message) && /taken/i.test(message)) {
+      console.log(`[FlyService] App ${appName} already exists; reusing`);
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Allocate public IP addresses for an app so it's reachable on its
+ * `<app>.fly.dev` anycast. Defaults to one shared IPv4 (free) + one
+ * dedicated IPv6 (free).
+ *
+ * Per-tenant apps need this in addition to a machine: without IPs, Fly's
+ * edge has nowhere to route public traffic for `<app>.fly.dev`. Legacy apps
+ * have IPs allocated at app-create time; new apps via `POST /v1/apps` do
+ * NOT auto-allocate, so we do it explicitly here.
+ *
+ * Idempotent — Fly returns "already allocated" which we treat as success.
+ */
+export async function allocateIPs(
+  appName: string,
+  opts?: { sharedV4?: boolean; v6?: boolean },
+): Promise<void> {
+  const wantsV6 = opts?.v6 ?? true;
+  const wantsSharedV4 = opts?.sharedV4 ?? true;
+
+  const allocate = async (type: 'v6' | 'shared_v4') => {
+    try {
+      await flyGraphQL(
+        `mutation Allocate($input: AllocateIPAddressInput!) {
+          allocateIpAddress(input: $input) {
+            ipAddress { id type address }
+          }
+        }`,
+        { input: { appId: appName, type } },
+      );
+      console.log(`[FlyService] Allocated ${type} IP for app ${appName}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/already|exist/i.test(message)) {
+        console.log(`[FlyService] ${type} IP already allocated for ${appName}`);
+        return;
+      }
+      throw err;
+    }
+  };
+
+  if (wantsSharedV4) await allocate('shared_v4');
+  if (wantsV6) await allocate('v6');
+}
+
+/**
+ * Issue a TLS certificate for `hostname` on a Fly app. Uses Fly's GraphQL
+ * `addCertificate` mutation (the same path `flyctl certs add` uses);
+ * Fly's REST endpoint for cert creation is documented as
+ * `/apps/{app}/certificates/acme`, but the GraphQL mutation works
+ * uniformly across cert states and is what the official CLI exercises.
+ *
+ * Validation: Fly attempts ACME automatically. With CF in front of the
+ * subdomain (proxied: true), Cloudflare may break the HTTP-01 path; in
+ * that case the cert sits in "Not verified" state and the operator can
+ * fall back to the `_fly-ownership` TXT record validation that
+ * `flyctl certs setup` documents. Critically, an unverified cert does NOT
+ * block user traffic in our setup: CF presents its own edge cert
+ * (universal SSL or wildcard) to browsers, and Fly's origin connection
+ * uses the standing `*.fly.dev` cert.
+ *
+ * This function therefore treats failures as warnings — best-effort. The
+ * provisioning flow will not fail because of a cert hiccup.
+ *
+ * Idempotent on "hostname has already been taken".
+ */
+export async function addCertificate(appName: string, hostname: string): Promise<void> {
+  try {
+    // Fly's addCertificate mutation takes appId + hostname as direct args,
+    // NOT through an input wrapper (verified against flyctl source). The
+    // appId field accepts the app slug (e.g. "ws-ws-foo"), not the GraphQL
+    // node ID.
+    await flyGraphQL<{ addCertificate: { certificate: { id: string; hostname: string } } }>(
+      `mutation Add($appId: ID!, $hostname: String!) {
+        addCertificate(appId: $appId, hostname: $hostname) {
+          certificate { id hostname }
+        }
+      }`,
+      { appId: appName, hostname },
+    );
+    console.log(`[FlyService] Added cert for ${hostname} on ${appName}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/(taken|already|exist|duplicate)/i.test(message)) {
+      console.log(`[FlyService] Cert for ${hostname} on ${appName} already exists`);
+      return;
+    }
+    // Anything else is a soft failure — log and continue. CF's edge cert
+    // covers user-facing TLS regardless of Fly cert state.
+    console.warn(`[FlyService] addCertificate(${hostname}, ${appName}) failed (best-effort, not blocking):`, message);
+  }
+}
+
+/**
+ * Delete a Fly app and all its machines/volumes/networks. Must be called only
+ * after the app's machine and volume have been removed (or with the
+ * understanding that this cascades).
+ *
+ * Idempotent: a 404 (app already gone) is treated as success.
+ */
+export async function deleteApp(appName: string): Promise<void> {
+  try {
+    await flyRequest<unknown>('DELETE', `/apps/${appName}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/404/.test(message)) {
+      console.log(`[FlyService] App ${appName} already deleted`);
+      return;
+    }
+    throw err;
+  }
+}
+
+// ============================================================================
 // Volume Management
 // ============================================================================
 
 /**
  * List all volumes for the app
  */
-export async function listVolumes(): Promise<FlyVolume[]> {
-  return flyRequest<FlyVolume[]>('GET', `/apps/${getServerAppName()}/volumes`);
+export async function listVolumes(appName?: string | null): Promise<FlyVolume[]> {
+  return flyRequest<FlyVolume[]>('GET', `/apps/${getServerAppName(appName)}/volumes`);
 }
 
 /**
@@ -316,9 +550,10 @@ export async function listVolumes(): Promise<FlyVolume[]> {
 export async function createVolume(
   name: string,
   region: string,
-  sizeGb: number = 1
+  sizeGb: number = 1,
+  appName?: string | null,
 ): Promise<FlyVolume> {
-  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName()}/volumes`, {
+  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName(appName)}/volumes`, {
     name,
     region,
     size_gb: sizeGb,
@@ -329,9 +564,9 @@ export async function createVolume(
 /**
  * Get a volume by ID
  */
-export async function getVolume(volumeId: string): Promise<FlyVolume | null> {
+export async function getVolume(volumeId: string, appName?: string | null): Promise<FlyVolume | null> {
   try {
-    return await flyRequest<FlyVolume>('GET', `/apps/${getServerAppName()}/volumes/${volumeId}`);
+    return await flyRequest<FlyVolume>('GET', `/apps/${getServerAppName(appName)}/volumes/${volumeId}`);
   } catch {
     return null;
   }
@@ -346,10 +581,11 @@ export async function forkVolume(
   sourceVolumeId: string,
   name: string,
   region: string,
-  sizeGb: number = 1
+  sizeGb: number = 1,
+  appName?: string | null,
 ): Promise<FlyVolume> {
   console.log(`[FlyService] Forking volume ${sourceVolumeId} to region ${region} (${sizeGb}GB)`);
-  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName()}/volumes`, {
+  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName(appName)}/volumes`, {
     name,
     region,
     size_gb: sizeGb,
@@ -361,24 +597,26 @@ export async function forkVolume(
 /**
  * Extend a volume to a larger size (cannot shrink)
  */
-export async function extendVolume(volumeId: string, newSizeGb: number): Promise<void> {
-  await flyRequest<unknown>('PUT', `/apps/${getServerAppName()}/volumes/${volumeId}/extend`, {
+export async function extendVolume(volumeId: string, newSizeGb: number, appName?: string | null): Promise<void> {
+  await flyRequest<unknown>('PUT', `/apps/${getServerAppName(appName)}/volumes/${volumeId}/extend`, {
     size_gb: newSizeGb,
   });
   console.log(`[FlyService] Extended volume ${volumeId} to ${newSizeGb}GB`);
 }
 
 /**
- * Create a volume from a snapshot (used for downsizing volumes)
+ * Create a volume from a snapshot (used for downsizing volumes and for
+ * cross-app migration of an existing workspace into its own per-tenant Fly app).
  */
 export async function createVolumeFromSnapshot(
   snapshotId: string,
   name: string,
   region: string,
-  sizeGb: number
+  sizeGb: number,
+  appName?: string | null,
 ): Promise<FlyVolume> {
   console.log(`[FlyService] Creating volume from snapshot ${snapshotId} in ${region} (${sizeGb}GB)`);
-  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName()}/volumes`, {
+  return flyRequest<FlyVolume>('POST', `/apps/${getServerAppName(appName)}/volumes`, {
     name,
     region,
     size_gb: sizeGb,
@@ -390,8 +628,8 @@ export async function createVolumeFromSnapshot(
 /**
  * Delete a volume
  */
-export async function deleteVolume(volumeId: string): Promise<void> {
-  await flyRequest<void>('DELETE', `/apps/${getServerAppName()}/volumes/${volumeId}`);
+export async function deleteVolume(volumeId: string, appName?: string | null): Promise<void> {
+  await flyRequest<void>('DELETE', `/apps/${getServerAppName(appName)}/volumes/${volumeId}`);
   console.log(`[FlyService] Deleted volume ${volumeId}`);
 }
 
@@ -400,22 +638,35 @@ export async function deleteVolume(volumeId: string): Promise<void> {
  * Fly.io snapshot creation is async — the API returns a graph_id immediately
  * but the snapshot isn't usable until it appears in the snapshots list.
  */
-export async function createSnapshot(volumeId: string): Promise<{ id: string }> {
+export async function createSnapshot(volumeId: string, appName?: string | null): Promise<{ id: string }> {
   const result = await flyRequest<{ Msg: { backup: { graph_id: string } } }>(
     'POST',
-    `/apps/${getServerAppName()}/volumes/${volumeId}/snapshots`
+    `/apps/${getServerAppName(appName)}/volumes/${volumeId}/snapshots`
   );
   const snapshotId = result.Msg?.backup?.graph_id || 'unknown';
   console.log(`[FlyService] Created snapshot ${snapshotId} for volume ${volumeId}, waiting for it to be ready...`);
 
-  // Poll until the snapshot appears in the list (ready to use)
-  const maxWaitMs = 300_000; // 5 minutes
+  // Poll until the snapshot appears in the list and reaches `created`
+  // state. With the migration runner disabling autostart on the old
+  // machine before snapshot, the volume is quiesced and most snapshots
+  // complete in under 90s. But Fly's snapshot infrastructure can queue
+  // operations during regional slowdowns — observed snapshots taking
+  // 5-15 minutes on a quiesced volume during IAD slowdowns. The 30-min
+  // cap is generous enough to ride those out.
+  //
+  // Throws on timeout (rather than returning the ID with a warning) so
+  // the caller's recovery path runs cleanly. Returning early would
+  // cause the next step (createVolumeFromSnapshot) to fail with the
+  // confusing "snapshot not found" 400 — that's what was masking
+  // timeout-vs-real-failure during the per-app-isolation migration
+  // testing.
+  const maxWaitMs = 1_800_000; // 30 minutes
   const pollIntervalMs = 3_000; // 3 seconds
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     await new Promise(r => setTimeout(r, pollIntervalMs));
     try {
-      const snapshots = await listSnapshots(volumeId);
+      const snapshots = await listSnapshots(volumeId, appName);
       const snap = snapshots.find(s => s.id === snapshotId);
       if (snap) {
         if (snap.status === 'created') {
@@ -429,18 +680,70 @@ export async function createSnapshot(volumeId: string): Promise<{ id: string }> 
     }
   }
 
-  // Timed out but still return the ID — createVolumeFromSnapshot will fail with a clear error if it's not ready
-  console.warn(`[FlyService] Snapshot ${snapshotId} not confirmed ready after ${maxWaitMs / 1000}s, proceeding anyway`);
-  return { id: snapshotId };
+  throw new Error(
+    `Snapshot ${snapshotId} did not reach 'created' state within ${maxWaitMs / 1000}s. ` +
+    `Fly's snapshot infrastructure may be slow today — check https://status.flyio.net/ ` +
+    `and retry. The orphaned snapshot will eventually complete and auto-delete after its retention period.`,
+  );
 }
 
 /**
  * List snapshots for a volume
  */
-export async function listSnapshots(volumeId: string): Promise<Array<{ id: string; size: number; created_at: string; status?: string }>> {
+export async function listSnapshots(volumeId: string, appName?: string | null): Promise<Array<{ id: string; size: number; created_at: string; status?: string }>> {
   return flyRequest<Array<{ id: string; size: number; created_at: string; status?: string }>>(
     'GET',
-    `/apps/${getServerAppName()}/volumes/${volumeId}/snapshots`
+    `/apps/${getServerAppName(appName)}/volumes/${volumeId}/snapshots`
+  );
+}
+
+/**
+ * Wait for a volume to reach `created` state.
+ *
+ * `createVolumeFromSnapshot` returns the volume ID immediately, but
+ * Fly hydrates the snapshot data in the background — the volume's
+ * `state` field stays `restoring` until hydration completes, then
+ * flips to `created`. Callers that immediately try to mount the
+ * volume on a new machine via `provisionNewMachine` hit
+ * `getOrCreateVolume()`, which sees `state !== 'created'` and creates
+ * a fresh EMPTY volume — silently dropping the restored data.
+ *
+ * Always call this after `createVolumeFromSnapshot` and before any
+ * machine creation that mounts the volume.
+ *
+ * Throws on timeout. For 40 GiB volumes restoring from typical small
+ * deltas, observed completion is well under 60s; the 5-minute cap is
+ * cushion for slow-Fly-day outliers (same regional slowdowns that
+ * stretch snapshot creation).
+ */
+export async function waitForVolumeReady(
+  volumeId: string,
+  appName?: string | null,
+  timeoutMs: number = 300_000,
+): Promise<FlyVolume> {
+  const start = Date.now();
+  const pollIntervalMs = 2_000;
+
+  console.log(`[FlyService] Waiting for volume ${volumeId} to reach state 'created'`);
+
+  while (Date.now() - start < timeoutMs) {
+    const vol = await getVolume(volumeId, appName);
+    if (vol && vol.state === 'created') {
+      console.log(`[FlyService] Volume ${volumeId} is ready (waited ${Math.round((Date.now() - start) / 1000)}s)`);
+      return vol;
+    }
+    if (vol) {
+      console.log(`[FlyService] Volume ${volumeId} state='${vol.state}', waiting...`);
+    } else {
+      console.log(`[FlyService] Volume ${volumeId} not yet visible, waiting...`);
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  throw new Error(
+    `Volume ${volumeId} did not reach 'created' state within ${timeoutMs / 1000}s. ` +
+    `If it eventually does, the restored data is intact in that volume — just not yet attached. ` +
+    `Manual recovery: detach any wrong volume, attach this one to the workspace machine.`,
   );
 }
 
@@ -454,10 +757,11 @@ async function getOrCreateVolume(
   region: string,
   sizeGb: number = 1,
   existingVolumeId?: string | null,
+  appName?: string | null,
 ): Promise<string> {
   if (existingVolumeId) {
     try {
-      const vol = await getVolume(existingVolumeId);
+      const vol = await getVolume(existingVolumeId, appName);
       if (vol && vol.state === 'created' && vol.region === region) {
         console.log(`[FlyService] Reusing existing volume ${existingVolumeId} for server ${serverId}`);
         return existingVolumeId;
@@ -474,7 +778,7 @@ async function getOrCreateVolume(
 
   const sanitizedId = serverId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
   const volumeName = `data_${sanitizedId}`;
-  const volume = await createVolume(volumeName, region, sizeGb);
+  const volume = await createVolume(volumeName, region, sizeGb, appName);
   console.log(`[FlyService] Created volume ${volume.id} for server ${serverId}`);
   return volume.id;
 }
@@ -486,18 +790,18 @@ async function getOrCreateVolume(
 /**
  * List all machines in the app
  */
-export async function listMachines(): Promise<FlyMachine[]> {
-  return flyRequest<FlyMachine[]>('GET', `/apps/${getServerAppName()}/machines`);
+export async function listMachines(appName?: string | null): Promise<FlyMachine[]> {
+  return flyRequest<FlyMachine[]>('GET', `/apps/${getServerAppName(appName)}/machines`);
 }
 
 
 /**
  * Get a machine by ID
  */
-export async function getMachine(machineId: string): Promise<FlyMachine> {
+export async function getMachine(machineId: string, appName?: string | null): Promise<FlyMachine> {
   return flyRequest<FlyMachine>(
     'GET',
-    `/apps/${getServerAppName()}/machines/${machineId}`
+    `/apps/${getServerAppName(appName)}/machines/${machineId}`
   );
 }
 
@@ -507,9 +811,10 @@ export async function getMachine(machineId: string): Promise<FlyMachine> {
  */
 export async function updateMachineAutoSuspend(
   machineId: string,
-  autoSuspendEnabled: boolean
+  autoSuspendEnabled: boolean,
+  appName?: string | null,
 ): Promise<FlyMachine> {
-  const machine = await getMachine(machineId);
+  const machine = await getMachine(machineId, appName);
   if (machine.state === 'destroyed' || machine.state === 'destroying') {
     throw new Error(`Cannot update lifecycle policy for destroyed machine ${machineId}`);
   }
@@ -537,7 +842,7 @@ export async function updateMachineAutoSuspend(
 
   return flyRequest<FlyMachine>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}`,
+    `/apps/${getServerAppName(appName)}/machines/${machineId}`,
     payload
   );
 }
@@ -548,9 +853,10 @@ export async function updateMachineAutoSuspend(
  */
 export async function ensureMachineTunnelToken(
   machineId: string,
-  tunnelToken: string
+  tunnelToken: string,
+  appName?: string | null,
 ): Promise<FlyMachine> {
-  const machine = await getMachine(machineId);
+  const machine = await getMachine(machineId, appName);
   if (machine.state === 'destroyed' || machine.state === 'destroying') {
     throw new Error(`Cannot update env for destroyed machine ${machineId}`);
   }
@@ -564,7 +870,7 @@ export async function ensureMachineTunnelToken(
 
   return flyRequest<FlyMachine>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}`,
+    `/apps/${getServerAppName(appName)}/machines/${machineId}`,
     {
       name: machine.name,
       config: {
@@ -584,7 +890,7 @@ export async function ensureMachineTunnelToken(
 export async function createMachine(
   options: CreateMachineOptions
 ): Promise<CreateMachineResult> {
-  const { serverId, serverToken, tunnelToken, region = 'iad', name, tier = 'shared-cpu-1x', existingVolumeId, autoSuspendEnabled } = options;
+  const { serverId, serverToken, tunnelToken, region = 'iad', name, tier = 'shared-cpu-1x', existingVolumeId, autoSuspendEnabled, appName } = options;
   const tierConfig = TIER_CONFIGS[tier] || TIER_CONFIGS['shared-cpu-1x']!;
   const lifecyclePolicy = typeof autoSuspendEnabled === 'boolean'
     ? getMachineLifecyclePolicy(autoSuspendEnabled)
@@ -613,7 +919,7 @@ export async function createMachine(
   // Get the latest release image and volume in parallel
   const [latestImage, volumeId] = await Promise.all([
     getLatestReleaseImage(),
-    getOrCreateVolume(serverId, region, tierConfig.volume_gb, existingVolumeId),
+    getOrCreateVolume(serverId, region, tierConfig.volume_gb, existingVolumeId, appName),
   ]);
 
   // Build machine config
@@ -630,7 +936,7 @@ export async function createMachine(
         AUTH_MODE: 'cloud',
         CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
         SERVER_SESSION_PUBLIC_KEY_PEM: sessionPublicKeyPem,
-        PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
+        PREVIEW_DOMAIN: resolvePreviewDomainForWorkspace(appName),
         CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
         NODE_ENV: 'development',
         PORT: '61987',
@@ -682,12 +988,12 @@ export async function createMachine(
 
   const machine = await flyRequest<FlyMachine>(
     'POST',
-    `/apps/${getServerAppName()}/machines`,
+    `/apps/${getServerAppName(appName)}/machines`,
     machineConfig
   );
 
   // Construct the public URL (app-level URL, use Fly-Force-Instance-Id header for per-machine routing)
-  const url = `https://${getServerAppName()}.fly.dev`;
+  const url = `https://${getServerAppName(appName)}.fly.dev`;
 
   console.log(`[FlyService] Created machine ${machine.id} (${machineName}) at ${url}`);
 
@@ -707,15 +1013,15 @@ export async function createMachine(
 export async function updateMachineConfig(
   machineId: string,
   configModifier: (config: Record<string, unknown>) => Record<string, unknown>,
-  options?: { skipLaunch?: boolean },
+  options?: { skipLaunch?: boolean; appName?: string | null },
 ): Promise<FlyMachine> {
-  const machine = await getMachine(machineId);
+  const machine = await getMachine(machineId, options?.appName);
   const updatedConfig = configModifier({ ...machine.config } as unknown as Record<string, unknown>);
 
   const queryParams = options?.skipLaunch ? '?skip_launch=true' : '';
   return flyRequest<FlyMachine>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}${queryParams}`,
+    `/apps/${getServerAppName(options?.appName)}/machines/${machineId}${queryParams}`,
     { config: updatedConfig },
   );
 }
@@ -724,12 +1030,12 @@ export async function updateMachineConfig(
  * Start a stopped/suspended machine
  * Handles 409/412 errors if machine is already starting or active
  */
-export async function startMachine(machineId: string): Promise<void> {
+export async function startMachine(machineId: string, appName?: string | null): Promise<void> {
   console.log(`[FlyService] Starting machine ${machineId}`);
   try {
     await flyRequest<void>(
       'POST',
-      `/apps/${getServerAppName()}/machines/${machineId}/start`
+      `/apps/${getServerAppName(appName)}/machines/${machineId}/start`
     );
   } catch (error) {
     if (error instanceof Error) {
@@ -749,24 +1055,85 @@ export async function startMachine(machineId: string): Promise<void> {
 }
 
 /**
- * Stop a running machine
+ * Options for `stopMachine`. The defaults are a regular soft-stop —
+ * Fly's edge will continue to wake the machine on incoming traffic if
+ * `autostart` is set on its services (which it is for workspace
+ * machines, see `getMachineLifecyclePolicy`).
+ *
+ * `disableAutostart: true` first updates the machine config to
+ * `autostart=false`, `autostop='off'`, `min_machines_running=0` so the
+ * stop is durable: subsequent traffic will NOT auto-wake the machine.
+ * Used by the per-tenant migration runner to keep the volume quiesced
+ * during snapshot — without it, an open browser tab's WebSocket /
+ * preview-port poll / terminal session can race-restart the machine
+ * mid-snapshot, causing Fly's snapshot to stay in `running` state past
+ * our poll timeout and the migration to fail at
+ * `createVolumeFromSnapshot` ("snapshot not found").
  */
-export async function stopMachine(machineId: string): Promise<void> {
+export interface StopMachineOptions {
+  /** Set autostart=false / autostop=off before issuing the stop. */
+  disableAutostart?: boolean;
+}
+
+/**
+ * Stop a running machine.
+ *
+ * Pass `{ disableAutostart: true }` for migration-style stops where
+ * the machine MUST stay down (no autorestart) for the duration of
+ * downstream operations like volume snapshot.
+ */
+export async function stopMachine(
+  machineId: string,
+  appName?: string | null,
+  options?: StopMachineOptions,
+): Promise<void> {
+  if (options?.disableAutostart) {
+    // Order matters: disable autostart BEFORE issuing the stop. If we
+    // stopped first, there's a window where Fly's edge could receive
+    // traffic and auto-wake the machine before we finish updating the
+    // config. Best-effort — if the config update fails (e.g., machine
+    // already destroyed), we still issue the stop and rely on the
+    // caller's downstream timeouts to handle a possible re-wake.
+    try {
+      const machine = await getMachine(machineId, appName);
+      if (machine.state !== 'destroyed' && machine.state !== 'destroying') {
+        const updatedServices: FlyMachineService[] = (machine.config.services || []).map((service) => ({
+          ...service,
+          autostart: false,
+          autostop: 'off',
+          min_machines_running: 0,
+        }));
+        const payload = {
+          name: machine.name,
+          config: { ...machine.config, services: updatedServices },
+        };
+        await flyRequest<FlyMachine>(
+          'POST',
+          `/apps/${getServerAppName(appName)}/machines/${machineId}`,
+          payload,
+        );
+        console.log(`[FlyService] Disabled autostart on ${machineId} before stop`);
+      }
+    } catch (err) {
+      console.warn(`[FlyService] Failed to disable autostart on ${machineId} before stop: ${err}`);
+    }
+  }
+
   console.log(`[FlyService] Stopping machine ${machineId}`);
   await flyRequest<void>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}/stop`
+    `/apps/${getServerAppName(appName)}/machines/${machineId}/stop`
   );
 }
 
 /**
  * Suspend a machine (faster restart than stop)
  */
-export async function suspendMachine(machineId: string): Promise<void> {
+export async function suspendMachine(machineId: string, appName?: string | null): Promise<void> {
   console.log(`[FlyService] Suspending machine ${machineId}`);
   await flyRequest<void>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}/suspend`
+    `/apps/${getServerAppName(appName)}/machines/${machineId}/suspend`
   );
 }
 
@@ -775,11 +1142,11 @@ export async function suspendMachine(machineId: string): Promise<void> {
  * Uses Fly.io's native restart endpoint which restarts the process
  * without rebuilding the container, so globally installed packages survive.
  */
-export async function restartMachine(machineId: string): Promise<void> {
+export async function restartMachine(machineId: string, appName?: string | null): Promise<void> {
   console.log(`[FlyService] Restarting machine ${machineId} (in-place)`);
   await flyRequest<void>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}/restart`
+    `/apps/${getServerAppName(appName)}/machines/${machineId}/restart`
   );
 }
 
@@ -788,9 +1155,9 @@ export async function restartMachine(machineId: string): Promise<void> {
  * Fetches the current machine config, swaps the image to the latest release,
  * and issues an update via the Machines API (which also restarts the machine).
  */
-export async function updateMachineImage(machineId: string): Promise<void> {
+export async function updateMachineImage(machineId: string, appName?: string | null): Promise<void> {
   const [machine, latestImage] = await Promise.all([
-    getMachine(machineId),
+    getMachine(machineId, appName),
     getLatestReleaseImage(),
   ]);
 
@@ -818,14 +1185,14 @@ export async function updateMachineImage(machineId: string): Promise<void> {
 
   await flyRequest<FlyMachine>(
     'POST',
-    `/apps/${getServerAppName()}/machines/${machineId}`,
+    `/apps/${getServerAppName(appName)}/machines/${machineId}`,
     {
       config: {
         ...machine.config,
         image: latestImage,
         env: {
           ...existingEnv,
-          PREVIEW_DOMAIN: process.env.PREVIEW_DOMAIN ?? 'tank.fish',
+          PREVIEW_DOMAIN: resolvePreviewDomainForWorkspace(appName),
           CLOUD_API_URL: process.env.CLOUD_API_URL || 'https://console.runhq.io',
           CLIENT_URL: process.env.CLIENT_URL ?? 'https://app.runhq.io',
           SERVER_SESSION_PUBLIC_KEY_PEM: sessionPublicKeyPem,
@@ -838,11 +1205,11 @@ export async function updateMachineImage(machineId: string): Promise<void> {
 /**
  * Delete a machine
  */
-export async function deleteMachine(machineId: string): Promise<void> {
+export async function deleteMachine(machineId: string, appName?: string | null): Promise<void> {
   console.log(`[FlyService] Deleting machine ${machineId}`);
   await flyRequest<void>(
     'DELETE',
-    `/apps/${getServerAppName()}/machines/${machineId}?force=true`
+    `/apps/${getServerAppName(appName)}/machines/${machineId}?force=true`
   );
 }
 
@@ -852,7 +1219,8 @@ export async function deleteMachine(machineId: string): Promise<void> {
 export async function waitForMachine(
   machineId: string,
   targetStates: FlyMachineState[] = ['started'],
-  timeoutMs: number = 90000
+  timeoutMs: number = 90000,
+  appName?: string | null,
 ): Promise<FlyMachine> {
   const start = Date.now();
   const pollInterval = 500;
@@ -860,7 +1228,7 @@ export async function waitForMachine(
   console.log(`[FlyService] Waiting for machine ${machineId} to reach state: ${targetStates.join(' or ')}`);
 
   while (Date.now() - start < timeoutMs) {
-    const machine = await getMachine(machineId);
+    const machine = await getMachine(machineId, appName);
 
     if (targetStates.includes(machine.state)) {
       console.log(`[FlyService] Machine ${machineId} reached state: ${machine.state}`);
@@ -886,7 +1254,8 @@ export async function waitForMachine(
  */
 export async function waitForMachineHealthy(
   machineId: string,
-  timeoutMs: number = 60000
+  timeoutMs: number = 60000,
+  appName?: string | null,
 ): Promise<FlyMachine> {
   const start = Date.now();
   const pollInterval = 1000; // Poll every second
@@ -894,7 +1263,7 @@ export async function waitForMachineHealthy(
   console.log(`[FlyService] Waiting for machine ${machineId} to be healthy`);
 
   // Directly poll the machine's health endpoint through Fly.io routing
-  const healthUrl = `https://${getServerAppName()}.fly.dev/health?fly_instance_id=${machineId}`;
+  const healthUrl = `https://${getServerAppName(appName)}.fly.dev/health?fly_instance_id=${machineId}`;
 
   while (Date.now() - start < timeoutMs) {
     try {
@@ -909,7 +1278,7 @@ export async function waitForMachineHealthy(
 
       if (response.ok) {
         console.log(`[FlyService] Machine ${machineId} is healthy (status ${response.status})`);
-        return await getMachine(machineId);
+        return await getMachine(machineId, appName);
       }
 
       console.log(`[FlyService] Machine ${machineId} health check returned ${response.status}`);
@@ -924,7 +1293,7 @@ export async function waitForMachineHealthy(
 
   // Timeout - return the machine anyway so creation can complete
   console.warn(`[FlyService] Timeout waiting for machine ${machineId} to be healthy after ${timeoutMs}ms`);
-  return await getMachine(machineId);
+  return await getMachine(machineId, appName);
 }
 
 /**

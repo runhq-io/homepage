@@ -44,7 +44,7 @@ import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions } from '../db/schema';
-import { eq, lt, sql } from 'drizzle-orm';
+import { eq, lt, sql, and, isNotNull } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -1651,6 +1651,85 @@ export function createHttpApp() {
     }
   });
 
+  // List remote servers that still live on the legacy shared Fly app
+  // (fly_app_name IS NULL). Drives the bulk per-tenant migration runner.
+  app.get('/api/admin/legacy-workspaces', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const rows = await ServerService.listLegacyWorkspaceServerIds();
+      return c.json({ servers: rows });
+    } catch (error) {
+      console.error('[HttpServer] List legacy workspaces error:', error);
+      return c.json({ error: 'Failed to list legacy workspaces' }, 500);
+    }
+  });
+
+  // Migrate one legacy workspace from the shared Fly app to its own per-tenant
+  // app + 6PN network. See docs/per-app-isolation-migration.md. Synchronous —
+  // takes ~2–3 minutes per workspace including snapshot + restore + health.
+  app.post('/api/admin/migrate-workspace/:serverId', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const serverId = c.req.param('serverId');
+      if (!serverId) {
+        return c.json({ error: 'serverId required' }, 400);
+      }
+
+      const result = await ServerService.migrateWorkspaceToOwnApp(serverId);
+      return c.json({ success: true, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[HttpServer] Migrate workspace error:`, error);
+      return c.json({ success: false, error: message }, 500);
+    }
+  });
+
+  // Distinct list of per-tenant Fly app names across the fleet — drives the
+  // deploy script's per-app fan-out so that an image update reaches every
+  // workspace app, not just the legacy shared one (see
+  // docs/per-app-isolation-migration.md). Legacy rows with fly_app_name=NULL
+  // are excluded here; the deploy script handles the legacy shared app
+  // directly via the env-default it built against.
+  app.get('/api/admin/all-workspace-apps', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+
+      const rows = await db
+        .selectDistinct({ flyAppName: servers.flyAppName })
+        .from(servers)
+        .where(and(
+          eq(servers.deploymentType, 'remote'),
+          isNotNull(servers.flyAppName),
+        ));
+      const apps = rows.map(r => r.flyAppName).filter((x): x is string => !!x);
+      return c.json({ apps });
+    } catch (error) {
+      console.error('[HttpServer] List workspace apps error:', error);
+      return c.json({ error: 'Failed to list workspace apps' }, 500);
+    }
+  });
+
   // Backfill tunnel DNS records for all remote servers
   app.post('/api/admin/backfill-tunnel-dns', async (c) => {
     try {
@@ -1672,17 +1751,38 @@ export function createHttpApp() {
       const withMachine = remoteServers.filter(s => s.machineId);
       console.log(`[HttpServer] Backfilling tunnel DNS for ${withMachine.length} remote servers (${remoteServers.length} total remote)`);
 
-      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string }> = [];
+      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string; warnings?: string[] }> = [];
       for (const server of withMachine) {
         try {
           const result = await ServerService.ensureServerTunnelConnector(server.id);
+          if (!result) {
+            results.push({
+              serverId: server.id,
+              machineId: server.machineId!,
+              name: server.name,
+              status: 'skipped',
+            });
+            console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): skipped`);
+            continue;
+          }
+          // Per-server status reflects partial success: any non-fatal warning
+          // collected by ensureServerTunnelConnector (e.g. allocateIPs failure
+          // for a per-tenant workspace) is surfaced here so the operator
+          // doesn't see a blanket "ok" when public ingress wasn't actually
+          // healed.
+          const hasWarnings = result.warnings.length > 0;
           results.push({
             serverId: server.id,
             machineId: server.machineId!,
             name: server.name,
-            status: result ? `ok (tunnel=${result.tunnelId})` : 'skipped',
+            status: hasWarnings
+              ? `partial (tunnel=${result.tunnelId})`
+              : `ok (tunnel=${result.tunnelId})`,
+            warnings: hasWarnings ? result.warnings : undefined,
           });
-          console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): ${result ? 'ok' : 'skipped'}`);
+          console.log(
+            `[HttpServer] Backfill ${server.id} (${server.machineId}): ${hasWarnings ? `partial (${result.warnings.length} warnings)` : 'ok'}`,
+          );
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -1784,28 +1884,26 @@ export function createHttpApp() {
 
       const servers = await ServerService.getUserServers(userId);
 
-      // Fetch live machine states from each provider for all servers with machines
-      // This allows the UI to show accurate running/stopped status for each server
-      let machineStateMap: Map<string, string> = new Map();
+      // Fetch live machine states for all servers with machines.
+      //
+      // We can't use listMachines() once workspaces are spread across
+      // per-tenant Fly apps (see docs/per-app-isolation-migration.md) — a
+      // single list call only sees one app. Instead, fetch each server's
+      // state in parallel, scoped to its own flyAppName when present (and
+      // falling back to the legacy shared app for older rows).
+      const machineStateMap: Map<string, string> = new Map();
       const serversWithMachines = servers.filter(w => w.machineId);
       if (serversWithMachines.length > 0) {
-        // Group servers by provider so we call listMachines() once per provider
-        const providerIds = new Set<string>();
-        for (const s of serversWithMachines) {
-          providerIds.add(s.provider || 'fly');
-        }
-        for (const pid of providerIds) {
+        await Promise.all(serversWithMachines.map(async (s) => {
           try {
-            const provider = getProvider(pid as ProviderId);
-            const machines = await provider.listMachines();
-            for (const machine of machines) {
-              machineStateMap.set(machine.id, machine.state);
-            }
+            const provider = getProvider((s.provider || 'fly') as ProviderId);
+            const state = await provider.getMachineState(s.machineId!, s.flyAppName);
+            machineStateMap.set(s.machineId!, state);
           } catch (err) {
-            // Don't fail the whole request if we can't get machine states
-            console.warn(`[HttpServer] Could not fetch ${pid} machine states:`, err);
+            // Don't fail the whole request if any one machine can't be reached
+            console.warn(`[HttpServer] Could not fetch state for machine ${s.machineId}:`, err);
           }
-        }
+        }));
       }
 
       // Transform servers: don't expose hash, but indicate if token exists
@@ -1814,7 +1912,7 @@ export function createHttpApp() {
         let serverUrl = w.serverUrl;
         if (w.machineId) {
           const provider = getProvider((w.provider || 'fly') as ProviderId);
-          const routingUrl = provider.getRoutingInfo(w.machineId).serverUrl;
+          const routingUrl = provider.getRoutingInfo(w.machineId, w.flyAppName).serverUrl;
           if (routingUrl) serverUrl = routingUrl;
         }
         return {
@@ -2129,13 +2227,13 @@ export function createHttpApp() {
       let volumeSizeGb: number | null = null;
       if (server.machineId) {
         const provider = getProvider((server.provider || 'fly') as ProviderId);
-        const routingUrl = provider.getRoutingInfo(server.machineId).serverUrl;
+        const routingUrl = provider.getRoutingInfo(server.machineId, server.flyAppName).serverUrl;
         if (routingUrl) serverUrl = routingUrl;
 
         // Fetch current volume size if volume exists
         if (server.volumeId) {
           try {
-            const volume = await provider.getVolume(server.volumeId);
+            const volume = await provider.getVolume(server.volumeId, server.flyAppName);
             if (volume) volumeSizeGb = volume.sizeGb;
           } catch { /* ignore - volume info is optional */ }
         }
@@ -3776,7 +3874,7 @@ export function createHttpApp() {
       ) {
         console.log(`[HttpServer] Fast-path session for server ${serverId} (lastSeen ${Math.round((Date.now() - server.lastSeen.getTime()) / 1000)}s ago)`);
         const provider = getProvider((server.provider || 'fly') as ProviderId);
-        const routing = provider.getRoutingInfo(server.machineId);
+        const routing = provider.getRoutingInfo(server.machineId, server.flyAppName);
         const [serverSessionToken, latestServerVersion] = await Promise.all([
           ServerSessionService.generateServerSessionToken(userId, serverId, tokenExpirySeconds, sessionTokenOpts),
           getLatestServerVersion(),
@@ -3860,7 +3958,7 @@ export function createHttpApp() {
       let serverUrl = latestServer.serverUrl;
       if (latestServer.machineId) {
         const provider = getProvider((latestServer.provider || 'fly') as ProviderId);
-        const routingUrl = provider.getRoutingInfo(latestServer.machineId).serverUrl;
+        const routingUrl = provider.getRoutingInfo(latestServer.machineId, latestServer.flyAppName).serverUrl;
         if (routingUrl) serverUrl = routingUrl;
       }
 
@@ -3880,7 +3978,7 @@ export function createHttpApp() {
       if (latestServer.deploymentType === 'remote' && routingMachineId) {
         try {
           const provider = getProvider((latestServer.provider || 'fly') as ProviderId);
-          const routing = provider.getRoutingInfo(routingMachineId);
+          const routing = provider.getRoutingInfo(routingMachineId, latestServer.flyAppName);
           const routingHeaders: Record<string, string> = { 'cache-control': 'no-cache' };
           // Only add provider-specific routing headers when required (e.g. Fly's fly-force-instance-id)
           if (routing.requiresRoutingHeaders && routing.routingToken) {
