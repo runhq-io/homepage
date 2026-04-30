@@ -28,7 +28,7 @@ import {
   type ServerStatusType,
   type ServerTier,
 } from '../../db/schema';
-import { eq, and, gt, lte, isNull, isNotNull, inArray, ne, sql } from 'drizzle-orm';
+import { eq, and, gt, lte, isNull, isNotNull, inArray, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { nanoid } from 'nanoid';
 import { createHash } from 'crypto';
@@ -1574,19 +1574,10 @@ export async function registerServer(
     }
   }
 
-  // Same status-clobber guard as updateServerHeartbeat: don't overwrite
-  // 'provisioning' (migration / region / tier in flight). The OLD
-  // workspace machine may keep emitting register calls during the
-  // migration window even after the migrator's stopMachine, and those
-  // would otherwise reset status to 'online' and disable the worker's
-  // 503 protection.
   const [updated] = await db
     .update(servers)
     .set(updates)
-    .where(and(
-      eq(servers.id, server.id),
-      ne(servers.status, 'provisioning'),
-    ))
+    .where(eq(servers.id, server.id))
     .returning();
 
   console.log(`[ServerService] Server registered for server ${server.id} at ${serverUrl}${machineId ? ` (machineId: ${machineId})` : ''}`);
@@ -1641,27 +1632,10 @@ export async function updateServerHeartbeat(serverToken: string, machineId?: str
     updateData.idleSince = null;
   }
 
-  // Don't clobber 'provisioning' status. The migrator (and changeRegion /
-  // changeTier / fresh-provision flows) sets status='provisioning' as a
-  // gate that prevents the BE from waking the machine while structural
-  // work is in progress. The workspace machine keeps sending heartbeats
-  // until it actually stops, and even after our stopMachine returns,
-  // there can be in-flight heartbeats that arrive a few hundred ms later.
-  // Without this guard those heartbeats race-write status='online',
-  // which silently disables the migrating-list 503 in the CF Worker —
-  // letting traffic reach Fly's edge, triggering fly-replay-driven
-  // wake of the very machine the migrator just stopped.
-  //
-  // Per-statement WHERE clause keeps this atomic at the DB level
-  // (no need for explicit transactions): if the row's status is
-  // 'provisioning' at the moment of UPDATE, this UPDATE skips it.
   await db
     .update(servers)
     .set(updateData)
-    .where(and(
-      eq(servers.id, server.id),
-      ne(servers.status, 'provisioning'),
-    ));
+    .where(eq(servers.id, server.id));
 
   // Ensure billing is tracking this machine
   if (!server.machineStartedAt && server.deploymentType === 'remote') {
