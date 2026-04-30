@@ -317,10 +317,24 @@ async function flyGraphQL<T>(query: string, variables?: Record<string, unknown>)
   return json.data as T;
 }
 
+/**
+ * Per-call timeout override for Fly Machines API requests.
+ *
+ * Default 30s is fine for read-style endpoints (list/get) and most write
+ * operations, but volume creation/restoration during regional Fly
+ * slowdowns has been observed to take 30-90s — Fly queues the work
+ * server-side and returns once the volume is allocated. A 30s abort
+ * surfaces as `TimeoutError` mid-migration and triggers the runner's
+ * recovery path even though the underlying op would have succeeded.
+ *
+ * Pass `{ timeoutMs: 120_000 }` (or higher) for any call you know can
+ * sit in Fly's queue during slow periods.
+ */
 async function flyRequest<T>(
   method: string,
   path: string,
-  body?: unknown
+  body?: unknown,
+  options?: { timeoutMs?: number },
 ): Promise<T> {
   const token = getFlyApiToken();
   if (!token) {
@@ -337,7 +351,7 @@ async function flyRequest<T>(
       'Content-Type': 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30000), // 30s timeout per API call
+    signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000),
   });
 
   if (!response.ok) {
@@ -545,6 +559,18 @@ export async function listVolumes(appName?: string | null): Promise<FlyVolume[]>
 }
 
 /**
+ * Long timeout for volume create / restore / fork operations. Fly's
+ * volume API is synchronous on allocation: the response returns once
+ * the volume is provisioned, which during regional slowdowns has been
+ * observed to take 30-90s. The 30s default flyRequest timeout was
+ * triggering mid-migration aborts (TimeoutError surfaced as a
+ * createVolumeFromSnapshot failure even though Fly's queue would have
+ * eventually completed the request). 2 min is generous enough to ride
+ * out IAD slowdowns without masking actually-stuck calls.
+ */
+const VOLUME_OP_TIMEOUT_MS = 120_000;
+
+/**
  * Create a volume for persistent storage
  */
 export async function createVolume(
@@ -558,7 +584,7 @@ export async function createVolume(
     region,
     size_gb: sizeGb,
     encrypted: true,
-  });
+  }, { timeoutMs: VOLUME_OP_TIMEOUT_MS });
 }
 
 /**
@@ -591,7 +617,7 @@ export async function forkVolume(
     size_gb: sizeGb,
     encrypted: true,
     source_volume_id: sourceVolumeId,
-  });
+  }, { timeoutMs: VOLUME_OP_TIMEOUT_MS });
 }
 
 /**
@@ -622,7 +648,7 @@ export async function createVolumeFromSnapshot(
     size_gb: sizeGb,
     encrypted: true,
     snapshot_id: snapshotId,
-  });
+  }, { timeoutMs: VOLUME_OP_TIMEOUT_MS });
 }
 
 /**
