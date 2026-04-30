@@ -2,7 +2,17 @@
  * Provider Registry
  *
  * Manages available infrastructure providers.
- * Call initProviders() at startup, then use getProvider(id) everywhere.
+ *
+ * `initProviders()` is called explicitly from `src/server.ts` at startup
+ * for the Hono side. The Next.js side runs in a separately bundled module
+ * graph (Webpack vs the runtime tsx/tsc loader Hono uses), so its copy of
+ * this module is a *different* instance with its own `providers` Map.
+ * Without lazy fallback, `getProvider('fly')` on the Next.js side throws
+ * "Provider 'fly' is not registered" — see /admin/migrations server action.
+ *
+ * Defense: every public lookup ensures the registry is initialized first.
+ * Cheap, idempotent, and works regardless of which module graph this file
+ * was loaded from.
  */
 
 import type { IProvider } from './IProvider';
@@ -14,6 +24,7 @@ import { FlyProvider } from './FlyProvider';
 // ---------------------------------------------------------------------------
 
 const providers = new Map<ProviderId, IProvider>();
+let initialized = false;
 
 // ---------------------------------------------------------------------------
 // Per-provider hourly rates (cents)
@@ -42,14 +53,21 @@ const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
 // ---------------------------------------------------------------------------
 
 export function initProviders(): void {
+  if (initialized) return;
   const fly = new FlyProvider();
   providers.set('fly', fly);
+  initialized = true;
 
   const configured = [...providers.values()].filter(p => p.isConfigured()).map(p => p.id);
   console.log(`[Providers] Initialized: ${configured.length ? configured.join(', ') : 'none configured'}`);
 }
 
+function ensureInitialized(): void {
+  if (!initialized) initProviders();
+}
+
 export function getProvider(id: ProviderId): IProvider {
+  ensureInitialized();
   const provider = providers.get(id);
   if (!provider) {
     throw new Error(`Provider '${id}' is not registered. Available: ${[...providers.keys()].join(', ')}`);
@@ -58,10 +76,12 @@ export function getProvider(id: ProviderId): IProvider {
 }
 
 export function hasProvider(id: ProviderId): boolean {
+  ensureInitialized();
   return providers.has(id) && providers.get(id)!.isConfigured();
 }
 
 export function getAllProviders(): IProvider[] {
+  ensureInitialized();
   return [...providers.values()];
 }
 
@@ -85,6 +105,7 @@ export function getHourlyRate(providerId: ProviderId, tierId: TierId): number {
  * Replaces the old FlyService.isConfigured() checks.
  */
 export function isAnyProviderConfigured(): boolean {
+  ensureInitialized();
   for (const p of providers.values()) {
     if (p.isConfigured()) return true;
   }
