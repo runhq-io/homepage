@@ -2379,12 +2379,15 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
     // found". Disabling autostart makes the stop durable for the
     // duration of the snapshot. The machine is deleted at step 7
     // anyway, so we don't need to restore the flag.
-    try {
-      await provider.stopMachine(oldMachineId, oldAppName, { disableAutostart: true });
-      await provider.waitForState(oldMachineId, ['stopped'], 60_000, oldAppName);
-    } catch (err) {
-      console.warn(`[ServerService] Could not stop old machine ${oldMachineId} cleanly: ${err}. Proceeding with snapshot anyway.`);
-    }
+    //
+    // 5-min waitForState cap matches the broader timeout chain — Fly
+    // can be slow to actually stop machines during regional congestion.
+    // Throwing on timeout (rather than warn-and-proceed) is intentional:
+    // taking a snapshot of a not-fully-quiesced volume risks data
+    // inconsistency in the migration target. Better to abort cleanly
+    // via the recovery path and retry than corrupt the new volume.
+    await provider.stopMachine(oldMachineId, oldAppName, { disableAutostart: true });
+    await provider.waitForState(oldMachineId, ['stopped'], 300_000, oldAppName);
 
     // 2. Snapshot old volume. createSnapshot polls until ready (~1–2 min).
     snapshot = await provider.createSnapshot(oldVolumeId, oldAppName);
