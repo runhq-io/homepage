@@ -573,16 +573,18 @@ export async function listVolumes(appName?: string | null): Promise<FlyVolume[]>
  * createVolumeFromSnapshot failure even though Fly's queue would have
  * eventually completed the request).
  *
- * 10 minutes is intentionally generous — Fly's IAD region has been
- * sustaining 5-15 min queues during the per-app-isolation rollout.
- * Failing fast on this op surfaces a Fly outage as a migration
- * failure, but waiting longer just trades latency for resilience.
- * The downside of a long timeout is a genuinely-stuck call (network
- * partition, DNS issue) hangs for the full window — but the
- * migration runner is already multi-minute, so an extra 10-min wait
- * on one API call doesn't change the operator experience materially.
+ * 30 minutes is intentionally generous — matches the
+ * `waitForVolumeReady` and `createSnapshot` poll caps so the entire
+ * volume-handling chain has a consistent worst-case window. During
+ * Fly's IAD congestion observed in the per-app-isolation rollout,
+ * 10 min wasn't always enough on POST and 5 min wasn't enough on the
+ * subsequent state poll. Aligning all three at 30 min trades a
+ * worst-case stuck-call hang for resilience under sustained Fly
+ * slowness; a stuck network call hanging 30 min is a worse operator
+ * experience than fast-failing, but we're already deep into a
+ * multi-step migration runner, so the marginal cost is small.
  */
-const VOLUME_OP_TIMEOUT_MS = 600_000;
+const VOLUME_OP_TIMEOUT_MS = 1_800_000;
 
 /**
  * Create a volume for persistent storage
