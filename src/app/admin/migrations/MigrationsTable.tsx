@@ -53,15 +53,20 @@ export function MigrationsTable({
 
     const confirmed = confirm(
       `Migrate ${row.name} (${row.id}) to its own Fly app?\n\n` +
-        `This will:\n` +
-        `  • Stop the existing machine (~30s)\n` +
-        `  • Snapshot the volume (~1-2 min)\n` +
+        `Recommended: close all browser tabs and SSH sessions to this\n` +
+        `workspace before continuing. The migration disables autostart\n` +
+        `on the old machine to keep the volume quiesced during snapshot,\n` +
+        `but reducing live traffic also speeds the snapshot up.\n\n` +
+        `Steps:\n` +
+        `  • Stop the existing machine and disable its autostart (~30s)\n` +
+        `  • Snapshot the volume (~1-2 min, up to 10 min cap)\n` +
         `  • Create a new ws-* Fly app on an isolated 6PN network\n` +
         `  • Restore the snapshot into the new app and start a new machine\n` +
         `  • Cutover the DB row to point at the new resources\n` +
         `  • Delete the old machine + volume from the shared app\n\n` +
-        `Total ~2-3 minutes; the workspace is unreachable during the cutover.\n` +
-        `Cancel to abort.`,
+        `Total ~2-3 minutes; the workspace machine is offline during cutover\n` +
+        `(the management UI / TODOs / files-from-DB still load — these are\n` +
+        `BE-side and unaffected). Cancel to abort.`,
     );
     if (!confirmed) return;
 

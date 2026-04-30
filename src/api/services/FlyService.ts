@@ -646,8 +646,12 @@ export async function createSnapshot(volumeId: string, appName?: string | null):
   const snapshotId = result.Msg?.backup?.graph_id || 'unknown';
   console.log(`[FlyService] Created snapshot ${snapshotId} for volume ${volumeId}, waiting for it to be ready...`);
 
-  // Poll until the snapshot appears in the list (ready to use)
-  const maxWaitMs = 300_000; // 5 minutes
+  // Poll until the snapshot appears in the list (ready to use). 10 min
+  // cap covers the slow-Fly-day case for ~50 GB volumes; with the
+  // migration runner now disabling autostart on the old machine before
+  // snapshot, the volume is quiesced and most snapshots complete in
+  // under 90s — the cushion is for outliers.
+  const maxWaitMs = 600_000; // 10 minutes
   const pollIntervalMs = 3_000; // 3 seconds
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
@@ -990,9 +994,70 @@ export async function startMachine(machineId: string, appName?: string | null): 
 }
 
 /**
- * Stop a running machine
+ * Options for `stopMachine`. The defaults are a regular soft-stop —
+ * Fly's edge will continue to wake the machine on incoming traffic if
+ * `autostart` is set on its services (which it is for workspace
+ * machines, see `getMachineLifecyclePolicy`).
+ *
+ * `disableAutostart: true` first updates the machine config to
+ * `autostart=false`, `autostop='off'`, `min_machines_running=0` so the
+ * stop is durable: subsequent traffic will NOT auto-wake the machine.
+ * Used by the per-tenant migration runner to keep the volume quiesced
+ * during snapshot — without it, an open browser tab's WebSocket /
+ * preview-port poll / terminal session can race-restart the machine
+ * mid-snapshot, causing Fly's snapshot to stay in `running` state past
+ * our poll timeout and the migration to fail at
+ * `createVolumeFromSnapshot` ("snapshot not found").
  */
-export async function stopMachine(machineId: string, appName?: string | null): Promise<void> {
+export interface StopMachineOptions {
+  /** Set autostart=false / autostop=off before issuing the stop. */
+  disableAutostart?: boolean;
+}
+
+/**
+ * Stop a running machine.
+ *
+ * Pass `{ disableAutostart: true }` for migration-style stops where
+ * the machine MUST stay down (no autorestart) for the duration of
+ * downstream operations like volume snapshot.
+ */
+export async function stopMachine(
+  machineId: string,
+  appName?: string | null,
+  options?: StopMachineOptions,
+): Promise<void> {
+  if (options?.disableAutostart) {
+    // Order matters: disable autostart BEFORE issuing the stop. If we
+    // stopped first, there's a window where Fly's edge could receive
+    // traffic and auto-wake the machine before we finish updating the
+    // config. Best-effort — if the config update fails (e.g., machine
+    // already destroyed), we still issue the stop and rely on the
+    // caller's downstream timeouts to handle a possible re-wake.
+    try {
+      const machine = await getMachine(machineId, appName);
+      if (machine.state !== 'destroyed' && machine.state !== 'destroying') {
+        const updatedServices: FlyMachineService[] = (machine.config.services || []).map((service) => ({
+          ...service,
+          autostart: false,
+          autostop: 'off',
+          min_machines_running: 0,
+        }));
+        const payload = {
+          name: machine.name,
+          config: { ...machine.config, services: updatedServices },
+        };
+        await flyRequest<FlyMachine>(
+          'POST',
+          `/apps/${getServerAppName(appName)}/machines/${machineId}`,
+          payload,
+        );
+        console.log(`[FlyService] Disabled autostart on ${machineId} before stop`);
+      }
+    } catch (err) {
+      console.warn(`[FlyService] Failed to disable autostart on ${machineId} before stop: ${err}`);
+    }
+  }
+
   console.log(`[FlyService] Stopping machine ${machineId}`);
   await flyRequest<void>(
     'POST',

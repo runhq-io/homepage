@@ -69,7 +69,17 @@ export interface IProvider {
   getMachineState(machineId: string, appName?: string | null): Promise<MachineState>;
   getMachineInfo(machineId: string, appName?: string | null): Promise<MachineInfo>;
   startMachine(machineId: string, appName?: string | null): Promise<void>;
-  stopMachine(machineId: string, appName?: string | null): Promise<void>;
+  /**
+   * Stop a running machine. Pass `{ disableAutostart: true }` for
+   * migration-style stops that must remain stopped even if traffic
+   * arrives (Fly's edge auto-wakes machines whose services have
+   * `autostart: true`, which would race-restart during a snapshot).
+   */
+  stopMachine(
+    machineId: string,
+    appName?: string | null,
+    options?: { disableAutostart?: boolean },
+  ): Promise<void>;
   suspendMachine(machineId: string, appName?: string | null): Promise<void>;
   restartMachine(machineId: string, appName?: string | null): Promise<void>;
   updateMachineImage(machineId: string, appName?: string | null): Promise<void>;

@@ -235,8 +235,12 @@ export class FlyProvider implements IProvider {
     await FlyService.startMachine(machineId, appName);
   }
 
-  async stopMachine(machineId: string, appName?: string | null): Promise<void> {
-    await FlyService.stopMachine(machineId, appName);
+  async stopMachine(
+    machineId: string,
+    appName?: string | null,
+    options?: { disableAutostart?: boolean },
+  ): Promise<void> {
+    await FlyService.stopMachine(machineId, appName, options);
   }
 
   async suspendMachine(machineId: string, appName?: string | null): Promise<void> {

@@ -2358,8 +2358,19 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
     await MachineUsageService.onMachineStopped(serverId);
 
     // 1. Stop the old machine so the volume is quiesced before snapshot.
+    //
+    // `disableAutostart: true` is critical here. Workspace machines have
+    // `autostart: true` on their services so Fly's edge auto-wakes them
+    // on incoming traffic. An open browser tab pointed at the workspace
+    // (WebSocket, terminal, file editor, preview port) keeps generating
+    // traffic, which would race-restart the machine mid-snapshot — the
+    // volume would never quiesce, Fly's snapshot stays in `running`
+    // state past our poll timeout, and step 4 fails with "snapshot not
+    // found". Disabling autostart makes the stop durable for the
+    // duration of the snapshot. The machine is deleted at step 7
+    // anyway, so we don't need to restore the flag.
     try {
-      await provider.stopMachine(oldMachineId, oldAppName);
+      await provider.stopMachine(oldMachineId, oldAppName, { disableAutostart: true });
       await provider.waitForState(oldMachineId, ['stopped'], 60_000, oldAppName);
     } catch (err) {
       console.warn(`[ServerService] Could not stop old machine ${oldMachineId} cleanly: ${err}. Proceeding with snapshot anyway.`);

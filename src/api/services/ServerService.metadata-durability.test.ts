@@ -463,6 +463,38 @@ describe('migrateWorkspaceToOwnApp — pre-cutover failures must drop the gate',
     flyNetworkName: null,
   };
 
+  it('disables autostart on the old machine before stop (prevents Fly auto-wake during snapshot)', async () => {
+    // Without `disableAutostart: true`, an open browser tab can race-restart
+    // the machine mid-snapshot via Fly's edge auto-wake. The volume never
+    // quiesces, the snapshot stays in `running` state past our poll
+    // timeout, and step 4 fails with "snapshot not found". This test pins
+    // the contract: step 1 MUST pass `disableAutostart: true` on stop.
+    mockSelectSequence([legacyServer, legacyServer]);
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createVolumeFromSnapshot.mockResolvedValueOnce({ id: 'vol_new' });
+    providerMock.createMachine.mockResolvedValueOnce({
+      machineId: 'mach_new',
+      machineName: 'srv-new',
+      serverUrl: 'https://ws-test.fly.dev',
+      region: 'iad',
+      volumeId: 'vol_new',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
+    });
+    providerMock.waitForState.mockResolvedValueOnce(undefined);
+    providerMock.waitForHealthy.mockResolvedValueOnce(undefined);
+
+    await ServerService.migrateWorkspaceToOwnApp('ws_test');
+
+    expect(providerMock.stopMachine).toHaveBeenCalledTimes(1);
+    expect(providerMock.stopMachine).toHaveBeenCalledWith(
+      'mach_old',
+      expect.any(String),
+      expect.objectContaining({ disableAutostart: true }),
+    );
+  });
+
   it('createSnapshot throws → status=offline, no app/volume cleanup, no deleteApp called', async () => {
     // Sequence of getServer calls during migrate:
     //   1. start of migrate — reads the legacy row
