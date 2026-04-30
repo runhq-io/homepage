@@ -746,14 +746,16 @@ export async function listSnapshots(volumeId: string, appName?: string | null): 
  * machine creation that mounts the volume.
  *
  * Throws on timeout. For 40 GiB volumes restoring from typical small
- * deltas, observed completion is well under 60s; the 5-minute cap is
- * cushion for slow-Fly-day outliers (same regional slowdowns that
- * stretch snapshot creation).
+ * deltas, observed completion is well under 60s. The 30-min cap is
+ * cushion for slow-Fly-day outliers — same regional slowdowns that
+ * stretch snapshot creation. Volume hydration during the
+ * per-app-isolation rollout has been observed taking many minutes
+ * during IAD congestion; 5 min wasn't enough.
  */
 export async function waitForVolumeReady(
   volumeId: string,
   appName?: string | null,
-  timeoutMs: number = 300_000,
+  timeoutMs: number = 1_800_000,
 ): Promise<FlyVolume> {
   const start = Date.now();
   const pollIntervalMs = 2_000;
