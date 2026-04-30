@@ -1746,22 +1746,37 @@ export function createHttpApp() {
   // moderate traffic this endpoint handles ~1 BE call per 30s globally.
   app.get('/api/preview-router/migrated-workspaces', async (c) => {
     try {
+      // Two queries combined into one round-trip: migrated workspaces
+      // (already on a per-tenant app) and currently-migrating workspaces
+      // (status='provisioning'). The Worker uses both:
+      //   • machines[mid]   → upstream override to <flyApp>.fly.dev
+      //   • migrating[mid]  → 503 Service Unavailable (block traffic)
+      // The 503 path is what keeps Fly's edge from starting a stopped
+      // target machine via fly-replay during migration. autostart=false
+      // on the service controls traffic-driven wake but NOT
+      // fly-replay-driven wake (Fly always starts the replay target).
+      // Blocking at the Worker layer keeps the request from ever
+      // reaching Fly, sidestepping the fly-replay problem entirely.
       const rows = await db
         .select({
           machineId: servers.machineId,
           flyAppName: servers.flyAppName,
+          status: servers.status,
         })
         .from(servers)
         .where(and(
           eq(servers.deploymentType, 'remote'),
           isNotNull(servers.machineId),
-          isNotNull(servers.flyAppName),
-          like(servers.flyAppName, 'ws-%'),
         ));
 
       const machines: Record<string, string> = {};
+      const migrating: string[] = [];
       for (const row of rows) {
-        if (row.machineId && row.flyAppName) {
+        if (!row.machineId) continue;
+        if (row.status === 'provisioning') {
+          migrating.push(row.machineId);
+        }
+        if (row.flyAppName && row.flyAppName.startsWith('ws-')) {
           machines[row.machineId] = row.flyAppName;
         }
       }
@@ -1771,7 +1786,7 @@ export function createHttpApp() {
       // browser, future direct-from-CF cache, etc.) sees consistent
       // semantics.
       c.header('Cache-Control', 'public, max-age=30, s-maxage=30');
-      return c.json({ machines });
+      return c.json({ machines, migrating });
     } catch (error) {
       console.error('[HttpServer] List migrated workspaces error:', error);
       return c.json({ error: 'Failed to list migrated workspaces' }, 500);
