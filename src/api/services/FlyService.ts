@@ -698,6 +698,56 @@ export async function listSnapshots(volumeId: string, appName?: string | null): 
 }
 
 /**
+ * Wait for a volume to reach `created` state.
+ *
+ * `createVolumeFromSnapshot` returns the volume ID immediately, but
+ * Fly hydrates the snapshot data in the background — the volume's
+ * `state` field stays `restoring` until hydration completes, then
+ * flips to `created`. Callers that immediately try to mount the
+ * volume on a new machine via `provisionNewMachine` hit
+ * `getOrCreateVolume()`, which sees `state !== 'created'` and creates
+ * a fresh EMPTY volume — silently dropping the restored data.
+ *
+ * Always call this after `createVolumeFromSnapshot` and before any
+ * machine creation that mounts the volume.
+ *
+ * Throws on timeout. For 40 GiB volumes restoring from typical small
+ * deltas, observed completion is well under 60s; the 5-minute cap is
+ * cushion for slow-Fly-day outliers (same regional slowdowns that
+ * stretch snapshot creation).
+ */
+export async function waitForVolumeReady(
+  volumeId: string,
+  appName?: string | null,
+  timeoutMs: number = 300_000,
+): Promise<FlyVolume> {
+  const start = Date.now();
+  const pollIntervalMs = 2_000;
+
+  console.log(`[FlyService] Waiting for volume ${volumeId} to reach state 'created'`);
+
+  while (Date.now() - start < timeoutMs) {
+    const vol = await getVolume(volumeId, appName);
+    if (vol && vol.state === 'created') {
+      console.log(`[FlyService] Volume ${volumeId} is ready (waited ${Math.round((Date.now() - start) / 1000)}s)`);
+      return vol;
+    }
+    if (vol) {
+      console.log(`[FlyService] Volume ${volumeId} state='${vol.state}', waiting...`);
+    } else {
+      console.log(`[FlyService] Volume ${volumeId} not yet visible, waiting...`);
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  throw new Error(
+    `Volume ${volumeId} did not reach 'created' state within ${timeoutMs / 1000}s. ` +
+    `If it eventually does, the restored data is intact in that volume — just not yet attached. ` +
+    `Manual recovery: detach any wrong volume, attach this one to the workspace machine.`,
+  );
+}
+
+/**
  * Get or create a volume for a server.
  * Uses the DB-stored volumeId if available, otherwise creates a new one.
  * Never searches by name — that leads to adopting ghost/deleted volumes.

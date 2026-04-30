@@ -294,6 +294,10 @@ export class FlyProvider implements IProvider {
     await FlyService.deleteVolume(volumeId, appName);
   }
 
+  async waitForVolumeReady(volumeId: string, appName?: string | null, timeoutMs?: number): Promise<void> {
+    await FlyService.waitForVolumeReady(volumeId, appName, timeoutMs);
+  }
+
   // ---- Health / waiting ----
 
   async waitForState(machineId: string, targetStates: MachineState[], timeoutMs?: number, appName?: string | null): Promise<void> {

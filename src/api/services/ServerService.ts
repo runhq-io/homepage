@@ -2397,6 +2397,21 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
     );
     console.log(`[ServerService] Restored snapshot into ${newVolume.id} (${newAppName})`);
 
+    // 4b. Wait for the restored volume to finish hydrating before
+    // mounting it. createVolumeFromSnapshot returns the volume ID
+    // immediately; Fly populates the data in the background, with the
+    // volume's `state` field staying `restoring` until done.
+    //
+    // Without this wait, the next step's call into provisionNewMachine
+    // → getOrCreateVolume would see `state !== 'created'` and create a
+    // fresh EMPTY volume instead, silently dropping the restored data
+    // — observed once on a staging migration where the new machine
+    // ended up mounted on an empty 40 GiB volume while the actual
+    // restored data sat orphaned in a different (created-state)
+    // volume. See docs/per-app-isolation-migration.md and the
+    // commit message for ServerService waitForVolumeReady wiring.
+    await provider.waitForVolumeReady(newVolume.id, newAppName);
+
     // 5. Provision a new machine in the new app, mounting the restored volume.
     // The new app was already created in step 3; provisionNewMachine consumes
     // newAppName / newNetworkName as the target. It writes the new

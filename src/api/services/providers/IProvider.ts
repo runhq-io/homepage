@@ -96,6 +96,14 @@ export interface IProvider {
   forkVolume(sourceVolumeId: string, name: string, region: string, sizeGb?: number, appName?: string | null): Promise<VolumeInfo>;
   createSnapshot(volumeId: string, appName?: string | null): Promise<SnapshotInfo>;
   deleteVolume(volumeId: string, appName?: string | null): Promise<void>;
+  /**
+   * Wait for a volume to finish hydrating after `createVolumeFromSnapshot`
+   * (state transitions `restoring` → `created`). Required before mounting
+   * a snapshot-restored volume on a new machine — otherwise the
+   * provisioning helper sees `state !== 'created'` and creates a fresh
+   * EMPTY volume instead, silently dropping the restored data.
+   */
+  waitForVolumeReady(volumeId: string, appName?: string | null, timeoutMs?: number): Promise<void>;
 
   // ---------------------------------------------------------------------------
   // Health / waiting

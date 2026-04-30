@@ -94,6 +94,7 @@ const providerMock = {
   deleteVolume: vi.fn(),
   createSnapshot: vi.fn(async () => ({ id: 'snap' })),
   createVolumeFromSnapshot: vi.fn(async () => ({ id: 'vol-restored' })),
+  waitForVolumeReady: vi.fn(),
   createApp: vi.fn(),
   deleteApp: vi.fn(),
   // Phase 6: per-tenant ingress setup. provisionNewMachine calls these
@@ -462,6 +463,44 @@ describe('migrateWorkspaceToOwnApp — pre-cutover failures must drop the gate',
     flyAppName: null,
     flyNetworkName: null,
   };
+
+  it('waits for the restored volume to be `created` before provisioning the new machine', async () => {
+    // After createVolumeFromSnapshot, Fly hydrates the volume in the
+    // background — state goes `restoring` → `created`. If the migrator
+    // skips the wait and immediately calls provisionNewMachine, the
+    // helper getOrCreateVolume sees `state !== 'created'` and creates
+    // a fresh empty volume, silently dropping the restored data.
+    // Reproduced once in staging. This test pins the contract:
+    // waitForVolumeReady MUST be called between createVolumeFromSnapshot
+    // and createMachine, with the same volume ID.
+    mockSelectSequence([legacyServer, legacyServer]);
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createVolumeFromSnapshot.mockResolvedValueOnce({ id: 'vol_new' });
+    providerMock.waitForVolumeReady.mockResolvedValueOnce(undefined);
+    providerMock.createMachine.mockResolvedValueOnce({
+      machineId: 'mach_new',
+      machineName: 'srv-new',
+      serverUrl: 'https://ws-test.fly.dev',
+      region: 'iad',
+      volumeId: 'vol_new',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
+    });
+    providerMock.waitForState.mockResolvedValueOnce(undefined);
+    providerMock.waitForHealthy.mockResolvedValueOnce(undefined);
+
+    await ServerService.migrateWorkspaceToOwnApp('ws_test');
+
+    // Wait was called exactly once, with the restored volume's id, on
+    // the new app — and BEFORE the machine was created.
+    expect(providerMock.waitForVolumeReady).toHaveBeenCalledTimes(1);
+    expect(providerMock.waitForVolumeReady).toHaveBeenCalledWith('vol_new', 'ws-test');
+
+    const waitOrder = providerMock.waitForVolumeReady.mock.invocationCallOrder[0];
+    const createMachineOrder = providerMock.createMachine.mock.invocationCallOrder[0];
+    expect(waitOrder).toBeLessThan(createMachineOrder);
+  });
 
   it('disables autostart on the old machine before stop (prevents Fly auto-wake during snapshot)', async () => {
     // Without `disableAutostart: true`, an open browser tab can race-restart
