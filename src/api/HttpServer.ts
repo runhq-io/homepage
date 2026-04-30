@@ -44,7 +44,7 @@ import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions } from '../db/schema';
-import { eq, lt, sql, and, isNotNull } from 'drizzle-orm';
+import { eq, lt, sql, and, isNotNull, like } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -1727,6 +1727,54 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] List workspace apps error:', error);
       return c.json({ error: 'Failed to list workspace apps' }, 500);
+    }
+  });
+
+  // Mapping of `<machineId> → <flyAppName>` for every workspace that lives
+  // in a per-tenant Fly app (`fly_app_name` matches `ws-%`). Consumed by
+  // the Cloudflare preview-router Worker to decide which Fly app to
+  // forward a legacy-shape preview URL (`<port>-<mid>.tank.fish`) to:
+  //   • machineId in this map → forward to the per-tenant `<flyApp>.fly.dev`
+  //   • machineId NOT in map  → fallback to `fishtank-workspaces.fly.dev`
+  //
+  // Public on purpose for now — the data is just a list of (machineId,
+  // appName) pairs that doesn't disclose anything an attacker couldn't
+  // get from `flyctl apps list` against a public Fly account, and adding
+  // an auth handshake to the Worker complicates rotation. We can gate it
+  // later (HMAC or shared secret) once the rest of the migration shakes
+  // out. The Worker caches the response for 30s on the edge, so even at
+  // moderate traffic this endpoint handles ~1 BE call per 30s globally.
+  app.get('/api/preview-router/migrated-workspaces', async (c) => {
+    try {
+      const rows = await db
+        .select({
+          machineId: servers.machineId,
+          flyAppName: servers.flyAppName,
+        })
+        .from(servers)
+        .where(and(
+          eq(servers.deploymentType, 'remote'),
+          isNotNull(servers.machineId),
+          isNotNull(servers.flyAppName),
+          like(servers.flyAppName, 'ws-%'),
+        ));
+
+      const machines: Record<string, string> = {};
+      for (const row of rows) {
+        if (row.machineId && row.flyAppName) {
+          machines[row.machineId] = row.flyAppName;
+        }
+      }
+
+      // Worker caches via cf.cacheTtl=30 + module-level memo; surface the
+      // same TTL via Cache-Control so any other consumer (debugging via
+      // browser, future direct-from-CF cache, etc.) sees consistent
+      // semantics.
+      c.header('Cache-Control', 'public, max-age=30, s-maxage=30');
+      return c.json({ machines });
+    } catch (error) {
+      console.error('[HttpServer] List migrated workspaces error:', error);
+      return c.json({ error: 'Failed to list migrated workspaces' }, 500);
     }
   });
 
