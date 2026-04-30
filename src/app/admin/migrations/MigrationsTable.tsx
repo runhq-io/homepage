@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { migrateOne } from './actions';
+import { migrateOne, createLegacyTestWorkspace } from './actions';
 import type { MigrationResult } from '@/api/services/ServerService';
 
 export type WorkspaceRow = {
@@ -97,6 +97,8 @@ export function MigrationsTable({
 
   return (
     <div className="space-y-12">
+      <CreateLegacyTestWorkspacePanel />
+
       <Section
         title="Eligible (legacy shared app)"
         subtitle={`${eligible.length} workspace${eligible.length === 1 ? '' : 's'} still on the shared Fly app — fly_app_name IS NULL`}
@@ -156,6 +158,98 @@ export function MigrationsTable({
         <Table rows={migrated} />
       </Section>
     </div>
+  );
+}
+
+type CreateOutcome =
+  | { kind: 'success'; serverId: string; machineId: string }
+  | { kind: 'error'; message: string };
+
+function CreateLegacyTestWorkspacePanel() {
+  const router = useRouter();
+  const [name, setName] = useState('migration-test');
+  const [outcome, setOutcome] = useState<CreateOutcome | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  function handleCreate(): void {
+    if (!name.trim()) return;
+    startTransition(async () => {
+      try {
+        const result = await createLegacyTestWorkspace(name);
+        setOutcome({ kind: 'success', serverId: result.serverId, machineId: result.machineId });
+        router.refresh();
+      } catch (err) {
+        setOutcome({
+          kind: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
+  return (
+    <section className="bg-slate-800/30 border border-slate-700/50 rounded-lg p-5">
+      <div className="flex items-start justify-between gap-6 flex-wrap">
+        <div>
+          <h2 className="text-base font-semibold text-white">Create test legacy workspace</h2>
+          <p className="mt-1 text-sm text-slate-400 max-w-xl">
+            Provisions a workspace in the shared Fly app
+            {' '}<code className="px-1 py-0.5 rounded bg-slate-900/60 text-slate-300 font-mono text-xs">runhq-workspaces-staging</code>{' '}
+            with{' '}<code className="px-1 py-0.5 rounded bg-slate-900/60 text-slate-300 font-mono text-xs">fly_app_name = NULL</code>{' '}
+            on the row — same shape as a pre-Phase-2 workspace. Use this to
+            verify the migration flow end-to-end without redeploying master.
+            Bypasses the Stripe payment gate. Owned by you; appears in your
+            normal workspace list.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="workspace name"
+            disabled={isPending}
+            maxLength={100}
+            className="px-3 py-1.5 rounded-md bg-slate-900 border border-slate-700 text-sm text-white placeholder:text-slate-500 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onClick={handleCreate}
+            disabled={isPending || !name.trim()}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed transition-colors"
+          >
+            {isPending && (
+              <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {isPending ? 'Provisioning…' : 'Create'}
+          </button>
+        </div>
+      </div>
+
+      {outcome?.kind === 'success' && (
+        <p className="mt-3 text-sm text-emerald-300">
+          Created{' '}
+          <code className="px-1 py-0.5 rounded bg-emerald-900/40 text-emerald-200 font-mono text-xs">
+            {outcome.serverId}
+          </code>
+          {' '}(machine{' '}
+          <code className="px-1 py-0.5 rounded bg-emerald-900/40 text-emerald-200 font-mono text-xs">
+            {outcome.machineId}
+          </code>
+          ). It now appears in the &ldquo;Eligible&rdquo; table below — open it,
+          add some test data, then click Migrate to verify the flow.
+        </p>
+      )}
+      {outcome?.kind === 'error' && (
+        <p className="mt-3 text-sm text-red-300">
+          Failed: <span className="font-mono text-xs">{outcome.message}</span>
+        </p>
+      )}
+    </section>
   );
 }
 

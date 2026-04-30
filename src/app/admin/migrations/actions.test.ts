@@ -21,12 +21,13 @@ vi.mock('@/lib/auth', () => ({
 
 vi.mock('@/api/services/ServerService', () => ({
   migrateWorkspaceToOwnApp: vi.fn(),
+  createLegacyTestServer: vi.fn(),
 }));
 
 import { auth } from '@/lib/auth';
 import { revalidatePath } from 'next/cache';
-import { migrateWorkspaceToOwnApp } from '@/api/services/ServerService';
-import { migrateOne } from './actions';
+import { migrateWorkspaceToOwnApp, createLegacyTestServer } from '@/api/services/ServerService';
+import { migrateOne, createLegacyTestWorkspace } from './actions';
 
 describe('admin migrations actions', () => {
   beforeEach(() => {
@@ -36,6 +37,13 @@ describe('admin migrations actions', () => {
   function mockAdminSession() {
     vi.mocked(auth).mockResolvedValue({
       user: { id: 'admin-1', email: 'admin@test.com', name: 'Admin', isAdmin: true },
+      expires: new Date(Date.now() + 86400000).toISOString(),
+    } as any);
+  }
+
+  function mockAdminSessionWithoutId() {
+    vi.mocked(auth).mockResolvedValue({
+      user: { email: 'admin@test.com', name: 'Admin', isAdmin: true },
       expires: new Date(Date.now() + 86400000).toISOString(),
     } as any);
   }
@@ -128,6 +136,91 @@ describe('admin migrations actions', () => {
       await expect(migrateOne('ws_test')).rejects.toThrow(/already on per-tenant app/);
       // No revalidate on failure — the page is unchanged so no need to bust
       // the cache.
+      expect(revalidatePath).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createLegacyTestWorkspace', () => {
+    const fakeResult = {
+      serverId: 'ws_abc_def',
+      machineId: 'mach_test',
+      serverUrl: 'https://srv-mach_test.runhq.io',
+    };
+
+    it('delegates to createLegacyTestServer with the calling admin as owner', async () => {
+      mockAdminSession();
+      vi.mocked(createLegacyTestServer).mockResolvedValueOnce(fakeResult);
+
+      const result = await createLegacyTestWorkspace('migration-test');
+
+      expect(result).toEqual(fakeResult);
+      expect(createLegacyTestServer).toHaveBeenCalledTimes(1);
+      // First arg = ownerId from the session, second = name (trimmed).
+      expect(createLegacyTestServer).toHaveBeenCalledWith('admin-1', 'migration-test');
+    });
+
+    it('trims whitespace on the name', async () => {
+      mockAdminSession();
+      vi.mocked(createLegacyTestServer).mockResolvedValueOnce(fakeResult);
+
+      await createLegacyTestWorkspace('  spaced-name  ');
+
+      expect(createLegacyTestServer).toHaveBeenCalledWith('admin-1', 'spaced-name');
+    });
+
+    it('revalidates /admin/migrations and /admin/servers on success', async () => {
+      mockAdminSession();
+      vi.mocked(createLegacyTestServer).mockResolvedValueOnce(fakeResult);
+
+      await createLegacyTestWorkspace('test');
+
+      expect(revalidatePath).toHaveBeenCalledWith('/admin/migrations');
+      expect(revalidatePath).toHaveBeenCalledWith('/admin/servers');
+    });
+
+    it('rejects unauthenticated callers without provisioning', async () => {
+      mockUnauthenticated();
+
+      await expect(createLegacyTestWorkspace('test')).rejects.toThrow('Not authenticated');
+      expect(createLegacyTestServer).not.toHaveBeenCalled();
+    });
+
+    it('rejects non-admin sessions without provisioning', async () => {
+      mockNonAdminSession();
+
+      await expect(createLegacyTestWorkspace('test')).rejects.toThrow('Not authorized');
+      expect(createLegacyTestServer).not.toHaveBeenCalled();
+    });
+
+    it('rejects sessions missing user id', async () => {
+      mockAdminSessionWithoutId();
+
+      await expect(createLegacyTestWorkspace('test')).rejects.toThrow(/user id/);
+      expect(createLegacyTestServer).not.toHaveBeenCalled();
+    });
+
+    it('rejects empty / whitespace-only names', async () => {
+      mockAdminSession();
+
+      await expect(createLegacyTestWorkspace('')).rejects.toThrow(/name is required/);
+      await expect(createLegacyTestWorkspace('   ')).rejects.toThrow(/name is required/);
+      expect(createLegacyTestServer).not.toHaveBeenCalled();
+    });
+
+    it('rejects names longer than 100 chars', async () => {
+      mockAdminSession();
+
+      await expect(createLegacyTestWorkspace('x'.repeat(101))).rejects.toThrow(/too long/);
+      expect(createLegacyTestServer).not.toHaveBeenCalled();
+    });
+
+    it('propagates provisioning errors without revalidating', async () => {
+      mockAdminSession();
+      vi.mocked(createLegacyTestServer).mockRejectedValueOnce(
+        new Error('Fly machine creation failed'),
+      );
+
+      await expect(createLegacyTestWorkspace('test')).rejects.toThrow(/Fly machine/);
       expect(revalidatePath).not.toHaveBeenCalled();
     });
   });

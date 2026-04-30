@@ -2522,6 +2522,89 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
 }
 
 /**
+ * Create a workspace in legacy shape — provisioned in the shared Fly app
+ * (`runhq-workspaces-staging` / `fishtank-workspaces`) with `fly_app_name`
+ * NULL on the row, exactly like a pre-Phase-2 workspace. Lets operators
+ * synthesize a migration target without redeploying master, so the
+ * `migrateWorkspaceToOwnApp` flow can be tested end-to-end on staging
+ * without disturbing already-migrated workspaces in the same env.
+ *
+ * Synchronous (awaits provisioning, unlike `createServer` which fires
+ * provisioning in the background with .catch). The admin caller wants
+ * to know whether the legacy machine actually came up before they try
+ * to migrate it.
+ *
+ * Skips the Stripe subscription gate that `createServer` enforces —
+ * this is an admin/operator path, not a self-serve user flow.
+ */
+export async function createLegacyTestServer(
+  ownerId: string,
+  name: string,
+  region: string = 'iad',
+  tier: ServerTier = 'shared-cpu-4x' as ServerTier,
+): Promise<{ serverId: string; machineId: string; serverUrl: string }> {
+  const serverId = `ws_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const serverToken = generateServerToken();
+  const tokenHash = hashServerToken(serverToken);
+
+  // Row is inserted with fly_app_name=NULL — that's what makes this a
+  // legacy-shape workspace. provisionNewMachine called with null flyAppName
+  // routes the machine into the env-default (shared) app and uses the
+  // legacy CloudflareTunnel.createDnsRecord ingress flow rather than the
+  // per-tenant CNAME flow.
+  await db.insert(servers).values({
+    id: serverId,
+    name,
+    ownerId,
+    tokenHash,
+    deploymentType: 'remote',
+    provider: 'fly',
+    tier,
+    region,
+    autoSuspendEnabled: true,
+    status: 'provisioning',
+    flyAppName: null,
+    flyNetworkName: null,
+  });
+
+  await db.insert(serverMembers).values({
+    serverId,
+    userId: ownerId,
+    role: 'owner',
+  });
+
+  console.log(`[ServerService] Created LEGACY test server ${serverId} for user ${ownerId} in shared Fly app`);
+
+  try {
+    const result = await provisionNewMachine(
+      serverId,
+      serverToken,
+      region,
+      tier,
+      true,
+      undefined,
+      undefined,
+      'fly',
+      undefined,
+      null, // flyAppName=null → legacy shared-app provisioning
+      null, // flyNetworkName=null
+    );
+    console.log(`[ServerService] LEGACY test server ${serverId} provisioned: machine ${result.machineId} at ${result.url}`);
+    return {
+      serverId,
+      machineId: result.machineId,
+      serverUrl: result.url,
+    };
+  } catch (err) {
+    await db
+      .update(servers)
+      .set({ status: 'error', updatedAt: new Date() })
+      .where(eq(servers.id, serverId));
+    throw err;
+  }
+}
+
+/**
  * Change the region of a remote server.
  * Forks the existing volume to the new region (preserving all data),
  * creates a new machine there, then cleans up old infrastructure.
