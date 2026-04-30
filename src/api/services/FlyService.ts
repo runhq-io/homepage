@@ -646,12 +646,21 @@ export async function createSnapshot(volumeId: string, appName?: string | null):
   const snapshotId = result.Msg?.backup?.graph_id || 'unknown';
   console.log(`[FlyService] Created snapshot ${snapshotId} for volume ${volumeId}, waiting for it to be ready...`);
 
-  // Poll until the snapshot appears in the list (ready to use). 10 min
-  // cap covers the slow-Fly-day case for ~50 GB volumes; with the
-  // migration runner now disabling autostart on the old machine before
-  // snapshot, the volume is quiesced and most snapshots complete in
-  // under 90s — the cushion is for outliers.
-  const maxWaitMs = 600_000; // 10 minutes
+  // Poll until the snapshot appears in the list and reaches `created`
+  // state. With the migration runner disabling autostart on the old
+  // machine before snapshot, the volume is quiesced and most snapshots
+  // complete in under 90s. But Fly's snapshot infrastructure can queue
+  // operations during regional slowdowns — observed snapshots taking
+  // 5-15 minutes on a quiesced volume during IAD slowdowns. The 30-min
+  // cap is generous enough to ride those out.
+  //
+  // Throws on timeout (rather than returning the ID with a warning) so
+  // the caller's recovery path runs cleanly. Returning early would
+  // cause the next step (createVolumeFromSnapshot) to fail with the
+  // confusing "snapshot not found" 400 — that's what was masking
+  // timeout-vs-real-failure during the per-app-isolation migration
+  // testing.
+  const maxWaitMs = 1_800_000; // 30 minutes
   const pollIntervalMs = 3_000; // 3 seconds
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
@@ -671,9 +680,11 @@ export async function createSnapshot(volumeId: string, appName?: string | null):
     }
   }
 
-  // Timed out but still return the ID — createVolumeFromSnapshot will fail with a clear error if it's not ready
-  console.warn(`[FlyService] Snapshot ${snapshotId} not confirmed ready after ${maxWaitMs / 1000}s, proceeding anyway`);
-  return { id: snapshotId };
+  throw new Error(
+    `Snapshot ${snapshotId} did not reach 'created' state within ${maxWaitMs / 1000}s. ` +
+    `Fly's snapshot infrastructure may be slow today — check https://status.flyio.net/ ` +
+    `and retry. The orphaned snapshot will eventually complete and auto-delete after its retention period.`,
+  );
 }
 
 /**
