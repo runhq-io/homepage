@@ -33,9 +33,17 @@ export function MigrationsTable({
   migrated: WorkspaceRow[];
 }) {
   const router = useRouter();
-  const [activeServerId, setActiveServerId] = useState<string | null>(null);
+  // Set rather than single string so simultaneous clicks on multiple rows
+  // each show their own spinner. The underlying server actions are
+  // independent and run in parallel — we just need the UI to reflect it.
+  const [activeServerIds, setActiveServerIds] = useState<Set<string>>(new Set());
   const [outcomes, setOutcomes] = useState<Record<string, MigrationOutcome>>({});
-  const [isPending, startTransition] = useTransition();
+  // We track per-row in-flight state via `activeServerIds` (above) rather
+  // than `useTransition`'s single boolean — useTransition's `isPending` is
+  // true while ANY transition is in flight, which loses the per-row
+  // resolution we want. The transition is still useful for batching the
+  // setState calls inside the async handler.
+  const [, startTransition] = useTransition();
 
   function isMigratable(row: WorkspaceRow): boolean {
     return row.machineId !== null && row.volumeId !== null;
@@ -70,7 +78,11 @@ export function MigrationsTable({
     );
     if (!confirmed) return;
 
-    setActiveServerId(row.id);
+    setActiveServerIds((prev) => {
+      const next = new Set(prev);
+      next.add(row.id);
+      return next;
+    });
     startTransition(async () => {
       try {
         const result = await migrateOne(row.id);
@@ -90,7 +102,11 @@ export function MigrationsTable({
           },
         }));
       } finally {
-        setActiveServerId(null);
+        setActiveServerIds((prev) => {
+          const next = new Set(prev);
+          next.delete(row.id);
+          return next;
+        });
       }
     });
   }
@@ -109,7 +125,7 @@ export function MigrationsTable({
           actionColumn
           renderAction={(row) => {
             const outcome = outcomes[row.id];
-            const isActive = activeServerId === row.id && isPending;
+            const isActive = activeServerIds.has(row.id);
             const migratable = isMigratable(row);
 
             if (outcome?.kind === 'success') {
