@@ -1,0 +1,286 @@
+'use client';
+
+import { useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
+import { migrateOne } from './actions';
+import type { MigrationResult } from '@/api/services/ServerService';
+
+export type WorkspaceRow = {
+  id: string;
+  name: string;
+  machineId: string | null;
+  volumeId: string | null;
+  flyAppName: string | null;
+  flyNetworkName: string | null;
+  region: string | null;
+  status: string | null;
+  tier: string | null;
+  /** ISO string (server-rendered Date is unsafe to pass through to client). */
+  createdAt: string;
+  ownerEmail: string | null;
+  ownerName: string | null;
+};
+
+type MigrationOutcome =
+  | { kind: 'success'; result: MigrationResult }
+  | { kind: 'error'; message: string };
+
+export function MigrationsTable({
+  eligible,
+  migrated,
+}: {
+  eligible: WorkspaceRow[];
+  migrated: WorkspaceRow[];
+}) {
+  const router = useRouter();
+  const [activeServerId, setActiveServerId] = useState<string | null>(null);
+  const [outcomes, setOutcomes] = useState<Record<string, MigrationOutcome>>({});
+  const [isPending, startTransition] = useTransition();
+
+  function isMigratable(row: WorkspaceRow): boolean {
+    return row.machineId !== null && row.volumeId !== null;
+  }
+
+  function handleMigrate(row: WorkspaceRow): void {
+    if (!isMigratable(row)) {
+      alert(
+        `Cannot migrate ${row.id}: row is missing ${
+          row.machineId === null ? 'machineId' : 'volumeId'
+        }. The migrator needs both. Manual triage required.`,
+      );
+      return;
+    }
+
+    const confirmed = confirm(
+      `Migrate ${row.name} (${row.id}) to its own Fly app?\n\n` +
+        `This will:\n` +
+        `  • Stop the existing machine (~30s)\n` +
+        `  • Snapshot the volume (~1-2 min)\n` +
+        `  • Create a new ws-* Fly app on an isolated 6PN network\n` +
+        `  • Restore the snapshot into the new app and start a new machine\n` +
+        `  • Cutover the DB row to point at the new resources\n` +
+        `  • Delete the old machine + volume from the shared app\n\n` +
+        `Total ~2-3 minutes; the workspace is unreachable during the cutover.\n` +
+        `Cancel to abort.`,
+    );
+    if (!confirmed) return;
+
+    setActiveServerId(row.id);
+    startTransition(async () => {
+      try {
+        const result = await migrateOne(row.id);
+        setOutcomes((prev) => ({
+          ...prev,
+          [row.id]: { kind: 'success', result },
+        }));
+        // Server action revalidated the path; refresh router-side cache to
+        // pick up the new row state (flyAppName populated, status updated).
+        router.refresh();
+      } catch (err) {
+        setOutcomes((prev) => ({
+          ...prev,
+          [row.id]: {
+            kind: 'error',
+            message: err instanceof Error ? err.message : String(err),
+          },
+        }));
+      } finally {
+        setActiveServerId(null);
+      }
+    });
+  }
+
+  return (
+    <div className="space-y-12">
+      <Section
+        title="Eligible (legacy shared app)"
+        subtitle={`${eligible.length} workspace${eligible.length === 1 ? '' : 's'} still on the shared Fly app — fly_app_name IS NULL`}
+        emptyMessage="No legacy workspaces. All remote workspaces are on per-tenant apps."
+      >
+        <Table
+          rows={eligible}
+          actionColumn
+          renderAction={(row) => {
+            const outcome = outcomes[row.id];
+            const isActive = activeServerId === row.id && isPending;
+            const migratable = isMigratable(row);
+
+            if (outcome?.kind === 'success') {
+              return (
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-green-900/40 text-green-300">
+                  Migrated → {outcome.result.newAppName}
+                </span>
+              );
+            }
+            if (outcome?.kind === 'error') {
+              return (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-red-900/50 text-red-300 cursor-help"
+                  title={outcome.message}
+                >
+                  Error — hover for details
+                </span>
+              );
+            }
+
+            return (
+              <button
+                type="button"
+                onClick={() => handleMigrate(row)}
+                disabled={isActive || !migratable}
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed transition-colors"
+              >
+                {isActive && (
+                  <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                )}
+                {isActive ? 'Migrating…' : migratable ? 'Migrate' : 'No machine/volume'}
+              </button>
+            );
+          }}
+        />
+      </Section>
+
+      <Section
+        title="Already migrated (per-tenant apps)"
+        subtitle={`${migrated.length} workspace${migrated.length === 1 ? '' : 's'} on dedicated ws-* apps`}
+        emptyMessage="No workspaces have been migrated yet."
+      >
+        <Table rows={migrated} />
+      </Section>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  subtitle,
+  emptyMessage,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  emptyMessage: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-4">
+        <h2 className="text-lg font-semibold text-white">{title}</h2>
+        <p className="text-sm text-slate-400 mt-0.5">{subtitle}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Table({
+  rows,
+  actionColumn,
+  renderAction,
+}: {
+  rows: WorkspaceRow[];
+  actionColumn?: boolean;
+  renderAction?: (row: WorkspaceRow) => React.ReactNode;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="bg-slate-800/40 border border-slate-700/50 rounded-lg px-4 py-8 text-center text-sm text-slate-500">
+        Empty.
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-slate-800/40 border border-slate-700/50 rounded-lg overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="bg-slate-700/40">
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Workspace</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Owner</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Fly App</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Machine</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Volume</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Region</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Status</th>
+              {actionColumn && (
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">Action</th>
+              )}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-700/50">
+            {rows.map((row) => (
+              <tr key={row.id} className="hover:bg-slate-700/20">
+                <td className="px-4 py-3">
+                  <div>
+                    <p className="text-sm font-medium text-white">{row.name}</p>
+                    <p className="text-xs text-slate-500 font-mono">{row.id}</p>
+                  </div>
+                </td>
+                <td className="px-4 py-3">
+                  {row.ownerName ? (
+                    <div>
+                      <p className="text-sm text-white">{row.ownerName}</p>
+                      <p className="text-xs text-slate-500">{row.ownerEmail}</p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">—</p>
+                  )}
+                </td>
+                <td className="px-4 py-3">
+                  {row.flyAppName ? (
+                    <span className="inline-flex items-center px-2 py-1 rounded text-xs font-mono bg-purple-900/40 text-purple-300">
+                      {row.flyAppName}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-amber-900/40 text-amber-300">
+                      legacy (shared app)
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-xs font-mono text-slate-400">
+                  {row.machineId || <span className="text-slate-600">—</span>}
+                </td>
+                <td className="px-4 py-3 text-xs font-mono text-slate-400">
+                  {row.volumeId || <span className="text-slate-600">—</span>}
+                </td>
+                <td className="px-4 py-3 text-sm text-slate-300">
+                  {row.region?.toUpperCase() || '—'}
+                </td>
+                <td className="px-4 py-3">
+                  <StatusBadge status={row.status} />
+                </td>
+                {actionColumn && renderAction && (
+                  <td className="px-4 py-3 text-right">{renderAction(row)}</td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string | null }) {
+  const map: Record<string, { className: string; label: string }> = {
+    online: { className: 'bg-green-900/40 text-green-300', label: 'online' },
+    offline: { className: 'bg-slate-700/60 text-slate-300', label: 'offline' },
+    provisioning: { className: 'bg-blue-900/50 text-blue-300', label: 'provisioning' },
+    error: { className: 'bg-red-900/50 text-red-300', label: 'error' },
+    suspended: { className: 'bg-amber-900/40 text-amber-300', label: 'suspended' },
+  };
+  const entry = status ? map[status] : null;
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${
+        entry?.className ?? 'bg-slate-700/60 text-slate-400'
+      }`}
+    >
+      {entry?.label ?? status ?? '—'}
+    </span>
+  );
+}

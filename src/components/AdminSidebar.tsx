@@ -9,6 +9,7 @@ const navigation = [
   { name: 'Users', href: '/admin/users', icon: UsersIcon },
   { name: 'Agents', href: '/admin/agents', icon: CpuIcon },
   { name: 'Servers', href: '/admin/servers', icon: ServerIcon },
+  { name: 'Migrations', href: '/admin/migrations', icon: MigrateIcon },
   { name: 'Templates', href: '/admin/templates', icon: TemplateIcon },
   { name: 'Usage', href: '/admin/usage', icon: ChartIcon },
 ];
@@ -200,6 +201,16 @@ function ChartIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3v18h18M7 15l4-4 4 4 5-6" />
+    </svg>
+  );
+}
+
+function MigrateIcon({ className }: { className?: string }) {
+  // arrows-right-left — "transfer between" glyph, matches the legacy →
+  // per-tenant motion.
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 17l4-4m0 0l-4-4m4 4H4m4-10l-4 4m0 0l4 4" />
     </svg>
   );
 }
