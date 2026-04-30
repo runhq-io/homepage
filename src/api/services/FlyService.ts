@@ -562,13 +562,21 @@ export async function listVolumes(appName?: string | null): Promise<FlyVolume[]>
  * Long timeout for volume create / restore / fork operations. Fly's
  * volume API is synchronous on allocation: the response returns once
  * the volume is provisioned, which during regional slowdowns has been
- * observed to take 30-90s. The 30s default flyRequest timeout was
- * triggering mid-migration aborts (TimeoutError surfaced as a
+ * observed to take many minutes. The 30s default flyRequest timeout
+ * was triggering mid-migration aborts (TimeoutError surfaced as a
  * createVolumeFromSnapshot failure even though Fly's queue would have
- * eventually completed the request). 2 min is generous enough to ride
- * out IAD slowdowns without masking actually-stuck calls.
+ * eventually completed the request).
+ *
+ * 10 minutes is intentionally generous — Fly's IAD region has been
+ * sustaining 5-15 min queues during the per-app-isolation rollout.
+ * Failing fast on this op surfaces a Fly outage as a migration
+ * failure, but waiting longer just trades latency for resilience.
+ * The downside of a long timeout is a genuinely-stuck call (network
+ * partition, DNS issue) hangs for the full window — but the
+ * migration runner is already multi-minute, so an extra 10-min wait
+ * on one API call doesn't change the operator experience materially.
  */
-const VOLUME_OP_TIMEOUT_MS = 120_000;
+const VOLUME_OP_TIMEOUT_MS = 600_000;
 
 /**
  * Create a volume for persistent storage
