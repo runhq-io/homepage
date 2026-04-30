@@ -729,6 +729,14 @@ export const servers = pgTable('servers', {
   // shared FLY_APP_NAME app (see docs/per-app-isolation-migration.md).
   flyAppName: text('fly_app_name'),
   flyNetworkName: text('fly_network_name'),
+  // Structural-op flag: set true while migrateWorkspaceToOwnApp is running and
+  // cleared in finally. Distinct from `status` (which is operational state:
+  // online/offline/error/etc.) because the heartbeat + register handlers
+  // legitimately clobber `status` to 'online' whenever a process inside the
+  // workspace machine reaches the BE — and we need wake gates and the CF
+  // Worker to know "this workspace is structurally being moved" regardless of
+  // operational status. See docs/per-app-isolation-migration.md.
+  migrationInProgress: boolean('migration_in_progress').notNull().default(false),
   tier: text('tier').$type<ServerTier>().default('shared-cpu-1x'), // Machine tier based on hardware specs
   iconUrl: text('icon_url'), // Custom server icon (base64 data URL)
   // Auto-suspend settings

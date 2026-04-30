@@ -249,6 +249,41 @@ describe('wakeRemoteServerInternal — DB durability on provider errors', () => 
     expect(captured).toHaveLength(0);
     assertNoDestructiveWipe(captured);
   });
+
+  // -------------------------------------------------------------------------
+  // Migration gate — must refuse to wake mid-migration even when status is
+  // online. Regression scenario: a process inside the workspace machine
+  // (heartbeat / register / agent) raced our stopMachine and called back into
+  // the BE, which legitimately UPSERTs status='online'. The dedicated
+  // `migrationInProgress` boolean column is the durable signal.
+  // -------------------------------------------------------------------------
+
+  it('refuses to wake when migrationInProgress=true even if status=online', async () => {
+    const result = await ServerService.wakeRemoteServerInternal({
+      ...liveServer,
+      status: 'online',
+      migrationInProgress: true,
+    } as any);
+
+    expect(result.success).toBe(false);
+    // Nothing should have been written, and no provider call should have
+    // been issued — the gate fires before tunnel backfill / getMachineState.
+    expect(captured).toHaveLength(0);
+    expect(providerMock.getMachineState).not.toHaveBeenCalled();
+    expect(providerMock.startMachine).not.toHaveBeenCalled();
+  });
+
+  it('refuses to wake when status=provisioning (legacy gate still works)', async () => {
+    const result = await ServerService.wakeRemoteServerInternal({
+      ...liveServer,
+      status: 'provisioning',
+      migrationInProgress: false,
+    } as any);
+
+    expect(result.success).toBe(false);
+    expect(captured).toHaveLength(0);
+    expect(providerMock.getMachineState).not.toHaveBeenCalled();
+  });
 });
 
 // ===========================================================================
@@ -500,6 +535,16 @@ describe('migrateWorkspaceToOwnApp — pre-cutover failures must drop the gate',
     const waitOrder = providerMock.waitForVolumeReady.mock.invocationCallOrder[0];
     const createMachineOrder = providerMock.createMachine.mock.invocationCallOrder[0];
     expect(waitOrder).toBeLessThan(createMachineOrder);
+
+    // Happy-path migration_in_progress arc: flipped true at the start,
+    // explicitly cleared to false after the old-machine/volume cleanup.
+    // Without the trailing clear the workspace would be permanently
+    // gated even though the migration succeeded.
+    const migFlags = captured
+      .filter(p => 'migrationInProgress' in p)
+      .map(p => p.migrationInProgress);
+    expect(migFlags[0]).toBe(true);
+    expect(migFlags[migFlags.length - 1]).toBe(false);
   });
 
   it('disables autostart on the old machine before stop (prevents Fly auto-wake during snapshot)', async () => {
@@ -549,6 +594,15 @@ describe('migrateWorkspaceToOwnApp — pre-cutover failures must drop the gate',
       .map(p => p.status)
       .filter((s): s is string => typeof s === 'string');
     expect(statuses).toEqual(['provisioning', 'offline']);
+
+    // migration_in_progress must follow the same arc: true on the gate flip,
+    // false in the recovery write. Anything else leaves the workspace
+    // permanently un-wakeable (wake gates would still trip on the residual
+    // flag).
+    const migFlags = captured
+      .filter(p => 'migrationInProgress' in p)
+      .map(p => p.migrationInProgress);
+    expect(migFlags).toEqual([true, false]);
 
     // No app or volume was created, so neither should have been cleaned up.
     expect(providerMock.createApp).not.toHaveBeenCalled();
@@ -667,6 +721,15 @@ describe('migrateWorkspaceToOwnApp — post-cutover failures must NOT clean up',
       .filter((s): s is string => typeof s === 'string');
     expect(statuses).toContain('provisioning');
     expect(statuses).not.toContain('offline');
+
+    // migration_in_progress was flipped to true on entry and MUST remain
+    // true — the post-cutover branch deliberately leaves the structural-op
+    // gate set so wake / autoheal don't touch the half-deployed workspace
+    // until an operator clears it.
+    const migFlags = captured
+      .filter(p => 'migrationInProgress' in p)
+      .map(p => p.migrationInProgress);
+    expect(migFlags).toEqual([true]);
 
     // New resources MUST NOT be deleted — DB row already references them.
     expect(providerMock.deleteApp).not.toHaveBeenCalled();

@@ -1910,7 +1910,14 @@ export async function wakeRemoteServerInternal(
   // Status check (passed-in `server` may be stale — see refetch before
   // startMachine below). This is the fast path that refuses the wake
   // when the caller already passed a provisioning row.
-  if (server.status === 'provisioning') {
+  //
+  // We also gate on `migrationInProgress` because the migrator's
+  // status='provisioning' flip can be clobbered to 'online' by a heartbeat
+  // / register call from a process inside the workspace machine that
+  // raced our stopMachine. The dedicated boolean column survives that
+  // clobber. status='provisioning' alone still covers changeRegion /
+  // changeTier (which don't touch migrationInProgress).
+  if (server.status === 'provisioning' || server.migrationInProgress) {
     return { success: false, error: 'Server is being provisioned (migration / region change / etc.). Please try again once it completes.' };
   }
 
@@ -1978,7 +1985,7 @@ export async function wakeRemoteServerInternal(
       // actually keeps a migration-in-progress workspace from being
       // race-restarted by a concurrent wake request.
       const fresh = await getServer(serverId);
-      if (fresh?.status === 'provisioning') {
+      if (fresh?.status === 'provisioning' || fresh?.migrationInProgress) {
         return { success: false, error: 'Server is being provisioned (migration / region change / etc.). Please try again once it completes.' };
       }
 
@@ -2257,7 +2264,7 @@ export async function validateChangeRegion(
     return { success: false, error: 'Server is already in this region' };
   }
 
-  if (server.status === 'provisioning') {
+  if (server.status === 'provisioning' || server.migrationInProgress) {
     return { success: false, error: 'Server is already being provisioned' };
   }
 
@@ -2361,16 +2368,28 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
 
   console.log(`[ServerService] Migrating ${serverId} from ${oldAppName} to ${newAppName}`);
 
-  // Gate concurrent traffic for the duration of the migration. The session
-  // endpoint blocks wakes when status === 'provisioning'; without this flip,
-  // a user request mid-migration would call wakeRemoteServerInternal →
-  // startMachine on the legacy machine after the snapshot was already taken,
-  // and any writes the user makes between then and cutover would land only
-  // in the old volume and disappear when migration completes. changeRegion
-  // and changeTier already use this gate; migration does the same.
+  // Gate concurrent traffic for the duration of the migration. Two flips:
+  //
+  //  • status='provisioning' — operational state. Lets the session endpoint
+  //    + UI render the in-progress affordance the same way changeRegion /
+  //    changeTier do. NOT load-bearing for the wake gates anymore (see
+  //    below).
+  //
+  //  • migrationInProgress=true — structural-op flag. THIS is what the wake
+  //    gates and the CF preview-router Worker key off. Necessary because a
+  //    process inside the workspace machine that races us before we stop it
+  //    (heartbeat, register, agent connect) calls back into the BE, and
+  //    those handlers legitimately UPSERT status='online' as part of normal
+  //    presence reporting — clobbering 'provisioning'. A separate boolean
+  //    column survives that clobber and gives wake gates an unambiguous
+  //    "this workspace is structurally being moved, hands off" signal.
+  //
+  // Cleared together on the success path and on PRE-cutover failure
+  // (status drops back to 'offline'). On POST-cutover failure both stay
+  // set so an operator inspects manually before traffic resumes.
   await db
     .update(servers)
-    .set({ status: 'provisioning', updatedAt: new Date() })
+    .set({ status: 'provisioning', migrationInProgress: true, updatedAt: new Date() })
     .where(eq(servers.id, serverId));
 
   // Track partial state so a single outer recovery handler knows what to
@@ -2496,7 +2515,7 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
         `DB row already points at ${newAppName} (machine ${refreshed.machineId}). ` +
         `New machine likely unhealthy. NOT deleting new resources. ` +
         `Old machine ${oldMachineId} and volume ${oldVolumeId} remain in ${oldAppName} as fallback. ` +
-        `Status remains 'provisioning' so the workspace is gated until an operator investigates.`
+        `Status remains 'provisioning' and migration_in_progress=true so the workspace is gated until an operator investigates.`
       );
       throw err;
     }
@@ -2517,7 +2536,7 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
 
     await db
       .update(servers)
-      .set({ status: 'offline', updatedAt: new Date() })
+      .set({ status: 'offline', migrationInProgress: false, updatedAt: new Date() })
       .where(eq(servers.id, serverId));
 
     throw err;
@@ -2538,6 +2557,14 @@ export async function migrateWorkspaceToOwnApp(serverId: string): Promise<Migrat
   } catch (err) {
     console.error(`[ServerService] Failed to delete old volume ${oldVolumeId}:`, err);
   }
+
+  // Drop the structural-op gate. status is already whatever provisionNewMachine
+  // left it (typically 'online' once the new machine is healthy); we only
+  // touch migrationInProgress here so we don't clobber operational state.
+  await db
+    .update(servers)
+    .set({ migrationInProgress: false, updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
 
   const durationMs = Date.now() - startedAt;
   console.log(`[ServerService] Migration complete for ${serverId}: ${oldAppName} → ${newAppName} in ${Math.round(durationMs / 1000)}s`);
@@ -2832,7 +2859,7 @@ export async function validateChangeTier(
     return { success: false, error: 'Server is already on this tier' };
   }
 
-  if (server.status === 'provisioning') {
+  if (server.status === 'provisioning' || server.migrationInProgress) {
     return { success: false, error: 'Server is already being provisioned' };
   }
 

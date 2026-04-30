@@ -140,7 +140,12 @@ export async function reportUnreachable(req: ReportUnreachableRequest): Promise<
   // machine and disabled autostart; an autoheal-triggered startMachine would
   // race-restart it mid-snapshot and corrupt the migration target volume.
   // Same gate applied to wakeRemoteServerInternal — see ServerService.ts.
-  if (server.status === 'provisioning') {
+  //
+  // Also gate on `migrationInProgress`: heartbeat / register handlers can
+  // clobber status='provisioning' to 'online' during migration (a process
+  // inside the workspace machine raced our stopMachine and reported
+  // presence). The dedicated boolean column survives that clobber.
+  if (server.status === 'provisioning' || server.migrationInProgress) {
     logEvent('auto_heal.skipped_provisioning', { serverId, userId });
     return { status: 503, body: { action: 'provider_unavailable' } };
   }

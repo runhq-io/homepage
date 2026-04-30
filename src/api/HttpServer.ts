@@ -1748,7 +1748,7 @@ export function createHttpApp() {
     try {
       // Two queries combined into one round-trip: migrated workspaces
       // (already on a per-tenant app) and currently-migrating workspaces
-      // (status='provisioning'). The Worker uses both:
+      // (migration_in_progress=true). The Worker uses both:
       //   • machines[mid]   → upstream override to <flyApp>.fly.dev
       //   • migrating[mid]  → 503 Service Unavailable (block traffic)
       // The 503 path is what keeps Fly's edge from starting a stopped
@@ -1757,11 +1757,17 @@ export function createHttpApp() {
       // fly-replay-driven wake (Fly always starts the replay target).
       // Blocking at the Worker layer keeps the request from ever
       // reaching Fly, sidestepping the fly-replay problem entirely.
+      //
+      // We key the migrating list off `migration_in_progress` rather than
+      // `status='provisioning'` because heartbeat + register handlers
+      // legitimately UPSERT status='online' whenever a process inside the
+      // workspace machine reaches the BE — that would otherwise drop the
+      // workspace out of this list mid-migration.
       const rows = await db
         .select({
           machineId: servers.machineId,
           flyAppName: servers.flyAppName,
-          status: servers.status,
+          migrationInProgress: servers.migrationInProgress,
         })
         .from(servers)
         .where(and(
@@ -1773,7 +1779,7 @@ export function createHttpApp() {
       const migrating: string[] = [];
       for (const row of rows) {
         if (!row.machineId) continue;
-        if (row.status === 'provisioning') {
+        if (row.migrationInProgress) {
           migrating.push(row.machineId);
         }
         if (row.flyAppName && row.flyAppName.startsWith('ws-')) {
@@ -3958,8 +3964,10 @@ export function createHttpApp() {
       // For remote servers, ensure the machine is awake and server is ready
       let needsRefetch = false;
       if (server.deploymentType === 'remote' && isAnyProviderConfigured()) {
-        // If server is still provisioning (e.g. during region change), don't try to connect yet
-        if (server.status === 'provisioning') {
+        // If server is still provisioning (e.g. during region change), don't try to connect yet.
+        // migrationInProgress covers per-tenant migration where heartbeat /
+        // register can clobber status='provisioning' to 'online' mid-flow.
+        if (server.status === 'provisioning' || server.migrationInProgress) {
           return c.json({ error: 'Server is still provisioning. Please try again shortly.', serverName: server.name }, 503);
         }
 
