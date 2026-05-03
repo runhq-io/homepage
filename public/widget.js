@@ -453,7 +453,7 @@
       '.rw-widget {',
       '  position: fixed; top: 0;',
       '  ' + (isRight ? "right" : "left") + ': 0;',
-      '  width: 400px; max-width: 100vw; height: 100vh;',
+      '  width: 440px; max-width: 100vw; height: 100vh;',
       '  background: linear-gradient(180deg, var(--rw-panel) 0%, #0e131c 100%);',
       '  color: var(--rw-fg);',
       '  ' + (isRight ? "border-left" : "border-right") + ': 1px solid var(--rw-line);',
@@ -468,6 +468,9 @@
       '.rw-widget[data-theme="light"] {',
       '  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);',
       '  box-shadow: 0 1px 0 rgba(15,20,35,0.04) inset, ' + (isRight ? "-8px" : "8px") + ' 0 30px -10px rgba(15,20,35,0.14);',
+      '}',
+      '@media (max-width: 640px) {',
+      '  .rw-widget { width: 100vw; }',
       '}',
 
       /* header */
