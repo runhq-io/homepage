@@ -1465,16 +1465,18 @@ export async function generateUserTokenBySecret(
   return { token };
 }
 
-export async function getWidgetIntegration(serverId: string) {
+export async function getWidgetIntegration(serverId: string, workspaceProjectId?: string) {
+  const conditions = [
+    eq(widgetProjects.serverId, serverId),
+    eq(widgetProjects.enabled, true),
+  ];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select()
     .from(widgetProjects)
-    .where(
-      and(
-        eq(widgetProjects.serverId, serverId),
-        eq(widgetProjects.enabled, true)
-      )
-    )
+    .where(and(...conditions))
     .limit(1);
 
   return project ?? null;
@@ -1505,7 +1507,12 @@ export async function generatePreviewWidgetBootstrap(
   serverId: string,
   userId: string,
   userName?: string,
+  workspaceProjectId?: string,
 ): Promise<PreviewWidgetBootstrap | null> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1518,7 +1525,7 @@ export async function generatePreviewWidgetBootstrap(
       autoApprove: widgetProjects.autoApprove,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
@@ -1547,10 +1554,14 @@ export async function generatePreviewWidgetBootstrap(
  * Report whether a server has auto-inject enabled (used by the preview proxy
  * to decide whether to include the bootstrap script in HTML responses).
  */
-export async function getPreviewWidgetFlag(serverId: string): Promise<{
+export async function getPreviewWidgetFlag(serverId: string, workspaceProjectId?: string): Promise<{
   shouldInject: boolean;
   projectSlug?: string;
 }> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1559,7 +1570,7 @@ export async function getPreviewWidgetFlag(serverId: string): Promise<{
       channelId: widgetProjects.channelId,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
@@ -1569,7 +1580,11 @@ export async function getPreviewWidgetFlag(serverId: string): Promise<{
   return { shouldInject: true, projectSlug: project.slug };
 }
 
-export async function getWidgetSettings(serverId: string) {
+export async function getWidgetSettings(serverId: string, workspaceProjectId?: string) {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       autoApprove: widgetProjects.autoApprove,
@@ -1581,7 +1596,7 @@ export async function getWidgetSettings(serverId: string) {
       slug: widgetProjects.slug,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project) return null;
