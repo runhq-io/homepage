@@ -1711,6 +1711,40 @@ export async function updateWidgetSettings(
 // Title Generation
 // ============================================================================
 
+/**
+ * For widget_projects rows on this server where workspace_project_id is still
+ * NULL, accept a channel→project mapping from the running workspace and fill
+ * the column in. Idempotent: rows already populated are left alone. Channel
+ * IDs not present in the supplied map are skipped (the row stays NULL — the
+ * channel might have been deleted on the workspace).
+ *
+ * Returns the count of rows updated for telemetry / logging.
+ */
+export async function reconcileUnbackfilledWidgets(
+  serverId: string,
+  channelToProject: Record<string, string>, // channelId -> workspaceProjectId
+): Promise<{ updated: number }> {
+  const unbackfilled = await db
+    .select({ id: widgetProjects.id, channelId: widgetProjects.channelId })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      isNull(widgetProjects.workspaceProjectId),
+    ));
+
+  let updated = 0;
+  for (const row of unbackfilled) {
+    if (!row.channelId) continue;
+    const projId = channelToProject[row.channelId];
+    if (!projId) continue;
+    await db.update(widgetProjects)
+      .set({ workspaceProjectId: projId, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+  return { updated };
+}
+
 export async function generateTitle(description: string): Promise<string> {
   const fallback = description.split('\n')[0].slice(0, 80).trim() || description.slice(0, 80).trim();
 

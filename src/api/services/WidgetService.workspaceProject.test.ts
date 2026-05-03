@@ -12,6 +12,7 @@ import {
   enableWidget,
   disableWidget,
   updateWidgetSettings,
+  reconcileUnbackfilledWidgets,
 } from './WidgetService';
 
 const RUN = randomBytes(6).toString('hex');
@@ -154,5 +155,84 @@ describe('WidgetService — per-project writes', () => {
     const b = await getWidgetSettings(WSERVER, WPROJ_B);
     expect(a?.is_public).toBe(true);
     expect(b?.is_public).toBe(false);
+  });
+});
+
+// ============================================================================
+// Reconcile tests
+// ============================================================================
+
+describe('reconcileUnbackfilledWidgets', () => {
+  const RRUN = randomBytes(6).toString('hex');
+  const RSERVER = `ws_rec_${RRUN}`;
+  const RPROJ = `proj_rec_${RRUN}`;
+  const ORPHAN_CHANNEL = `ch_orphan_${RRUN}`;
+  const KNOWN_CHANNEL = `ch_known_${RRUN}`;
+
+  beforeEach(async () => {
+    await db.delete(widgetProjects).where(eq(widgetProjects.serverId, RSERVER));
+  });
+
+  afterAll(async () => {
+    await db.delete(widgetProjects).where(eq(widgetProjects.serverId, RSERVER));
+  });
+
+  it('fills workspace_project_id for rows whose channel appears in the map', async () => {
+    await db.insert(widgetProjects).values({
+      serverId: RSERVER,
+      // Note: workspace_project_id intentionally NULL.
+      name: 'Old', slug: `old-${RRUN}`, apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`,
+      enabled: true, channelId: KNOWN_CHANNEL,
+    });
+
+    const result = await reconcileUnbackfilledWidgets(RSERVER, {
+      [KNOWN_CHANNEL]: RPROJ,
+    });
+    expect(result.updated).toBe(1);
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, RSERVER));
+    expect(row.workspaceProjectId).toBe(RPROJ);
+  });
+
+  it('leaves rows alone when their channel is not in the map (channel may have been deleted)', async () => {
+    await db.insert(widgetProjects).values({
+      serverId: RSERVER, name: 'Lost', slug: `lost-${RRUN}`,
+      apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`, enabled: true, channelId: ORPHAN_CHANNEL,
+    });
+
+    const result = await reconcileUnbackfilledWidgets(RSERVER, {
+      [`ch_other_${RRUN}`]: RPROJ,
+    });
+    expect(result.updated).toBe(0);
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, RSERVER));
+    expect(row.workspaceProjectId).toBeNull();
+  });
+
+  it('is idempotent — already-populated rows are skipped', async () => {
+    await db.insert(widgetProjects).values({
+      serverId: RSERVER,
+      workspaceProjectId: RPROJ, // already populated
+      name: 'Already', slug: `already-${RRUN}`,
+      apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`, enabled: true, channelId: KNOWN_CHANNEL,
+    });
+
+    const result = await reconcileUnbackfilledWidgets(RSERVER, {
+      [KNOWN_CHANNEL]: `proj_DIFFERENT_${RRUN}`, // ignored, row already populated
+    });
+    expect(result.updated).toBe(0);
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, RSERVER));
+    expect(row.workspaceProjectId).toBe(RPROJ); // unchanged
+  });
+
+  it('skips rows with NULL channel_id (no way to resolve them)', async () => {
+    await db.insert(widgetProjects).values({
+      serverId: RSERVER, name: 'NoCh', slug: `noch-${RRUN}`,
+      apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`, enabled: true, channelId: null,
+    });
+
+    const result = await reconcileUnbackfilledWidgets(RSERVER, { [KNOWN_CHANNEL]: RPROJ });
+    expect(result.updated).toBe(0);
   });
 });

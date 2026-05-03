@@ -5227,6 +5227,22 @@ export function createHttpApp() {
     return c.json({ success: true, data: result });
   });
 
+  app.post('/api/widget/reconcile', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json().catch(() => null);
+    const channelToProject = body?.channelToProject;
+    if (!channelToProject || typeof channelToProject !== 'object' || Array.isArray(channelToProject)) {
+      return c.json({ error: 'channelToProject required (object of channelId → workspaceProjectId)' }, 400);
+    }
+
+    const result = await WidgetService.reconcileUnbackfilledWidgets(server.id, channelToProject);
+    return c.json({ success: true, data: result });
+  });
+
   app.delete('/api/widget/disable', async (c) => {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
