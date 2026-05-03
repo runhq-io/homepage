@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { eq, inArray } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
@@ -9,6 +9,9 @@ import {
   getWidgetSettings,
   getPreviewWidgetFlag,
   generatePreviewWidgetBootstrap,
+  enableWidget,
+  disableWidget,
+  updateWidgetSettings,
 } from './WidgetService';
 
 const RUN = randomBytes(6).toString('hex');
@@ -87,5 +90,69 @@ describe('WidgetService — per-project isolation (reads)', () => {
   it('omitting workspaceProjectId falls back to legacy serverId-only behavior (backward compat)', async () => {
     const anyOne = await getWidgetIntegration(SERVER);
     expect(['Moddio', 'Snek']).toContain(anyOne?.name);
+  });
+});
+
+// ============================================================================
+// Write-path tests
+// ============================================================================
+
+describe('WidgetService — per-project writes', () => {
+  // Use a separate set of constants so this block is self-contained and
+  // doesn't collide with the read-block's beforeAll-seeded data.
+  const WRUN = randomBytes(6).toString('hex');
+  const WSERVER = `ws_ww_${WRUN}`;
+  const WPROJ_A = `proj_w_${WRUN}_a`;
+  const WPROJ_B = `proj_w_${WRUN}_b`;
+
+  beforeEach(async () => {
+    await db.delete(widgetProjects).where(eq(widgetProjects.serverId, WSERVER));
+  });
+
+  afterAll(async () => {
+    await db.delete(widgetProjects).where(eq(widgetProjects.serverId, WSERVER));
+  });
+
+  it('enableWidget creates one row per (serverId, workspaceProjectId)', async () => {
+    const a = await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
+    const b = await enableWidget(WSERVER, { name: 'Snek',   channelId: `ch-b-${WRUN}`, workspaceProjectId: WPROJ_B });
+    expect(a.id).not.toBe(b.id);
+    expect(a.workspaceProjectId).toBe(WPROJ_A);
+    expect(b.workspaceProjectId).toBe(WPROJ_B);
+  });
+
+  it('enableWidget for an existing (server, project) re-enables and rotates secret without creating a duplicate row', async () => {
+    const first  = await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
+    const second = await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
+    expect(second.id).toBe(first.id);
+    expect(second.apiSecretHash).not.toBe(first.apiSecretHash); // rotated
+    const all = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, WSERVER));
+    expect(all).toHaveLength(1);
+  });
+
+  it('enableWidget rejects calls without workspaceProjectId', async () => {
+    await expect(
+      enableWidget(WSERVER, { name: 'X', channelId: 'c' } as any),
+    ).rejects.toThrow(/workspaceProjectId/);
+  });
+
+  it('disableWidget(serverId, workspaceProjectId) does not affect a sibling project on the same server', async () => {
+    await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
+    await enableWidget(WSERVER, { name: 'Snek',   channelId: `ch-b-${WRUN}`, workspaceProjectId: WPROJ_B });
+    await disableWidget(WSERVER, WPROJ_A);
+    const a = await getWidgetIntegration(WSERVER, WPROJ_A);
+    const b = await getWidgetIntegration(WSERVER, WPROJ_B);
+    expect(a).toBeNull();   // disabled = enabled:false; getWidgetIntegration filters enabled=true
+    expect(b?.name).toBe('Snek');
+  });
+
+  it('updateWidgetSettings only updates the targeted project row', async () => {
+    await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
+    await enableWidget(WSERVER, { name: 'Snek',   channelId: `ch-b-${WRUN}`, workspaceProjectId: WPROJ_B });
+    await updateWidgetSettings(WSERVER, { is_public: true }, { workspaceProjectId: WPROJ_A });
+    const a = await getWidgetSettings(WSERVER, WPROJ_A);
+    const b = await getWidgetSettings(WSERVER, WPROJ_B);
+    expect(a?.is_public).toBe(true);
+    expect(b?.is_public).toBe(false);
   });
 });

@@ -1305,13 +1305,20 @@ function generateSlug(name: string, suffix: string): string {
 
 export async function enableWidget(
   serverId: string,
-  opts: { name: string; channelId?: string }
+  opts: { name: string; channelId?: string; workspaceProjectId: string }
 ) {
-  // Check if a project already exists for this server (re-enable case)
+  if (!opts.workspaceProjectId) {
+    throw new Error('enableWidget: workspaceProjectId is required');
+  }
+
+  // Check if a project already exists for this (server, workspaceProject) pair (re-enable case)
   const [existing] = await db
     .select({ slug: widgetProjects.slug })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId),
+    ))
     .limit(1);
 
   const apiSecret = randomBytes(32).toString('base64url');
@@ -1323,6 +1330,7 @@ export async function enableWidget(
     .insert(widgetProjects)
     .values({
       serverId,
+      workspaceProjectId: opts.workspaceProjectId,
       name: opts.name,
       slug,
       apiKey,
@@ -1338,6 +1346,7 @@ export async function enableWidget(
         apiKey,
         apiSecretHash: apiSecret,
         channelId: opts.channelId,
+        workspaceProjectId: opts.workspaceProjectId,
         updatedAt: new Date(),
       },
     })
@@ -1346,20 +1355,28 @@ export async function enableWidget(
   return { ...project, apiSecret };
 }
 
-export async function disableWidget(serverId: string) {
+export async function disableWidget(serverId: string, workspaceProjectId?: string) {
+  const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   await db
     .update(widgetProjects)
     .set({ enabled: false, updatedAt: new Date() })
-    .where(eq(widgetProjects.serverId, serverId));
+    .where(and(...conditions));
 }
 
-export async function regenerateSecret(serverId: string) {
+export async function regenerateSecret(serverId: string, workspaceProjectId?: string) {
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
+  const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .update(widgetProjects)
     .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .returning({ id: widgetProjects.id });
 
   if (!project) throw new Error('Widget project not found');
@@ -1637,14 +1654,22 @@ export async function updateWidgetSettings(
     auto_inject_in_preview?: boolean;
     slug?: string;
   },
+  opts?: { workspaceProjectId?: string },
 ): Promise<UpdateWidgetSettingsResult> {
+  // Build a reusable conditions array for all three internal queries.
+  const projConds = (): ReturnType<typeof eq>[] => {
+    const c: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+    if (opts?.workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId));
+    return c;
+  };
+
   // Enabling auto-inject requires a channel already to be set on the project.
   // Without a channel the widget has nowhere to submit tickets.
   if (settings.auto_inject_in_preview === true) {
     const [current] = await db
       .select({ channelId: widgetProjects.channelId })
       .from(widgetProjects)
-      .where(eq(widgetProjects.serverId, serverId))
+      .where(and(...projConds()))
       .limit(1);
     if (!current?.channelId) {
       throw new WidgetSettingsValidationError(
@@ -1659,7 +1684,7 @@ export async function updateWidgetSettings(
     const [current] = await db
       .select({ autoInjectInPreview: widgetProjects.autoInjectInPreview })
       .from(widgetProjects)
-      .where(eq(widgetProjects.serverId, serverId))
+      .where(and(...projConds()))
       .limit(1);
     if (current && current.autoInjectInPreview !== settings.auto_inject_in_preview) {
       autoInjectChanged = true;
@@ -1677,7 +1702,7 @@ export async function updateWidgetSettings(
       ...(settings.slug !== undefined && { slug: settings.slug }),
       updatedAt: new Date(),
     })
-    .where(eq(widgetProjects.serverId, serverId));
+    .where(and(...projConds()));
 
   return { autoInjectChanged };
 }
