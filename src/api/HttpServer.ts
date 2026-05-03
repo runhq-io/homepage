@@ -4989,7 +4989,7 @@ export function createHttpApp() {
     if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
     const { value } = await c.req.json();
     try {
-      await WidgetService.castVote(c.req.param('id'), auth.widgetUserId, value);
+      await WidgetService.castVote(auth.projectId, c.req.param('id'), auth.widgetUserId, value);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: String(err) }, 400);
@@ -4999,8 +4999,12 @@ export function createHttpApp() {
   app.delete('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    await WidgetService.retractVote(c.req.param('id'), auth.widgetUserId);
-    return c.json({ ok: true });
+    try {
+      await WidgetService.retractVote(auth.projectId, c.req.param('id'), auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err) }, 400);
+    }
   });
 
   app.patch('/api/widget/tickets/:id', async (c) => {

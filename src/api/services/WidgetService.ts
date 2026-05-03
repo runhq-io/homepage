@@ -1206,10 +1206,14 @@ export async function getTicketStats(projectId: string) {
 }
 
 export async function castVote(
+  projectId: string,
   ticketId: string,
   widgetUserId: string,
   value: boolean
 ) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new Error('Project not found');
+
   const [task] = await db
     .select({
       id: workspaceTasks.id,
@@ -1220,6 +1224,7 @@ export async function castVote(
     .from(workspaceTasks)
     .where(and(
       eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
       isNull(workspaceTasks.deletedAt),
     ))
     .limit(1);
@@ -1249,12 +1254,24 @@ export async function castVote(
   await recountVotes(ticketId, task.serverId);
 }
 
-export async function retractVote(ticketId: string, widgetUserId: string) {
+export async function retractVote(
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string,
+) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new Error('Project not found');
+
   const [task] = await db
     .select({ serverId: workspaceTasks.serverId })
     .from(workspaceTasks)
-    .where(eq(workspaceTasks.id, ticketId))
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+    ))
     .limit(1);
+
+  if (!task) throw new Error('Ticket not found');
 
   await db
     .delete(workspaceTaskVotes)
@@ -1265,9 +1282,7 @@ export async function retractVote(ticketId: string, widgetUserId: string) {
       )
     );
 
-  if (task) {
-    await recountVotes(ticketId, task.serverId);
-  }
+  await recountVotes(ticketId, task.serverId);
 }
 
 // ============================================================================
