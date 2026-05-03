@@ -1283,6 +1283,7 @@ export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 export const widgetProjects = pgTable('widget_projects', {
   id: uuid('id').primaryKey().defaultRandom(),
   serverId: text('server_id').notNull(),
+  workspaceProjectId: text('workspace_project_id'), // nullable during rollout; NOT NULL in follow-up migration
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   apiKey: text('api_key').notNull().unique(),
@@ -1296,7 +1297,14 @@ export const widgetProjects = pgTable('widget_projects', {
   channelId: text('channel_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (t) => [
+  // Partial unique replaces the prior `widget_projects_server_id_unique`.
+  // Enforced only when workspace_project_id is populated so rollout can
+  // ship the schema before every row is backfilled.
+  uniqueIndex('widget_projects_server_workspace_project_unique')
+    .on(t.serverId, t.workspaceProjectId)
+    .where(sql`${t.workspaceProjectId} IS NOT NULL`),
+]);
 
 export const widgetUsers = pgTable('widget_users', {
   id: uuid('id').primaryKey().defaultRandom(),
