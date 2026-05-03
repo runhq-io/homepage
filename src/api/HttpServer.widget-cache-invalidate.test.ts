@@ -84,6 +84,7 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('POST', '/api/widget/enable', {
       serverId: 'srv_1',
+      projectId: 'proj_1',
       name: 'Widget Project',
       channelId: 'ch_1',
     });
@@ -97,14 +98,14 @@ describe('widget cache invalidation route wiring', () => {
       mockServer,
       'user_1',
       '/__preview/config-invalidate',
-      { method: 'POST', body: { kind: 'widget' } },
+      { method: 'POST', body: { kind: 'widget', projectId: 'proj_1' } },
     );
   });
 
   it('DELETE /api/widget/disable push-invalidates preview widget cache', async () => {
     (WidgetService.disableWidget as any).mockResolvedValue(undefined);
 
-    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1');
+    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1&projectId=proj_1');
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ success: true });
@@ -115,7 +116,7 @@ describe('widget cache invalidation route wiring', () => {
       mockServer,
       'user_1',
       '/__preview/config-invalidate',
-      { method: 'POST', body: { kind: 'widget' } },
+      { method: 'POST', body: { kind: 'widget', projectId: 'proj_1' } },
     );
   });
 
@@ -124,6 +125,7 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('PUT', '/api/widget/settings', {
       serverId: 'srv_1',
+      projectId: 'proj_1',
       auto_approve: true,
       widget_position: 'bottom-right',
       is_public: true,
@@ -140,7 +142,7 @@ describe('widget cache invalidation route wiring', () => {
       mockServer,
       'user_1',
       '/__preview/config-invalidate',
-      { method: 'POST', body: { kind: 'widget' } },
+      { method: 'POST', body: { kind: 'widget', projectId: 'proj_1' } },
     );
   });
 
@@ -151,6 +153,7 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('PUT', '/api/widget/settings', {
       serverId: 'srv_1',
+      projectId: 'proj_1',
       auto_inject_in_preview: true,
     });
 

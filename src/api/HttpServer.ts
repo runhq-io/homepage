@@ -3673,10 +3673,15 @@ export function createHttpApp() {
         return c.json({ error: 'Server mismatch' }, 403);
       }
 
+      const body = await c.req.json().catch(() => ({}));
+      const projectId: string | undefined = body?.projectId;
+      if (!projectId) return c.json({ error: 'No widget for this preview' }, 404);
+
       const bootstrap = await WidgetService.generatePreviewWidgetBootstrap(
         payload.serverId,
         payload.userId,
         payload.userName,
+        projectId,
       );
       if (!bootstrap) return c.json({ error: 'Widget auto-inject not enabled' }, 404);
 
@@ -3706,7 +3711,10 @@ export function createHttpApp() {
         return c.json({ error: 'Server mismatch' }, 403);
       }
 
-      const flag = await WidgetService.getPreviewWidgetFlag(payload.serverId);
+      const projectId = c.req.query('projectId');
+      if (!projectId) return c.json({ shouldInject: false });
+
+      const flag = await WidgetService.getPreviewWidgetFlag(payload.serverId, projectId);
       return c.json(flag);
     } catch (error) {
       console.error('[HttpServer] Preview widget-config error:', error);
@@ -5175,14 +5183,14 @@ export function createHttpApp() {
   //
   // Failures (machine stopped, network error) are intentionally swallowed:
   // the machine will re-fetch on its next boot anyway.
-  function pushInvalidateWidgetCache(serverId: string, userId: string): void {
+  function pushInvalidateWidgetCache(serverId: string, userId: string, projectId: string): void {
     (async () => {
       try {
         const server = await ServerService.getServer(serverId);
         if (!server?.serverUrl) return;
         await ServerService.fetchFromServer(server, userId, '/__preview/config-invalidate', {
           method: 'POST',
-          body: { kind: 'widget' },
+          body: { kind: 'widget', projectId },
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -5198,8 +5206,10 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const projectId = c.req.query('projectId');
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const integration = await WidgetService.getWidgetIntegration(serverId);
+    const integration = await WidgetService.getWidgetIntegration(serverId, projectId);
     return c.json({ success: true, data: integration });
   });
 
@@ -5208,11 +5218,12 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId, name, channelId } = await c.req.json();
+    const { serverId, projectId, name, channelId } = await c.req.json();
     if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const result = await WidgetService.enableWidget(serverId, { name, channelId });
-    pushInvalidateWidgetCache(serverId, userId);
+    const result = await WidgetService.enableWidget(serverId, { name, channelId, workspaceProjectId: projectId });
+    pushInvalidateWidgetCache(serverId, userId, projectId);
     return c.json({ success: true, data: result });
   });
 
@@ -5223,9 +5234,11 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const projectId = c.req.query('projectId');
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    await WidgetService.disableWidget(serverId);
-    pushInvalidateWidgetCache(serverId, userId);
+    await WidgetService.disableWidget(serverId, projectId);
+    pushInvalidateWidgetCache(serverId, userId, projectId);
     return c.json({ success: true });
   });
 
@@ -5234,11 +5247,12 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId } = await c.req.json();
+    const { serverId, projectId } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     try {
-      const result = await WidgetService.regenerateSecret(serverId);
+      const result = await WidgetService.regenerateSecret(serverId, projectId);
       return c.json({ success: true, data: result });
     } catch (err) {
       return c.json({ error: String(err) }, 400);
@@ -5270,8 +5284,10 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const projectId = c.req.query('projectId');
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const settings = await WidgetService.getWidgetSettings(serverId);
+    const settings = await WidgetService.getWidgetSettings(serverId, projectId);
     return c.json({ success: true, data: settings });
   });
 
@@ -5282,6 +5298,7 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const {
       serverId,
+      projectId,
       auto_approve,
       widget_position,
       voting_period_hours,
@@ -5290,13 +5307,14 @@ export function createHttpApp() {
       slug,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
 
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
         auto_approve, widget_position, voting_period_hours, is_public, auto_inject_in_preview, slug,
-      });
+      }, { workspaceProjectId: projectId });
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {
         return c.json({ error: err.message }, 400);
@@ -5309,7 +5327,7 @@ export function createHttpApp() {
     // flow into the widget bootstrap payload, and limiting to the flag alone
     // misses re-enable-after-disable scenarios where the DB value didn't
     // change but the effective shouldInject did.
-    pushInvalidateWidgetCache(serverId, userId);
+    pushInvalidateWidgetCache(serverId, userId, projectId);
     // `result.autoInjectChanged` is returned for callers that care (telemetry,
     // audit logs); we don't branch on it here.
     void result;
