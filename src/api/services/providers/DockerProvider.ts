@@ -426,19 +426,31 @@ export class DockerProvider implements IProvider {
     // Host fs is always ready.
   }
 
-  async createVolumeFromSnapshot(): Promise<VolumeInfo> {
+  async createVolumeFromSnapshot(
+    _snapshotId: string,
+    _name: string,
+    _region: string,
+    _sizeGb: number,
+    _appName?: string | null,
+  ): Promise<VolumeInfo> {
     throw new Error(
       'Snapshots are not supported by DockerProvider. Set LOCAL_PROVIDER=fly to test that flow against a real Fly account.',
     );
   }
 
-  async forkVolume(): Promise<VolumeInfo> {
+  async forkVolume(
+    _sourceVolumeId: string,
+    _name: string,
+    _region: string,
+    _sizeGb?: number,
+    _appName?: string | null,
+  ): Promise<VolumeInfo> {
     throw new Error(
       'Volume forking is not supported by DockerProvider. Set LOCAL_PROVIDER=fly to test that flow against a real Fly account.',
     );
   }
 
-  async createSnapshot(): Promise<SnapshotInfo> {
+  async createSnapshot(_volumeId: string, _appName?: string | null): Promise<SnapshotInfo> {
     throw new Error(
       'Snapshots are not supported by DockerProvider. Set LOCAL_PROVIDER=fly to test that flow against a real Fly account.',
     );
