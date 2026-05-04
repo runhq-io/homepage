@@ -53,6 +53,9 @@ interface ClaimedRow {
   timezone: string | null;
 }
 
+/** Abort a hung server dispatch after this many milliseconds. */
+const DISPATCH_TIMEOUT_MS = 10_000;
+
 export class WorkflowCronScheduler {
   private timer?: ReturnType<typeof setInterval>;
   private readonly fetchImpl: typeof fetch;
@@ -84,16 +87,24 @@ export class WorkflowCronScheduler {
   /**
    * Public for tests. Safe to call concurrently — SKIP LOCKED prevents
    * double-firing when multiple scheduler instances run simultaneously.
+   *
+   * Dispatches are fired in parallel so a slow or hung machine cannot block
+   * other agents from receiving their cron fire. Each dispatch is independently
+   * bounded by DISPATCH_TIMEOUT_MS via an AbortController.
    */
   async tick(now: Date = new Date()): Promise<void> {
     const due = await this.claimDueRows(now);
 
-    for (const row of due) {
-      try {
-        await this.dispatch(row, now);
+    const results = await Promise.allSettled(
+      due.map(row => this.dispatch(row, now)),
+    );
+
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled') {
         this.cfg.metrics?.dispatched(1);
-      } catch (err) {
-        console.error(`[WorkflowCronScheduler] dispatch ${row.id} failed:`, err);
+      } else {
+        console.error(`[WorkflowCronScheduler] dispatch ${due[i].id} failed:`, r.reason);
         this.cfg.metrics?.failed(1);
       }
     }
@@ -174,15 +185,28 @@ export class WorkflowCronScheduler {
     });
     const sig = signPayload(token, ts, body);
 
-    const res = await this.fetchImpl(`${url}/api/internal/cron-fire`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-runhq-timestamp': ts,
-        'x-runhq-signature': sig,
-      },
-      body,
-    });
+    // Bound the outbound HTTP call so a hung server machine cannot wedge
+    // this scheduler indefinitely. The timeout is intentionally short (10 s)
+    // because cron-fire now returns 202 immediately — any legitimate server
+    // should respond well within that window.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DISPATCH_TIMEOUT_MS);
+
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${url}/api/internal/cron-fire`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-runhq-timestamp': ts,
+          'x-runhq-signature': sig,
+        },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
