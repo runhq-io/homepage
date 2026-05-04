@@ -485,3 +485,84 @@ describe('DockerProvider — inspect', () => {
     await expect(p.getMachineInfo('gone')).rejects.toThrow();
   });
 });
+
+describe('DockerProvider — lifecycle ops', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+  const mockStart = vi.fn();
+  const mockStop = vi.fn();
+  const mockRestart = vi.fn();
+  const mockPause = vi.fn();
+  const mockRemove = vi.fn();
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    mockGetContainer.mockReturnValue({
+      start: mockStart,
+      stop: mockStop,
+      restart: mockRestart,
+      pause: mockPause,
+      remove: mockRemove,
+    });
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  it('startMachine calls container.start', async () => {
+    mockStart.mockResolvedValueOnce(undefined);
+    const p = new DockerProvider();
+    await p.startMachine('abc');
+    expect(mockStart).toHaveBeenCalled();
+  });
+
+  it('startMachine swallows "already started" errors (304)', async () => {
+    const err = Object.assign(new Error('not modified'), { statusCode: 304 });
+    mockStart.mockRejectedValueOnce(err);
+    const p = new DockerProvider();
+    await expect(p.startMachine('abc')).resolves.toBeUndefined();
+  });
+
+  it('stopMachine calls container.stop with timeout', async () => {
+    mockStop.mockResolvedValueOnce(undefined);
+    const p = new DockerProvider();
+    await p.stopMachine('abc');
+    expect(mockStop).toHaveBeenCalledWith({ t: 10 });
+  });
+
+  it('stopMachine swallows "already stopped" (304)', async () => {
+    const err = Object.assign(new Error('not modified'), { statusCode: 304 });
+    mockStop.mockRejectedValueOnce(err);
+    const p = new DockerProvider();
+    await expect(p.stopMachine('abc')).resolves.toBeUndefined();
+  });
+
+  it('restartMachine calls container.restart', async () => {
+    mockRestart.mockResolvedValueOnce(undefined);
+    const p = new DockerProvider();
+    await p.restartMachine('abc');
+    expect(mockRestart).toHaveBeenCalled();
+  });
+
+  it('suspendMachine calls container.pause', async () => {
+    mockPause.mockResolvedValueOnce(undefined);
+    const p = new DockerProvider();
+    await p.suspendMachine('abc');
+    expect(mockPause).toHaveBeenCalled();
+  });
+
+  it('deleteMachine stops then removes', async () => {
+    mockStop.mockResolvedValueOnce(undefined);
+    mockRemove.mockResolvedValueOnce(undefined);
+    const p = new DockerProvider();
+    await p.deleteMachine('abc');
+    expect(mockStop).toHaveBeenCalledWith({ t: 10 });
+    expect(mockRemove).toHaveBeenCalled();
+  });
+
+  it('deleteMachine ignores 404 on stop and remove', async () => {
+    const err = Object.assign(new Error('not found'), { statusCode: 404 });
+    mockStop.mockRejectedValueOnce(err);
+    mockRemove.mockRejectedValueOnce(err);
+    const p = new DockerProvider();
+    await expect(p.deleteMachine('gone')).resolves.toBeUndefined();
+  });
+});

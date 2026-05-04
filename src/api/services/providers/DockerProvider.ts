@@ -279,27 +279,56 @@ export class DockerProvider implements IProvider {
       region: 'local',
     };
   }
-  async startMachine(_machineId: string, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('startMachine');
+  private isHttpError(err: unknown, code: number): boolean {
+    return (err as { statusCode?: number })?.statusCode === code;
   }
+
+  async startMachine(machineId: string, _appName?: string | null): Promise<void> {
+    try {
+      await this.docker.getContainer(machineId).start();
+    } catch (err: unknown) {
+      if (this.isHttpError(err, 304)) return;
+      throw err;
+    }
+  }
+
   async stopMachine(
-    _machineId: string,
+    machineId: string,
     _appName?: string | null,
     _options?: { disableAutostart?: boolean },
   ): Promise<void> {
-    throw NOT_IMPLEMENTED('stopMachine');
+    try {
+      await this.docker.getContainer(machineId).stop({ t: 10 });
+    } catch (err: unknown) {
+      if (this.isHttpError(err, 304)) return;
+      throw err;
+    }
   }
-  async suspendMachine(_machineId: string, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('suspendMachine');
+
+  async restartMachine(machineId: string, _appName?: string | null): Promise<void> {
+    await this.docker.getContainer(machineId).restart();
   }
-  async restartMachine(_machineId: string, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('restartMachine');
+
+  async suspendMachine(machineId: string, _appName?: string | null): Promise<void> {
+    await this.docker.getContainer(machineId).pause();
   }
+
   async updateMachineImage(_machineId: string, _appName?: string | null): Promise<void> {
     throw NOT_IMPLEMENTED('updateMachineImage');
   }
-  async deleteMachine(_machineId: string, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('deleteMachine');
+
+  async deleteMachine(machineId: string, _appName?: string | null): Promise<void> {
+    const container = this.docker.getContainer(machineId);
+    try {
+      await container.stop({ t: 10 });
+    } catch (err: unknown) {
+      if (!this.isHttpError(err, 304) && !this.isHttpError(err, 404)) throw err;
+    }
+    try {
+      await container.remove();
+    } catch (err: unknown) {
+      if (!this.isHttpError(err, 404)) throw err;
+    }
   }
 
   // -------------------------------------------------------------------------
