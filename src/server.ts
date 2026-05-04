@@ -28,6 +28,9 @@ import { registerWsHandlers } from './api/wsHandlers';
 import { initProviders } from './api/services/providers/registry';
 import * as MachineUsageService from './api/services/MachineUsageService';
 import * as ServerService from './api/services/ServerService';
+import { registerCronSyncRoute } from './api/internal/cron-sync';
+import { WorkflowCronScheduler } from './api/services/WorkflowCronScheduler';
+import { ServerRegistry } from './api/services/ServerRegistry';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -59,6 +62,27 @@ async function main() {
 
   // ── Hono app (API routes) ────────────────────────────────────────────
   const honoApp = createHttpApp();
+
+  // ── Workflow cron subsystem (feature-gated) ───────────────────────────
+  const WORKFLOWS_V1 = process.env.WORKFLOWS_V1 === 'true' || process.env.WORKFLOWS_V1 === '1';
+  let cronScheduler: WorkflowCronScheduler | null = null;
+
+  if (WORKFLOWS_V1) {
+    const serverRegistry = new ServerRegistry(db);
+
+    registerCronSyncRoute(honoApp, {
+      db,
+      getServerToken: (serverId) => serverRegistry.getServerToken(serverId),
+    });
+
+    cronScheduler = new WorkflowCronScheduler({
+      db,
+      serverRegistry,
+    });
+    cronScheduler.start();
+
+    console.log('[workflow] cron subsystem wired (WORKFLOWS_V1=true)');
+  }
 
   // ── Next.js app ──────────────────────────────────────────────────────
   // Dynamic import so the server-only modules don't fail during tsc
@@ -192,6 +216,7 @@ async function main() {
   // ── Graceful shutdown ────────────────────────────────────────────────
   const shutdown = () => {
     console.log('\n[be] Shutting down...');
+    cronScheduler?.stop();
     server.close();
     wsServer.close();
     process.exit(0);
