@@ -292,3 +292,139 @@ describe('DockerProvider — image resolution', () => {
     expect(mockBuildImage).not.toHaveBeenCalled();
   });
 });
+
+describe('DockerProvider — createMachine', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+  let baseDir: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    baseDir = mkdtempSync(join(tmpdir(), 'runhq-cm-test-'));
+    process.env.RUNHQ_LOCAL_VOLUMES_DIR = baseDir;
+    delete process.env.RUNHQ_WORKSPACE_IMAGE;
+    delete process.env.RUNHQ_WORKSPACE_DOCKERFILE_DIR;
+    process.env.CLOUD_API_URL = 'http://test.cloud';
+
+    mockListImages.mockResolvedValue([{ Id: 'sha256:abc', RepoTags: ['runhq-server:local'] }]);
+
+    const fullId = 'a'.repeat(64);
+    const fakeContainer = {
+      id: fullId,
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    mockCreateContainer.mockResolvedValue(fakeContainer);
+
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true });
+    delete process.env.RUNHQ_LOCAL_VOLUMES_DIR;
+    delete process.env.CLOUD_API_URL;
+  });
+
+  it('returns a ProvisionResult with localhost URL, 12-char machine id, and host port stored in appName', async () => {
+    mockPing.mockResolvedValueOnce('OK');
+    const p = new DockerProvider();
+    const v = await p.createVolume('vol', 'local', 10);
+
+    const result = await p.createMachine({
+      serverId: 'srv-123',
+      serverToken: 'session-token',
+      region: 'local',
+      tier: 'shared-4x-2gb',
+      existingVolumeId: v.id,
+      autoSuspendEnabled: false,
+      appName: null,
+      networkName: null,
+    });
+
+    expect(result.machineId).toMatch(/^[a-f0-9]{12}$/);
+    const portMatch = result.serverUrl.match(/^http:\/\/localhost:(\d+)$/);
+    expect(portMatch).not.toBeNull();
+    const hostPort = Number(portMatch![1]);
+    expect(result.appName).toBe(String(hostPort));
+    expect(result.region).toBe('local');
+    expect(result.volumeId).toBe(v.id);
+    expect(result.providerMetadata).toMatchObject({
+      hostPort,
+      fullContainerId: 'a'.repeat(64),
+    });
+  });
+
+  it('passes correct container spec to dockerode.createContainer', async () => {
+    mockPing.mockResolvedValueOnce('OK');
+    const p = new DockerProvider();
+    const v = await p.createVolume('vol', 'local', 10);
+
+    await p.createMachine({
+      serverId: 'srv-123',
+      serverToken: 'session-token',
+      region: 'local',
+      tier: 'shared-4x-2gb',
+      existingVolumeId: v.id,
+      appName: null,
+      networkName: null,
+    });
+
+    expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+    const spec = mockCreateContainer.mock.calls[0][0];
+
+    expect(spec.Image).toBe('runhq-server:local');
+    expect(spec.Env).toEqual(expect.arrayContaining([
+      'SERVER_TOKEN=session-token',
+      'CLOUD_API_URL=http://test.cloud',
+      'PORT=61987',
+      'NODE_ENV=production',
+    ]));
+    expect(spec.Labels).toMatchObject({
+      'runhq.managed': 'true',
+      'runhq.serverId': 'srv-123',
+      'runhq.volumeId': v.id,
+      'runhq.tier': 'shared-4x-2gb',
+    });
+    expect(spec.Labels['runhq.hostPort']).toMatch(/^\d+$/);
+    expect(spec.HostConfig.Binds).toEqual([
+      `${join(baseDir, v.id)}:/app/data`,
+    ]);
+    expect(spec.HostConfig.PortBindings['61987/tcp']).toEqual([
+      { HostIp: '127.0.0.1', HostPort: expect.any(String) },
+    ]);
+    expect(spec.HostConfig.NanoCpus).toBe(4_000_000_000);
+    expect(spec.HostConfig.Memory).toBe(2 * 1024 * 1024 * 1024);
+    expect(spec.HostConfig.RestartPolicy).toEqual({ Name: 'unless-stopped' });
+  });
+
+  it('container.start() is called after create', async () => {
+    mockPing.mockResolvedValueOnce('OK');
+    const p = new DockerProvider();
+    const v = await p.createVolume('vol', 'local', 10);
+
+    await p.createMachine({
+      serverId: 'srv-123',
+      serverToken: 'tok',
+      region: 'local',
+      tier: 'shared-4x-1gb',
+      existingVolumeId: v.id,
+    });
+
+    const ret = await mockCreateContainer.mock.results[0].value;
+    expect(ret.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws when docker.ping() rejects (daemon not responding)', async () => {
+    mockPing.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const p = new DockerProvider();
+    const v = await p.createVolume('vol', 'local', 10);
+    await expect(
+      p.createMachine({
+        serverId: 'srv',
+        serverToken: 'tok',
+        region: 'local',
+        tier: 'shared-4x-1gb',
+        existingVolumeId: v.id,
+      }),
+    ).rejects.toThrow(/Docker is not running/);
+  });
+});

@@ -189,8 +189,76 @@ export class DockerProvider implements IProvider {
   // Machine lifecycle — STUBS (filled in subsequent tasks)
   // -------------------------------------------------------------------------
 
-  async createMachine(_options: CreateMachineOptions): Promise<ProvisionResult> {
-    throw NOT_IMPLEMENTED('createMachine');
+  async createMachine(options: CreateMachineOptions): Promise<ProvisionResult> {
+    // Liveness check: isConfigured() only verifies the socket file. Ping the
+    // daemon to make sure it's actually responding before we commit to a flow.
+    try {
+      await this.docker.ping();
+    } catch (err: unknown) {
+      throw new Error(
+        `Docker is not running. Start Docker before creating workspaces. (cause: ${(err as Error).message})`,
+      );
+    }
+
+    const imageRef = this.resolveImageRef();
+    await this.ensureImage(imageRef);
+
+    const hostPort = await allocateHostPort();
+    const volumeId = options.existingVolumeId ?? randomUUID();
+    if (!options.existingVolumeId) {
+      await mkdir(this.volumeDir(volumeId), { recursive: true, mode: 0o755 });
+    }
+
+    const tierSpec = this.getTierSpecs().find((t) => t.tierId === options.tier);
+    if (!tierSpec) throw new Error(`Unknown tier: ${options.tier}`);
+
+    const env = [
+      `SERVER_TOKEN=${options.serverToken}`,
+      `CLOUD_API_URL=${process.env.CLOUD_API_URL ?? ''}`,
+      `PORT=61987`,
+      `NODE_ENV=production`,
+    ];
+    if (options.tunnelToken) env.push(`TUNNEL_TOKEN=${options.tunnelToken}`);
+
+    const labels: Record<string, string> = {
+      'runhq.managed': 'true',
+      'runhq.serverId': options.serverId,
+      'runhq.volumeId': volumeId,
+      'runhq.tier': options.tier,
+      'runhq.hostPort': String(hostPort),
+    };
+
+    const container = await this.docker.createContainer({
+      Image: imageRef,
+      Env: env,
+      Labels: labels,
+      ExposedPorts: { '61987/tcp': {} },
+      HostConfig: {
+        Binds: [`${this.volumeDir(volumeId)}:/app/data`],
+        PortBindings: { '61987/tcp': [{ HostIp: '127.0.0.1', HostPort: String(hostPort) }] },
+        NanoCpus: tierSpec.cpus * 1_000_000_000,
+        Memory: tierSpec.memoryMb * 1024 * 1024,
+        RestartPolicy: { Name: 'unless-stopped' },
+      },
+    } as Docker.ContainerCreateOptions);
+
+    await container.start();
+
+    const fullId = container.id;
+    const machineId = fullId.slice(0, 12);
+
+    return {
+      machineId,
+      machineName: machineId,
+      serverUrl: `http://localhost:${hostPort}`,
+      region: 'local',
+      volumeId,
+      // Persisted in servers.flyAppName so getRoutingInfo can reconstruct
+      // the URL synchronously after a be restart (no Docker round-trip).
+      appName: String(hostPort),
+      networkName: null,
+      providerMetadata: { hostPort, fullContainerId: fullId },
+    };
   }
   async getMachineState(_machineId: string, _appName?: string | null): Promise<MachineState> {
     throw NOT_IMPLEMENTED('getMachineState');
