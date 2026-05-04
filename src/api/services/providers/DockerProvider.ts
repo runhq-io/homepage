@@ -448,11 +448,60 @@ export class DockerProvider implements IProvider {
   // Health / waiting / routing / config — STUBS
   // -------------------------------------------------------------------------
 
-  async waitForState(_machineId: string, _targetStates: MachineState[], _timeoutMs?: number, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('waitForState');
+  async waitForState(
+    machineId: string,
+    targetStates: MachineState[],
+    timeoutMs: number = 60_000,
+    _appName?: string | null,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let lastState: MachineState | 'unknown' = 'unknown';
+
+    while (Date.now() < deadline) {
+      try {
+        const data = await this.docker.getContainer(machineId).inspect();
+        lastState = mapDockerState(data.State.Status);
+        if (targetStates.includes(lastState as MachineState)) return;
+      } catch (err: unknown) {
+        if (this.isHttpError(err, 404)) lastState = 'destroyed';
+        else throw err;
+        if (targetStates.includes('destroyed')) return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    throw new Error(
+      `waitForState timed out after ${timeoutMs}ms (last state: ${lastState}, targets: ${targetStates.join(',')})`,
+    );
   }
-  async waitForHealthy(_machineId: string, _timeoutMs?: number, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('waitForHealthy');
+
+  async waitForHealthy(
+    machineId: string,
+    timeoutMs: number = 60_000,
+    _appName?: string | null,
+  ): Promise<void> {
+    const data = await this.docker.getContainer(machineId).inspect();
+    const port = data.Config?.Labels?.['runhq.hostPort'];
+    if (!port) {
+      throw new Error(`waitForHealthy: container ${machineId} has no runhq.hostPort label`);
+    }
+    const url = `http://localhost:${port}/health`;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 2_000);
+      try {
+        const res = await fetch(url, { signal: ac.signal });
+        clearTimeout(timer);
+        if (res.ok) return;
+      } catch {
+        clearTimeout(timer);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    throw new Error(`waitForHealthy timed out after ${timeoutMs}ms (url: ${url})`);
   }
   getRoutingInfo(_machineId: string, _appName?: string | null): RoutingInfo {
     throw NOT_IMPLEMENTED('getRoutingInfo');

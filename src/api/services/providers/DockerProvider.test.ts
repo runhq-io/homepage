@@ -672,3 +672,60 @@ describe('DockerProvider — recreate ops', () => {
     ]));
   });
 });
+
+describe('DockerProvider — waiting', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+  const mockInspect = vi.fn();
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    mockGetContainer.mockReturnValue({ inspect: mockInspect });
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  it('waitForState resolves once state matches', async () => {
+    mockInspect
+      .mockResolvedValueOnce({ State: { Status: 'restarting' } })
+      .mockResolvedValueOnce({ State: { Status: 'restarting' } })
+      .mockResolvedValueOnce({ State: { Status: 'running' } });
+    const p = new DockerProvider();
+    await expect(p.waitForState('abc', ['running'], 5_000)).resolves.toBeUndefined();
+    expect(mockInspect).toHaveBeenCalledTimes(3);
+  });
+
+  it('waitForState times out with last observed state in message', async () => {
+    mockInspect.mockResolvedValue({ State: { Status: 'restarting' } });
+    const p = new DockerProvider();
+    await expect(p.waitForState('abc', ['running'], 200)).rejects.toThrow(
+      /timed out.*last state.*starting/i,
+    );
+  });
+
+  it('waitForHealthy polls /health and resolves on 200', async () => {
+    mockInspect.mockResolvedValue({
+      Config: { Labels: { 'runhq.hostPort': '54321' } },
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const p = new DockerProvider();
+    await expect(p.waitForHealthy('abc', 5_000)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:54321/health',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('waitForHealthy times out if /health never returns 200', async () => {
+    mockInspect.mockResolvedValue({
+      Config: { Labels: { 'runhq.hostPort': '54321' } },
+    });
+    global.fetch = vi.fn().mockRejectedValue(new Error('connection refused')) as unknown as typeof fetch;
+
+    const p = new DockerProvider();
+    await expect(p.waitForHealthy('abc', 200)).rejects.toThrow(/timed out/i);
+  });
+});
