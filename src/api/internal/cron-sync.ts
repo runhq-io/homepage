@@ -2,7 +2,11 @@ import type { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { eq, and } from 'drizzle-orm';
-import { parseExpression } from 'cron-parser';
+// cron-parser@4 is CJS-only; Node ESM's cjs-module-lexer doesn't always
+// detect `parseExpression` as a named export, so we default-import the
+// module object and destructure. Same pattern in WorkflowCronScheduler.ts.
+import cronParser from 'cron-parser';
+const { parseExpression } = cronParser;
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../../db/schema.js';
 import { workflowCronSchedules } from '../../db/schema.js';

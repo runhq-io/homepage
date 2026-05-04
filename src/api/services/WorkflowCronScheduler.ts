@@ -15,7 +15,10 @@
  */
 
 import { sql } from 'drizzle-orm';
-import { parseExpression } from 'cron-parser';
+// See cron-sync.ts for the rationale: cron-parser@4 is CJS-only and Node
+// ESM's named-export detection misses `parseExpression`.
+import cronParser from 'cron-parser';
+const { parseExpression } = cronParser;
 import { signPayload } from '../../lib/hmac.js';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../../db/schema.js';
