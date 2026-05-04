@@ -11,6 +11,7 @@
 import Docker from 'dockerode';
 import { statSync, existsSync } from 'node:fs';
 import { mkdir, rm, stat } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { IProvider } from './IProvider';
@@ -46,8 +47,26 @@ function mapDockerState(dockerStatus: string): MachineState {
   }
 }
 
+async function allocateHostPort(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const srv = createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (typeof addr === 'object' && addr && 'port' in addr) {
+        const port = addr.port;
+        srv.close(() => resolve(port));
+      } else {
+        srv.close();
+        reject(new Error('Failed to allocate host port'));
+      }
+    });
+  });
+}
+
 // Test-only export. Do not import from production code.
-export const __test__ = { mapDockerState };
+export const __test__ = { mapDockerState, allocateHostPort };
 
 export class DockerProvider implements IProvider {
   readonly id: ProviderId = 'docker';

@@ -210,3 +210,25 @@ describe('DockerProvider — state mapping', () => {
     expect(() => mapDockerState('cosmic-ray')).toThrow(/unknown docker state/i);
   });
 });
+
+describe('DockerProvider — port allocation', () => {
+  let allocateHostPort: () => Promise<number>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const mod = await import('./DockerProvider');
+    allocateHostPort = mod.__test__.allocateHostPort;
+  });
+
+  it('returns a free port (> 1024)', async () => {
+    const port = await allocateHostPort();
+    expect(port).toBeGreaterThan(1024);
+    expect(port).toBeLessThan(65536);
+  });
+
+  it('returns different ports across calls', async () => {
+    const a = await allocateHostPort();
+    const b = await allocateHostPort();
+    expect(a).not.toBe(b);
+  });
+});
