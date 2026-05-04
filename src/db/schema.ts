@@ -1353,3 +1353,27 @@ export const widgetComments = pgTable('widget_comments', {
 export type WidgetProject = typeof widgetProjects.$inferSelect;
 export type NewWidgetProject = typeof widgetProjects.$inferInsert;
 export type WidgetUser = typeof widgetUsers.$inferSelect;
+
+// ============================================================================
+// Workflow Cron Schedules
+// ============================================================================
+
+export const workflowCronSchedules = pgTable('workflow_cron_schedules', {
+  id: text('id').primaryKey(),
+  serverId: text('server_id').notNull(),
+  agentId: text('agent_id').notNull(),
+  workflowVersion: integer('workflow_version').notNull(),
+  triggerNodeId: text('trigger_node_id').notNull(),
+  schedule: text('schedule').notNull(),
+  timezone: text('timezone'),
+  nextFireAt: timestamp('next_fire_at', { withTimezone: true }).notNull(),
+  lastFiredAt: timestamp('last_fired_at', { withTimezone: true }),
+  enabled: boolean('enabled').notNull().default(true),
+}, (t) => ({
+  uniqServerAgentNode: uniqueIndex('uniq_server_agent_node').on(t.serverId, t.agentId, t.triggerNodeId),
+  // Partial index on enabled rows ordered by nextFireAt — the scheduler scans
+  // this index on every tick to claim due-to-fire rows efficiently.
+  nextFireIdx: index('idx_next_fire').on(t.nextFireAt).where(sql`enabled = true`),
+}));
+
+export type WorkflowCronScheduleRow = typeof workflowCronSchedules.$inferSelect;
