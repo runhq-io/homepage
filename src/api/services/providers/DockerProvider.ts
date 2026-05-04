@@ -503,11 +503,26 @@ export class DockerProvider implements IProvider {
 
     throw new Error(`waitForHealthy timed out after ${timeoutMs}ms (url: ${url})`);
   }
-  getRoutingInfo(_machineId: string, _appName?: string | null): RoutingInfo {
-    throw NOT_IMPLEMENTED('getRoutingInfo');
+  getRoutingInfo(_machineId: string, appName?: string | null): RoutingInfo {
+    const port = appName?.trim();
+    if (!port) {
+      throw new Error(
+        'DockerProvider.getRoutingInfo: missing appName (expected host port string in servers.flyAppName)',
+      );
+    }
+    return {
+      serverUrl: `http://localhost:${port}`,
+      routingToken: null,
+      requiresRoutingHeaders: false,
+    };
   }
-  async updateAutoSuspendPolicy(_machineId: string, _autoSuspendEnabled: boolean, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('updateAutoSuspendPolicy');
+
+  async updateAutoSuspendPolicy(
+    _machineId: string,
+    _autoSuspendEnabled: boolean,
+    _appName?: string | null,
+  ): Promise<void> {
+    // Auto-suspend is a Fly cost optimization that doesn't apply locally.
   }
   async updateMachineEnv(
     machineId: string,
@@ -526,6 +541,18 @@ export class DockerProvider implements IProvider {
     });
   }
   async listMachines(_appName?: string | null): Promise<MachineInfo[]> {
-    throw NOT_IMPLEMENTED('listMachines');
+    const containers = await this.docker.listContainers({
+      all: true,
+      filters: { label: ['runhq.managed=true'] },
+    });
+    return containers.map((c) => {
+      const name = (c.Names?.[0] ?? c.Id).replace(/^\//, '');
+      return {
+        id: c.Id.slice(0, 12),
+        name,
+        state: mapDockerState(c.State as string),
+        region: 'local',
+      };
+    });
   }
 }

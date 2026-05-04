@@ -729,3 +729,61 @@ describe('DockerProvider — waiting', () => {
     await expect(p.waitForHealthy('abc', 200)).rejects.toThrow(/timed out/i);
   });
 });
+
+describe('DockerProvider — routing and fleet', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  it('getRoutingInfo reads hostPort from the appName argument', () => {
+    const p = new DockerProvider();
+    expect(p.getRoutingInfo('abc', '54321')).toEqual({
+      serverUrl: 'http://localhost:54321',
+      routingToken: null,
+      requiresRoutingHeaders: false,
+    });
+  });
+
+  it('getRoutingInfo throws when appName is missing or empty', () => {
+    const p = new DockerProvider();
+    expect(() => p.getRoutingInfo('abc', null)).toThrow(/missing appName.*host port/i);
+    expect(() => p.getRoutingInfo('abc', '')).toThrow(/missing appName.*host port/i);
+    expect(() => p.getRoutingInfo('abc')).toThrow(/missing appName.*host port/i);
+  });
+
+  it('updateAutoSuspendPolicy is a no-op', async () => {
+    const p = new DockerProvider();
+    await expect(p.updateAutoSuspendPolicy('abc', true)).resolves.toBeUndefined();
+  });
+
+  it('listMachines filters by runhq.managed label and returns MachineInfo[]', async () => {
+    mockListContainers.mockResolvedValueOnce([
+      {
+        Id: 'c'.repeat(64),
+        Names: ['/wild_curie'],
+        State: 'running',
+        Labels: { 'runhq.managed': 'true', 'runhq.serverId': 'srv-1' },
+      },
+      {
+        Id: 'd'.repeat(64),
+        Names: ['/serene_kepler'],
+        State: 'exited',
+        Labels: { 'runhq.managed': 'true', 'runhq.serverId': 'srv-2' },
+      },
+    ]);
+    const p = new DockerProvider();
+    const machines = await p.listMachines();
+    expect(mockListContainers).toHaveBeenCalledWith({
+      all: true,
+      filters: { label: ['runhq.managed=true'] },
+    });
+    expect(machines).toEqual([
+      { id: 'cccccccccccc', name: 'wild_curie', state: 'running', region: 'local' },
+      { id: 'dddddddddddd', name: 'serene_kepler', state: 'stopped', region: 'local' },
+    ]);
+  });
+});
