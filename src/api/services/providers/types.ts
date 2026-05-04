@@ -9,7 +9,7 @@
 // Provider identity
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'fly';
+export type ProviderId = 'fly' | 'docker';
 
 // ---------------------------------------------------------------------------
 // Machine states (normalized across providers)
