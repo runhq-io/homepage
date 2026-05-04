@@ -260,11 +260,24 @@ export class DockerProvider implements IProvider {
       providerMetadata: { hostPort, fullContainerId: fullId },
     };
   }
-  async getMachineState(_machineId: string, _appName?: string | null): Promise<MachineState> {
-    throw NOT_IMPLEMENTED('getMachineState');
+  async getMachineState(machineId: string, _appName?: string | null): Promise<MachineState> {
+    try {
+      const data = await this.docker.getContainer(machineId).inspect();
+      return mapDockerState(data.State.Status);
+    } catch (err: unknown) {
+      if ((err as { statusCode?: number }).statusCode === 404) return 'destroyed';
+      throw err;
+    }
   }
-  async getMachineInfo(_machineId: string, _appName?: string | null): Promise<MachineInfo> {
-    throw NOT_IMPLEMENTED('getMachineInfo');
+
+  async getMachineInfo(machineId: string, _appName?: string | null): Promise<MachineInfo> {
+    const data = await this.docker.getContainer(machineId).inspect();
+    return {
+      id: data.Id.slice(0, 12),
+      name: typeof data.Name === 'string' ? data.Name.replace(/^\//, '') : data.Id.slice(0, 12),
+      state: mapDockerState(data.State.Status),
+      region: 'local',
+    };
   }
   async startMachine(_machineId: string, _appName?: string | null): Promise<void> {
     throw NOT_IMPLEMENTED('startMachine');

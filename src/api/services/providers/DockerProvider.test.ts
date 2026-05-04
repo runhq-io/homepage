@@ -428,3 +428,60 @@ describe('DockerProvider — createMachine', () => {
     ).rejects.toThrow(/Docker is not running/);
   });
 });
+
+describe('DockerProvider — inspect', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+  const mockInspect = vi.fn();
+  const containerStub = { inspect: mockInspect };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    mockGetContainer.mockReturnValue(containerStub);
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  it('getMachineState returns mapped state', async () => {
+    mockInspect.mockResolvedValueOnce({ State: { Status: 'running' } });
+    const p = new DockerProvider();
+    expect(await p.getMachineState('abc')).toBe('running');
+    expect(mockGetContainer).toHaveBeenCalledWith('abc');
+  });
+
+  it('getMachineState returns "destroyed" on 404', async () => {
+    const err = Object.assign(new Error('No such container'), { statusCode: 404 });
+    mockInspect.mockRejectedValueOnce(err);
+    const p = new DockerProvider();
+    expect(await p.getMachineState('gone')).toBe('destroyed');
+  });
+
+  it('getMachineState propagates non-404 errors', async () => {
+    mockInspect.mockRejectedValueOnce(new Error('socket closed'));
+    const p = new DockerProvider();
+    await expect(p.getMachineState('abc')).rejects.toThrow('socket closed');
+  });
+
+  it('getMachineInfo returns normalized MachineInfo', async () => {
+    mockInspect.mockResolvedValueOnce({
+      Id: 'a'.repeat(64),
+      Name: '/silly_einstein',
+      State: { Status: 'running' },
+      Config: { Labels: { 'runhq.serverId': 'srv-1' } },
+    });
+    const p = new DockerProvider();
+    const info = await p.getMachineInfo('aaaaaaaaaaaa');
+    expect(info).toEqual({
+      id: 'aaaaaaaaaaaa',
+      name: 'silly_einstein',
+      state: 'running',
+      region: 'local',
+    });
+  });
+
+  it('getMachineInfo propagates 404 errors (does not swallow)', async () => {
+    const err = Object.assign(new Error('No such container'), { statusCode: 404 });
+    mockInspect.mockRejectedValueOnce(err);
+    const p = new DockerProvider();
+    await expect(p.getMachineInfo('gone')).rejects.toThrow();
+  });
+});
