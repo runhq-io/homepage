@@ -9,7 +9,10 @@
  */
 
 import Docker from 'dockerode';
-import { statSync } from 'node:fs';
+import { statSync, existsSync } from 'node:fs';
+import { mkdir, rm, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { IProvider } from './IProvider';
 import type {
   CreateMachineOptions,
@@ -36,6 +39,14 @@ export class DockerProvider implements IProvider {
 
   constructor(docker?: Docker) {
     this.docker = docker ?? new Docker();
+  }
+
+  private get volumesBaseDir(): string {
+    return process.env.RUNHQ_LOCAL_VOLUMES_DIR || '/app/data/local-workspaces';
+  }
+
+  private volumeDir(volumeId: string): string {
+    return join(this.volumesBaseDir, volumeId);
   }
 
   // -------------------------------------------------------------------------
@@ -130,29 +141,70 @@ export class DockerProvider implements IProvider {
   // Volumes — STUBS
   // -------------------------------------------------------------------------
 
-  async createVolume(_name: string, _region: string, _sizeGb?: number, _appName?: string | null): Promise<VolumeInfo> {
-    throw NOT_IMPLEMENTED('createVolume');
+  async createVolume(
+    name: string,
+    region: string,
+    sizeGb?: number,
+    _appName?: string | null,
+  ): Promise<VolumeInfo> {
+    const id = randomUUID();
+    await mkdir(this.volumeDir(id), { recursive: true, mode: 0o755 });
+    return {
+      id,
+      name,
+      state: 'created',
+      sizeGb: sizeGb ?? 0,
+      region: region || 'local',
+    };
   }
-  async getVolume(_volumeId: string, _appName?: string | null): Promise<VolumeInfo | null> {
-    throw NOT_IMPLEMENTED('getVolume');
+
+  async getVolume(volumeId: string, _appName?: string | null): Promise<VolumeInfo | null> {
+    const dir = this.volumeDir(volumeId);
+    try {
+      const s = await stat(dir);
+      if (!s.isDirectory()) return null;
+      return {
+        id: volumeId,
+        name: volumeId,
+        state: 'created',
+        sizeGb: 0,
+        region: 'local',
+      };
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
   }
+
   async extendVolume(_volumeId: string, _newSizeGb: number, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('extendVolume');
+    // Local provider does not enforce volume size; host fs has whatever space it has.
   }
-  async createVolumeFromSnapshot(_snapshotId: string, _name: string, _region: string, _sizeGb: number, _appName?: string | null): Promise<VolumeInfo> {
-    throw NOT_IMPLEMENTED('createVolumeFromSnapshot');
+
+  async deleteVolume(volumeId: string, _appName?: string | null): Promise<void> {
+    if (!existsSync(this.volumeDir(volumeId))) return; // idempotent
+    await rm(this.volumeDir(volumeId), { recursive: true, force: true });
   }
-  async forkVolume(_sourceVolumeId: string, _name: string, _region: string, _sizeGb?: number, _appName?: string | null): Promise<VolumeInfo> {
-    throw NOT_IMPLEMENTED('forkVolume');
-  }
-  async createSnapshot(_volumeId: string, _appName?: string | null): Promise<SnapshotInfo> {
-    throw NOT_IMPLEMENTED('createSnapshot');
-  }
-  async deleteVolume(_volumeId: string, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('deleteVolume');
-  }
+
   async waitForVolumeReady(_volumeId: string, _appName?: string | null, _timeoutMs?: number): Promise<void> {
-    throw NOT_IMPLEMENTED('waitForVolumeReady');
+    // Host fs is always ready.
+  }
+
+  async createVolumeFromSnapshot(): Promise<VolumeInfo> {
+    throw new Error(
+      'Snapshots are not supported by DockerProvider. Set LOCAL_PROVIDER=fly to test that flow against a real Fly account.',
+    );
+  }
+
+  async forkVolume(): Promise<VolumeInfo> {
+    throw new Error(
+      'Volume forking is not supported by DockerProvider. Set LOCAL_PROVIDER=fly to test that flow against a real Fly account.',
+    );
+  }
+
+  async createSnapshot(): Promise<SnapshotInfo> {
+    throw new Error(
+      'Snapshots are not supported by DockerProvider. Set LOCAL_PROVIDER=fly to test that flow against a real Fly account.',
+    );
   }
 
   // -------------------------------------------------------------------------
