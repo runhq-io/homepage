@@ -62,7 +62,7 @@ Both providers are always registered in `initProviders()`. Selection is purely a
 - `be/.env.example` — document `LOCAL_PROVIDER`, `RUNHQ_WORKSPACE_IMAGE`, `RUNHQ_WORKSPACE_DOCKERFILE_DIR`.
 - `be/package.json` — add `dockerode` and `@types/dockerode`.
 
-No DB migration. The `servers.providerId` column already accepts arbitrary strings; the existing `flyMachineId` column stores the Docker container ID (12-char short ID, fits the column width), and `flyAppName` is left `null` (the column is nullable per `schema.ts:730`; DockerProvider has no app concept).
+No DB migration. The `servers.providerId` column already accepts arbitrary strings; the existing `flyMachineId` column stores the Docker container ID (12-char short ID, fits the column width), and `flyAppName` is repurposed to store the **host port** as a string (e.g., `"54321"`). This is the only persistence channel available — `IProvider.getRoutingInfo` is synchronous per its contract, so we cannot read the host port via a `docker inspect` call from inside it. The existing callers (7 sites in `HttpServer.ts` + `ServerService.ts`) already pass `server.flyAppName` as the second argument, so the persisted port is available wherever needed.
 
 ---
 
@@ -74,7 +74,7 @@ No DB migration. The `servers.providerId` column already accepts arbitrary strin
 
 | Method | Behavior |
 |---|---|
-| `isConfigured()` | Tries to `ping()` the Docker socket once on first call, caches the result for the process lifetime. Logs warning if unreachable; returns `false`. |
+| `isConfigured()` | Synchronous: returns `true` if `/var/run/docker.sock` exists and is a socket file (`fs.statSync` + `isSocket()`). Returns `false` otherwise. The actual liveness check (`docker.ping()`) happens lazily inside `createMachine`, which throws a clear `Docker is not running` error if the daemon is not responding. Keeping `isConfigured` sync matches the existing `IProvider` contract and avoids cascading async changes through `registry.ts` callers. |
 | `getRegions()` | Returns `[{ id: 'local', providerId: 'docker', providerRegion: 'local', displayName: 'Local Docker' }]`. |
 | `getTierSpecs()` | Returns the same tier list the Fly provider exposes. Local users see the same tier choices in any UI that calls `getTierSpecs()`. |
 
@@ -125,13 +125,13 @@ Idempotent by virtue of doing nothing.
      serverUrl: `http://localhost:${hostPort}`,
      region: 'local',
      volumeId,
-     appName: null,
+     appName: String(hostPort),  // repurposed: stored in servers.flyAppName, read by getRoutingInfo
      networkName: null,
      providerMetadata: { hostPort, fullContainerId: container.id }
    }
    ```
 
-The 12-char short ID is used as `machineId` everywhere downstream because the `servers.flyMachineId` column was sized for Fly's 14-char IDs. The full 64-char ID is stored in `providerMetadata` for cases that need it.
+The 12-char short ID is used as `machineId` everywhere downstream because the `servers.flyMachineId` column was sized for Fly's 14-char IDs. The full 64-char ID is stored in `providerMetadata` for cases that need it. The `appName` field carries the host port as a string so `getRoutingInfo(machineId, appName)` can synchronously reconstruct `http://localhost:<appName>` without needing a Docker round-trip.
 
 #### State + info
 
@@ -170,7 +170,7 @@ Backed by host-side bind mounts under `/app/data/local-workspaces/<volumeId>/`. 
 |---|---|
 | `waitForState(id, targets, timeoutMs)` | Poll `inspect()` every 500 ms until `state` matches one of `targets` or timeout (default 60 s). Throw on timeout with last observed state in the message. |
 | `waitForHealthy(id, timeoutMs)` | Read `runhq.hostPort` label → poll `http://localhost:<port>/health` every 500 ms with a 2 s per-request timeout, until 200 OK or overall timeout (default 60 s). Throw on timeout. |
-| `getRoutingInfo(id)` | Read `runhq.hostPort` label → `{ serverUrl: 'http://localhost:<port>', routingToken: null, requiresRoutingHeaders: false }`. |
+| `getRoutingInfo(id, appName)` | Read host port from `appName` (callers pass `server.flyAppName`, where the port string is persisted). Return `{ serverUrl: 'http://localhost:<appName>', routingToken: null, requiresRoutingHeaders: false }`. Throws if `appName` is missing/empty. The same value is also set on the container as label `runhq.hostPort` for `docker ps` debuggability, but `getRoutingInfo` does not read it (interface is sync; cannot await `inspect`). |
 | `updateAutoSuspendPolicy` | No-op. |
 | `updateMachineEnv(id, env)` | Inspect → record current config → stop → remove → recreate with merged env, same labels/volume/port. Docker doesn't allow live env changes; recreate is the only path. The container ID changes, so callers must read the new ID from `getMachineInfo` afterward. (The same ID-rotation already happens in some FlyProvider paths.) |
 
@@ -199,17 +199,17 @@ Backed by host-side bind mounts under `/app/data/local-workspaces/<volumeId>/`. 
 8. `provider.waitForState(id, ['running'], 60_000)`.
 9. `provider.waitForHealthy(id, 60_000)` — polls `http://localhost:<port>/health`.
 10. `provisionNewMachine` returns `{ machineId, machineName, url: 'http://localhost:<port>', region: 'local', volumeId }`.
-11. `ServerService` writes the row to `servers` (with `providerId='docker'`, `flyMachineId=<container short ID>`, `flyAppName=null`).
+11. `ServerService` writes the row to `servers` (with `providerId='docker'`, `flyMachineId=<container short ID>`, `flyAppName='<hostPort>'` — the port string lives in the `flyAppName` column so `getRoutingInfo` can reconstruct the URL synchronously after a `be` restart).
 12. Client gets back the new server with `serverUrl: 'http://localhost:<port>'`.
 
 ### Boot recovery
 
 After `be` restarts:
 - Containers with `--restart=unless-stopped` are still running (Docker daemon owns them).
-- `servers` rows still reference them by container ID.
-- Next time the UI queries server state, `getMachineState(id)` reads live state from Docker.
+- `servers` rows still reference them by container ID, with the host port persisted in `flyAppName`.
+- Next time the UI queries server state, `getMachineState(id)` reads live state from Docker; `getRoutingInfo(id, server.flyAppName)` reconstructs the URL from the persisted port without needing a Docker call.
 
-No reaper, no startup migration, no special-case code.
+No reaper, no startup migration, no in-memory cache, no special-case code.
 
 ---
 
@@ -217,7 +217,7 @@ No reaper, no startup migration, no special-case code.
 
 | Failure | Behavior |
 |---|---|
-| Docker socket unreachable on `isConfigured()` | Log warning at startup. `isConfigured()` returns `false`. `createMachine` throws `Error('Docker is not running. Start Docker before creating workspaces.')` — same shape as FlyProvider's "FLY_API_TOKEN missing" error. |
+| Docker socket missing | `isConfigured()` returns `false` (sync `fs.statSync` check on `/var/run/docker.sock`). `initProviders()` logs a warning at startup. `createMachine` calls `docker.ping()` first and throws `Error('Docker is not running. Start Docker before creating workspaces.')` if the daemon doesn't respond — same shape as FlyProvider's "FLY_API_TOKEN missing" error. |
 | Image build fails | `createMachine` throws with the build's stderr tail. No partial state — container is never created. |
 | Free-port allocation race | `EADDRINUSE` from `docker create`: retry once with a fresh port from `net.createServer().listen(0)`. Beyond that, throw. |
 | Container creation fails after volume dir was created | Volume dir is left in place (matches Fly semantics where volumes outlive machines). Caller's responsibility to call `deleteVolume` for cleanup. |
@@ -237,7 +237,7 @@ Mock `dockerode` end-to-end. Verify each method makes the expected Docker API ca
 - `getMachineState` correctly maps every Docker state we care about.
 - `deleteMachine` does not call `deleteVolume`.
 - `forkVolume` etc. throw the documented error.
-- `getRoutingInfo` reads from labels (not from a re-inspect call).
+- `getRoutingInfo` reads from the `appName` argument (no Docker call); throws when missing.
 
 ### Integration tests — `be/src/api/services/providers/DockerProvider.integration.test.ts`
 
