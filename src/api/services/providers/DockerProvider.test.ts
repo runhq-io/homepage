@@ -232,3 +232,63 @@ describe('DockerProvider — port allocation', () => {
     expect(a).not.toBe(b);
   });
 });
+
+describe('DockerProvider — image resolution', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    delete process.env.RUNHQ_WORKSPACE_IMAGE;
+    delete process.env.RUNHQ_WORKSPACE_DOCKERFILE_DIR;
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  it('uses RUNHQ_WORKSPACE_IMAGE env var when set', () => {
+    process.env.RUNHQ_WORKSPACE_IMAGE = 'my.registry/foo:v1';
+    const p = new DockerProvider();
+    expect(p.resolveImageRef()).toBe('my.registry/foo:v1');
+  });
+
+  it('defaults to runhq-server:local when env var unset', () => {
+    const p = new DockerProvider();
+    expect(p.resolveImageRef()).toBe('runhq-server:local');
+  });
+
+  it('ensureImage skips build when image already exists', async () => {
+    mockListImages.mockResolvedValueOnce([{ Id: 'sha256:abc', RepoTags: ['runhq-server:local'] }]);
+    const p = new DockerProvider();
+    await p.ensureImage('runhq-server:local');
+    expect(mockBuildImage).not.toHaveBeenCalled();
+  });
+
+  it('ensureImage builds when :local tag missing and dockerfile dir is set', async () => {
+    process.env.RUNHQ_WORKSPACE_DOCKERFILE_DIR = '/tmp/fake-dockerfile-dir';
+    mockListImages.mockResolvedValueOnce([]);
+
+    const fakeStream = {
+      on: vi.fn((evt: string, cb: () => void) => {
+        if (evt === 'end') queueMicrotask(cb);
+        return fakeStream;
+      }),
+    };
+    mockBuildImage.mockResolvedValueOnce(fakeStream);
+
+    const p = new DockerProvider();
+    await p.ensureImage('runhq-server:local');
+
+    expect(mockBuildImage).toHaveBeenCalledTimes(1);
+    const [ctx, opts] = mockBuildImage.mock.calls[0];
+    expect(ctx).toMatchObject({ context: '/tmp/fake-dockerfile-dir' });
+    expect(opts).toMatchObject({ t: 'runhq-server:local' });
+  });
+
+  it('ensureImage throws when non-:local image is missing (no auto-build)', async () => {
+    mockListImages.mockResolvedValueOnce([]);
+    const p = new DockerProvider();
+    await expect(p.ensureImage('my.registry/foo:v1')).rejects.toThrow(
+      /image 'my.registry\/foo:v1' not found.*pull/i,
+    );
+    expect(mockBuildImage).not.toHaveBeenCalled();
+  });
+});

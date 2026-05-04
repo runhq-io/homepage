@@ -85,6 +85,54 @@ export class DockerProvider implements IProvider {
     return join(this.volumesBaseDir, volumeId);
   }
 
+  resolveImageRef(): string {
+    return process.env.RUNHQ_WORKSPACE_IMAGE || 'runhq-server:local';
+  }
+
+  private dockerfileDir(): string {
+    return (
+      process.env.RUNHQ_WORKSPACE_DOCKERFILE_DIR ||
+      join(process.cwd(), '..', 'runhq', 'server')
+    );
+  }
+
+  async ensureImage(ref: string): Promise<void> {
+    const images = await this.docker.listImages({ filters: { reference: [ref] } });
+    if (images.length > 0) return;
+
+    if (!ref.endsWith(':local')) {
+      throw new Error(
+        `Workspace image '${ref}' not found locally. Pull it (e.g. \`docker pull ${ref}\`) or unset RUNHQ_WORKSPACE_IMAGE to lazy-build runhq-server:local.`,
+      );
+    }
+
+    const ctxDir = this.dockerfileDir();
+    console.log(`[DockerProvider] Building ${ref} from ${ctxDir} (one-time, may take minutes)...`);
+    const stream = await this.docker.buildImage(
+      { context: ctxDir, src: ['Dockerfile'] },
+      { t: ref },
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      let lastError: Error | null = null;
+      stream.on('data', (chunk: Buffer) => {
+        const lines = chunk.toString('utf8').split('\n').filter(Boolean);
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.error) lastError = new Error(`docker build: ${obj.error}`);
+          } catch {
+            // Non-JSON progress line; ignore.
+          }
+        }
+      });
+      stream.on('end', () => (lastError ? reject(lastError) : resolve()));
+      stream.on('error', reject);
+    });
+
+    console.log(`[DockerProvider] Built ${ref}`);
+  }
+
   // -------------------------------------------------------------------------
   // Configuration
   // -------------------------------------------------------------------------
