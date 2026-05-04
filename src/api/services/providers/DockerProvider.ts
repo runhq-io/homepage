@@ -313,8 +313,51 @@ export class DockerProvider implements IProvider {
     await this.docker.getContainer(machineId).pause();
   }
 
-  async updateMachineImage(_machineId: string, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('updateMachineImage');
+  private async recreateContainer(
+    machineId: string,
+    transform: (currentEnv: string[], currentImage: string) => { env: string[]; image: string },
+  ): Promise<void> {
+    const container = this.docker.getContainer(machineId);
+    const data = await container.inspect();
+    const labels = data.Config.Labels ?? {};
+    const binds = data.HostConfig.Binds ?? [];
+    const portBindings = data.HostConfig.PortBindings ?? {};
+    const exposedPorts = data.Config.ExposedPorts ?? {};
+    const nanoCpus = data.HostConfig.NanoCpus;
+    const memory = data.HostConfig.Memory;
+    const restartPolicy = data.HostConfig.RestartPolicy;
+    const currentEnv = data.Config.Env ?? [];
+    const currentImage = data.Config.Image;
+
+    const { env: newEnv, image: newImage } = transform(currentEnv, currentImage);
+
+    await container.stop({ t: 10 }).catch((err: unknown) => {
+      if (!this.isHttpError(err, 304) && !this.isHttpError(err, 404)) throw err;
+    });
+    await container.remove().catch((err: unknown) => {
+      if (!this.isHttpError(err, 404)) throw err;
+    });
+
+    await this.ensureImage(newImage);
+    const fresh = await this.docker.createContainer({
+      Image: newImage,
+      Env: newEnv,
+      Labels: labels,
+      ExposedPorts: exposedPorts,
+      HostConfig: {
+        Binds: binds,
+        PortBindings: portBindings,
+        NanoCpus: nanoCpus,
+        Memory: memory,
+        RestartPolicy: restartPolicy,
+      },
+    } as Docker.ContainerCreateOptions);
+    await fresh.start();
+  }
+
+  async updateMachineImage(machineId: string, _appName?: string | null): Promise<void> {
+    const newImage = this.resolveImageRef();
+    await this.recreateContainer(machineId, (env) => ({ env, image: newImage }));
   }
 
   async deleteMachine(machineId: string, _appName?: string | null): Promise<void> {
@@ -417,8 +460,21 @@ export class DockerProvider implements IProvider {
   async updateAutoSuspendPolicy(_machineId: string, _autoSuspendEnabled: boolean, _appName?: string | null): Promise<void> {
     throw NOT_IMPLEMENTED('updateAutoSuspendPolicy');
   }
-  async updateMachineEnv(_machineId: string, _env: Record<string, string>, _appName?: string | null): Promise<void> {
-    throw NOT_IMPLEMENTED('updateMachineEnv');
+  async updateMachineEnv(
+    machineId: string,
+    envUpdates: Record<string, string>,
+    _appName?: string | null,
+  ): Promise<void> {
+    await this.recreateContainer(machineId, (currentEnv, currentImage) => {
+      const map = new Map<string, string>();
+      for (const line of currentEnv) {
+        const eq = line.indexOf('=');
+        if (eq > 0) map.set(line.slice(0, eq), line.slice(eq + 1));
+      }
+      for (const [k, v] of Object.entries(envUpdates)) map.set(k, v);
+      const env = [...map.entries()].map(([k, v]) => `${k}=${v}`);
+      return { env, image: currentImage };
+    });
   }
   async listMachines(_appName?: string | null): Promise<MachineInfo[]> {
     throw NOT_IMPLEMENTED('listMachines');

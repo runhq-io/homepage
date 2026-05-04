@@ -566,3 +566,109 @@ describe('DockerProvider — lifecycle ops', () => {
     await expect(p.deleteMachine('gone')).resolves.toBeUndefined();
   });
 });
+
+describe('DockerProvider — recreate ops', () => {
+  let DockerProvider: typeof import('./DockerProvider').DockerProvider;
+  const mockInspect = vi.fn();
+  const mockStop = vi.fn();
+  const mockRemove = vi.fn();
+  const mockStart = vi.fn();
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    process.env.RUNHQ_LOCAL_VOLUMES_DIR = '/tmp/runhq-vols';
+    mockGetContainer.mockReturnValue({ inspect: mockInspect, stop: mockStop, remove: mockRemove });
+    mockListImages.mockResolvedValue([{ Id: 'sha256:abc', RepoTags: ['runhq-server:local'] }]);
+    mockCreateContainer.mockResolvedValue({ id: 'b'.repeat(64), start: mockStart });
+    ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  afterEach(() => {
+    delete process.env.RUNHQ_LOCAL_VOLUMES_DIR;
+    delete process.env.RUNHQ_WORKSPACE_IMAGE;
+  });
+
+  it('updateMachineImage stops, removes, recreates with new image', async () => {
+    mockInspect.mockResolvedValueOnce({
+      Id: 'a'.repeat(64),
+      Image: 'runhq-server:local',
+      Config: {
+        Image: 'runhq-server:local',
+        Env: ['SERVER_TOKEN=t', 'PORT=61987'],
+        Labels: {
+          'runhq.managed': 'true',
+          'runhq.serverId': 'srv-1',
+          'runhq.volumeId': 'v-1',
+          'runhq.tier': 'shared-4x-2gb',
+          'runhq.hostPort': '12345',
+        },
+        ExposedPorts: { '61987/tcp': {} },
+      },
+      HostConfig: {
+        Binds: ['/tmp/runhq-vols/v-1:/app/data'],
+        PortBindings: { '61987/tcp': [{ HostIp: '127.0.0.1', HostPort: '12345' }] },
+        NanoCpus: 4_000_000_000,
+        Memory: 2 * 1024 * 1024 * 1024,
+        RestartPolicy: { Name: 'unless-stopped' },
+      },
+    });
+    mockStop.mockResolvedValueOnce(undefined);
+    mockRemove.mockResolvedValueOnce(undefined);
+
+    process.env.RUNHQ_WORKSPACE_IMAGE = 'runhq-server:v2';
+    mockListImages.mockResolvedValue([{ Id: 'sha256:def', RepoTags: ['runhq-server:v2'] }]);
+
+    const p = new DockerProvider();
+    await p.updateMachineImage('abc');
+
+    expect(mockStop).toHaveBeenCalled();
+    expect(mockRemove).toHaveBeenCalled();
+    const spec = mockCreateContainer.mock.calls[0][0];
+    expect(spec.Image).toBe('runhq-server:v2');
+    expect(spec.Labels).toMatchObject({ 'runhq.serverId': 'srv-1' });
+    expect(spec.HostConfig.Binds).toEqual(['/tmp/runhq-vols/v-1:/app/data']);
+    expect(spec.HostConfig.PortBindings['61987/tcp']).toEqual([
+      { HostIp: '127.0.0.1', HostPort: '12345' },
+    ]);
+    expect(mockStart).toHaveBeenCalled();
+  });
+
+  it('updateMachineEnv recreates with merged env', async () => {
+    mockInspect.mockResolvedValueOnce({
+      Id: 'a'.repeat(64),
+      Config: {
+        Image: 'runhq-server:local',
+        Env: ['SERVER_TOKEN=old', 'PORT=61987', 'EXTRA=keep'],
+        Labels: {
+          'runhq.managed': 'true',
+          'runhq.serverId': 'srv-1',
+          'runhq.volumeId': 'v-1',
+          'runhq.tier': 'shared-4x-2gb',
+          'runhq.hostPort': '12345',
+        },
+        ExposedPorts: { '61987/tcp': {} },
+      },
+      HostConfig: {
+        Binds: ['/tmp/runhq-vols/v-1:/app/data'],
+        PortBindings: { '61987/tcp': [{ HostIp: '127.0.0.1', HostPort: '12345' }] },
+        NanoCpus: 4_000_000_000,
+        Memory: 2 * 1024 * 1024 * 1024,
+        RestartPolicy: { Name: 'unless-stopped' },
+      },
+    });
+    mockStop.mockResolvedValueOnce(undefined);
+    mockRemove.mockResolvedValueOnce(undefined);
+
+    const p = new DockerProvider();
+    await p.updateMachineEnv('abc', { SERVER_TOKEN: 'new', NEW_KEY: 'val' });
+
+    const spec = mockCreateContainer.mock.calls[0][0];
+    expect(spec.Env).toEqual(expect.arrayContaining([
+      'SERVER_TOKEN=new',
+      'PORT=61987',
+      'EXTRA=keep',
+      'NEW_KEY=val',
+    ]));
+  });
+});
