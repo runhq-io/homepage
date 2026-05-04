@@ -32,6 +32,23 @@ const NOT_IMPLEMENTED = (method: string) =>
 
 const DEFAULT_DOCKER_SOCK = '/var/run/docker.sock';
 
+function mapDockerState(dockerStatus: string): MachineState {
+  switch (dockerStatus) {
+    case 'running':    return 'running';
+    case 'paused':     return 'suspended';
+    case 'exited':     return 'stopped';
+    case 'created':    return 'stopped';
+    case 'restarting': return 'starting';
+    case 'removing':   return 'destroying';
+    case 'dead':       return 'destroyed';
+    default:
+      throw new Error(`Unknown docker state: ${dockerStatus}`);
+  }
+}
+
+// Test-only export. Do not import from production code.
+export const __test__ = { mapDockerState };
+
 export class DockerProvider implements IProvider {
   readonly id: ProviderId = 'docker';
 

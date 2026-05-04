@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { rmSync, mkdtempSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { MachineState } from './types';
 
 // Mock dockerode at the module level. Each test resets the mock and configures
 // behaviour via the returned mock factory.
@@ -181,5 +182,31 @@ describe('DockerProvider — volumes', () => {
     await expect(p.createSnapshot('v')).rejects.toThrow(
       /not supported by DockerProvider/,
     );
+  });
+});
+
+describe('DockerProvider — state mapping', () => {
+  let mapDockerState: (s: string) => MachineState;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const mod = await import('./DockerProvider');
+    mapDockerState = mod.__test__.mapDockerState;
+  });
+
+  it.each([
+    ['running', 'running'],
+    ['paused', 'suspended'],
+    ['exited', 'stopped'],
+    ['created', 'stopped'],
+    ['restarting', 'starting'],
+    ['removing', 'destroying'],
+    ['dead', 'destroyed'],
+  ] as const)('maps docker state %s -> %s', (docker, expected) => {
+    expect(mapDockerState(docker)).toBe(expected);
+  });
+
+  it('throws on unknown docker state', () => {
+    expect(() => mapDockerState('cosmic-ray')).toThrow(/unknown docker state/i);
   });
 });
