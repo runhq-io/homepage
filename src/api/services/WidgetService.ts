@@ -1305,13 +1305,20 @@ function generateSlug(name: string, suffix: string): string {
 
 export async function enableWidget(
   serverId: string,
-  opts: { name: string; channelId?: string }
+  opts: { name: string; channelId?: string; workspaceProjectId: string }
 ) {
-  // Check if a project already exists for this server (re-enable case)
+  if (!opts.workspaceProjectId) {
+    throw new Error('enableWidget: workspaceProjectId is required');
+  }
+
+  // Check if a project already exists for this (server, workspaceProject) pair (re-enable case)
   const [existing] = await db
     .select({ slug: widgetProjects.slug })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId),
+    ))
     .limit(1);
 
   const apiSecret = randomBytes(32).toString('base64url');
@@ -1323,6 +1330,7 @@ export async function enableWidget(
     .insert(widgetProjects)
     .values({
       serverId,
+      workspaceProjectId: opts.workspaceProjectId,
       name: opts.name,
       slug,
       apiKey,
@@ -1338,6 +1346,7 @@ export async function enableWidget(
         apiKey,
         apiSecretHash: apiSecret,
         channelId: opts.channelId,
+        workspaceProjectId: opts.workspaceProjectId,
         updatedAt: new Date(),
       },
     })
@@ -1346,20 +1355,28 @@ export async function enableWidget(
   return { ...project, apiSecret };
 }
 
-export async function disableWidget(serverId: string) {
+export async function disableWidget(serverId: string, workspaceProjectId?: string) {
+  const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   await db
     .update(widgetProjects)
     .set({ enabled: false, updatedAt: new Date() })
-    .where(eq(widgetProjects.serverId, serverId));
+    .where(and(...conditions));
 }
 
-export async function regenerateSecret(serverId: string) {
+export async function regenerateSecret(serverId: string, workspaceProjectId?: string) {
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
+  const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .update(widgetProjects)
     .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .returning({ id: widgetProjects.id });
 
   if (!project) throw new Error('Widget project not found');
@@ -1465,16 +1482,18 @@ export async function generateUserTokenBySecret(
   return { token };
 }
 
-export async function getWidgetIntegration(serverId: string) {
+export async function getWidgetIntegration(serverId: string, workspaceProjectId?: string) {
+  const conditions = [
+    eq(widgetProjects.serverId, serverId),
+    eq(widgetProjects.enabled, true),
+  ];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select()
     .from(widgetProjects)
-    .where(
-      and(
-        eq(widgetProjects.serverId, serverId),
-        eq(widgetProjects.enabled, true)
-      )
-    )
+    .where(and(...conditions))
     .limit(1);
 
   return project ?? null;
@@ -1505,7 +1524,12 @@ export async function generatePreviewWidgetBootstrap(
   serverId: string,
   userId: string,
   userName?: string,
+  workspaceProjectId?: string,
 ): Promise<PreviewWidgetBootstrap | null> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1518,7 +1542,7 @@ export async function generatePreviewWidgetBootstrap(
       autoApprove: widgetProjects.autoApprove,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
@@ -1547,10 +1571,14 @@ export async function generatePreviewWidgetBootstrap(
  * Report whether a server has auto-inject enabled (used by the preview proxy
  * to decide whether to include the bootstrap script in HTML responses).
  */
-export async function getPreviewWidgetFlag(serverId: string): Promise<{
+export async function getPreviewWidgetFlag(serverId: string, workspaceProjectId?: string): Promise<{
   shouldInject: boolean;
   projectSlug?: string;
 }> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1559,7 +1587,7 @@ export async function getPreviewWidgetFlag(serverId: string): Promise<{
       channelId: widgetProjects.channelId,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
@@ -1569,7 +1597,11 @@ export async function getPreviewWidgetFlag(serverId: string): Promise<{
   return { shouldInject: true, projectSlug: project.slug };
 }
 
-export async function getWidgetSettings(serverId: string) {
+export async function getWidgetSettings(serverId: string, workspaceProjectId?: string) {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       autoApprove: widgetProjects.autoApprove,
@@ -1581,7 +1613,7 @@ export async function getWidgetSettings(serverId: string) {
       slug: widgetProjects.slug,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project) return null;
@@ -1622,14 +1654,22 @@ export async function updateWidgetSettings(
     auto_inject_in_preview?: boolean;
     slug?: string;
   },
+  opts?: { workspaceProjectId?: string },
 ): Promise<UpdateWidgetSettingsResult> {
+  // Build a reusable conditions array for all three internal queries.
+  const projConds = (): ReturnType<typeof eq>[] => {
+    const c: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+    if (opts?.workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId));
+    return c;
+  };
+
   // Enabling auto-inject requires a channel already to be set on the project.
   // Without a channel the widget has nowhere to submit tickets.
   if (settings.auto_inject_in_preview === true) {
     const [current] = await db
       .select({ channelId: widgetProjects.channelId })
       .from(widgetProjects)
-      .where(eq(widgetProjects.serverId, serverId))
+      .where(and(...projConds()))
       .limit(1);
     if (!current?.channelId) {
       throw new WidgetSettingsValidationError(
@@ -1644,7 +1684,7 @@ export async function updateWidgetSettings(
     const [current] = await db
       .select({ autoInjectInPreview: widgetProjects.autoInjectInPreview })
       .from(widgetProjects)
-      .where(eq(widgetProjects.serverId, serverId))
+      .where(and(...projConds()))
       .limit(1);
     if (current && current.autoInjectInPreview !== settings.auto_inject_in_preview) {
       autoInjectChanged = true;
@@ -1662,7 +1702,7 @@ export async function updateWidgetSettings(
       ...(settings.slug !== undefined && { slug: settings.slug }),
       updatedAt: new Date(),
     })
-    .where(eq(widgetProjects.serverId, serverId));
+    .where(and(...projConds()));
 
   return { autoInjectChanged };
 }
@@ -1670,6 +1710,40 @@ export async function updateWidgetSettings(
 // ============================================================================
 // Title Generation
 // ============================================================================
+
+/**
+ * For widget_projects rows on this server where workspace_project_id is still
+ * NULL, accept a channel→project mapping from the running workspace and fill
+ * the column in. Idempotent: rows already populated are left alone. Channel
+ * IDs not present in the supplied map are skipped (the row stays NULL — the
+ * channel might have been deleted on the workspace).
+ *
+ * Returns the count of rows updated for telemetry / logging.
+ */
+export async function reconcileUnbackfilledWidgets(
+  serverId: string,
+  channelToProject: Record<string, string>, // channelId -> workspaceProjectId
+): Promise<{ updated: number }> {
+  const unbackfilled = await db
+    .select({ id: widgetProjects.id, channelId: widgetProjects.channelId })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      isNull(widgetProjects.workspaceProjectId),
+    ));
+
+  let updated = 0;
+  for (const row of unbackfilled) {
+    if (!row.channelId) continue;
+    const projId = channelToProject[row.channelId];
+    if (!projId) continue;
+    await db.update(widgetProjects)
+      .set({ workspaceProjectId: projId, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+  return { updated };
+}
 
 export async function generateTitle(description: string): Promise<string> {
   const fallback = description.split('\n')[0].slice(0, 80).trim() || description.slice(0, 80).trim();
