@@ -2753,12 +2753,27 @@ export function createHttpApp() {
       const serverId = c.req.param('serverId');
       const memberId = c.req.param('memberId');
 
-      // Support server-token auth (fishtank server proxying leave/kick requests)
+      // Support server-token auth (fishtank server proxying self-leave only).
+      // The server-token path is constrained to self-leave: the workspace must
+      // also forward the requesting user's session JWT as X-Actor-Token, and
+      // memberId must match its userId claim. This prevents a leaked server
+      // token alone from removing arbitrary members.
       const serverToken = c.req.header('X-Server-Token');
       if (serverToken) {
         const server = await ServerService.getServerByToken(serverToken);
         if (!server || server.id !== serverId) {
           return c.json({ error: 'Invalid server token' }, 401);
+        }
+        const actorToken = c.req.header('X-Actor-Token');
+        if (!actorToken) {
+          return c.json({ error: 'Actor token required' }, 401);
+        }
+        const actor = await ServerSessionService.verifyServerSessionToken(actorToken);
+        if (!actor || actor.serverId !== serverId) {
+          return c.json({ error: 'Invalid actor token' }, 401);
+        }
+        if (actor.userId !== memberId) {
+          return c.json({ error: 'Server-token path supports self-leave only' }, 403);
         }
         const success = await ServerService.leaveServer(serverId, memberId);
         return c.json({ success });
@@ -3673,10 +3688,21 @@ export function createHttpApp() {
         return c.json({ error: 'Server mismatch' }, 403);
       }
 
+      // Do NOT trust `payload.userName` — preview tokens are mintable by any
+      // server member with their own claimed name. Resolve the canonical name
+      // from the DB by userId so widget tickets/comments cannot be authored
+      // under a spoofed display name.
+      const [user] = await db
+        .select({ name: users.name, username: users.username })
+        .from(users)
+        .where(eq(users.id, payload.userId))
+        .limit(1);
+      const canonicalName = user?.name ?? user?.username ?? undefined;
+
       const bootstrap = await WidgetService.generatePreviewWidgetBootstrap(
         payload.serverId,
         payload.userId,
-        payload.userName,
+        canonicalName,
       );
       if (!bootstrap) return c.json({ error: 'Widget auto-inject not enabled' }, 404);
 
@@ -4308,6 +4334,80 @@ export function createHttpApp() {
     return c.json({ success: true, data: tasks });
   });
 
+  // Fields a server member is allowed to set on task create. Identity-bearing
+  // fields (createdBy*), moderation-bearing fields, and migration-internal
+  // fields are intentionally excluded — they are server-controlled.
+  // Fields a server member is allowed to set on task create. Identity-bearing
+  // fields, moderation/source/upvote/legacy fields, and attachments are
+  // intentionally excluded.
+  //
+  // Why no attachments here: client-supplied storageProvider/storageKey are
+  // persisted verbatim (see WorkspaceTaskService.createTask). Without an
+  // ownership check, a member could attach another user's R2/S3 object as
+  // theirs, then later trigger storage deletion via a deleteComment-style
+  // path. Legitimate attachment uploads go through the server-token
+  // /api/server/workspace-task-attachments/upload endpoint, which is the
+  // trust boundary that owns storage references.
+  const TASK_CREATE_MEMBER_FIELDS = [
+    'workspaceProjectId',
+    'workspaceChannelId',
+    'title',
+    'description',
+    'status',
+    'visibility',
+    'type',
+    'schedule',
+    'scheduledAt',
+    'timezone',
+    'commentsDisabled',
+  ] as const;
+
+  // Fields a server member is allowed to update on a task. archivedAt and
+  // deletedAt are excluded (ownership-sensitive). Attachments are excluded
+  // for the same reason as on create — see TASK_CREATE_MEMBER_FIELDS.
+  const TASK_UPDATE_MEMBER_FIELDS = [
+    'workspaceProjectId',
+    'workspaceChannelId',
+    'title',
+    'description',
+    'status',
+    'visibility',
+    'type',
+    'schedule',
+    'scheduledAt',
+    'timezone',
+    'completedAt',
+    'commentsDisabled',
+  ] as const;
+
+  function pickFields<T extends string>(body: unknown, allowed: readonly T[]): Record<T, unknown> {
+    const out = {} as Record<T, unknown>;
+    if (!body || typeof body !== 'object') return out;
+    for (const key of allowed) {
+      if (key in (body as Record<string, unknown>)) {
+        out[key] = (body as Record<string, unknown>)[key];
+      }
+    }
+    return out;
+  }
+
+  async function resolveMemberIdentity(userId: string): Promise<{
+    createdByType: 'member';
+    createdById: string;
+    createdByName: string | null;
+  }> {
+    const [user] = await db
+      .select({ name: users.name, username: users.username })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return {
+      createdByType: 'member',
+      createdById: userId,
+      createdByName: user?.name ?? user?.username ?? null,
+    };
+  }
+
   app.post('/api/servers/:serverId/workspace-tasks', async (c) => {
     const userId = await requireAuthenticatedUser(c);
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
@@ -4317,7 +4417,17 @@ export function createHttpApp() {
     if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
-    const task = await WorkspaceTaskService.createTask(serverId, body);
+    if (typeof (body as { title?: unknown })?.title !== 'string' || !(body as { title: string }).title.trim()) {
+      return c.json({ error: 'title is required' }, 400);
+    }
+
+    const safe = pickFields(body, TASK_CREATE_MEMBER_FIELDS);
+    const identity = await resolveMemberIdentity(userId);
+    const task = await WorkspaceTaskService.createTask(serverId, {
+      ...safe,
+      ...identity,
+      sourceType: 'workspace',
+    } as Parameters<typeof WorkspaceTaskService.createTask>[1]);
     return c.json({ success: true, data: task }, 201);
   });
 
@@ -4330,7 +4440,12 @@ export function createHttpApp() {
     if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
-    const task = await WorkspaceTaskService.updateTask(serverId, c.req.param('taskId'), body);
+    const safe = pickFields(body, TASK_UPDATE_MEMBER_FIELDS);
+    const task = await WorkspaceTaskService.updateTask(
+      serverId,
+      c.req.param('taskId'),
+      safe as Parameters<typeof WorkspaceTaskService.updateTask>[2],
+    );
     if (!task) return c.json({ error: 'Task not found' }, 404);
     return c.json({ success: true, data: task });
   });
@@ -4397,8 +4512,19 @@ export function createHttpApp() {
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
+
     const body = await c.req.json();
-    const comment = await WorkspaceTaskService.addComment(serverId, task.id, body);
+    const content = (body as { content?: unknown })?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      return c.json({ error: 'content is required' }, 400);
+    }
+    // Attachments are not accepted from the user-token path — see comment on
+    // TASK_CREATE_MEMBER_FIELDS for the storage-ownership rationale.
+    const identity = await resolveMemberIdentity(userId);
+    const comment = await WorkspaceTaskService.addComment(serverId, task.id, {
+      content,
+      ...identity,
+    });
     return c.json({ success: true, data: comment }, 201);
   });
 
@@ -4413,8 +4539,12 @@ export function createHttpApp() {
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
 
-    const deleted = await WorkspaceTaskService.deleteComment(serverId, task.id, c.req.param('commentId'));
-    if (!deleted) return c.json({ error: 'Comment not found' }, 404);
+    const result = await WorkspaceTaskService.deleteComment(serverId, task.id, c.req.param('commentId'), {
+      actorId: userId,
+      actorType: 'member',
+    });
+    if (result === 'not_found') return c.json({ error: 'Comment not found' }, 404);
+    if (result === 'forbidden') return c.json({ error: 'Forbidden' }, 403);
     return c.json({ success: true });
   });
 
@@ -4442,8 +4572,21 @@ export function createHttpApp() {
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
+
     const body = await c.req.json();
-    const activity = await WorkspaceTaskService.addActivity(serverId, task.id, body);
+    const activityType = (body as { type?: unknown })?.type;
+    if (typeof activityType !== 'string' || !activityType) {
+      return c.json({ error: 'type is required' }, 400);
+    }
+    const identity = await resolveMemberIdentity(userId);
+    // Attachments are not accepted from the user-token path — see comment on
+    // TASK_CREATE_MEMBER_FIELDS for the storage-ownership rationale.
+    const activity = await WorkspaceTaskService.addActivity(serverId, task.id, {
+      type: activityType as Parameters<typeof WorkspaceTaskService.addActivity>[2]['type'],
+      content: typeof (body as { content?: unknown })?.content === 'string' ? (body as { content: string }).content : null,
+      metadata: ((body as { metadata?: unknown })?.metadata as Record<string, unknown> | null) ?? null,
+      ...identity,
+    });
     return c.json({ success: true, data: activity }, 201);
   });
 
@@ -4670,8 +4813,14 @@ export function createHttpApp() {
 
     const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    const deleted = await WorkspaceTaskService.deleteComment(server.id, task.id, c.req.param('commentId'));
-    if (!deleted) return c.json({ error: 'Comment not found' }, 404);
+    // Server-token path: the workspace server has already authorized the action
+    // locally. Authoring identity is opaque to the BE here.
+    const result = await WorkspaceTaskService.deleteComment(server.id, task.id, c.req.param('commentId'), {
+      actorId: 'server-token',
+      actorType: 'system',
+      override: true,
+    });
+    if (result === 'not_found') return c.json({ error: 'Comment not found' }, 404);
     return c.json({ success: true });
   });
 
@@ -5242,10 +5391,9 @@ export function createHttpApp() {
   });
 
   // Generate a signed widget JWT for the RunHQ feedback widget.
-  // Secret is server-side config — never accepted from the client.
-  // Uses FEEDBACK_WIDGET_SECRET env var, falling back to staging secret.
-  const FEEDBACK_WIDGET_SECRET = process.env.FEEDBACK_WIDGET_SECRET
-    || 'N21HtPoGxGBRPd_emBv-poLK8G2rlQsrv42ZjAClWPs';
+  // Secret is server-side config — never accepted from the client and never
+  // hard-coded. The endpoint reports 503 when the env var is missing.
+  const FEEDBACK_WIDGET_SECRET = process.env.FEEDBACK_WIDGET_SECRET ?? '';
 
   app.get('/api/widget/user-token', async (c) => {
     if (!FEEDBACK_WIDGET_SECRET) return c.json({ error: 'Feedback widget not configured' }, 503);

@@ -38,9 +38,14 @@ export async function POST(request: NextRequest) {
   } catch { body = {}; }
 
   const actionRaw = body.action;
-  if (actionRaw !== 'disable-mfa' && actionRaw !== 'regenerate-codes' && actionRaw !== 'delete-passkey') {
+  if (
+    actionRaw !== 'disable-mfa' &&
+    actionRaw !== 'regenerate-codes' &&
+    actionRaw !== 'delete-passkey' &&
+    actionRaw !== 'change-password'
+  ) {
     return NextResponse.json(
-      { error: 'action must be one of: disable-mfa, regenerate-codes, delete-passkey' },
+      { error: 'action must be one of: disable-mfa, regenerate-codes, delete-passkey, change-password' },
       { status: 400, headers: corsHeaders },
     );
   }

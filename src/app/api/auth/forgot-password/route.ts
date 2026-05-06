@@ -4,6 +4,7 @@ import { eq, and, gt, isNull } from 'drizzle-orm';
 import { sendPasswordResetEmail } from '@/lib/email';
 import { randomBytes, createHash } from 'crypto';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
+import { safeRedirectUrl } from '@/lib/redirectAllowlist';
 
 // Rate limiters
 const ipLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 }); // 5 per 15 min per IP
@@ -80,9 +81,11 @@ export async function POST(request: NextRequest) {
     expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
   });
 
-  // Build reset URL
+  // Build reset URL. The redirect param is attacker-controllable from the
+  // client, so we silently drop it unless it points at an allowed host.
   const baseUrl = process.env.APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:8080';
-  const redirectParam = redirect ? `&redirect=${encodeURIComponent(redirect)}` : '';
+  const safeRedirect = safeRedirectUrl(redirect);
+  const redirectParam = safeRedirect ? `&redirect=${encodeURIComponent(safeRedirect)}` : '';
   const resetUrl = `${baseUrl}/reset-password?token=${rawToken}${redirectParam}`;
 
   try {
