@@ -415,11 +415,23 @@ export async function updateComment(
   return toCanonicalComment(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 
+export type DeleteCommentResult = 'deleted' | 'not_found' | 'forbidden';
+
+/**
+ * Delete a comment. The actor must be the original author (member-typed) of
+ * the comment. Pass `{ override: true }` for trusted internal callers (e.g. an
+ * admin/moderator pathway) that have already authorized the deletion.
+ */
 export async function deleteComment(
   serverId: string,
   taskId: string,
   commentId: string,
-): Promise<boolean> {
+  authorization: {
+    actorId: string;
+    actorType: 'member' | 'external' | 'system' | 'agent';
+    override?: boolean;
+  },
+): Promise<DeleteCommentResult> {
   const [comment] = await db
     .select()
     .from(workspaceTaskComments)
@@ -431,7 +443,14 @@ export async function deleteComment(
     ))
     .limit(1);
 
-  if (!comment) return false;
+  if (!comment) return 'not_found';
+
+  if (!authorization.override) {
+    const isAuthor =
+      comment.createdByType === authorization.actorType &&
+      comment.createdById === authorization.actorId;
+    if (!isAuthor) return 'forbidden';
+  }
 
   const attachments = await db
     .select()
@@ -471,7 +490,7 @@ export async function deleteComment(
     }
   }
 
-  return true;
+  return 'deleted';
 }
 
 async function recountTaskUpvotes(taskId: string): Promise<number> {

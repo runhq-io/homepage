@@ -14,14 +14,18 @@ let _jwtSecret: Uint8Array | null = null;
 
 function getJwtSecret(): Uint8Array {
   if (!_jwtSecret) {
-    const secret = process.env.JWT_SECRET || 'dev-secret-do-not-use-in-production';
-    if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
-      throw new Error('[JWT] CRITICAL: JWT_SECRET not set in production!');
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      throw new Error(
+        '[JWT] CRITICAL: JWT_SECRET is not set. Set it in your environment (see .env.example for local dev).',
+      );
     }
     _jwtSecret = new TextEncoder().encode(secret);
   }
   return _jwtSecret;
 }
+
+const JWT_VERIFY_OPTIONS: jose.JWTVerifyOptions = { algorithms: ['HS256'] };
 
 /** Session token — no scope claim. */
 export async function createToken(userId: string): Promise<string> {
@@ -35,7 +39,7 @@ export async function createToken(userId: string): Promise<string> {
 /** Verify a session token. Rejects scoped tokens. */
 export async function verifyToken(token: string): Promise<string | null> {
   try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    const { payload } = await jose.jwtVerify(token, getJwtSecret(), JWT_VERIFY_OPTIONS);
     if (payload.scope) return null;
     if (typeof payload.userId === 'string') return payload.userId;
     return null;
@@ -63,7 +67,7 @@ export async function createMfaPendingToken(userId: string): Promise<string> {
 
 export async function verifyMfaPendingToken(token: string): Promise<MfaPendingClaims | null> {
   try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    const { payload } = await jose.jwtVerify(token, getJwtSecret(), JWT_VERIFY_OPTIONS);
     if (payload.scope !== 'mfa-pending') return null;
     if (typeof payload.userId !== 'string') return null;
     return { userId: payload.userId };
@@ -88,7 +92,7 @@ export async function createMfaSetupToken(userId: string, secret: string): Promi
 
 export async function verifyMfaSetupToken(token: string): Promise<MfaSetupClaims | null> {
   try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    const { payload } = await jose.jwtVerify(token, getJwtSecret(), JWT_VERIFY_OPTIONS);
     if (payload.scope !== 'mfa-setup') return null;
     if (typeof payload.userId !== 'string' || typeof payload.secret !== 'string') return null;
     return { userId: payload.userId, secret: payload.secret };
@@ -113,7 +117,7 @@ export async function createPasskeyRegistrationToken(userId: string, challenge: 
 
 export async function verifyPasskeyRegistrationToken(token: string): Promise<PasskeyRegistrationClaims | null> {
   try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    const { payload } = await jose.jwtVerify(token, getJwtSecret(), JWT_VERIFY_OPTIONS);
     if (payload.scope !== 'passkey-registration') return null;
     if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
     return { userId: payload.userId, challenge: payload.challenge };
@@ -138,7 +142,7 @@ export async function createPasskeyAuthenticationToken(userId: string, challenge
 
 export async function verifyPasskeyAuthenticationToken(token: string): Promise<PasskeyAuthenticationClaims | null> {
   try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    const { payload } = await jose.jwtVerify(token, getJwtSecret(), JWT_VERIFY_OPTIONS);
     if (payload.scope !== 'passkey-authentication') return null;
     if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
     return { userId: payload.userId, challenge: payload.challenge };
@@ -147,7 +151,11 @@ export async function verifyPasskeyAuthenticationToken(token: string): Promise<P
   }
 }
 
-export type PasskeyReauthAction = 'disable-mfa' | 'regenerate-codes' | 'delete-passkey';
+export type PasskeyReauthAction =
+  | 'disable-mfa'
+  | 'regenerate-codes'
+  | 'delete-passkey'
+  | 'change-password';
 
 export interface PasskeyReauthClaims {
   userId: string;
@@ -174,11 +182,16 @@ export async function createPasskeyReauthToken(
 
 export async function verifyPasskeyReauthToken(token: string): Promise<PasskeyReauthClaims | null> {
   try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret());
+    const { payload } = await jose.jwtVerify(token, getJwtSecret(), JWT_VERIFY_OPTIONS);
     if (payload.scope !== 'passkey-reauth') return null;
     if (typeof payload.userId !== 'string' || typeof payload.challenge !== 'string') return null;
     const action = payload.action;
-    if (action !== 'disable-mfa' && action !== 'regenerate-codes' && action !== 'delete-passkey') return null;
+    if (
+      action !== 'disable-mfa' &&
+      action !== 'regenerate-codes' &&
+      action !== 'delete-passkey' &&
+      action !== 'change-password'
+    ) return null;
     return { userId: payload.userId, challenge: payload.challenge, action };
   } catch {
     return null;
