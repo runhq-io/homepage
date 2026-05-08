@@ -2645,10 +2645,9 @@
       h("div", { className: "rw-shell", "data-theme": theme }, [cardModal]),
     ]);
 
-    // Click-outside-the-card to close.
-    widgetEl.addEventListener("mousedown", function (e) {
-      if (e.target === widgetEl) closePanel();
-    });
+    // Deliberately NO click-outside-to-close handler — accidental clicks
+    // on the scrim shouldn't drop a half-typed feedback ticket. The user
+    // closes via the explicit × button or Escape.
 
     modalMountEl = h("div", { className: "rw-modal-mount", "data-theme": theme });
 
