@@ -132,6 +132,7 @@
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
+  function updateTicket(ticketId, data) { return api("/api/widget/tickets/" + encodeURIComponent(ticketId), { method: "PATCH", body: data }); }
   function castUpvote(ticketId)   { return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/vote", { method: "POST", body: { value: true } }); }
   function retractVote(ticketId)  { return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/vote", { method: "DELETE" }); }
   function postComment(ticketId, content) {
@@ -306,6 +307,13 @@
       },
       others: { label: "Recent Submissions", empty: "No tickets yet." },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
+      visibility: {
+        private: "Private",
+        public: "Public",
+        privateTooltip: "Only you and the team can see this. Click to make it public.",
+        publicTooltip: "Anyone can see this. Click to make it private.",
+        failed: "Couldn't update visibility — try again.",
+      },
       empty: {
         noTickets: "No tickets yet",
         beFirst: "Be the first to share feedback.",
@@ -397,6 +405,13 @@
       },
       others: { label: "최근 제출 내역", empty: "아직 티켓이 없습니다." },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
+      visibility: {
+        private: "비공개",
+        public: "공개",
+        privateTooltip: "본인과 팀만 볼 수 있습니다. 클릭하면 공개로 전환됩니다.",
+        publicTooltip: "누구나 볼 수 있습니다. 클릭하면 비공개로 전환됩니다.",
+        failed: "공개 설정을 변경하지 못했습니다. 다시 시도해 주세요.",
+      },
       empty: {
         noTickets: "아직 티켓이 없습니다",
         beFirst: "가장 먼저 피드백을 남겨보세요.",
@@ -1469,7 +1484,32 @@
          (.rw-td-scroll), so the head is no longer flex-pinned. */
       '.rw-td-head { padding: 16px 18px 14px; border-bottom: 1px solid var(--rw-line); background: rgba(255,255,255,0.015); }',
       '.rw-td-head-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }',
-      '.rw-td-head-ref { display: inline-flex; align-items: center; gap: 8px; }',
+      '.rw-td-head-ref { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }',
+
+      /* Visibility toggle chip — only rendered for the ticket owner.
+         Sits next to the status chip in the head. Active (rw-on) state
+         = ticket is private. */
+      '.rw-vis-chip {',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  padding: 2px 8px 2px 6px;',
+      '  background: var(--rw-panel-2);',
+      '  border: 1px solid var(--rw-line);',
+      '  border-radius: 999px;',
+      '  font-size: 10.5px; font-weight: 500; letter-spacing: 0.01em;',
+      '  color: var(--rw-fg-2); font-family: inherit;',
+      '  cursor: pointer; white-space: nowrap;',
+      '  transition: background .12s ease, color .12s ease, border-color .12s ease, opacity .12s ease;',
+      '}',
+      '.rw-vis-chip:hover:not(:disabled) {',
+      '  background: var(--rw-panel-3); color: var(--rw-fg);',
+      '  border-color: var(--rw-line-2);',
+      '}',
+      '.rw-vis-chip.rw-on {',
+      '  background: color-mix(in oklab, var(--rw-accent) 12%, transparent);',
+      '  color: var(--rw-accent);',
+      '  border-color: color-mix(in oklab, var(--rw-accent) 38%, var(--rw-line));',
+      '}',
+      '.rw-vis-chip:disabled { cursor: wait; opacity: 0.55; }',
       '.rw-td-ref { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--rw-muted); letter-spacing: 0.04em; }',
       '.rw-td-title { margin: 6px 0 12px; font-family: inherit; font-size: 20px; font-weight: 600; color: var(--rw-fg); line-height: 1.22; letter-spacing: -0.018em; }',
       '.rw-td-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--rw-muted); }',
@@ -2302,12 +2342,46 @@
     voteBtn.addEventListener("click", function (e) { handleVoteClick(ticket, voteBtn, countSpan, e); });
 
     var refId = String(ticket.id || "").slice(0, 8).toUpperCase();
+
+    // Visibility toggle chip — only rendered for the ticket owner. The
+    // backend (WidgetService.updateTicket) lets owners flip private/public
+    // at any time regardless of triage state; title/description still
+    // require an untouched ticket.
+    var visChip = null;
+    if (data.isOwner) {
+      var visBtn = h("button", {
+        className: "rw-vis-chip" + (ticket.isPrivate ? " rw-on" : ""),
+        type: "button",
+        title: ticket.isPrivate ? t("visibility.privateTooltip") : t("visibility.publicTooltip"),
+      }, [Icons.lock(11), h("span", null, ticket.isPrivate ? t("visibility.private") : t("visibility.public"))]);
+      visBtn.addEventListener("click", function () {
+        var next = ticket.isPrivate ? "public" : "private";
+        visBtn.disabled = true;
+        updateTicket(ticket.id, { visibility: next })
+          .then(function () {
+            ticket.isPrivate = (next === "private");
+            visBtn.classList.toggle("rw-on", ticket.isPrivate);
+            visBtn.title = ticket.isPrivate ? t("visibility.privateTooltip") : t("visibility.publicTooltip");
+            // Update the label span (second child).
+            visBtn.lastChild.textContent = ticket.isPrivate ? t("visibility.private") : t("visibility.public");
+          })
+          .catch(function (err) {
+            console.warn("[Widget] updateTicket(visibility) failed:", err && err.message);
+          })
+          .then(function () { visBtn.disabled = false; });
+      });
+      visChip = visBtn;
+    }
+
+    var headRefChildren = [
+      h("span", { className: "rw-td-ref" }, "#" + refId),
+      renderStatusChip(ticket.status),
+    ];
+    if (visChip) headRefChildren.push(visChip);
+
     var head = h("div", { className: "rw-td-head" }, [
       h("div", { className: "rw-td-head-top" }, [
-        h("div", { className: "rw-td-head-ref" }, [
-          h("span", { className: "rw-td-ref" }, "#" + refId),
-          renderStatusChip(ticket.status),
-        ]),
+        h("div", { className: "rw-td-head-ref" }, headRefChildren),
         voteBtn,
       ]),
       h("h2", { className: "rw-td-title" }, ticket.title),

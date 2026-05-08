@@ -840,7 +840,12 @@ export async function createTicket(
  * Check if a task can be edited/deleted by a widget user.
  * Returns the task row if editable, or throws with a reason.
  */
-async function requireEditableTask(taskId: string, serverId: string, widgetUserId: string) {
+async function requireEditableTask(
+  taskId: string,
+  serverId: string,
+  widgetUserId: string,
+  opts: { skipPostActivityChecks?: boolean } = {},
+) {
   const [task] = await db
     .select()
     .from(workspaceTasks)
@@ -855,6 +860,11 @@ async function requireEditableTask(taskId: string, serverId: string, widgetUserI
   if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
     throw new Error('Not the ticket owner');
   }
+  // Visibility flips are exempt from the post-activity gate — toggling
+  // private/public is a personal disclosure choice the owner should
+  // retain regardless of triage state or comment count.
+  if (opts.skipPostActivityChecks) return;
+
   if (task.status !== 'pending') throw new Error('Ticket status is no longer pending');
   if (task.moderationStatus === 'rejected') throw new Error('Ticket has been rejected');
 
@@ -880,18 +890,31 @@ export async function updateTicket(
   ticketId: string,
   projectId: string,
   widgetUserId: string,
-  opts: { title?: string; description?: string },
+  opts: { title?: string; description?: string; visibility?: 'public' | 'private' },
 ) {
   const project = await getWidgetProjectContext(projectId);
   if (!project) throw new Error('Project not found');
 
-  await requireEditableTask(ticketId, project.serverId, widgetUserId);
+  // Visibility-only edits bypass the post-activity lockout so the owner
+  // can flip private/public at any time. Title/description still require
+  // an untouched ticket (no triage actions, no comments).
+  const fields = Object.keys(opts).filter((k) => (opts as Record<string, unknown>)[k] !== undefined);
+  const visibilityOnly = fields.length > 0 && fields.every((k) => k === 'visibility');
+  await requireEditableTask(ticketId, project.serverId, widgetUserId, {
+    skipPostActivityChecks: visibilityOnly,
+  });
 
   const updates: Partial<typeof workspaceTasks.$inferInsert> = {
     updatedAt: new Date(),
   };
   if (opts.title !== undefined) updates.title = opts.title.trim() || 'Untitled';
   if (opts.description !== undefined) updates.description = opts.description;
+  if (opts.visibility !== undefined) {
+    if (opts.visibility !== 'public' && opts.visibility !== 'private') {
+      throw new Error('Invalid visibility');
+    }
+    updates.visibility = opts.visibility;
+  }
 
   const [updated] = await db
     .update(workspaceTasks)

@@ -118,8 +118,14 @@ async function main() {
     //   /health
     //   /billing/*
     //   /oauth/*
+    //   /widget.js  — must go to Hono so the route handler can prepend
+    //                 window.__RW_CONSTANTS__ before serving the file. If
+    //                 it falls through to Next.js, public/widget.js is
+    //                 served raw and the status registry is missing
+    //                 (regression: status_change events fall back to
+    //                 the generic "changed status" label).
     const isHonoApiRoute = url.startsWith('/api/') && !isNextAuthRoute && !isNextAdminCsvRoute;
-    const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/') || url.startsWith('/oauth/');
+    const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/') || url.startsWith('/oauth/') || url === '/widget.js' || url.startsWith('/widget.js?');
 
     if (isHonoRoute) {
       // Convert Node.js IncomingMessage to a Fetch API Request for Hono
