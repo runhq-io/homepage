@@ -3399,6 +3399,44 @@ export function createHttpApp() {
     }
   });
 
+  // Sync workspace project metadata (currently: name) into widget_projects so
+  // widget UIs reflect renames. Authenticated with X-Server-Token; serverId in
+  // URL must match the token's server. Called by the workspace's
+  // ProjectMirrorPush on every project mutation and on boot.
+  app.post('/api/internal/servers/:serverId/projects/sync', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) {
+        return c.json({ error: 'X-Server-Token required' }, 401);
+      }
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) {
+        return c.json({ error: 'Invalid server token' }, 401);
+      }
+
+      const body = await c.req.json().catch(() => null) as { projects?: unknown } | null;
+      if (
+        !body ||
+        !Array.isArray(body.projects) ||
+        !body.projects.every((p: unknown): p is { id: string; name: string } =>
+          typeof p === 'object' &&
+          p !== null &&
+          typeof (p as { id?: unknown }).id === 'string' &&
+          typeof (p as { name?: unknown }).name === 'string',
+        )
+      ) {
+        return c.json({ error: 'body.projects must be Array<{ id: string; name: string }>' }, 400);
+      }
+
+      const result = await WidgetService.syncProjectMetadata(serverId, body.projects);
+      return c.json(result);
+    } catch (error) {
+      console.error('[HttpServer] Project mirror sync error:', error);
+      return c.json({ error: 'Failed to sync projects' }, 500);
+    }
+  });
+
   // Get server info for a server (called by client)
   app.get('/api/servers/:serverId/server', async (c) => {
     try {

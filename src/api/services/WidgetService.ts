@@ -1753,6 +1753,55 @@ export async function reconcileUnbackfilledWidgets(
   return { updated };
 }
 
+/**
+ * Sync workspace project metadata into widget_projects so widget UIs reflect
+ * workspace renames. The workspace POSTs the full list of its projects on
+ * every project change and on boot; BE updates `name` for each matching
+ * (serverId, workspaceProjectId) row whose name has actually changed.
+ *
+ * Scoped per `serverId`: rows on other servers are not touched, even if a
+ * workspace_project_id collides. Rows that have no `workspace_project_id`
+ * are skipped (those are pre-rollout rows; `reconcileUnbackfilledWidgets`
+ * handles backfilling them via channel mapping).
+ *
+ * Idempotent: re-sending the same payload is a no-op. The returned `updated`
+ * count reflects actual writes — useful for lightweight telemetry.
+ */
+export async function syncProjectMetadata(
+  serverId: string,
+  projects: Array<{ id: string; name: string }>,
+): Promise<{ updated: number }> {
+  if (projects.length === 0) return { updated: 0 };
+
+  const ids = projects.map((p) => p.id);
+  const existing = await db
+    .select({
+      id: widgetProjects.id,
+      workspaceProjectId: widgetProjects.workspaceProjectId,
+      name: widgetProjects.name,
+    })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      inArray(widgetProjects.workspaceProjectId, ids),
+    ));
+
+  const desiredByWorkspaceProjectId = new Map(projects.map((p) => [p.id, p.name]));
+
+  let updated = 0;
+  for (const row of existing) {
+    if (!row.workspaceProjectId) continue;
+    const desired = desiredByWorkspaceProjectId.get(row.workspaceProjectId);
+    if (desired === undefined) continue;
+    if (desired === row.name) continue;
+    await db.update(widgetProjects)
+      .set({ name: desired, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+  return { updated };
+}
+
 export async function generateTitle(description: string): Promise<string> {
   const fallback = description.split('\n')[0].slice(0, 80).trim() || description.slice(0, 80).trim();
 
