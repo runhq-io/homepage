@@ -681,8 +681,8 @@
          (translateY) is preserved so middle-anchored tabs stay centered. */
       '.rw-tab:hover { filter: brightness(1.06); padding-' + (isRight ? "left" : "right") + ': 18px; }',
       /* Top / bottom anchored variants override the default centered transform. */
-      '.rw-tab--top    { top: 80px;    bottom: auto; transform: none; }',
-      '.rw-tab--bottom { top: auto;    bottom: 80px; transform: none; }',
+      '.rw-tab--top    { top: 24px;    bottom: auto; transform: none; }',
+      '.rw-tab--bottom { top: auto;    bottom: 24px; transform: none; }',
 
       /* ------------------------------------------------------------------
          Animated tab mark — abstract entity in mathematical motion.
