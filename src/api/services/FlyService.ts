@@ -553,6 +553,47 @@ export async function deleteApp(appName: string): Promise<void> {
   }
 }
 
+export interface FlyAppSummary {
+  name: string;
+  status: string;
+  deployed: boolean;
+}
+
+/**
+ * List apps in the configured Fly org. Used by admin/infra tooling that needs
+ * to enumerate per-tenant workspaces (each one lives in its own app under
+ * per-app isolation — see docs/per-app-isolation-migration.md). The Machines
+ * REST API has no list-apps endpoint; this uses the GraphQL API the way
+ * `flyctl apps list` does.
+ *
+ * `prefix` is matched against `app.name` to scope to e.g. `ws-`.
+ */
+export async function listAppsInOrg(prefix?: string): Promise<FlyAppSummary[]> {
+  const orgSlug = getFlyOrgSlug();
+  if (!orgSlug) {
+    throw new Error('FLY_ORG_SLUG is not configured');
+  }
+
+  const data = await flyGraphQL<{
+    organization: {
+      apps: { nodes: Array<{ name: string; status: string; deployed: boolean }> };
+    } | null;
+  }>(
+    `query OrgApps($slug: String!) {
+      organization(slug: $slug) {
+        apps {
+          nodes { name status deployed }
+        }
+      }
+    }`,
+    { slug: orgSlug },
+  );
+
+  const all = data.organization?.apps?.nodes ?? [];
+  const filtered = prefix ? all.filter((a) => a.name.startsWith(prefix)) : all;
+  return filtered.map((a) => ({ name: a.name, status: a.status, deployed: a.deployed }));
+}
+
 // ============================================================================
 // Volume Management
 // ============================================================================

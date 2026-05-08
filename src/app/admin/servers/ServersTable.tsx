@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { destroyMachines, deleteServers } from './actions';
+import { destroyInfra, deleteServers } from './actions';
+import type { InfraTarget } from './actions';
 import type { InfrastructureRow } from './page';
 
 type StatusFilter = 'all' | 'orphaned' | 'matched' | 'stale';
@@ -43,11 +44,12 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
     const orphanedRows = selectedRows.filter(r => r.status === 'orphaned');
     const staleRows = selectedRows.filter(r => r.status === 'stale' && r.dbServerId);
 
-    // 'matched' and 'orphaned' both go through destroyMachines (it destroys the Fly
-    // machine and cleans any DB row referencing that machineId).
-    const cloudMachines = [...matchedRows, ...orphanedRows].map(r => ({
-      id: r.machineId,
-      provider: r.provider,
+    // matched + orphaned both go through destroyInfra → tears down the Fly app
+    // (and machines/volumes/network it cascades to). matched additionally has
+    // a dbServerId so the DB row + CF tunnel get cleaned up too.
+    const infraTargets: InfraTarget[] = [...matchedRows, ...orphanedRows].map(r => ({
+      flyAppName: r.flyAppName,
+      dbServerId: r.dbServerId,
     }));
     const staleServerIds = staleRows.map(r => r.dbServerId!);
 
@@ -56,7 +58,7 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
       parts.push(`${matchedRows.length} LIVE user server${matchedRows.length > 1 ? 's' : ''}`);
     }
     if (orphanedRows.length > 0) {
-      parts.push(`${orphanedRows.length} orphaned cloud machine${orphanedRows.length > 1 ? 's' : ''}`);
+      parts.push(`${orphanedRows.length} orphaned Fly app${orphanedRows.length > 1 ? 's' : ''}`);
     }
     if (staleRows.length > 0) {
       parts.push(`${staleRows.length} stale DB record${staleRows.length > 1 ? 's' : ''}`);
@@ -67,12 +69,12 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
         .map(r => `  • ${r.dbServerName || r.machineName} (${r.ownerEmail || 'unknown owner'})`)
         .join('\n');
       const others = [
-        orphanedRows.length > 0 ? `${orphanedRows.length} orphaned cloud machine${orphanedRows.length > 1 ? 's' : ''}` : null,
+        orphanedRows.length > 0 ? `${orphanedRows.length} orphaned Fly app${orphanedRows.length > 1 ? 's' : ''}` : null,
         staleRows.length > 0 ? `${staleRows.length} stale DB record${staleRows.length > 1 ? 's' : ''}` : null,
       ].filter(Boolean).join(' and ');
       const warning =
         `⚠️  You are about to DESTROY ${matchedRows.length} live user server${matchedRows.length > 1 ? 's' : ''}:\n\n${names}\n\n` +
-        `This will kill the Fly machine AND delete the DB record. The user(s) will lose access immediately.` +
+        `This will delete the Fly app (machine + volume + network) AND the DB record. The user(s) will lose access immediately.` +
         (others ? `\n\nPlus: ${others}` : '');
       if (!confirm(warning)) return;
       const phrase = `destroy ${matchedRows.length}`;
@@ -88,9 +90,9 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
     startTransition(async () => {
       const messages: string[] = [];
 
-      if (cloudMachines.length > 0) {
-        const result = await destroyMachines(cloudMachines);
-        messages.push(`Destroyed ${result.destroyed} cloud machine${result.destroyed === 1 ? '' : 's'}.`);
+      if (infraTargets.length > 0) {
+        const result = await destroyInfra(infraTargets);
+        messages.push(`Destroyed ${result.destroyed} Fly app${result.destroyed === 1 ? '' : 's'}.`);
         if (result.errors.length > 0) {
           messages.push(`Errors:\n${result.errors.join('\n')}`);
         }

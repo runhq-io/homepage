@@ -792,14 +792,12 @@ export async function deleteServersAndDependents(serverIds: string[]): Promise<v
 }
 
 /**
- * Delete server (owner only)
+ * Tear down all server resources by id: provider (machine + volume + Fly app),
+ * Cloudflare (port mappings, tunnel), then DB row(s) atomically. Used by both
+ * the owner-facing `deleteServer` and the admin override `adminDeleteServer`,
+ * so the cleanup sequence stays in one place.
  */
-export async function deleteServer(serverId: string, userId: string): Promise<{ success: boolean; error?: string }> {
-  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
-  if (!hasPermission) {
-    return { success: false, error: 'Only the owner can delete a server' };
-  }
-
+async function teardownServerById(serverId: string): Promise<{ success: boolean; error?: string }> {
   const server = await getServer(serverId);
   if (!server) {
     return { success: false, error: 'Server not found' };
@@ -835,6 +833,26 @@ export async function deleteServer(serverId: string, userId: string): Promise<{ 
 
   console.log(`[ServerService] Deleted server ${serverId}`);
   return { success: true };
+}
+
+/**
+ * Delete server (owner only)
+ */
+export async function deleteServer(serverId: string, userId: string): Promise<{ success: boolean; error?: string }> {
+  const hasPermission = await checkServerPermission(serverId, userId, ['owner']);
+  if (!hasPermission) {
+    return { success: false, error: 'Only the owner can delete a server' };
+  }
+
+  return teardownServerById(serverId);
+}
+
+/**
+ * Admin override: same teardown as `deleteServer`, no ownership check.
+ * Caller is responsible for verifying the requester is an admin.
+ */
+export async function adminDeleteServer(serverId: string): Promise<{ success: boolean; error?: string }> {
+  return teardownServerById(serverId);
 }
 
 // ============================================================================
