@@ -283,9 +283,10 @@
         // Headline interpolates the project name: e.g. "Staircase HQ".
         headline: "{name} HQ",
         // Sub-text is rendered as: [subBefore]<em>{subEm}</em>[subAfter].
-        // Empty em / after segments keep the prose plain when no inline
-        // emphasis is needed (current copy is short enough to skip it).
-        subBefore: "Bugs, ideas, suggestions — please write them here.",
+        // Explains the WHY of the widget — that the team treats user
+        // feedback as direct input into the roadmap. Reads as a brief
+        // value statement, not a checklist.
+        subBefore: "We use feedback like yours to rapidly improve {name}.",
         subEm: "",
         subAfter: "",
         thisProduct: "this product",
@@ -293,7 +294,10 @@
         visitRunhq: "Visit RunHQ",
       },
       composer: {
-        placeholder: "Start typing…",
+        // Placeholder picks up the prompt that used to live above the
+        // textarea — moves the call-to-action onto the input itself,
+        // freeing the sub-text above for the product-value pitch.
+        placeholder: "Bugs, ideas, suggestions — please write them here.",
         attach: "Attach",
         private: "Private",
         privateOn: "Only you and the team will see this.",
@@ -383,7 +387,10 @@
         // Korean keeps the brand "HQ" mark — translating it to "본부" reads
         // institutional and loses the product feel.
         headline: "{name} HQ",
-        subBefore: "버그, 아이디어, 제안 — 여기에 자유롭게 적어주세요.",
+        // Korean drops the {name} interpolation — the eyebrow already
+        // shows the product name, and Korean particle agreement (을/를,
+        // 은/는) on a runtime-injected name reads as machine-translated.
+        subBefore: "사용자 피드백을 반영해 제품을 빠르게 개선하고 있어요.",
         subEm: "",
         subAfter: "",
         thisProduct: "이 제품",
@@ -391,7 +398,7 @@
         visitRunhq: "RunHQ 방문",
       },
       composer: {
-        placeholder: "내용을 입력하세요…",
+        placeholder: "버그, 아이디어, 제안 — 여기에 자유롭게 적어주세요.",
         attach: "첨부",
         private: "비공개",
         privateOn: "본인과 팀에게만 표시됩니다.",
@@ -2206,11 +2213,12 @@
           ]),
           poweredBy,
         ]),
-        // Sub-text: prefix + <em>tab name</em> + suffix. The em segment
-        // visually links the prose to the My Submissions tab so users know
-        // where to follow up on what they file.
+        // Sub-text is the product-value pitch: explains WHY the widget
+        // exists. Prose composes as [subBefore]<em>{subEm}</em>[subAfter];
+        // empty em / after segments yield a plain sentence. The {name}
+        // placeholder in subBefore interpolates the project name.
         h("p", { className: "rw-prompt-sub" }, [
-          document.createTextNode(t("header.subBefore")),
+          document.createTextNode(t("header.subBefore", { name: projectName })),
           h("em", null, t("header.subEm")),
           document.createTextNode(t("header.subAfter")),
         ]),
