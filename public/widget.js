@@ -177,7 +177,11 @@
   // ===========================================================================
 
   var SVG_NS = "http://www.w3.org/2000/svg";
-  var SVG_TAGS = { svg: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, g: 1 };
+  var SVG_TAGS = {
+    svg: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, g: 1,
+    defs: 1, filter: 1, feTurbulence: 1, feDisplacementMap: 1,
+    animate: 1, animateTransform: 1,
+  };
 
   function h(tag, attrs, children) {
     var el = SVG_TAGS[tag] ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
@@ -538,17 +542,54 @@
   }
 
   function buildTabIcon() {
-    // A small CSS-driven mark: glowing core + three concentric orbits with
-    // different radii / periods / directions. The orbital periods (2.4s,
-    // 3.6s, 4.7s) are mutually almost-coprime, so the dots only line up
-    // every ~40 minutes — the visual pattern never quite repeats, which is
-    // what reads as "alive." Pure CSS, no rAF, no SVG.
-    return h("span", { className: "rw-tab-icon", "aria-hidden": "true" }, [
-      h("span", { className: "rw-tab-icon-orbit rw-tab-icon-orbit-1" }),
-      h("span", { className: "rw-tab-icon-orbit rw-tab-icon-orbit-2" }),
-      h("span", { className: "rw-tab-icon-orbit rw-tab-icon-orbit-3" }),
-      h("span", { className: "rw-tab-icon-core" }),
-    ]);
+    // A 5-point star polygon distorted by an animated turbulence noise
+    // field (feDisplacementMap driven by feTurbulence). The displacement
+    // softens the sharp star tips into rounded petals, and the animated
+    // displacement scale + slow base rotation make the silhouette wobble
+    // continuously without ever matching a pose it had before. Reads as a
+    // small "living organism" rather than anything specific.
+    return h("span", { className: "rw-tab-icon", "aria-hidden": "true" },
+      h("svg", { viewBox: "0 0 100 100", focusable: "false" }, [
+        h("defs", null,
+          // x/y/width/height extend the filter region so displacement at
+          // the star tips isn't clipped.
+          h("filter", { id: "rw-organic", x: "-25%", y: "-25%", width: "150%", height: "150%" }, [
+            h("feTurbulence", {
+              type: "fractalNoise", baseFrequency: "0.045",
+              numOctaves: "2", seed: "3", result: "noise",
+            }),
+            h("feDisplacementMap", { in: "SourceGraphic", in2: "noise" },
+              // Scale pulses 9 → 14 → 11 → 14 → 9 over 5.5s so the
+              // silhouette breathes; the asymmetric rhythm reads as
+              // organic rather than mechanical.
+              h("animate", {
+                attributeName: "scale",
+                values: "9;14;11;14;9",
+                dur: "5.5s",
+                repeatCount: "indefinite",
+              })
+            ),
+          ])
+        ),
+        h("g", { filter: "url(#rw-organic)" }, [
+          // 5-point star (outer radius 42, inner radius 18, centered at
+          // 50,50). The source has sharp tips — the displacement filter
+          // is what gives them their soft, varying roundness.
+          h("polygon", {
+            fill: "currentColor",
+            points: "50,8 60.6,35.4 89.9,37 66.5,56 75.7,84 50,68 24.3,84 33.5,56 10.1,37 39.4,35.4",
+          }),
+          // Slow rotation paired with the breathing displacement: each
+          // tip's wobble pattern is always slightly different from the
+          // last revolution. No obvious loop.
+          h("animateTransform", {
+            attributeName: "transform", type: "rotate",
+            from: "0 50 50", to: "360 50 50",
+            dur: "24s", repeatCount: "indefinite",
+          }),
+        ]),
+      ])
+    );
   }
 
   function buildTabContent() {
@@ -685,91 +726,22 @@
       '.rw-tab--bottom { top: auto;    bottom: 24px; transform: none; }',
 
       /* ------------------------------------------------------------------
-         Animated tab mark — abstract entity in mathematical motion.
-         Three orbital satellites at different radii / periods / directions
-         + a pulsing core. Sized to fit beside the "HQ" label.
-         The icon escapes the tab's vertical writing-mode so absolute
-         positions inside it (top/left/right/bottom) read naturally. */
+         Animated tab mark — a 5-point star deformed by an animated SVG
+         turbulence/displacement filter (built in buildTabIcon). The
+         outer span just sizes the SVG and adds a soft halo. */
       '.rw-tab-icon {',
-      '  position: relative;',
       '  width: 18px; height: 18px;',
       '  flex: 0 0 auto;',
-      '  writing-mode: horizontal-tb; text-orientation: initial;',
-      '  display: inline-block;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
       '  /* very subtle outer halo for depth */',
       '  filter: drop-shadow(0 0 2px color-mix(in oklab, currentColor 50%, transparent));',
       '}',
-
-      '.rw-tab-icon-core {',
-      '  position: absolute; top: 50%; left: 50%;',
-      '  width: 4px; height: 4px;',
-      '  margin: -2px 0 0 -2px;',
-      '  border-radius: 50%;',
-      '  background: currentColor;',
-      '  box-shadow: 0 0 6px currentColor, 0 0 2px currentColor;',
-      '  animation: rw-tab-core-pulse 1.6s cubic-bezier(0.4,0,0.6,1) infinite;',
-      '}',
-
-      /* Each orbit is an invisible square pinned to the icon box; rotating
-         it sweeps the ::before satellite around the center on a circle. */
-      '.rw-tab-icon-orbit {',
-      '  position: absolute;',
-      '  border-radius: 50%;',
-      '  pointer-events: none;',
-      '}',
-      '.rw-tab-icon-orbit::before {',
-      '  content: "";',
-      '  position: absolute;',
-      '  border-radius: 50%;',
-      '  background: currentColor;',
-      '}',
-      /* Outer satellite: full-radius orbit, clockwise, brightest. */
-      '.rw-tab-icon-orbit-1 {',
-      '  inset: 0;',
-      '  animation: rw-tab-orbit-cw 2.4s linear infinite;',
-      '}',
-      '.rw-tab-icon-orbit-1::before {',
-      '  top: 0; left: 50%;',
-      '  width: 3px; height: 3px;',
-      '  margin: -1.5px 0 0 -1.5px;',
-      '  box-shadow: 0 0 5px currentColor, 0 0 1.5px currentColor;',
-      '}',
-      /* Middle satellite: smaller radius, counter-clockwise, slower. */
-      '.rw-tab-icon-orbit-2 {',
-      '  inset: 4px;',
-      '  animation: rw-tab-orbit-ccw 3.6s linear infinite;',
-      '}',
-      '.rw-tab-icon-orbit-2::before {',
-      '  top: 50%; left: 100%;',
-      '  width: 2px; height: 2px;',
-      '  margin: -1px 0 0 -2px;',
-      '  opacity: 0.85;',
-      '  box-shadow: 0 0 3px currentColor;',
-      '}',
-      /* Inner satellite: tiny, longer period, off-axis starting position. */
-      '.rw-tab-icon-orbit-3 {',
-      '  inset: 2px;',
-      '  animation: rw-tab-orbit-cw 4.7s linear infinite;',
-      '  animation-delay: -1.6s;',
-      '}',
-      '.rw-tab-icon-orbit-3::before {',
-      '  top: 82%; left: 18%;',
-      '  width: 1.5px; height: 1.5px;',
-      '  margin: -0.75px 0 0 -0.75px;',
-      '  opacity: 0.65;',
-      '  box-shadow: 0 0 2px currentColor;',
-      '}',
-
-      '@keyframes rw-tab-orbit-cw  { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }',
-      '@keyframes rw-tab-orbit-ccw { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }',
-      '@keyframes rw-tab-core-pulse {',
-      '  0%, 100% { transform: scale(1);   opacity: 1; }',
-      '  50%      { transform: scale(1.6); opacity: 0.55; }',
-      '}',
-      /* Respect reduced-motion: keep the structure visible, drop the spin. */
+      '.rw-tab-icon svg { display: block; width: 100%; height: 100%; overflow: visible; }',
+      /* Reduced motion: stop the SMIL animation by hiding the displacement
+         entirely (CSS can\'t pause SMIL, but it can hide the animator).
+         The plain star polygon stays visible. */
       '@media (prefers-reduced-motion: reduce) {',
-      '  .rw-tab-icon-orbit-1, .rw-tab-icon-orbit-2, .rw-tab-icon-orbit-3, .rw-tab-icon-core { animation: none; }',
-      '  .rw-tab-icon-core { transform: scale(1); opacity: 1; }',
+      '  .rw-tab-icon svg g { filter: none !important; }',
       '}',
 
       '.rw-tab-count {',
