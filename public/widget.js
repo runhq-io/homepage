@@ -1111,7 +1111,9 @@
       '}',
       '.rw-detail-topbar {',
       '  display: flex; align-items: center; justify-content: space-between;',
-      '  padding: 0 22px 10px;',
+      /* Right padding leaves room for the absolute-positioned shell
+         actions (theme + close) so the #refId never overlaps the X. */
+      '  padding: 0 80px 10px 22px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '  flex: 0 0 auto;',
       '}',
@@ -2290,7 +2292,9 @@
         voteBtn,
       ]),
       h("h2", { className: "rw-td-title" }, ticket.title),
-      renderHeadMeta(ticket),
+      // The author + when row used to live here too (renderHeadMeta), but
+      // it duplicated the avatar/author/time block in the post header
+      // immediately below. Single source of truth = the post header.
     ]);
     card.appendChild(head);
 
