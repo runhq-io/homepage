@@ -28,13 +28,21 @@
   var modalMountEl = null;
 
   var isOpen = false;
-  var activeTab = "updates"; // "updates" | "top" | "mine"
+  var activeTab = "hot"; // "updates" | "hot" | "mine"  (default lands on Hot per dashboard design)
   var theme = "light";
 
-  var topTicketsCache = null;   // /api/widget/tickets
-  var updatesCache = null;      // /api/widget/tickets/updates
-  var myTicketsCache = null;    // /api/widget/tickets/mine
-  var activeModal = null;
+  var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
+  var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
+  var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
+  var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
+
+  // Modal-shell view state. The shell is a centered card with two faces:
+  //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
+  //   "detail" — full-width ticket detail with a "Back to activity" button.
+  // Switching between the two re-renders the card body in place; the launcher
+  // tab and outer modal chrome stay mounted so we don't pay a remount cost.
+  var view = "list";
+  var currentDetailTicket = null;
 
   // ===========================================================================
   // Console & error capture
@@ -230,6 +238,7 @@
     close:     function (s) { return icon([{ d: "M6 6l12 12M18 6L6 18" }], s); },
     plus:      function (s) { return icon([{ d: "M12 5v14M5 12h14" }], s, 2.2); },
     arrowUp:   function (s) { return icon([{ d: "M12 19V5M5 12l7-7 7 7" }], s, 2); },
+    arrowLeft: function (s) { return icon([{ d: "M19 12H5M12 19l-7-7 7-7" }], s, 2); },
     paperclip: function (s) { return icon([{ d: "M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8" }], s); },
     lock:      function (s) { return icon([{ tag: "rect", x: 4, y: 11, width: 16, height: 10, rx: 2 }, { d: "M8 11V7a4 4 0 0 1 8 0v4" }], s); },
     send:      function (s) { return icon([{ d: "M22 2L11 13" }, { d: "M22 2l-7 20-4-9-9-4 20-7z" }], s); },
@@ -345,7 +354,13 @@
   function applyTheme(next) {
     theme = next;
     if (stageEl) stageEl.setAttribute("data-theme", theme);
-    if (widgetEl) widgetEl.setAttribute("data-theme", theme);
+    if (widgetEl) {
+      // widgetEl is the outer scrim; the inner .rw-shell also needs the
+      // attribute because dark-mode shadows are scoped to it.
+      widgetEl.setAttribute("data-theme", theme);
+      var innerShell = widgetEl.querySelector ? widgetEl.querySelector(".rw-shell") : null;
+      if (innerShell) innerShell.setAttribute("data-theme", theme);
+    }
     if (modalMountEl) modalMountEl.setAttribute("data-theme", theme);
     if (themeToggleBtn) {
       clearChildren(themeToggleBtn);
@@ -449,29 +464,306 @@
       /* Open state hides the launcher; declared last so it wins over all variants */
       '.rw-tab.rw-open { display: none; }',
 
-      /* widget shell */
-      '.rw-widget {',
-      '  position: fixed; top: 0;',
-      '  ' + (isRight ? "right" : "left") + ': 0;',
-      '  width: 440px; max-width: 100vw; height: 100vh;',
-      '  background: linear-gradient(180deg, var(--rw-panel) 0%, #0e131c 100%);',
-      '  color: var(--rw-fg);',
-      '  ' + (isRight ? "border-left" : "border-right") + ': 1px solid var(--rw-line);',
-      '  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, ' + (isRight ? "-8px" : "8px") + ' 0 30px -10px rgba(0,0,0,0.5);',
+      /* widget shell — centered modal scrim. Pinned to the top of the stage; the
+         launcher tab still sits at the screen edge as before. */
+      '.rw-shell-scrim {',
+      '  position: fixed; inset: 0;',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  padding: 28px;',
+      '  background: rgba(20,16,12,0.55);',
+      '  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);',
       '  z-index: 2147483645;',
+      '  opacity: 0; pointer-events: none;',
+      '  transition: opacity .18s ease;',
+      '}',
+      '.rw-shell-scrim.rw-open { opacity: 1; pointer-events: auto; }',
+      '.rw-shell-scrim[data-theme="dark"] { background: rgba(6,5,4,0.66); }',
+      '@media (max-width: 640px) { .rw-shell-scrim { padding: 0; } }',
+
+      /* the centered card itself */
+      '.rw-shell {',
+      '  position: relative;',
+      '  width: min(1080px, 100%);',
+      '  height: min(680px, calc(100vh - 56px));',
+      '  min-height: 540px;',
       '  display: flex; flex-direction: column;',
-      '  transform: translateX(' + (isRight ? "100%" : "-100%") + ');',
-      '  transition: transform .3s cubic-bezier(0.4,0,0.2,1);',
-      '  overflow: hidden;',
+      '  transform: translateY(8px) scale(0.99);',
+      '  transition: transform .22s cubic-bezier(0.16,1,0.3,1);',
       '}',
-      '.rw-widget.rw-open { transform: translateX(0); }',
-      '.rw-widget[data-theme="light"] {',
-      '  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);',
-      '  box-shadow: 0 1px 0 rgba(15,20,35,0.04) inset, ' + (isRight ? "-8px" : "8px") + ' 0 30px -10px rgba(15,20,35,0.14);',
-      '}',
+      '.rw-shell-scrim.rw-open .rw-shell { transform: none; }',
       '@media (max-width: 640px) {',
-      '  .rw-widget { width: 100vw; }',
+      '  .rw-shell { width: 100%; height: 100vh; min-height: 0; }',
       '}',
+
+      '.rw-card-modal {',
+      '  position: relative;',
+      '  flex: 1 1 auto; min-height: 0;',
+      '  display: flex; flex-direction: column;',
+      '  background: var(--rw-bg);',
+      '  border: 1px solid var(--rw-line-2);',
+      '  border-radius: 16px;',
+      '  overflow: hidden;',
+      '  color: var(--rw-fg);',
+      '  box-shadow:',
+      '    0 1px 0 rgba(255,255,255,0.6) inset,',
+      '    0 30px 80px -30px rgba(42,37,32,0.35),',
+      '    0 8px 24px -16px rgba(42,37,32,0.20);',
+      '}',
+      '.rw-shell[data-theme="dark"] .rw-card-modal {',
+      '  box-shadow:',
+      '    0 1px 0 rgba(255,255,255,0.04) inset,',
+      '    0 30px 80px -30px rgba(0,0,0,0.65),',
+      '    0 8px 24px -16px rgba(0,0,0,0.5);',
+      '}',
+      '@media (max-width: 640px) { .rw-card-modal { border-radius: 0; border: none; } }',
+
+      /* shell-level controls (close + theme), pinned top-right of the modal card */
+      '.rw-shell-actions {',
+      '  position: absolute; top: 12px; right: 12px;',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  z-index: 5;',
+      '}',
+
+      /* split (list view): asymmetric — composer left, tabs/list right */
+      '.rw-split {',
+      '  display: grid;',
+      '  grid-template-columns: 0.85fr 1fr;',
+      '  flex: 1 1 auto;',
+      '  min-height: 0;',
+      '}',
+      '.rw-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }',
+      '.rw-pane-left {',
+      '  padding: 26px 28px 22px;',
+      '  background: var(--rw-panel);',
+      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 6%, transparent), transparent 70%);',
+      '  border-right: 1px solid var(--rw-line);',
+      '}',
+      '.rw-shell[data-theme="dark"] .rw-pane-left {',
+      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 14%, transparent), transparent 70%);',
+      '}',
+      '.rw-pane-right { padding: 22px 4px 0; }',
+      '@media (max-width: 880px) {',
+      '  .rw-split { grid-template-columns: 1fr; }',
+      '  .rw-pane-left { border-right: 0; border-bottom: 1px solid var(--rw-line); }',
+      '}',
+
+      /* eyebrow + headline + sub */
+      '.rw-eyebrow {',
+      '  display: inline-flex; align-items: center; gap: 8px;',
+      '  font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase;',
+      '  color: var(--rw-muted); font-weight: 500; margin-bottom: 14px;',
+      '}',
+      '.rw-eyebrow-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); }',
+      '.rw-prompt {',
+      '  font-family: var(--rw-serif);',
+      '  font-size: 28px; line-height: 1.12; letter-spacing: -0.018em; font-weight: 500;',
+      '  color: var(--rw-fg); margin: 0 0 8px;',
+      '}',
+      '.rw-prompt em { font-style: italic; font-weight: 400; color: var(--rw-fg-2); }',
+      '.rw-prompt-sub { margin: 0 0 18px; font-size: 13px; line-height: 1.45; color: var(--rw-muted); }',
+
+      /* inline composer (left pane) */
+      '.rw-inline-composer { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }',
+      '.rw-inline-composer-ta {',
+      '  width: 100%; border: 0; outline: none; resize: none; background: transparent;',
+      '  color: var(--rw-fg);',
+      '  font-family: var(--rw-serif); font-size: 19px; line-height: 1.5; letter-spacing: -0.005em;',
+      '  padding: 4px 0; min-height: 120px;',
+      '}',
+      '.rw-inline-composer-ta::placeholder {',
+      '  color: var(--rw-muted);',
+      '  font-family: var(--rw-serif); font-style: italic; font-size: 18px; letter-spacing: -0.008em;',
+      '}',
+      '.rw-inline-composer-bar {',
+      '  display: flex; align-items: center; justify-content: space-between; gap: 10px;',
+      '  margin-top: 12px; padding-top: 12px;',
+      '  border-top: 1px solid var(--rw-line);',
+      '}',
+      '.rw-inline-tools { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }',
+      '.rw-inline-submit {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 8px 18px; border: 1px solid var(--rw-accent);',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  border-radius: 999px;',
+      '  font: inherit; font-size: 13px; font-weight: 500; letter-spacing: 0.005em;',
+      '  cursor: pointer; white-space: nowrap; flex-shrink: 0;',
+      '  transition: transform .12s ease, box-shadow .16s ease, opacity .12s ease, filter .12s ease;',
+      '}',
+      '.rw-inline-submit:not(:disabled):hover { transform: translateY(-1px); filter: brightness(1.04); box-shadow: 0 8px 18px -10px color-mix(in oklab, var(--rw-accent) 60%, transparent); }',
+      '.rw-inline-submit:disabled { background: transparent; color: var(--rw-muted); border-color: var(--rw-line-2); cursor: not-allowed; opacity: 0.85; }',
+      '.rw-inline-notice { margin-top: 10px; }',
+
+      /* recent-tickets-submitted strip (left pane bottom) */
+      '.rw-others {',
+      '  display: flex; flex-direction: column;',
+      '  flex: 1 1 auto; min-height: 0;',
+      '  margin-top: 18px; padding-top: 14px;',
+      '  border-top: 1px solid var(--rw-line);',
+      '  transition: opacity 200ms ease;',
+      '}',
+      '.rw-pane-left:focus-within .rw-others { opacity: 0.32; }',
+      '.rw-others-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }',
+      '.rw-others-label {',
+      '  font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em;',
+      '  text-transform: uppercase; color: var(--rw-muted);',
+      '}',
+      '.rw-others-count {',
+      '  font-size: 10.5px; font-variant-numeric: tabular-nums;',
+      '  color: var(--rw-muted-2); background: var(--rw-panel-2);',
+      '  border: 1px solid var(--rw-line);',
+      '  border-radius: 999px; padding: 1px 7px; line-height: 1.6;',
+      '}',
+      '.rw-others-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; padding: 0 6px; scrollbar-width: thin; }',
+      '.rw-others-row {',
+      '  display: grid; grid-template-columns: 8px 1fr auto;',
+      '  align-items: center; gap: 10px; width: 100%;',
+      '  text-align: left; background: transparent; border: 0;',
+      '  border-radius: 8px; padding: 8px;',
+      '  cursor: pointer; color: var(--rw-fg); font: inherit;',
+      '  transition: background 100ms;',
+      '}',
+      '.rw-others-row + .rw-others-row {',
+      '  border-top: 1px dashed var(--rw-line);',
+      '  border-radius: 0; padding-top: 9px; margin-top: 1px;',
+      '}',
+      '.rw-others-row:hover { background: var(--rw-panel-2); border-top-color: transparent; }',
+      '.rw-others-row:hover + .rw-others-row { border-top-color: transparent; }',
+      '.rw-others-status { width: 7px; height: 7px; border-radius: 50%; background: var(--rw-muted); flex-shrink: 0; }',
+      '.rw-others-title {',
+      '  font-size: 13px; line-height: 1.35; color: var(--rw-fg);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      '  letter-spacing: -0.005em;',
+      '}',
+      '.rw-others-meta {',
+      '  display: inline-flex; align-items: center; gap: 3px;',
+      '  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--rw-muted);',
+      '}',
+
+      /* dashboard tab row (right pane) — underline-active, no background pill */
+      '.rw-dash-tabs {',
+      '  display: flex; align-items: center; gap: 0;',
+      '  padding: 0 22px 10px;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '}',
+      '.rw-dash-tab {',
+      '  position: relative; display: inline-flex; align-items: center; gap: 7px;',
+      '  padding: 8px 14px 10px; margin-right: 4px;',
+      '  background: transparent; border: 0; cursor: pointer;',
+      '  font-family: inherit; font-size: 13.5px; font-weight: 500;',
+      '  color: var(--rw-muted); letter-spacing: -0.005em;',
+      '  transition: color .12s ease;',
+      '}',
+      '.rw-dash-tab:hover { color: var(--rw-fg-2); }',
+      '.rw-dash-tab.rw-on { color: var(--rw-fg); }',
+      '.rw-dash-tab.rw-on::after {',
+      '  content: ""; position: absolute;',
+      '  left: 14px; right: 14px; bottom: -11px; height: 2px;',
+      '  background: var(--rw-accent); border-radius: 1px;',
+      '}',
+      '.rw-dash-tab-count {',
+      '  font-size: 11px; font-feature-settings: "lnum","tnum";',
+      '  color: var(--rw-muted); background: var(--rw-panel-2);',
+      '  border-radius: 999px; min-width: 20px; padding: 1px 6px;',
+      '  height: 18px; display: inline-flex; align-items: center; justify-content: center;',
+      '}',
+      '.rw-dash-tab.rw-on .rw-dash-tab-count {',
+      '  background: color-mix(in oklab, var(--rw-accent) 14%, var(--rw-panel-2));',
+      '  color: var(--rw-accent);',
+      '}',
+
+      /* dashboard list (right pane) */
+      '.rw-dash-list {',
+      '  flex: 1; min-height: 0; overflow-y: auto;',
+      '  padding: 6px 18px 14px 22px;',
+      '  display: flex; flex-direction: column; gap: 2px;',
+      '}',
+      '.rw-dash-list::-webkit-scrollbar { width: 6px; }',
+      '.rw-dash-list::-webkit-scrollbar-thumb { background: var(--rw-line-2); border-radius: 999px; }',
+
+      /* dashboard row (replaces .rw-card visually for the new layout) */
+      '.rw-dash-row {',
+      '  display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;',
+      '  width: 100%; text-align: left;',
+      '  background: transparent; border: 0;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '  padding: 14px 4px;',
+      '  cursor: pointer; font-family: inherit; color: var(--rw-fg);',
+      '  transition: background 120ms;',
+      '}',
+      '.rw-dash-row:hover { background: color-mix(in oklab, var(--rw-accent) 5%, transparent); }',
+      '.rw-dash-row:last-child { border-bottom: 0; }',
+      '.rw-dash-row-main { flex: 1; min-width: 0; }',
+      '.rw-dash-row-title {',
+      '  font-size: 13.5px; font-weight: 500; line-height: 1.32;',
+      '  color: var(--rw-fg); letter-spacing: -0.005em; margin-bottom: 3px;',
+      '  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;',
+      '}',
+      '.rw-dash-row-body {',
+      '  font-size: 12px; line-height: 1.45; color: var(--rw-fg-2);',
+      '  margin-bottom: 7px;',
+      '  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;',
+      '}',
+      '.rw-dash-row-meta {',
+      '  display: flex; align-items: center; gap: 6px;',
+      '  font-size: 11px; color: var(--rw-muted); flex-wrap: wrap;',
+      '}',
+
+      /* vote pill (right side of row) — replaces the old vertical .rw-vote */
+      '.rw-dash-vote {',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  padding: 4px 9px 4px 7px;',
+      '  background: var(--rw-panel-2); border: 1px solid var(--rw-line);',
+      '  border-radius: 999px;',
+      '  font-size: 11.5px; font-feature-settings: "lnum","tnum"; font-weight: 500;',
+      '  color: var(--rw-fg-2); flex-shrink: 0; cursor: pointer; margin-top: 1px;',
+      '  transition: background .12s ease, color .12s ease, border-color .12s ease;',
+      '  font-family: inherit;',
+      '}',
+      '.rw-dash-vote:hover:not(:disabled) {',
+      '  background: color-mix(in oklab, var(--rw-accent) 12%, var(--rw-panel));',
+      '  color: var(--rw-accent);',
+      '  border-color: color-mix(in oklab, var(--rw-accent) 35%, var(--rw-line));',
+      '}',
+      '.rw-dash-vote.rw-voted {',
+      '  background: color-mix(in oklab, var(--rw-accent) 12%, transparent);',
+      '  border-color: color-mix(in oklab, var(--rw-accent) 55%, transparent);',
+      '  color: var(--rw-accent);',
+      '}',
+      '.rw-dash-vote:disabled { cursor: not-allowed; opacity: 0.55; }',
+
+      /* full-width detail view (replaces split layout when a ticket is selected) */
+      '.rw-detail-full {',
+      '  flex: 1 1 auto; min-height: 0;',
+      '  display: flex; flex-direction: column;',
+      '  padding: 22px 4px 0;',
+      '}',
+      '.rw-detail-topbar {',
+      '  display: flex; align-items: center; justify-content: space-between;',
+      '  padding: 0 22px 10px;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '  flex: 0 0 auto;',
+      '}',
+      '.rw-back-btn {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 6px 10px 6px 8px;',
+      '  background: transparent; border: 1px solid var(--rw-line);',
+      '  border-radius: 999px;',
+      '  color: var(--rw-fg-2); font: inherit; font-size: 12px; cursor: pointer;',
+      '  transition: background .12s, color .12s, border-color .12s;',
+      '}',
+      '.rw-back-btn:hover { background: var(--rw-panel-2); color: var(--rw-fg); border-color: var(--rw-line-2); }',
+
+      /* dashboard footer */
+      '.rw-dash-ftr {',
+      '  flex: 0 0 auto;',
+      '  display: flex; align-items: center; justify-content: center; gap: 6px;',
+      '  padding: 8px 14px 12px;',
+      '  font-size: 11px; color: var(--rw-muted);',
+      '  border-top: 1px solid var(--rw-line);',
+      '  background: transparent;',
+      '}',
+      '.rw-dash-ftr b { color: var(--rw-fg-2); font-weight: 600; letter-spacing: 0.01em; }',
+      '.rw-dash-ftr-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); }',
 
       /* header */
       '.rw-hdr {',
@@ -1130,34 +1422,43 @@
     var voted = ticket.userVote === true;
     var countSpan = h("span", null, String(ticket.yesVotes || 0));
     var voteBtn = h("button", {
-      className: "rw-vote" + (voted ? " rw-voted" : ""),
+      className: "rw-dash-vote" + (voted ? " rw-voted" : ""),
       type: "button",
       "aria-label": "Upvote ticket",
       disabled: !config.isIdentified,
       title: config.isIdentified ? "Upvote" : "Sign in to vote",
-    }, [Icons.arrowUp(12), countSpan]);
-    voteBtn.addEventListener("click", function (e) { handleVoteClick(ticket, voteBtn, countSpan, e); });
+    }, [Icons.arrowUp(11), countSpan]);
+    voteBtn.addEventListener("click", function (e) {
+      // Stop the row's click handler from also firing (which would open detail).
+      e.stopPropagation();
+      handleVoteClick(ticket, voteBtn, countSpan, e);
+    });
 
     var authorName = displayNameFromTicket(ticket);
     var metaChildren = [renderStatusChip(ticket.status)];
-    metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
     if (authorName) {
-      metaChildren.push(h("span", { className: "rw-meta-author" }, authorName));
       metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      metaChildren.push(h("span", { className: "rw-meta-author" }, authorName));
     }
+    metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
     metaChildren.push(h("span", { className: "rw-meta-when" }, timeAgo(ticket.completedAt || ticket.createdAt)));
 
-    var bodyChildren = [h("div", { className: "rw-card-title" }, ticket.title)];
-    if (ticket.description) bodyChildren.push(h("div", { className: "rw-card-sub" }, ticket.description));
-    bodyChildren.push(h("div", { className: "rw-card-meta" }, metaChildren));
+    var mainChildren = [h("div", { className: "rw-dash-row-title" }, ticket.title)];
+    if (ticket.description) {
+      mainChildren.push(h("div", { className: "rw-dash-row-body" }, ticket.description));
+    }
+    mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
-    var card = h("button", {
-      className: "rw-card", type: "button",
+    var row = h("button", {
+      className: "rw-dash-row", type: "button",
       "aria-label": "Open ticket: " + ticket.title,
-    }, [voteBtn, h("div", { className: "rw-card-body" }, bodyChildren)]);
+    }, [
+      h("div", { className: "rw-dash-row-main" }, mainChildren),
+      voteBtn,
+    ]);
 
-    card.addEventListener("click", function () { openDetailModal(ticket); });
-    return card;
+    row.addEventListener("click", function () { openDetailModal(ticket); });
+    return row;
   }
 
   function renderFooter() {
@@ -1174,75 +1475,311 @@
   // ===========================================================================
 
   function renderTabsBar() {
+    // "top" was renamed "hot" in the dashboard design but the cache/API keys
+    // stayed the same. activeTab values can be "hot" or legacy "top" — coerce
+    // here so old persisted state still routes to the same list.
+    var pendingTab = activeTab === "top" ? "hot" : activeTab;
     var counts = {
       updates: (updatesCache || []).length,
-      top:     (topTicketsCache || []).length,
+      hot:     (topTicketsCache || []).length,
       mine:    (myTicketsCache || []).length,
     };
 
     var defs = [
       { id: "updates", label: "Updates" },
-      { id: "top",     label: "Pending" },
-      { id: "mine",    label: "Mine" },
+      { id: "hot",     label: "Hot" },
+      { id: "mine",    label: "My Tickets" },
     ];
 
     var tabButtons = defs.map(function (t) {
       var btn = h("button", {
-        className: "rw-tab-btn" + (activeTab === t.id ? " rw-on" : ""),
+        className: "rw-dash-tab" + (pendingTab === t.id ? " rw-on" : ""),
         type: "button",
         role: "tab",
-        "aria-selected": activeTab === t.id ? "true" : "false",
+        "aria-selected": pendingTab === t.id ? "true" : "false",
       }, [
-        h("span", null, t.label),
-        counts[t.id] > 0 ? h("span", { className: "rw-tab-badge" }, String(counts[t.id])) : null,
+        h("span", { className: "rw-dash-tab-label" }, t.label),
+        h("span", { className: "rw-dash-tab-count" }, String(counts[t.id] || 0)),
       ]);
       btn.addEventListener("click", function () {
-        if (activeTab !== t.id) { activeTab = t.id; renderPanelBody(); }
+        if (pendingTab !== t.id) { activeTab = t.id; renderPanelBody(); }
       });
       return btn;
     });
 
-    var newTicketBtn = h("button", {
-      className: "rw-new-ticket-btn", type: "button",
-    }, [Icons.plus(13), h("span", null, "New ticket")]);
-    newTicketBtn.addEventListener("click", openNewTicketModal);
-
-    return h("div", { className: "rw-tabs-bar" }, [
-      h("div", { className: "rw-tabs", role: "tablist" }, tabButtons),
-      newTicketBtn,
-    ]);
+    return h("div", { className: "rw-dash-tabs", role: "tablist" }, tabButtons);
   }
 
   function renderList() {
+    // "top" stayed as the cache name even though the tab is now "Hot" — accept either.
+    var tab = activeTab === "top" ? "hot" : activeTab;
     var items =
-      activeTab === "updates" ? (updatesCache || []) :
-      activeTab === "top"     ? (topTicketsCache || []) :
-                                (myTicketsCache || []);
+      tab === "updates" ? (updatesCache || []) :
+      tab === "hot"     ? (topTicketsCache || []) :
+                          (myTicketsCache || []);
 
     if (items.length === 0) {
-      if (activeTab === "mine" && !config.isIdentified) {
+      if (tab === "mine" && !config.isIdentified) {
         return renderEmpty("Sign in to see your tickets", "Your submissions appear here once you're identified.");
       }
-      if (activeTab === "mine") {
-        return renderEmpty("You haven't submitted any tickets yet", "Click “New ticket” to start.");
+      if (tab === "mine") {
+        return renderEmpty("You haven't submitted any tickets yet", "Use the composer on the left to file one.");
       }
-      if (activeTab === "updates") {
+      if (tab === "updates") {
         return renderEmpty("Nothing shipped recently", "Updates will show up here as tickets are resolved.");
       }
       return renderEmpty("No tickets yet", "Be the first to share feedback.");
     }
 
-    var list = h("div", { className: "rw-list" });
+    var list = h("div", { className: "rw-dash-list" });
     items.forEach(function (t) { list.appendChild(renderTicketCard(t)); });
     return list;
   }
 
+  // -----------------------------------------------------------------------
+  // Inline composer (left pane)
+  //
+  // Replaces the old "+ New ticket" button → modal flow. Always visible at the
+  // top of the dashboard so writing feedback is one click rather than two.
+  // Reuses the same createTicket + uploadTicketAttachment APIs and the same
+  // staged-files semantics as the old modal composer (the file-staging pattern
+  // — append before submit, upload after — is identical, only the chrome
+  // changed).
+  // -----------------------------------------------------------------------
+
+  function renderInlineComposer() {
+    var noticeSlot = h("div", { className: "rw-inline-notice" });
+    var ta = h("textarea", {
+      className: "rw-inline-composer-ta",
+      placeholder: "Start typing…",
+      maxlength: "5000",
+      rows: "4",
+    });
+
+    var entries = []; // { file }
+    var chipsEl = h("div", { className: "rw-chips", style: "padding: 0 0 6px 0; margin-top: 8px;" });
+    chipsEl.style.display = "none";
+    var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
+
+    function renderChips() {
+      clearChildren(chipsEl);
+      if (entries.length === 0) { chipsEl.style.display = "none"; return; }
+      chipsEl.style.display = "flex";
+      entries.forEach(function (entry) {
+        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": "Remove attachment" }, "×");
+        removeBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var i = entries.indexOf(entry);
+          if (i >= 0) entries.splice(i, 1);
+          renderChips(); updateSubmitEnabled();
+        });
+        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
+          Icons.image(11),
+          h("span", null, entry.file.name || "Pasted image"),
+          removeBtn,
+        ]));
+      });
+    }
+    function addFiles(files) {
+      Array.prototype.forEach.call(files, function (file) {
+        if (!file.type || file.type.indexOf("image/") !== 0) return;
+        if (entries.length >= 5) return;
+        entries.push({ file: file });
+      });
+      renderChips(); updateSubmitEnabled();
+    }
+    fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
+    ta.addEventListener("paste", function (e) {
+      if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+        e.preventDefault(); addFiles(e.clipboardData.files);
+      }
+    });
+
+    var submitBtn = h("button", { className: "rw-inline-submit", type: "button", disabled: true }, [
+      h("span", null, "Submit"),
+    ]);
+    function updateSubmitEnabled() {
+      submitBtn.disabled = !config.isIdentified || ta.value.trim().length === 0;
+    }
+    ta.addEventListener("input", updateSubmitEnabled);
+
+    var isPrivate = false;
+    var attachBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Attach image" }, [
+      Icons.paperclip(13), h("span", null, "Attach"),
+    ]);
+    attachBtn.addEventListener("click", function () { fileInput.click(); });
+    var privateBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Only visible to the team" }, [
+      Icons.lock(12), h("span", null, "Private"),
+    ]);
+    privateBtn.addEventListener("click", function () {
+      isPrivate = !isPrivate;
+      privateBtn.classList.toggle("rw-on", isPrivate);
+    });
+
+    submitBtn.addEventListener("click", function () {
+      if (!config.isIdentified) {
+        clearChildren(noticeSlot);
+        noticeSlot.appendChild(renderNotice("error", "You must be signed in to submit a ticket."));
+        return;
+      }
+      var description = ta.value.trim();
+      if (!description) return;
+      submitBtn.disabled = true;
+      submitBtn.firstChild.textContent = "Posting…";
+      clearChildren(noticeSlot);
+
+      createTicket({
+        description: description,
+        isPrivate: isPrivate,
+        context: collectContext(),
+      }).then(function (data) {
+        var ticketId = data && data.ticket && data.ticket.id;
+        if (!ticketId || entries.length === 0) return null;
+        submitBtn.firstChild.textContent = "Uploading…";
+        return Promise.all(entries.map(function (e) {
+          return uploadTicketAttachment(ticketId, e.file).catch(function (err) {
+            console.warn("Attachment failed:", err && err.message);
+            return null;
+          });
+        }));
+      }).then(function () {
+        ta.value = "";
+        entries.length = 0;
+        renderChips();
+        isPrivate = false;
+        privateBtn.classList.remove("rw-on");
+        submitBtn.firstChild.textContent = "Submit";
+        topTicketsCache = null; updatesCache = null; myTicketsCache = null;
+        // Refresh data + the panel body. The composer instance is replaced
+        // along with the rest of the left pane on re-render, so we don't
+        // need to reset state on the same DOM node.
+        return refreshAll();
+      }).catch(function (err) {
+        submitBtn.disabled = false;
+        submitBtn.firstChild.textContent = "Submit";
+        clearChildren(noticeSlot);
+        noticeSlot.appendChild(renderNotice("error", "Failed to submit: " + (err.message || "Unknown error")));
+      });
+    });
+
+    return h("div", { className: "rw-inline-composer" }, [
+      ta,
+      chipsEl,
+      h("div", { className: "rw-inline-composer-bar" }, [
+        h("div", { className: "rw-inline-tools" }, [attachBtn, privateBtn]),
+        submitBtn,
+      ]),
+      noticeSlot,
+      fileInput,
+    ]);
+  }
+
+  // -----------------------------------------------------------------------
+  // Recent tickets submitted (left pane bottom)
+  // -----------------------------------------------------------------------
+
+  function renderOthersList() {
+    var items = (topTicketsCache || []).slice(0, 5);
+    var head = h("div", { className: "rw-others-head" }, [
+      h("span", { className: "rw-others-label" }, "Recent tickets submitted"),
+      h("span", { className: "rw-others-count" }, String(items.length)),
+    ]);
+    var list = h("div", { className: "rw-others-list" });
+    if (items.length === 0) {
+      list.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "10px 0", fontSize: "11.5px" } }, "No tickets yet."));
+    } else {
+      items.forEach(function (t) {
+        var row = h("button", {
+          className: "rw-others-row", type: "button",
+          "aria-label": "Open ticket: " + t.title,
+        }, [
+          h("span", { className: "rw-others-status", "data-status": t.status, style: { background: statusMeta(t.status).dot } }),
+          h("span", { className: "rw-others-title" }, t.title),
+          h("span", { className: "rw-others-meta" }, [Icons.arrowUp(9), String(t.yesVotes || 0)]),
+        ]);
+        row.addEventListener("click", function () { openDetailModal(t); });
+        list.appendChild(row);
+      });
+    }
+    return h("div", { className: "rw-others" }, [head, list]);
+  }
+
+  // -----------------------------------------------------------------------
+  // Top-level body renderer — builds either the split (list) view or the
+  // full-width detail view, depending on `view` state.
+  // -----------------------------------------------------------------------
+
   function renderPanelBody() {
     if (!scrollEl) return;
     clearChildren(scrollEl);
-    scrollEl.appendChild(renderTabsBar());
-    scrollEl.appendChild(renderList());
-    scrollEl.scrollTop = 0;
+
+    if (view === "detail" && currentDetailTicket) {
+      var detailFull = h("div", { className: "rw-detail-full" });
+
+      // Topbar with Back button + ticket ref. The reference id mirrors the
+      // old detail-modal head: short uppercase prefix of the ticket id.
+      var refId = String(currentDetailTicket.id || "").slice(0, 8).toUpperCase();
+      var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
+        Icons.arrowLeft(13),
+        h("span", null, "Back to activity"),
+      ]);
+      backBtn.addEventListener("click", function () {
+        view = "list";
+        currentDetailTicket = null;
+        renderPanelBody();
+      });
+      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [
+        backBtn,
+        h("span", { className: "rw-td-ref" }, "#" + refId),
+      ]));
+
+      // Body uses the same renderDetailInto pipeline as the legacy modal,
+      // just rendered inline. Loads detail data on demand.
+      var card = h("div", { style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minHeight: 0 } });
+      detailFull.appendChild(card);
+      scrollEl.appendChild(detailFull);
+
+      // Initial loading frame uses the summary; replaced when fetch resolves.
+      renderDetailInto(card, { ticket: currentDetailTicket, comments: [], activity: [], isOwner: false, isEditable: false }, true);
+      var ticketAtFetch = currentDetailTicket;
+      loadTicketDetail(ticketAtFetch.id).then(function (data) {
+        // Bail if the user navigated back / picked a different ticket.
+        if (view !== "detail" || currentDetailTicket !== ticketAtFetch) return;
+        renderDetailInto(card, data, false);
+      }).catch(function (err) {
+        if (view !== "detail" || currentDetailTicket !== ticketAtFetch) return;
+        clearChildren(card);
+        card.appendChild(h("div", { style: { padding: "16px" } },
+          renderNotice("error", "Could not load ticket: " + (err.message || "Unknown error"))));
+      });
+    } else {
+      // Split layout: composer + others on the left, tabbed activity on the right.
+      var split = h("div", { className: "rw-split" });
+
+      var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
+        h("div", { className: "rw-eyebrow" }, [
+          h("span", { className: "rw-eyebrow-dot" }),
+          h("span", null, ((config.projectName || "") + " Feedback").trim()),
+        ]),
+        h("h1", { className: "rw-prompt" }, [
+          document.createTextNode("Help us improve "),
+          h("em", null, config.projectName || "this product"),
+        ]),
+        h("p", { className: "rw-prompt-sub" },
+          "Bugs, ideas, or small annoyances — drop them here. We read everything."),
+        renderInlineComposer(),
+        renderOthersList(),
+      ]);
+
+      var rightPane = h("div", { className: "rw-pane rw-pane-right" }, [
+        renderTabsBar(),
+        renderList(),
+      ]);
+
+      split.appendChild(leftPane);
+      split.appendChild(rightPane);
+      scrollEl.appendChild(split);
+    }
   }
 
   // ===========================================================================
@@ -1471,32 +2008,15 @@
   // Detail modal
   // ===========================================================================
 
+  // Switches the dashboard to the inline detail view (full-width). Replaces
+  // the old modal-on-modal pattern — instead of stacking a second modal on
+  // top, we swap the same card body. The "Back to activity" button (rendered
+  // in renderPanelBody when view === "detail") returns to the split layout.
   function openDetailModal(ticketSummary) {
-    var card = h("div", { className: "rw-modal-card" });
-    var closeBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close" }, Icons.close(16));
-    closeBtn.addEventListener("click", closeActiveModal);
-
-    var modal = h("div", { className: "rw-modal rw-modal--detail" }, [
-      h("div", { className: "rw-modal-topbar" }, [
-        h("span", { className: "rw-modal-kicker" }, "Ticket"),
-        closeBtn,
-      ]),
-      card,
-    ]);
-
-    renderDetailInto(card, { ticket: ticketSummary, comments: [], activity: [], isOwner: false, isEditable: false }, true);
-
-    var handle = mountModal(modal);
-
-    loadTicketDetail(ticketSummary.id).then(function (data) {
-      if (handle !== activeModal) return;
-      renderDetailInto(card, data, false);
-    }).catch(function (err) {
-      if (handle !== activeModal) return;
-      clearChildren(card);
-      card.appendChild(h("div", { style: { padding: "16px" } },
-        renderNotice("error", "Could not load ticket: " + (err.message || "Unknown error"))));
-    });
+    view = "detail";
+    currentDetailTicket = ticketSummary;
+    renderPanelBody();
+    if (scrollEl) scrollEl.scrollTop = 0;
   }
 
   function renderDetailInto(card, data, loading) {
@@ -1807,6 +2327,10 @@
     widgetEl.classList.remove("rw-open");
     tabEl.classList.remove("rw-open");
     closeActiveModal();
+    // Reset the detail-view state so re-opening the dashboard lands back on
+    // the split (list) view rather than the last ticket the user was reading.
+    view = "list";
+    currentDetailTicket = null;
   }
 
   // ===========================================================================
@@ -1825,6 +2349,9 @@
 
     stageEl = h("div", { className: "rw-stage", "data-theme": theme });
 
+    // Launcher tab (unchanged from the side-panel design — the user still
+    // discovers feedback through the same edge pill). The expanded form is
+    // what changed: clicking opens a centered modal instead of a slide-out.
     tabEl = h("button", {
       className: "rw-tab", type: "button",
       "aria-label": "Open feedback panel",
@@ -1849,27 +2376,46 @@
     }
     tabEl.addEventListener("click", function () { isOpen ? closePanel() : openPanel(); });
 
-    headerTitleEl = h("div", { className: "rw-hdr-title" }, (config.projectName || config.project || "") + " Feedback");
-
+    // Shell controls (theme + close), pinned top-right of the modal card.
     themeToggleBtn = h("button", { className: "rw-icon-btn", type: "button" });
     themeToggleBtn.addEventListener("click", toggleTheme);
 
-    var closeHdrBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close panel" }, Icons.close(16));
-    closeHdrBtn.addEventListener("click", closePanel);
+    var closeShellBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close" }, Icons.close(16));
+    closeShellBtn.addEventListener("click", closePanel);
 
-    var header = h("div", { className: "rw-hdr" }, [
-      headerTitleEl,
-      h("div", { className: "rw-hdr-actions" }, [themeToggleBtn, closeHdrBtn]),
+    // The card body (`scrollEl` keeps its name for compatibility with
+    // refreshAll's loading-state insert + renderPanelBody clears) holds
+    // either the split layout or the full-width detail view.
+    scrollEl = h("div", {
+      style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" },
+    });
+
+    footerEl = h("div", { className: "rw-dash-ftr" }, [
+      h("span", { className: "rw-dash-ftr-dot" }),
+      h("span", null, [document.createTextNode("Powered by "), h("b", null, "RunHQ")]),
     ]);
 
-    scrollEl = h("div", { className: "rw-scroll" });
-    footerEl = renderFooter();
+    var cardModal = h("div", {
+      className: "rw-card-modal", role: "dialog",
+      "aria-label": "Feedback panel", "aria-modal": "true",
+    }, [
+      h("div", { className: "rw-shell-actions" }, [themeToggleBtn, closeShellBtn]),
+      scrollEl,
+      footerEl,
+    ]);
 
+    // `widgetEl` aliases the outer scrim so existing open/close code that
+    // toggles `widgetEl.classList` ("rw-open") keeps working.
     widgetEl = h("div", {
-      className: "rw-widget", role: "dialog",
-      "aria-label": "Feedback panel",
-      "data-theme": theme,
-    }, [header, scrollEl, footerEl]);
+      className: "rw-shell-scrim", "data-theme": theme,
+    }, [
+      h("div", { className: "rw-shell", "data-theme": theme }, [cardModal]),
+    ]);
+
+    // Click-outside-the-card to close.
+    widgetEl.addEventListener("mousedown", function (e) {
+      if (e.target === widgetEl) closePanel();
+    });
 
     modalMountEl = h("div", { className: "rw-modal-mount", "data-theme": theme });
 
