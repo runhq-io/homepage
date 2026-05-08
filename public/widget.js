@@ -650,30 +650,39 @@
       '.rw-stage *, .rw-stage *::before, .rw-stage *::after,',
       '.rw-modal-mount *, .rw-modal-mount *::before, .rw-modal-mount *::after { box-sizing: border-box; }',
 
-      /* side opener */
+      /* Side launcher — protrudes from the screen edge (left or right).
+         Content reads horizontally regardless of vertical anchor (top /
+         middle / bottom). Earlier versions rotated the text 90° via
+         writing-mode: vertical-rl, which only made sense for long labels;
+         "HQ" + the orbital mark is short enough to read naturally
+         left-to-right. */
       '.rw-tab {',
       '  position: fixed; top: 50%;',
       '  ' + (isRight ? "right" : "left") + ': 0;',
       '  transform: translateY(-50%);',
-      '  width: 36px; height: 120px;',
+      '  height: 36px; min-width: 64px;',
+      '  padding: ' + (isRight ? "0 10px 0 14px" : "0 14px 0 10px") + ';',
       '  background: var(--rw-accent); color: var(--rw-accent-ink);',
       '  cursor: pointer;',
-      '  display: flex; align-items: center; justify-content: center;',
-      '  writing-mode: vertical-rl; text-orientation: mixed;',
-      '  font: inherit; font-size: 11.5px; font-weight: 600; letter-spacing: 0.08em;',
+      '  display: inline-flex; align-items: center; justify-content: center; gap: 6px;',
+      '  font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.04em;',
       '  text-transform: uppercase; border: none;',
+      /* Round only the protruding edge so the pill reads as a tab anchored
+         to the screen border. */
       '  border-radius: ' + (isRight ? "10px 0 0 10px" : "0 10px 10px 0") + ';',
       '  z-index: 2147483646;',
-      '  transition: width .2s ease, box-shadow .2s ease, filter .15s ease;',
+      '  transition: padding .15s ease, box-shadow .2s ease, filter .15s ease, transform .15s ease;',
       '  box-shadow: 0 8px 24px -6px rgba(249,115,22,0.45), 0 1px 0 rgba(255,255,255,0.2) inset;',
       '  user-select: none; -webkit-user-select: none;',
+      '  white-space: nowrap;',
       '}',
-      '.rw-tab:hover { width: 42px; filter: brightness(1.06); }',
-      /* Tab inner gap so icon / label / count don't crowd. The flex axis is
-         vertical-rl in the default tab orientation and horizontal in the
-         bottom-position variant; flex-gap respects the main axis in both. */
-      '.rw-tab { gap: 6px; }',
-      '.rw-tab-label { writing-mode: inherit; text-orientation: inherit; }',
+      /* Hover slides the pill out a few pixels for affordance — direction
+         depends on which edge we're attached to. The vertical anchor
+         (translateY) is preserved so middle-anchored tabs stay centered. */
+      '.rw-tab:hover { filter: brightness(1.06); padding-' + (isRight ? "left" : "right") + ': 18px; }',
+      /* Top / bottom anchored variants override the default centered transform. */
+      '.rw-tab--top    { top: 80px;    bottom: auto; transform: none; }',
+      '.rw-tab--bottom { top: auto;    bottom: 80px; transform: none; }',
 
       /* ------------------------------------------------------------------
          Animated tab mark — abstract entity in mathematical motion.
@@ -766,20 +775,13 @@
       '.rw-tab-count {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  min-width: 18px; height: 18px; padding: 0 5px;',
-      '  margin-inline-start: 8px;', /* logical: margin-top in vertical, margin-left in horizontal */
-      '  vertical-align: middle;',
       '  border-radius: 999px;',
       '  background: var(--rw-accent-ink);',
       '  color: var(--rw-accent);',
       '  font-size: 11px; font-weight: 700;',
       '  font-variant-numeric: tabular-nums; letter-spacing: 0;',
-      '  writing-mode: horizontal-tb; text-orientation: mixed;',
       '  box-shadow: 0 1px 2px rgba(0,0,0,0.18);',
       '  flex: 0 0 auto;',
-      '}',
-      /* Horizontal (bottom-position) tab: lay out as a flex row */
-      '.rw-tab.rw-tab--horizontal {',
-      '  display: inline-flex; align-items: center; justify-content: center;',
       '}',
       /* Open state hides the launcher; declared last so it wins over all variants */
       '.rw-tab.rw-open { display: none; }',
@@ -2534,24 +2536,11 @@
       className: "rw-tab", type: "button",
       "aria-label": t("aria.openPanel"),
     }, buildTabContent());
-    if (config.offset === "auto") {
-      tabEl.classList.add("rw-tab--horizontal");
-      tabEl.style.top = "auto";
-      tabEl.style.bottom = "0";
-      tabEl.style.left = isRight ? "auto" : "24px";
-      tabEl.style.right = isRight ? "24px" : "auto";
-      tabEl.style.transform = "none";
-      tabEl.style.writingMode = "horizontal-tb";
-      tabEl.style.textOrientation = "initial";
-      tabEl.style.width = "auto";
-      tabEl.style.height = "36px";
-      tabEl.style.paddingLeft = "16px";
-      tabEl.style.paddingRight = "16px";
-      tabEl.style.borderRadius = "10px 10px 0 0";
-    } else if (config.offset != null) {
-      tabEl.style.top = config.offset;
-      tabEl.style.transform = "none";
-    }
+    // Vertical anchor: top / middle (default) / bottom. The protrusion
+    // direction is always horizontal (out from the screen edge); only
+    // where the pill sits along the vertical axis changes.
+    if (config.offset === "top")    tabEl.classList.add("rw-tab--top");
+    if (config.offset === "bottom") tabEl.classList.add("rw-tab--bottom");
     tabEl.addEventListener("click", function () { isOpen ? closePanel() : openPanel(); });
 
     // Shell controls (theme + close), pinned top-right of the modal card.
@@ -2653,7 +2642,10 @@
         var vPos = pos[0] || "middle";
         var hPos = pos[1] || "right";
         config.position = hPos;
-        config.offset = vPos === "bottom" ? "auto" : vPos === "top" ? "80px" : null;
+        // null = vertically centered; "top" / "bottom" anchor near the
+        // matching edge. The launcher always protrudes horizontally from
+        // left or right (never from the bottom edge).
+        config.offset = vPos === "top" ? "top" : vPos === "bottom" ? "bottom" : null;
 
         theme = resolveInitialTheme(opts.theme);
 
