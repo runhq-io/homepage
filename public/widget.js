@@ -28,7 +28,7 @@
   var modalMountEl = null;
 
   var isOpen = false;
-  var activeTab = "hot"; // "updates" | "hot" | "mine"  (default lands on Hot per dashboard design)
+  var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
   var theme = "light";
 
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
@@ -2575,10 +2575,11 @@
     widgetEl.classList.remove("rw-open");
     tabEl.classList.remove("rw-open");
     closeActiveModal();
-    // Reset the detail-view state so re-opening the dashboard lands back on
-    // the split (list) view rather than the last ticket the user was reading.
+    // Reset the dashboard so re-opening lands on a fresh state rather
+    // than wherever the user last left it (detail view, Hot tab, etc.).
     view = "list";
     currentDetailTicket = null;
+    activeTab = "updates";
   }
 
   // ===========================================================================
