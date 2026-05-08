@@ -282,12 +282,11 @@
         // Headline interpolates the project name: e.g. "Staircase HQ".
         headline: "{name} HQ",
         // Sub-text is rendered as: [subBefore]<em>{subEm}</em>[subAfter].
-        // The em segment highlights the My Submissions tab name; locales
-        // can shift its position (English: tail; Korean: head) by moving
-        // the surrounding text between subBefore and subAfter.
-        subBefore: "Bugs, ideas — please write them here. Track progress on everything you've submitted in ",
-        subEm: "My Submissions",
-        subAfter: ".",
+        // Empty em / after segments keep the prose plain when no inline
+        // emphasis is needed (current copy is short enough to skip it).
+        subBefore: "Bugs, ideas, suggestions — please write them here.",
+        subEm: "",
+        subAfter: "",
         thisProduct: "this product",
         poweredBy: "Powered by",
         visitRunhq: "Visit RunHQ",
@@ -376,11 +375,9 @@
         // Korean keeps the brand "HQ" mark — translating it to "본부" reads
         // institutional and loses the product feel.
         headline: "{name} HQ",
-        // Korean reverses English word order: the "My Submissions" reference
-        // comes first, with the rest of the sentence trailing.
-        subBefore: "버그, 아이디어 — 여기에 자유롭게 적어주세요. ",
-        subEm: "내 제출 내역",
-        subAfter: "에서 제출한 모든 항목의 진행 상황을 확인할 수 있습니다.",
+        subBefore: "버그, 아이디어, 제안 — 여기에 자유롭게 적어주세요.",
+        subEm: "",
+        subAfter: "",
         thisProduct: "이 제품",
         poweredBy: "제공",
         visitRunhq: "RunHQ 방문",
