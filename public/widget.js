@@ -328,9 +328,26 @@
     return n;
   }
 
+  function buildTabIcon() {
+    // A small CSS-driven mark: glowing core + three concentric orbits with
+    // different radii / periods / directions. The orbital periods (2.4s,
+    // 3.6s, 4.7s) are mutually almost-coprime, so the dots only line up
+    // every ~40 minutes — the visual pattern never quite repeats, which is
+    // what reads as "alive." Pure CSS, no rAF, no SVG.
+    return h("span", { className: "rw-tab-icon", "aria-hidden": "true" }, [
+      h("span", { className: "rw-tab-icon-orbit rw-tab-icon-orbit-1" }),
+      h("span", { className: "rw-tab-icon-orbit rw-tab-icon-orbit-2" }),
+      h("span", { className: "rw-tab-icon-orbit rw-tab-icon-orbit-3" }),
+      h("span", { className: "rw-tab-icon-core" }),
+    ]);
+  }
+
   function buildTabContent() {
     var n = unreadUpdatesCount();
-    var nodes = [document.createTextNode("Updates")];
+    var nodes = [
+      buildTabIcon(),
+      h("span", { className: "rw-tab-label" }, "HQ"),
+    ];
     if (n > 0) {
       nodes.push(h("span", { className: "rw-tab-count" }, n > 99 ? "99+" : String(n)));
     }
@@ -443,6 +460,100 @@
       '  user-select: none; -webkit-user-select: none;',
       '}',
       '.rw-tab:hover { width: 42px; filter: brightness(1.06); }',
+      /* Tab inner gap so icon / label / count don't crowd. The flex axis is
+         vertical-rl in the default tab orientation and horizontal in the
+         bottom-position variant; flex-gap respects the main axis in both. */
+      '.rw-tab { gap: 6px; }',
+      '.rw-tab-label { writing-mode: inherit; text-orientation: inherit; }',
+
+      /* ------------------------------------------------------------------
+         Animated tab mark — abstract entity in mathematical motion.
+         Three orbital satellites at different radii / periods / directions
+         + a pulsing core. Sized to fit beside the "HQ" label.
+         The icon escapes the tab's vertical writing-mode so absolute
+         positions inside it (top/left/right/bottom) read naturally. */
+      '.rw-tab-icon {',
+      '  position: relative;',
+      '  width: 18px; height: 18px;',
+      '  flex: 0 0 auto;',
+      '  writing-mode: horizontal-tb; text-orientation: initial;',
+      '  display: inline-block;',
+      '  /* very subtle outer halo for depth */',
+      '  filter: drop-shadow(0 0 2px color-mix(in oklab, currentColor 50%, transparent));',
+      '}',
+
+      '.rw-tab-icon-core {',
+      '  position: absolute; top: 50%; left: 50%;',
+      '  width: 4px; height: 4px;',
+      '  margin: -2px 0 0 -2px;',
+      '  border-radius: 50%;',
+      '  background: currentColor;',
+      '  box-shadow: 0 0 6px currentColor, 0 0 2px currentColor;',
+      '  animation: rw-tab-core-pulse 1.6s cubic-bezier(0.4,0,0.6,1) infinite;',
+      '}',
+
+      /* Each orbit is an invisible square pinned to the icon box; rotating
+         it sweeps the ::before satellite around the center on a circle. */
+      '.rw-tab-icon-orbit {',
+      '  position: absolute;',
+      '  border-radius: 50%;',
+      '  pointer-events: none;',
+      '}',
+      '.rw-tab-icon-orbit::before {',
+      '  content: "";',
+      '  position: absolute;',
+      '  border-radius: 50%;',
+      '  background: currentColor;',
+      '}',
+      /* Outer satellite: full-radius orbit, clockwise, brightest. */
+      '.rw-tab-icon-orbit-1 {',
+      '  inset: 0;',
+      '  animation: rw-tab-orbit-cw 2.4s linear infinite;',
+      '}',
+      '.rw-tab-icon-orbit-1::before {',
+      '  top: 0; left: 50%;',
+      '  width: 3px; height: 3px;',
+      '  margin: -1.5px 0 0 -1.5px;',
+      '  box-shadow: 0 0 5px currentColor, 0 0 1.5px currentColor;',
+      '}',
+      /* Middle satellite: smaller radius, counter-clockwise, slower. */
+      '.rw-tab-icon-orbit-2 {',
+      '  inset: 4px;',
+      '  animation: rw-tab-orbit-ccw 3.6s linear infinite;',
+      '}',
+      '.rw-tab-icon-orbit-2::before {',
+      '  top: 50%; left: 100%;',
+      '  width: 2px; height: 2px;',
+      '  margin: -1px 0 0 -2px;',
+      '  opacity: 0.85;',
+      '  box-shadow: 0 0 3px currentColor;',
+      '}',
+      /* Inner satellite: tiny, longer period, off-axis starting position. */
+      '.rw-tab-icon-orbit-3 {',
+      '  inset: 2px;',
+      '  animation: rw-tab-orbit-cw 4.7s linear infinite;',
+      '  animation-delay: -1.6s;',
+      '}',
+      '.rw-tab-icon-orbit-3::before {',
+      '  top: 82%; left: 18%;',
+      '  width: 1.5px; height: 1.5px;',
+      '  margin: -0.75px 0 0 -0.75px;',
+      '  opacity: 0.65;',
+      '  box-shadow: 0 0 2px currentColor;',
+      '}',
+
+      '@keyframes rw-tab-orbit-cw  { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }',
+      '@keyframes rw-tab-orbit-ccw { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }',
+      '@keyframes rw-tab-core-pulse {',
+      '  0%, 100% { transform: scale(1);   opacity: 1; }',
+      '  50%      { transform: scale(1.6); opacity: 0.55; }',
+      '}',
+      /* Respect reduced-motion: keep the structure visible, drop the spin. */
+      '@media (prefers-reduced-motion: reduce) {',
+      '  .rw-tab-icon-orbit-1, .rw-tab-icon-orbit-2, .rw-tab-icon-orbit-3, .rw-tab-icon-core { animation: none; }',
+      '  .rw-tab-icon-core { transform: scale(1); opacity: 1; }',
+      '}',
+
       '.rw-tab-count {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  min-width: 18px; height: 18px; padding: 0 5px;',
