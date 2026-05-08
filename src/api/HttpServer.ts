@@ -185,7 +185,12 @@ export function createHttpApp() {
     const filePath = path.join(process.cwd(), 'public', 'widget.js');
     const widgetSource = fs.readFileSync(filePath, 'utf-8');
     const body = renderWidgetConstantsHeader() + widgetSource;
-    c.header('Content-Type', 'application/javascript');
+    // The charset matters: widget.js contains UTF-8 strings (Korean
+    // locale tables, em dashes, smart quotes). Without it the browser
+    // falls back to Latin-1 and renders the bytes as � replacement
+    // characters. Next.js's static handler set this automatically; the
+    // Hono route has to be explicit.
+    c.header('Content-Type', 'application/javascript; charset=utf-8');
     c.header('Cache-Control', 'public, max-age=3600');
     c.header('Access-Control-Allow-Origin', '*');
     return c.body(body);
