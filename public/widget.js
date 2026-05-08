@@ -2154,14 +2154,18 @@
       ]);
 
       var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
+        // Eyebrow row carries the project name+HQ label (small caps, the
+        // same micro-typography the older "FEEDBACK" eyebrow used) on the
+        // left and the Powered-by link on the right. The big H1 headline
+        // was removed — at small sizes it competed for visual weight with
+        // the composer placeholder, which is the actual hero.
         h("div", { className: "rw-eyebrow-row" }, [
           h("div", { className: "rw-eyebrow" }, [
             h("span", { className: "rw-eyebrow-dot" }),
-            h("span", null, t("header.feedback", { name: config.projectName || "" }).trim()),
+            h("span", null, t("header.headline", { name: projectName })),
           ]),
           poweredBy,
         ]),
-        h("h1", { className: "rw-prompt" }, t("header.headline", { name: projectName })),
         // Sub-text: prefix + <em>tab name</em> + suffix. The em segment
         // visually links the prose to the My Submissions tab so users know
         // where to follow up on what they file.
