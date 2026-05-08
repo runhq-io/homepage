@@ -930,12 +930,28 @@
       '.rw-prompt-sub em { font-style: normal; font-weight: 600; color: var(--rw-fg-2); }',
 
       /* inline composer (left pane) */
-      '.rw-inline-composer { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }',
+      /* Inline composer card — textarea + tool bar live inside one bordered
+         surface so they read as a single input, the way GitHub/Linear/Notion
+         render their comment boxes. focus-within lights up the border to
+         match the textarea's focused state. */
+      '.rw-inline-composer {',
+      '  display: flex; flex-direction: column;',
+      '  flex: 0 0 auto; min-height: 0;',
+      '  background: var(--rw-bg);',
+      '  border: 1px solid var(--rw-line-2);',
+      '  border-radius: 12px;',
+      '  padding: 12px 14px 10px;',
+      '  transition: border-color .15s ease, box-shadow .15s ease;',
+      '}',
+      '.rw-inline-composer:focus-within {',
+      '  border-color: color-mix(in oklab, var(--rw-accent) 50%, var(--rw-line-2));',
+      '  box-shadow: 0 0 0 3px color-mix(in oklab, var(--rw-accent) 14%, transparent);',
+      '}',
       '.rw-inline-composer-ta {',
       '  width: 100%; border: 0; outline: none; resize: none; background: transparent;',
       '  color: var(--rw-fg);',
       '  font-family: inherit; font-size: 14.5px; line-height: 1.55; letter-spacing: -0.005em;',
-      '  padding: 4px 0; min-height: 110px;',
+      '  padding: 0; min-height: 96px;',
       '}',
       '.rw-inline-composer-ta::placeholder {',
       '  color: var(--rw-muted);',
@@ -943,7 +959,7 @@
       '}',
       '.rw-inline-composer-bar {',
       '  display: flex; align-items: center; justify-content: space-between; gap: 10px;',
-      '  margin-top: 12px; padding-top: 12px;',
+      '  margin-top: 10px; padding-top: 10px;',
       '  border-top: 1px solid var(--rw-line);',
       '}',
       '.rw-inline-tools { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }',
