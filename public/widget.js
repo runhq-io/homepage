@@ -249,6 +249,215 @@
   };
 
   // ===========================================================================
+  // i18n
+  //
+  // The active locale is set from the bootstrap response (config.language,
+  // populated from widget_projects.widget_language on the server). The
+  // status registry (window.__RW_CONSTANTS__.status) supplies its own
+  // `label` strings — those aren't translated here; widget settings can
+  // override them per project independently.
+  //
+  // Adding a new locale = one new key in LOCALES. Missing keys fall back
+  // to en. Strings can interpolate {placeholders} via the second arg to t().
+  // ===========================================================================
+
+  var LOCALES = {
+    en: {
+      aria: {
+        openPanel: "Open feedback panel",
+        close: "Close",
+        upvote: "Upvote",
+        upvoteSignedOut: "Sign in to vote",
+        openTicket: "Open ticket: {title}",
+        removeAttach: "Remove attachment",
+        remove: "Remove",
+      },
+      header: {
+        feedback: "{name} Feedback",
+        // Headline is rendered as: [helpBefore][<em>{projectName}</em>][helpAfter]
+        // English: "Help us improve <em>{name}</em>"
+        // Korean:  "<em>{name}</em> 개선을 도와주세요"
+        helpBefore: "Help us improve ",
+        helpAfter: "",
+        helpSub: "Bugs, ideas, or small annoyances — drop them here. We read everything.",
+        thisProduct: "this product",
+      },
+      composer: {
+        placeholder: "Start typing…",
+        attach: "Attach",
+        private: "Private",
+        submit: "Submit",
+        posting: "Posting…",
+        uploading: "Uploading…",
+        needSignIn: "You must be signed in to submit a ticket.",
+        failed: "Failed to submit: {msg}",
+        pastedImage: "Pasted image",
+      },
+      others: { label: "Recent tickets submitted", empty: "No tickets yet." },
+      tabs: { updates: "Updates", hot: "Hot", mine: "My Tickets" },
+      empty: {
+        noTickets: "No tickets yet",
+        beFirst: "Be the first to share feedback.",
+        signInToSeeMine: "Sign in to see your tickets",
+        signedInPlaceholder: "Your submissions appear here once you're identified.",
+        noMineYet: "You haven't submitted any tickets yet",
+        useComposer: "Use the composer on the left to file one.",
+        nothingShipped: "Nothing shipped recently",
+        updatesWillShow: "Updates will show up here as tickets are resolved.",
+      },
+      list: { loadFailed: "Could not load tickets: {msg}" },
+      detail: {
+        loadFailed: "Could not load ticket: {msg}",
+        back: "Back to activity",
+        original: "Original report",
+        shipped: "shipped {when}",
+        activity: "Activity",
+        activityCount: "Activity · {n} {plural}",
+        commentSingular: "comment",
+        commentPlural: "comments",
+        noActivity: "No activity yet.",
+      },
+      reply: {
+        signInPlaceholder: "Sign in to reply",
+        disabledPlaceholder: "Comments are disabled",
+        placeholder: "Write a comment…  (⌘V to paste a screenshot)",
+        hint: "Paste screenshots with ⌘V",
+        submit: "Comment",
+        posting: "Posting…",
+        uploading: "Uploading…",
+        failed: "Failed to post: {msg}",
+        signInPrompt: "Sign in to post a comment.",
+        disabledPrompt: "Comments are disabled on this ticket.",
+      },
+      theme: {
+        dark: "Dark mode",
+        light: "Light mode",
+        switchToDark: "Switch to dark mode",
+        switchToLight: "Switch to light mode",
+      },
+      timeAgo: { now: "just now", s: "{n}s ago", m: "{n}m ago", h: "{n}h ago", d: "{n}d ago", mo: "{n}mo ago" },
+      events: {
+        statusChangeBoth: "status change [{from}] → [{to}]",
+        statusChangeTo: "status change → [{to}]",
+        changedStatus: "changed status",
+        moderationChanged: "changed moderation to {to}",
+        assigned: "assigned the ticket",
+        assignedTo: "assigned the ticket to {to}",
+        unassigned: "unassigned the ticket",
+        ticketCreated: "opened the ticket",
+        ticketEdited: "edited the ticket",
+        ticketDeleted: "deleted the ticket",
+      },
+    },
+    ko: {
+      aria: {
+        openPanel: "피드백 패널 열기",
+        close: "닫기",
+        upvote: "추천",
+        upvoteSignedOut: "추천하려면 로그인하세요",
+        openTicket: "티켓 열기: {title}",
+        removeAttach: "첨부 제거",
+        remove: "제거",
+      },
+      header: {
+        feedback: "{name} 피드백",
+        helpBefore: "",
+        helpAfter: " 개선을 도와주세요",
+        helpSub: "버그, 아이디어, 작은 불편함까지 자유롭게 남겨주세요. 모두 읽어보고 있습니다.",
+        thisProduct: "이 제품",
+      },
+      composer: {
+        placeholder: "내용을 입력하세요…",
+        attach: "첨부",
+        private: "비공개",
+        submit: "제출",
+        posting: "게시 중…",
+        uploading: "업로드 중…",
+        needSignIn: "티켓을 제출하려면 로그인해야 합니다.",
+        failed: "제출 실패: {msg}",
+        pastedImage: "붙여넣은 이미지",
+      },
+      others: { label: "최근 등록된 티켓", empty: "아직 티켓이 없습니다." },
+      tabs: { updates: "업데이트", hot: "인기", mine: "내 티켓" },
+      empty: {
+        noTickets: "아직 티켓이 없습니다",
+        beFirst: "가장 먼저 피드백을 남겨보세요.",
+        signInToSeeMine: "내 티켓을 보려면 로그인하세요",
+        signedInPlaceholder: "로그인하시면 제출한 티켓이 여기에 표시됩니다.",
+        noMineYet: "아직 제출한 티켓이 없습니다",
+        useComposer: "왼쪽 입력창에서 새 티켓을 작성하세요.",
+        nothingShipped: "최근 배포된 항목이 없습니다",
+        updatesWillShow: "티켓이 해결되면 이곳에 표시됩니다.",
+      },
+      list: { loadFailed: "티켓을 불러올 수 없습니다: {msg}" },
+      detail: {
+        loadFailed: "티켓을 불러올 수 없습니다: {msg}",
+        back: "활동으로 돌아가기",
+        original: "최초 보고",
+        shipped: "{when} 배포됨",
+        activity: "활동",
+        activityCount: "활동 · 댓글 {n}개",
+        commentSingular: "댓글",
+        commentPlural: "댓글",
+        noActivity: "아직 활동이 없습니다.",
+      },
+      reply: {
+        signInPlaceholder: "답글을 달려면 로그인하세요",
+        disabledPlaceholder: "댓글이 비활성화되었습니다",
+        placeholder: "댓글을 작성하세요…  (⌘V로 스크린샷 붙여넣기)",
+        hint: "⌘V로 스크린샷 붙여넣기",
+        submit: "댓글",
+        posting: "게시 중…",
+        uploading: "업로드 중…",
+        failed: "게시 실패: {msg}",
+        signInPrompt: "댓글을 작성하려면 로그인하세요.",
+        disabledPrompt: "이 티켓의 댓글이 비활성화되었습니다.",
+      },
+      theme: {
+        dark: "다크 모드",
+        light: "라이트 모드",
+        switchToDark: "다크 모드로 전환",
+        switchToLight: "라이트 모드로 전환",
+      },
+      timeAgo: { now: "방금 전", s: "{n}초 전", m: "{n}분 전", h: "{n}시간 전", d: "{n}일 전", mo: "{n}개월 전" },
+      events: {
+        statusChangeBoth: "상태 변경 [{from}] → [{to}]",
+        statusChangeTo: "상태 변경 → [{to}]",
+        changedStatus: "상태를 변경했습니다",
+        moderationChanged: "검토 상태를 {to}로 변경했습니다",
+        assigned: "티켓을 할당했습니다",
+        assignedTo: "티켓을 {to}에게 할당했습니다",
+        unassigned: "티켓 할당을 해제했습니다",
+        ticketCreated: "티켓을 열었습니다",
+        ticketEdited: "티켓을 수정했습니다",
+        ticketDeleted: "티켓을 삭제했습니다",
+      },
+    },
+  };
+
+  function t(path, vars) {
+    var locale = LOCALES[config.language] || LOCALES.en;
+    var resolve = function (root) {
+      var node = root;
+      var parts = path.split(".");
+      for (var i = 0; i < parts.length; i++) {
+        if (node == null) return null;
+        node = node[parts[i]];
+      }
+      return node;
+    };
+    var s = resolve(locale);
+    if (s == null && locale !== LOCALES.en) s = resolve(LOCALES.en);
+    if (s == null) return path;
+    if (vars && typeof s === "string") {
+      s = s.replace(/\{(\w+)\}/g, function (m, k) {
+        return vars[k] != null ? String(vars[k]) : m;
+      });
+    }
+    return s;
+  }
+
+  // ===========================================================================
   // Status palette — sourced from window.__RW_CONSTANTS__.status, which is
   // injected by the /widget.js route handler from the protocol's canonical
   // TODO_STATUS_DISPLAY registry. The widget MUST NOT carry its own table
@@ -382,8 +591,8 @@
     if (themeToggleBtn) {
       clearChildren(themeToggleBtn);
       themeToggleBtn.appendChild(theme === "light" ? Icons.moon(15) : Icons.sun(15));
-      themeToggleBtn.setAttribute("aria-label", theme === "light" ? "Switch to dark mode" : "Switch to light mode");
-      themeToggleBtn.setAttribute("title", theme === "light" ? "Dark mode" : "Light mode");
+      themeToggleBtn.setAttribute("aria-label", theme === "light" ? t("theme.switchToDark") : t("theme.switchToLight"));
+      themeToggleBtn.setAttribute("title", theme === "light" ? t("theme.dark") : t("theme.light"));
     }
     try { localStorage.setItem(themeStorageKey(), theme); } catch (_) {}
   }
@@ -1384,18 +1593,19 @@
   function timeAgo(dateStr) {
     if (!dateStr) return "";
     var diff = Date.now() - new Date(dateStr).getTime();
-    if (diff < 0) return "just now";
+    if (diff < 0) return t("timeAgo.now");
     var secs = Math.floor(diff / 1000);
-    if (secs < 45) return "just now";
+    if (secs < 45) return t("timeAgo.now");
     var mins = Math.floor(secs / 60);
-    if (mins < 60) return mins + "m ago";
+    if (mins < 60) return t("timeAgo.m", { n: mins });
     var hours = Math.floor(mins / 60);
-    if (hours < 24) return hours + "h ago";
+    if (hours < 24) return t("timeAgo.h", { n: hours });
     var days = Math.floor(hours / 24);
-    if (days < 30) return days + "d ago";
+    if (days < 30) return t("timeAgo.d", { n: days });
     var months = Math.floor(days / 30);
-    if (months < 12) return months + "mo ago";
-    return Math.floor(months / 12) + "y ago";
+    if (months < 12) return t("timeAgo.mo", { n: months });
+    // year-scale fallback uses a static suffix; rare for ticket timestamps
+    return Math.floor(months / 12) + "y";
   }
 
   function displayNameFromTicket(t) { return t.authorName || "Anonymous"; }
@@ -1422,7 +1632,7 @@
   function renderLoading() { return h("div", { className: "rw-loading" }, h("div", { className: "rw-spinner" })); }
   function renderEmpty(title, sub) {
     return h("div", { className: "rw-empty" }, [
-      h("div", { className: "rw-empty-title" }, title || "No tickets yet"),
+      h("div", { className: "rw-empty-title" }, title || t("empty.noTickets")),
       sub ? h("div", { className: "rw-empty-sub" }, sub) : null,
     ]);
   }
@@ -1535,9 +1745,9 @@
     var voteBtn = h("button", {
       className: "rw-dash-vote" + (voted ? " rw-voted" : ""),
       type: "button",
-      "aria-label": "Upvote ticket",
+      "aria-label": t("aria.upvote"),
       disabled: !config.isIdentified,
-      title: config.isIdentified ? "Upvote" : "Sign in to vote",
+      title: config.isIdentified ? t("aria.upvote") : t("aria.upvoteSignedOut"),
     }, [Icons.arrowUp(11), countSpan]);
     voteBtn.addEventListener("click", function (e) {
       // Stop the row's click handler from also firing (which would open detail).
@@ -1562,7 +1772,7 @@
 
     var row = h("button", {
       className: "rw-dash-row", type: "button",
-      "aria-label": "Open ticket: " + ticket.title,
+      "aria-label": t("aria.openTicket", { title: ticket.title }),
     }, [
       h("div", { className: "rw-dash-row-main" }, mainChildren),
       voteBtn,
@@ -1570,15 +1780,6 @@
 
     row.addEventListener("click", function () { openDetailModal(ticket); });
     return row;
-  }
-
-  function renderFooter() {
-    return h("div", { className: "rw-ftr" }, [
-      h("span", { className: "rw-ftr-mark" }, [
-        h("span", { className: "rw-ftr-dot" }),
-        h("span", null, [document.createTextNode("Powered by "), h("b", null, "RunHQ")]),
-      ]),
-    ]);
   }
 
   // ===========================================================================
@@ -1597,23 +1798,24 @@
     };
 
     var defs = [
-      { id: "updates", label: "Updates" },
-      { id: "hot",     label: "Hot" },
-      { id: "mine",    label: "My Tickets" },
+      { id: "updates", label: t("tabs.updates") },
+      { id: "hot",     label: t("tabs.hot") },
+      { id: "mine",    label: t("tabs.mine") },
     ];
 
-    var tabButtons = defs.map(function (t) {
+    // Use `def` (not `t`) for the loop variable — `t` is the i18n function.
+    var tabButtons = defs.map(function (def) {
       var btn = h("button", {
-        className: "rw-dash-tab" + (pendingTab === t.id ? " rw-on" : ""),
+        className: "rw-dash-tab" + (pendingTab === def.id ? " rw-on" : ""),
         type: "button",
         role: "tab",
-        "aria-selected": pendingTab === t.id ? "true" : "false",
+        "aria-selected": pendingTab === def.id ? "true" : "false",
       }, [
-        h("span", { className: "rw-dash-tab-label" }, t.label),
-        h("span", { className: "rw-dash-tab-count" }, String(counts[t.id] || 0)),
+        h("span", { className: "rw-dash-tab-label" }, def.label),
+        h("span", { className: "rw-dash-tab-count" }, String(counts[def.id] || 0)),
       ]);
       btn.addEventListener("click", function () {
-        if (pendingTab !== t.id) { activeTab = t.id; renderPanelBody(); }
+        if (pendingTab !== def.id) { activeTab = def.id; renderPanelBody(); }
       });
       return btn;
     });
@@ -1631,19 +1833,20 @@
 
     if (items.length === 0) {
       if (tab === "mine" && !config.isIdentified) {
-        return renderEmpty("Sign in to see your tickets", "Your submissions appear here once you're identified.");
+        return renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"));
       }
       if (tab === "mine") {
-        return renderEmpty("You haven't submitted any tickets yet", "Use the composer on the left to file one.");
+        return renderEmpty(t("empty.noMineYet"), t("empty.useComposer"));
       }
       if (tab === "updates") {
-        return renderEmpty("Nothing shipped recently", "Updates will show up here as tickets are resolved.");
+        return renderEmpty(t("empty.nothingShipped"), t("empty.updatesWillShow"));
       }
-      return renderEmpty("No tickets yet", "Be the first to share feedback.");
+      return renderEmpty(t("empty.noTickets"), t("empty.beFirst"));
     }
 
     var list = h("div", { className: "rw-dash-list" });
-    items.forEach(function (t) { list.appendChild(renderTicketCard(t)); });
+    // Use `tk` for the loop variable — `t` is the i18n function.
+    items.forEach(function (tk) { list.appendChild(renderTicketCard(tk)); });
     return list;
   }
 
@@ -1662,7 +1865,7 @@
     var noticeSlot = h("div", { className: "rw-inline-notice" });
     var ta = h("textarea", {
       className: "rw-inline-composer-ta",
-      placeholder: "Start typing…",
+      placeholder: t("composer.placeholder"),
       maxlength: "5000",
       rows: "4",
     });
@@ -1677,7 +1880,7 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": "Remove attachment" }, "×");
+        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach") }, "×");
         removeBtn.addEventListener("click", function (e) {
           e.stopPropagation();
           var i = entries.indexOf(entry);
@@ -1686,7 +1889,7 @@
         });
         chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
           Icons.image(11),
-          h("span", null, entry.file.name || "Pasted image"),
+          h("span", null, entry.file.name || t("composer.pastedImage")),
           removeBtn,
         ]));
       });
@@ -1707,7 +1910,7 @@
     });
 
     var submitBtn = h("button", { className: "rw-inline-submit", type: "button", disabled: true }, [
-      h("span", null, "Submit"),
+      h("span", null, t("composer.submit")),
     ]);
     function updateSubmitEnabled() {
       submitBtn.disabled = !config.isIdentified || ta.value.trim().length === 0;
@@ -1715,12 +1918,12 @@
     ta.addEventListener("input", updateSubmitEnabled);
 
     var isPrivate = false;
-    var attachBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Attach image" }, [
-      Icons.paperclip(13), h("span", null, "Attach"),
+    var attachBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
+      Icons.paperclip(13), h("span", null, t("composer.attach")),
     ]);
     attachBtn.addEventListener("click", function () { fileInput.click(); });
-    var privateBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Only visible to the team" }, [
-      Icons.lock(12), h("span", null, "Private"),
+    var privateBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
+      Icons.lock(12), h("span", null, t("composer.private")),
     ]);
     privateBtn.addEventListener("click", function () {
       isPrivate = !isPrivate;
@@ -1730,13 +1933,13 @@
     submitBtn.addEventListener("click", function () {
       if (!config.isIdentified) {
         clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", "You must be signed in to submit a ticket."));
+        noticeSlot.appendChild(renderNotice("error", t("composer.needSignIn")));
         return;
       }
       var description = ta.value.trim();
       if (!description) return;
       submitBtn.disabled = true;
-      submitBtn.firstChild.textContent = "Posting…";
+      submitBtn.firstChild.textContent = t("composer.posting");
       clearChildren(noticeSlot);
 
       createTicket({
@@ -1746,7 +1949,7 @@
       }).then(function (data) {
         var ticketId = data && data.ticket && data.ticket.id;
         if (!ticketId || entries.length === 0) return null;
-        submitBtn.firstChild.textContent = "Uploading…";
+        submitBtn.firstChild.textContent = t("composer.uploading");
         return Promise.all(entries.map(function (e) {
           return uploadTicketAttachment(ticketId, e.file).catch(function (err) {
             console.warn("Attachment failed:", err && err.message);
@@ -1759,7 +1962,7 @@
         renderChips();
         isPrivate = false;
         privateBtn.classList.remove("rw-on");
-        submitBtn.firstChild.textContent = "Submit";
+        submitBtn.firstChild.textContent = t("composer.submit");
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
         // Refresh data + the panel body. The composer instance is replaced
         // along with the rest of the left pane on re-render, so we don't
@@ -1767,9 +1970,9 @@
         return refreshAll();
       }).catch(function (err) {
         submitBtn.disabled = false;
-        submitBtn.firstChild.textContent = "Submit";
+        submitBtn.firstChild.textContent = t("composer.submit");
         clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", "Failed to submit: " + (err.message || "Unknown error")));
+        noticeSlot.appendChild(renderNotice("error", t("composer.failed", { msg: err.message || "" })));
       });
     });
 
@@ -1792,23 +1995,24 @@
   function renderOthersList() {
     var items = (topTicketsCache || []).slice(0, 5);
     var head = h("div", { className: "rw-others-head" }, [
-      h("span", { className: "rw-others-label" }, "Recent tickets submitted"),
+      h("span", { className: "rw-others-label" }, t("others.label")),
       h("span", { className: "rw-others-count" }, String(items.length)),
     ]);
     var list = h("div", { className: "rw-others-list" });
     if (items.length === 0) {
-      list.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "10px 0", fontSize: "11.5px" } }, "No tickets yet."));
+      list.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "10px 0", fontSize: "11.5px" } }, t("others.empty")));
     } else {
-      items.forEach(function (t) {
+      // Use `tk` for ticket — `t` is the i18n function.
+      items.forEach(function (tk) {
         var row = h("button", {
           className: "rw-others-row", type: "button",
-          "aria-label": "Open ticket: " + t.title,
+          "aria-label": t("aria.openTicket", { title: tk.title }),
         }, [
-          h("span", { className: "rw-others-status", "data-status": t.status, style: { background: statusMeta(t.status).dot } }),
-          h("span", { className: "rw-others-title" }, t.title),
-          h("span", { className: "rw-others-meta" }, [Icons.arrowUp(9), String(t.yesVotes || 0)]),
+          h("span", { className: "rw-others-status", "data-status": tk.status, style: { background: statusMeta(tk.status).dot } }),
+          h("span", { className: "rw-others-title" }, tk.title),
+          h("span", { className: "rw-others-meta" }, [Icons.arrowUp(9), String(tk.yesVotes || 0)]),
         ]);
-        row.addEventListener("click", function () { openDetailModal(t); });
+        row.addEventListener("click", function () { openDetailModal(tk); });
         list.appendChild(row);
       });
     }
@@ -1832,7 +2036,7 @@
       var refId = String(currentDetailTicket.id || "").slice(0, 8).toUpperCase();
       var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
         Icons.arrowLeft(13),
-        h("span", null, "Back to activity"),
+        h("span", null, t("detail.back")),
       ]);
       backBtn.addEventListener("click", function () {
         view = "list";
@@ -1861,23 +2065,24 @@
         if (view !== "detail" || currentDetailTicket !== ticketAtFetch) return;
         clearChildren(card);
         card.appendChild(h("div", { style: { padding: "16px" } },
-          renderNotice("error", "Could not load ticket: " + (err.message || "Unknown error"))));
+          renderNotice("error", t("detail.loadFailed", { msg: err.message || "" }))));
       });
     } else {
       // Split layout: composer + others on the left, tabbed activity on the right.
       var split = h("div", { className: "rw-split" });
 
+      var projectName = config.projectName || t("header.thisProduct");
       var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
         h("div", { className: "rw-eyebrow" }, [
           h("span", { className: "rw-eyebrow-dot" }),
-          h("span", null, ((config.projectName || "") + " Feedback").trim()),
+          h("span", null, t("header.feedback", { name: config.projectName || "" }).trim()),
         ]),
         h("h1", { className: "rw-prompt" }, [
-          document.createTextNode("Help us improve "),
-          h("em", null, config.projectName || "this product"),
+          document.createTextNode(t("header.helpBefore")),
+          h("em", null, projectName),
+          document.createTextNode(t("header.helpAfter")),
         ]),
-        h("p", { className: "rw-prompt-sub" },
-          "Bugs, ideas, or small annoyances — drop them here. We read everything."),
+        h("p", { className: "rw-prompt-sub" }, t("header.helpSub")),
         renderInlineComposer(),
         renderOthersList(),
       ]);
@@ -1905,8 +2110,11 @@
       topTicketsCache = data.tickets || [];
       if (data.projectName) {
         config.projectName = data.projectName;
-        if (headerTitleEl) headerTitleEl.textContent = config.projectName + " Feedback";
+        if (headerTitleEl) headerTitleEl.textContent = t("header.feedback", { name: config.projectName });
       }
+      // Refresh language on every panel open so settings changes pick up
+      // without requiring the embedding page to reload.
+      if (data.language) config.language = data.language;
       config.isIdentified = !!data.isIdentified;
     });
     var updP = loadUpdates().then(function (data) {
@@ -1921,7 +2129,7 @@
       refreshTabLabel();
     }).catch(function (err) {
       clearChildren(scrollEl);
-      scrollEl.appendChild(renderNotice("error", "Could not load tickets: " + err.message));
+      scrollEl.appendChild(renderNotice("error", t("list.loadFailed", { msg: err.message || "" })));
     });
   }
 
@@ -1954,152 +2162,6 @@
     return activeModal;
   }
 
-  // ===========================================================================
-  // New-ticket modal — stages files locally, uploads after ticket is created
-  // ===========================================================================
-
-  function openNewTicketModal() {
-    var currentUrl = typeof window !== "undefined" ? window.location.href : "";
-    var noticeSlot = h("div", null);
-
-    var ta = h("textarea", {
-      className: "rw-modal-ta",
-      placeholder: "Write feedback, a proposal, or a bug report…",
-      maxlength: "5000",
-    });
-
-    var entries = []; // { file, state: 'staged' }
-    var chipsEl = h("div", { className: "rw-chips" });
-    chipsEl.style.display = "none";
-    var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
-
-    function renderChips() {
-      clearChildren(chipsEl);
-      if (entries.length === 0) { chipsEl.style.display = "none"; return; }
-      chipsEl.style.display = "flex";
-      entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": "Remove attachment" }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
-          renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || "Pasted image"),
-          removeBtn,
-        ]));
-      });
-    }
-    function addFiles(files) {
-      Array.prototype.forEach.call(files, function (file) {
-        if (!file.type || file.type.indexOf("image/") !== 0) return;
-        if (entries.length >= 5) return;
-        entries.push({ file: file, state: "staged" });
-      });
-      renderChips();
-      updateSubmitEnabled();
-    }
-    fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
-    ta.addEventListener("paste", function (e) {
-      if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
-        e.preventDefault(); addFiles(e.clipboardData.files);
-      }
-    });
-
-    var submitBtn = h("button", { className: "rw-submit-btn", type: "button", disabled: true }, [
-      h("span", null, "Submit"), Icons.send(12),
-    ]);
-    function updateSubmitEnabled() {
-      submitBtn.disabled = !config.isIdentified || ta.value.trim().length === 0;
-    }
-    ta.addEventListener("input", function () {
-      ta.style.height = "auto";
-      ta.style.height = Math.min(300, Math.max(160, ta.scrollHeight)) + "px";
-      updateSubmitEnabled();
-    });
-
-    var isPrivate = false;
-    var attachBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Attach image" }, [
-      Icons.paperclip(14), h("span", null, "Attach"),
-    ]);
-    attachBtn.addEventListener("click", function () { fileInput.click(); });
-    var privateBtn = h("button", { className: "rw-pill-btn", type: "button", title: "Only visible to the team" }, [
-      Icons.lock(12), h("span", null, "Private"),
-    ]);
-    privateBtn.addEventListener("click", function () {
-      isPrivate = !isPrivate;
-      privateBtn.classList.toggle("rw-on", isPrivate);
-    });
-
-    submitBtn.addEventListener("click", function () {
-      if (!config.isIdentified) {
-        clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", "You must be signed in to submit a ticket."));
-        return;
-      }
-      var description = ta.value.trim();
-      if (!description) return;
-      submitBtn.disabled = true;
-      submitBtn.firstChild.textContent = "Posting…";
-      clearChildren(noticeSlot);
-
-      createTicket({
-        description: description,
-        isPrivate: isPrivate,
-        context: collectContext(),
-      }).then(function (data) {
-        var ticketId = data && data.ticket && data.ticket.id;
-        if (!ticketId || entries.length === 0) return null;
-        submitBtn.firstChild.textContent = "Uploading…";
-        return Promise.all(entries.map(function (e) {
-          return uploadTicketAttachment(ticketId, e.file).catch(function (err) {
-            console.warn("Attachment failed:", err && err.message);
-            return null;
-          });
-        }));
-      }).then(function () {
-        topTicketsCache = null; updatesCache = null; myTicketsCache = null;
-        closeActiveModal();
-        return refreshAll();
-      }).catch(function (err) {
-        submitBtn.disabled = false;
-        submitBtn.firstChild.textContent = "Submit";
-        clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", "Failed to submit: " + (err.message || "Unknown error")));
-      });
-    });
-
-    var card = h("div", { className: "rw-modal-card" }, [
-      h("div", { className: "rw-modal-url", title: currentUrl }, [
-        h("span", { className: "rw-modal-url-label" }, "Current URL:"),
-        h("span", { className: "rw-modal-url-value" }, currentUrl),
-      ]),
-      ta,
-      chipsEl,
-      h("div", { className: "rw-modal-card-bar" }, [
-        h("div", { className: "rw-modal-bar-l" }, [attachBtn, privateBtn]),
-        h("div", { className: "rw-modal-bar-r" }, [submitBtn]),
-      ]),
-    ]);
-
-    var closeBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close" }, Icons.close(16));
-    closeBtn.addEventListener("click", closeActiveModal);
-
-    var modal = h("div", { className: "rw-modal" }, [
-      h("div", { className: "rw-modal-topbar" }, [
-        h("span", { className: "rw-modal-kicker" }, "New ticket"),
-        closeBtn,
-      ]),
-      noticeSlot,
-      card,
-      fileInput,
-    ]);
-
-    mountModal(modal);
-    setTimeout(function () { try { ta.focus(); } catch (_) {} }, 30);
-  }
 
   function collectContext() {
     return {
@@ -2143,7 +2205,7 @@
     var voteBtn = h("button", {
       className: "rw-vote" + (voted ? " rw-voted" : ""),
       type: "button",
-      "aria-label": "Upvote ticket",
+      "aria-label": t("aria.upvote"),
       disabled: !config.isIdentified,
     }, [Icons.arrowUp(12), countSpan]);
     voteBtn.addEventListener("click", function (e) { handleVoteClick(ticket, voteBtn, countSpan, e); });
@@ -2171,7 +2233,7 @@
         renderAvatar(authorName, 28),
         h("div", { className: "rw-td-post-hdr-text" }, [
           h("div", { className: "rw-td-post-author" }, authorName),
-          h("div", { className: "rw-td-post-when" }, timeAgo(ticket.createdAt) + " · Original report"),
+          h("div", { className: "rw-td-post-when" }, timeAgo(ticket.createdAt) + " · " + t("detail.original")),
         ]),
       ]),
     ];
@@ -2190,10 +2252,15 @@
       thread.appendChild(renderLoading());
     } else {
       var merged = mergeThread(comments, activity);
-      thread.appendChild(h("div", { className: "rw-td-thread-title" },
-        comments.length > 0 ? ("Activity · " + comments.length + " " + (comments.length === 1 ? "comment" : "comments")) : "Activity"));
+      var threadTitle = comments.length > 0
+        ? t("detail.activityCount", {
+            n: comments.length,
+            plural: comments.length === 1 ? t("detail.commentSingular") : t("detail.commentPlural"),
+          })
+        : t("detail.activity");
+      thread.appendChild(h("div", { className: "rw-td-thread-title" }, threadTitle));
       if (merged.length === 0) {
-        thread.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "4px 0" } }, "No activity yet."));
+        thread.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "4px 0" } }, t("detail.noActivity")));
       } else {
         merged.forEach(function (node) {
           if (node.kind === "event") thread.appendChild(renderEventNode(node.event));
@@ -2222,7 +2289,7 @@
     metaChildren.push(h("span", null, timeAgo(ticket.createdAt)));
     if (ticket.completedAt && ticket.status === "done") {
       metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
-      metaChildren.push(h("span", null, "shipped " + timeAgo(ticket.completedAt)));
+      metaChildren.push(h("span", null, t("detail.shipped", { when: timeAgo(ticket.completedAt) })));
     }
     return h("div", { className: "rw-td-head-meta" }, metaChildren);
   }
@@ -2248,18 +2315,18 @@
     if (e.type === "status_change") {
       var fromLabel = m.from ? statusLabel(m.from) : null;
       var toLabel = m.to ? statusLabel(m.to) : null;
-      if (fromLabel && toLabel) return "status change [" + fromLabel + "] → [" + toLabel + "]";
-      if (toLabel) return "status change → [" + toLabel + "]";
-      return "changed status";
+      if (fromLabel && toLabel) return t("events.statusChangeBoth", { from: fromLabel, to: toLabel });
+      if (toLabel) return t("events.statusChangeTo", { to: toLabel });
+      return t("events.changedStatus");
     }
     if (e.type === "moderation_changed") {
-      return "changed moderation to " + (m.to || "unknown");
+      return t("events.moderationChanged", { to: m.to || "unknown" });
     }
-    if (e.type === "assigned")       return "assigned the ticket" + (m.assignee ? " to " + m.assignee : "");
-    if (e.type === "unassigned")     return "unassigned the ticket";
-    if (e.type === "ticket_created") return "opened the ticket";
-    if (e.type === "ticket_edited")  return "edited the ticket";
-    if (e.type === "ticket_deleted") return "deleted the ticket";
+    if (e.type === "assigned")       return m.assignee ? t("events.assignedTo", { to: m.assignee }) : t("events.assigned");
+    if (e.type === "unassigned")     return t("events.unassigned");
+    if (e.type === "ticket_created") return t("events.ticketCreated");
+    if (e.type === "ticket_edited")  return t("events.ticketEdited");
+    if (e.type === "ticket_deleted") return t("events.ticketDeleted");
     return e.content || e.type;
   }
 
@@ -2298,17 +2365,17 @@
     var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
 
     var disabled = !config.isIdentified || !!ticket.commentsDisabled;
-    var placeholder = !config.isIdentified ? "Sign in to reply"
-                    : ticket.commentsDisabled ? "Comments are disabled"
-                    : "Write a comment…  (⌘V to paste a screenshot)";
+    var placeholder = !config.isIdentified ? t("reply.signInPlaceholder")
+                    : ticket.commentsDisabled ? t("reply.disabledPlaceholder")
+                    : t("reply.placeholder");
 
     var ta = h("textarea", { className: "rw-td-composer-ta", placeholder: placeholder, disabled: disabled });
 
     var submitBtn = h("button", { className: "rw-submit-btn", type: "button", disabled: true }, [
-      h("span", null, "Comment"), Icons.send(12),
+      h("span", null, t("reply.submit")), Icons.send(12),
     ]);
     var attachBtn = h("button", { className: "rw-pill-btn", type: "button", disabled: disabled }, [
-      Icons.paperclip(14), h("span", null, "Attach"),
+      Icons.paperclip(14), h("span", null, t("composer.attach")),
     ]);
     attachBtn.addEventListener("click", function () { fileInput.click(); });
 
@@ -2323,7 +2390,7 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": "Remove" }, "×");
+        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.remove") }, "×");
         removeBtn.addEventListener("click", function (e) {
           e.stopPropagation();
           var i = entries.indexOf(entry);
@@ -2332,7 +2399,7 @@
         });
         chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
           Icons.image(11),
-          h("span", null, entry.file.name || "Pasted image"),
+          h("span", null, entry.file.name || t("composer.pastedImage")),
           removeBtn,
         ]));
       });
@@ -2362,13 +2429,13 @@
       var text = ta.value.trim();
       if (!text && entries.length === 0) return;
       submitBtn.disabled = true;
-      submitBtn.firstChild.textContent = "Posting…";
+      submitBtn.firstChild.textContent = t("reply.posting");
       clearChildren(noticeSlot);
       postComment(ticket.id, text || "").then(function (data) {
         var newComment = data && data.comment;
         if (!newComment) throw new Error("Malformed response");
         if (entries.length === 0) return newComment;
-        submitBtn.firstChild.textContent = "Uploading…";
+        submitBtn.firstChild.textContent = t("reply.uploading");
         return Promise.all(entries.map(function (e) {
           return uploadCommentAttachment(ticket.id, newComment.id, e.file)
             .then(function (r) { return r && r.attachment; })
@@ -2383,13 +2450,13 @@
         ta.style.height = "auto";
         entries.length = 0;
         renderChips();
-        submitBtn.firstChild.textContent = "Comment";
+        submitBtn.firstChild.textContent = t("reply.submit");
         updateSubmitEnabled();
         if (onPosted) onPosted(newComment);
       }).catch(function (err) {
-        submitBtn.firstChild.textContent = "Comment";
+        submitBtn.firstChild.textContent = t("reply.submit");
         updateSubmitEnabled();
-        noticeSlot.appendChild(renderNotice("error", "Failed to post: " + (err.message || "Unknown error")));
+        noticeSlot.appendChild(renderNotice("error", t("reply.failed", { msg: err.message || "" })));
       });
     });
 
@@ -2399,7 +2466,7 @@
       h("div", { className: "rw-td-composer-bar" }, [
         h("div", { className: "rw-td-composer-bar-l" }, [
           attachBtn,
-          h("span", { className: "rw-td-composer-hint" }, "Paste screenshots with ⌘V"),
+          h("span", { className: "rw-td-composer-hint" }, t("reply.hint")),
         ]),
         submitBtn,
       ]),
@@ -2407,9 +2474,9 @@
 
     var composer = h("div", { className: "rw-td-composer" });
     if (!config.isIdentified) {
-      composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, "Sign in to post a comment."));
+      composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, t("reply.signInPrompt")));
     } else if (ticket.commentsDisabled) {
-      composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, "Comments are disabled on this ticket."));
+      composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, t("reply.disabledPrompt")));
     }
     composer.appendChild(noticeSlot);
     composer.appendChild(h("div", { className: "rw-td-composer-row" }, [
@@ -2465,7 +2532,7 @@
     // what changed: clicking opens a centered modal instead of a slide-out.
     tabEl = h("button", {
       className: "rw-tab", type: "button",
-      "aria-label": "Open feedback panel",
+      "aria-label": t("aria.openPanel"),
     }, buildTabContent());
     if (config.offset === "auto") {
       tabEl.classList.add("rw-tab--horizontal");
@@ -2491,7 +2558,7 @@
     themeToggleBtn = h("button", { className: "rw-icon-btn", type: "button" });
     themeToggleBtn.addEventListener("click", toggleTheme);
 
-    var closeShellBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": "Close" }, Icons.close(16));
+    var closeShellBtn = h("button", { className: "rw-icon-btn", type: "button", "aria-label": t("aria.close") }, Icons.close(16));
     closeShellBtn.addEventListener("click", closePanel);
 
     // The card body (`scrollEl` keeps its name for compatibility with
@@ -2508,7 +2575,7 @@
 
     var cardModal = h("div", {
       className: "rw-card-modal", role: "dialog",
-      "aria-label": "Feedback panel", "aria-modal": "true",
+      "aria-label": t("aria.openPanel"), "aria-modal": "true",
     }, [
       h("div", { className: "rw-shell-actions" }, [themeToggleBtn, closeShellBtn]),
       scrollEl,
@@ -2578,6 +2645,9 @@
         config.projectId = data.projectSlug || config.project;
         config.projectName = data.projectName || config.project;
         config.isIdentified = !!data.isIdentified;
+        // language must be set BEFORE mountDOM — the launcher tab's aria-label
+        // and any first-render strings read t() at construction time.
+        config.language = data.language || opts.language || "en";
 
         var pos = (data.position || "middle-right").split("-");
         var vPos = pos[0] || "middle";

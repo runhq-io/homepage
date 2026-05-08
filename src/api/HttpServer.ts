@@ -5465,6 +5465,7 @@ export function createHttpApp() {
       projectId,
       auto_approve,
       widget_position,
+      widget_language,
       voting_period_hours,
       is_public,
       auto_inject_in_preview,
@@ -5477,7 +5478,7 @@ export function createHttpApp() {
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
-        auto_approve, widget_position, voting_period_hours, is_public, auto_inject_in_preview, slug,
+        auto_approve, widget_position, widget_language, voting_period_hours, is_public, auto_inject_in_preview, slug,
       }, { workspaceProjectId: projectId });
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {

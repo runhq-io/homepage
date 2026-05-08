@@ -1293,6 +1293,7 @@ export const widgetProjects = pgTable('widget_projects', {
   autoApprove: boolean('auto_approve').default(false).notNull(),
   autoInjectInPreview: boolean('auto_inject_in_preview').default(false).notNull(),
   widgetPosition: text('widget_position'),
+  widgetLanguage: text('widget_language'),
   votingPeriodHours: integer('voting_period_hours'),
   channelId: text('channel_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),

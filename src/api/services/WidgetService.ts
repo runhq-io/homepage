@@ -49,6 +49,7 @@ interface WidgetProjectContext {
   name: string;
   slug: string;
   widgetPosition: string | null;
+  widgetLanguage: string | null;
   serverId: string;
   channelId: string | null;
 }
@@ -144,6 +145,7 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       name: widgetProjects.name,
       slug: widgetProjects.slug,
       widgetPosition: widgetProjects.widgetPosition,
+      widgetLanguage: widgetProjects.widgetLanguage,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
     })
@@ -410,6 +412,7 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     projectSlug: project?.slug ?? '',
     homepageUrl: getHomepageUrl(),
     position: project?.widgetPosition ?? null,
+    language: project?.widgetLanguage ?? 'en',
     isIdentified: !!widgetUserId,
     tickets,
   };
@@ -452,6 +455,7 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
     projectSlug: project?.slug ?? '',
     homepageUrl: getHomepageUrl(),
     position: project?.widgetPosition ?? null,
+    language: project?.widgetLanguage ?? 'en',
     isIdentified: !!widgetUserId,
     tickets,
   };
@@ -1606,6 +1610,7 @@ export async function getWidgetSettings(serverId: string, workspaceProjectId?: s
     .select({
       autoApprove: widgetProjects.autoApprove,
       widgetPosition: widgetProjects.widgetPosition,
+      widgetLanguage: widgetProjects.widgetLanguage,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       isPublic: widgetProjects.isPublic,
       autoInjectInPreview: widgetProjects.autoInjectInPreview,
@@ -1621,6 +1626,7 @@ export async function getWidgetSettings(serverId: string, workspaceProjectId?: s
   return {
     auto_approve: project.autoApprove,
     widget_position: project.widgetPosition,
+    widget_language: project.widgetLanguage,
     voting_period_hours: project.votingPeriodHours,
     is_public: project.isPublic,
     auto_inject_in_preview: project.autoInjectInPreview,
@@ -1649,6 +1655,7 @@ export async function updateWidgetSettings(
   settings: {
     auto_approve?: boolean;
     widget_position?: string;
+    widget_language?: string | null;
     voting_period_hours?: number;
     is_public?: boolean;
     auto_inject_in_preview?: boolean;
@@ -1696,6 +1703,7 @@ export async function updateWidgetSettings(
     .set({
       ...(settings.auto_approve !== undefined && { autoApprove: settings.auto_approve }),
       ...(settings.widget_position !== undefined && { widgetPosition: settings.widget_position }),
+      ...(settings.widget_language !== undefined && { widgetLanguage: settings.widget_language }),
       ...(settings.voting_period_hours !== undefined && { votingPeriodHours: settings.voting_period_hours }),
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
