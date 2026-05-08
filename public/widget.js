@@ -1455,8 +1455,9 @@
       '.rw-submit-btn:disabled { cursor: not-allowed; opacity: 0.75; background: transparent; color: var(--rw-muted); border-color: var(--rw-line); }',
       '.rw-modal-mount[data-theme="light"] .rw-submit-btn:disabled { color: var(--rw-muted-2); }',
 
-      /* detail modal head */
-      '.rw-td-head { padding: 16px 18px 14px; border-bottom: 1px solid var(--rw-line); background: rgba(255,255,255,0.015); flex: 0 0 auto; }',
+      /* detail modal head — head + body share one scroll area
+         (.rw-td-scroll), so the head is no longer flex-pinned. */
+      '.rw-td-head { padding: 16px 18px 14px; border-bottom: 1px solid var(--rw-line); background: rgba(255,255,255,0.015); }',
       '.rw-td-head-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }',
       '.rw-td-head-ref { display: inline-flex; align-items: center; gap: 8px; }',
       '.rw-td-ref { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--rw-muted); letter-spacing: 0.04em; }',
@@ -1464,10 +1465,16 @@
       '.rw-td-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--rw-muted); }',
       '.rw-td-meta-author { color: var(--rw-fg-2); font-weight: 500; }',
 
-      '.rw-td-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 18px 8px; }',
-      '.rw-td-body::-webkit-scrollbar { width: 10px; }',
-      '.rw-td-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }',
-      '.rw-modal-mount[data-theme="light"] .rw-td-body::-webkit-scrollbar-thumb { background: rgba(15,20,35,0.15); background-clip: padding-box; }',
+      /* The single scroll container for the detail view. Title, description,
+         attachments, and activity thread all scroll together — the composer
+         sits OUTSIDE this element (pinned at the bottom of the card). */
+      '.rw-td-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }',
+      '.rw-td-scroll::-webkit-scrollbar { width: 6px; }',
+      '.rw-td-scroll::-webkit-scrollbar-track { background: transparent; }',
+      '.rw-td-scroll::-webkit-scrollbar-thumb { background: var(--rw-line-2); border-radius: 999px; }',
+      '.rw-td-scroll::-webkit-scrollbar-thumb:hover { background: var(--rw-muted-2); }',
+
+      '.rw-td-body { padding: 18px 18px 8px; }',
 
       /* original post */
       '.rw-td-post { margin-bottom: 14px; }',
@@ -2084,9 +2091,10 @@
     if (view === "detail" && currentDetailTicket) {
       var detailFull = h("div", { className: "rw-detail-full" });
 
-      // Topbar with Back button + ticket ref. The reference id mirrors the
-      // old detail-modal head: short uppercase prefix of the ticket id.
-      var refId = String(currentDetailTicket.id || "").slice(0, 8).toUpperCase();
+      // Topbar with just the Back button. The ticket ref id used to live
+      // here too but it duplicated the #refId chip in the head below and
+      // collided with the absolute-positioned shell actions on narrow
+      // viewports — gone.
       var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
         Icons.arrowLeft(13),
         h("span", null, t("detail.back")),
@@ -2096,10 +2104,7 @@
         currentDetailTicket = null;
         renderPanelBody();
       });
-      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [
-        backBtn,
-        h("span", { className: "rw-td-ref" }, "#" + refId),
-      ]));
+      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [backBtn]));
 
       // Body uses the same renderDetailInto pipeline as the legacy modal,
       // just rendered inline. Loads detail data on demand.
@@ -2296,7 +2301,13 @@
       // it duplicated the avatar/author/time block in the post header
       // immediately below. Single source of truth = the post header.
     ]);
-    card.appendChild(head);
+    // Head + body share one scroll area so the entire ticket content
+    // (title, description, attachments, activity thread) scrolls
+    // together. The composer below stays pinned at the bottom of the
+    // card via flex layout. Earlier the body alone scrolled, which made
+    // long descriptions invisible on the way down to comments.
+    var scrollArea = h("div", { className: "rw-td-scroll" });
+    scrollArea.appendChild(head);
 
     // body
     var body = h("div", { className: "rw-td-body" });
@@ -2343,9 +2354,10 @@
       }
     }
     body.appendChild(thread);
-    card.appendChild(body);
+    scrollArea.appendChild(body);
+    card.appendChild(scrollArea);
 
-    // composer
+    // composer (outside the scroll area, pinned to the bottom of the card)
     card.appendChild(renderComposer(ticket, function (newComment) {
       comments.push(newComment);
       renderDetailInto(card, { ticket: ticket, comments: comments, activity: activity, isOwner: data.isOwner, isEditable: data.isEditable }, false);
