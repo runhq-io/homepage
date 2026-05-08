@@ -278,18 +278,25 @@
       },
       header: {
         feedback: "{name} Feedback",
-        // Headline is rendered as: [helpBefore][<em>{projectName}</em>][helpAfter]
-        // English: "Help us improve <em>{name}</em>"
-        // Korean:  "<em>{name}</em> 개선을 도와주세요"
-        helpBefore: "Help us improve ",
-        helpAfter: "",
-        helpSub: "Bugs, ideas, or small annoyances — drop them here. We read everything.",
+        // Headline interpolates the project name: e.g. "Staircase HQ".
+        headline: "{name} HQ",
+        // Sub-text is rendered as: [subBefore]<em>{subEm}</em>[subAfter].
+        // The em segment highlights the My Submissions tab name; locales
+        // can shift its position (English: tail; Korean: head) by moving
+        // the surrounding text between subBefore and subAfter.
+        subBefore: "Bugs, ideas — please write them here. Track progress on everything you've submitted in ",
+        subEm: "My Submissions",
+        subAfter: ".",
         thisProduct: "this product",
+        poweredBy: "Powered by",
+        visitRunhq: "Visit RunHQ",
       },
       composer: {
         placeholder: "Start typing…",
         attach: "Attach",
         private: "Private",
+        privateOn: "Only you and the team will see this.",
+        privateOff: "Others can see and upvote this.",
         submit: "Submit",
         posting: "Posting…",
         uploading: "Uploading…",
@@ -297,8 +304,8 @@
         failed: "Failed to submit: {msg}",
         pastedImage: "Pasted image",
       },
-      others: { label: "Recent tickets submitted", empty: "No tickets yet." },
-      tabs: { updates: "Updates", hot: "Hot", mine: "My Tickets" },
+      others: { label: "Recent Submissions", empty: "No tickets yet." },
+      tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
       empty: {
         noTickets: "No tickets yet",
         beFirst: "Be the first to share feedback.",
@@ -365,15 +372,24 @@
       },
       header: {
         feedback: "{name} 피드백",
-        helpBefore: "",
-        helpAfter: " 개선을 도와주세요",
-        helpSub: "버그, 아이디어, 작은 불편함까지 자유롭게 남겨주세요. 모두 읽어보고 있습니다.",
+        // Korean keeps the brand "HQ" mark — translating it to "본부" reads
+        // institutional and loses the product feel.
+        headline: "{name} HQ",
+        // Korean reverses English word order: the "My Submissions" reference
+        // comes first, with the rest of the sentence trailing.
+        subBefore: "버그, 아이디어 — 여기에 자유롭게 적어주세요. ",
+        subEm: "내 제출 내역",
+        subAfter: "에서 제출한 모든 항목의 진행 상황을 확인할 수 있습니다.",
         thisProduct: "이 제품",
+        poweredBy: "제공",
+        visitRunhq: "RunHQ 방문",
       },
       composer: {
         placeholder: "내용을 입력하세요…",
         attach: "첨부",
         private: "비공개",
+        privateOn: "본인과 팀에게만 표시됩니다.",
+        privateOff: "다른 사용자가 보고 추천할 수 있습니다.",
         submit: "제출",
         posting: "게시 중…",
         uploading: "업로드 중…",
@@ -381,8 +397,8 @@
         failed: "제출 실패: {msg}",
         pastedImage: "붙여넣은 이미지",
       },
-      others: { label: "최근 등록된 티켓", empty: "아직 티켓이 없습니다." },
-      tabs: { updates: "업데이트", hot: "인기", mine: "내 티켓" },
+      others: { label: "최근 제출 내역", empty: "아직 티켓이 없습니다." },
+      tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
       empty: {
         noTickets: "아직 티켓이 없습니다",
         beFirst: "가장 먼저 피드백을 남겨보세요.",
@@ -665,21 +681,23 @@
     var isRight = position === "right";
 
     var css = [
-      /* Direction A · Warm paper (default) */
+      /* Modern SaaS palette (Linear/zinc-style). Display & body are both
+         Inter; --rw-serif is kept as a token name for compatibility but it
+         points at the same Inter stack — there are no serif faces left. */
       '.rw-stage[data-theme="light"], .rw-modal-mount[data-theme="light"] {',
-      '  --rw-bg: #faf7f1; --rw-panel: #ffffff; --rw-panel-2: #f3efe6; --rw-panel-3: #ede7d9;',
-      '  --rw-line: rgba(42,37,32,0.09); --rw-line-2: rgba(42,37,32,0.16);',
-      '  --rw-fg: #2a2520; --rw-fg-2: #55504a; --rw-muted: #8a857d; --rw-muted-2: #b0aa9f;',
-      '  --rw-accent: #6b8a6a; --rw-accent-ink: #ffffff;',
-      '  --rw-serif: "Fraunces", Georgia, "Times New Roman", serif;',
+      '  --rw-bg: #ffffff; --rw-panel: #fafafa; --rw-panel-2: #f4f4f5; --rw-panel-3: #e4e4e7;',
+      '  --rw-line: rgba(0,0,0,0.07); --rw-line-2: rgba(0,0,0,0.13);',
+      '  --rw-fg: #0a0a0a; --rw-fg-2: #3f3f46; --rw-muted: #71717a; --rw-muted-2: #a1a1aa;',
+      '  --rw-accent: #6366f1; --rw-accent-ink: #ffffff;',
+      '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
-      /* Direction D · Warm charcoal dark */
+      /* Warm charcoal dark — matches dashboard.css. */
       '.rw-stage[data-theme="dark"], .rw-modal-mount[data-theme="dark"] {',
-      '  --rw-bg: #1c1f26; --rw-panel: #252932; --rw-panel-2: #21252d; --rw-panel-3: #2c313c;',
-      '  --rw-line: rgba(255,255,255,0.07); --rw-line-2: rgba(255,255,255,0.14);',
-      '  --rw-fg: #ecebe6; --rw-fg-2: #c0bdb5; --rw-muted: #8a877f; --rw-muted-2: #5e5d58;',
-      '  --rw-accent: #9bb99a; --rw-accent-ink: #1c1f26;',
-      '  --rw-serif: "Fraunces", Georgia, "Times New Roman", serif;',
+      '  --rw-bg: #1f1a14; --rw-panel: #2a231b; --rw-panel-2: #251f17; --rw-panel-3: #2f2820;',
+      '  --rw-line: rgba(255,243,219,0.08); --rw-line-2: rgba(255,243,219,0.14);',
+      '  --rw-fg: #f0e9d9; --rw-fg-2: #c8c0ad; --rw-muted: #8e8676; --rw-muted-2: #6e6759;',
+      '  --rw-accent: #818cf8; --rw-accent-ink: #1f1a14;',
+      '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
 
       '.rw-stage, .rw-modal-mount {',
@@ -811,12 +829,14 @@
       '}',
       '@media (max-width: 640px) { .rw-card-modal { border-radius: 0; border: none; } }',
 
-      /* shell-level controls (close + theme), pinned top-right of the modal card */
+      /* Shell-level controls (theme + close), pinned top-right of the
+         modal card. Buttons are 28×28 to match the design's compact close. */
       '.rw-shell-actions {',
-      '  position: absolute; top: 12px; right: 12px;',
+      '  position: absolute; top: 18px; right: 18px;',
       '  display: inline-flex; align-items: center; gap: 4px;',
       '  z-index: 5;',
       '}',
+      '.rw-shell-actions .rw-icon-btn { width: 28px; height: 28px; }',
 
       /* split (list view): asymmetric — composer left, tabs/list right */
       '.rw-split {',
@@ -842,31 +862,53 @@
       '}',
 
       /* eyebrow + headline + sub */
+      /* Eyebrow row: kicker on the left, "Powered by RunHQ" on the right.
+         The bottom-of-modal footer was moved up here so the modal's vertical
+         space goes entirely to content. */
+      '.rw-eyebrow-row {',
+      '  display: flex; align-items: center; justify-content: space-between;',
+      '  gap: 12px; margin-bottom: 14px;',
+      '}',
       '.rw-eyebrow {',
       '  display: inline-flex; align-items: center; gap: 8px;',
       '  font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase;',
-      '  color: var(--rw-muted); font-weight: 500; margin-bottom: 14px;',
+      '  color: var(--rw-muted); font-weight: 500;',
+      '  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
       '}',
-      '.rw-eyebrow-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); }',
+      '.rw-eyebrow-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); flex: 0 0 auto; }',
+      '.rw-powered-by {',
+      '  font-size: 10.5px; color: var(--rw-muted);',
+      '  white-space: nowrap; flex: 0 0 auto;',
+      '  letter-spacing: 0.02em;',
+      '}',
+      '.rw-powered-by a {',
+      '  color: var(--rw-fg-2); text-decoration: none; font-weight: 600;',
+      '  transition: color .15s ease;',
+      '}',
+      '.rw-powered-by a:hover { color: var(--rw-fg); text-decoration: underline; }',
+
       '.rw-prompt {',
-      '  font-family: var(--rw-serif);',
-      '  font-size: 28px; line-height: 1.12; letter-spacing: -0.018em; font-weight: 500;',
-      '  color: var(--rw-fg); margin: 0 0 8px;',
+      '  font-family: inherit;',
+      '  font-size: 22px; line-height: 1.18; letter-spacing: -0.018em; font-weight: 600;',
+      '  color: var(--rw-fg); margin: 0 0 6px;',
       '}',
-      '.rw-prompt em { font-style: italic; font-weight: 400; color: var(--rw-fg-2); }',
+      /* <em> in the headline + sub is now bold-not-italic — used to highlight
+         the project name or "My Submissions" without breaking line rhythm. */
+      '.rw-prompt em { font-style: normal; font-weight: 600; color: var(--rw-fg); }',
       '.rw-prompt-sub { margin: 0 0 18px; font-size: 13px; line-height: 1.45; color: var(--rw-muted); }',
+      '.rw-prompt-sub em { font-style: normal; font-weight: 600; color: var(--rw-fg-2); }',
 
       /* inline composer (left pane) */
       '.rw-inline-composer { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }',
       '.rw-inline-composer-ta {',
       '  width: 100%; border: 0; outline: none; resize: none; background: transparent;',
       '  color: var(--rw-fg);',
-      '  font-family: var(--rw-serif); font-size: 19px; line-height: 1.5; letter-spacing: -0.005em;',
-      '  padding: 4px 0; min-height: 120px;',
+      '  font-family: inherit; font-size: 14.5px; line-height: 1.55; letter-spacing: -0.005em;',
+      '  padding: 4px 0; min-height: 110px;',
       '}',
       '.rw-inline-composer-ta::placeholder {',
       '  color: var(--rw-muted);',
-      '  font-family: var(--rw-serif); font-style: italic; font-size: 18px; letter-spacing: -0.008em;',
+      '  font-size: 14.5px; letter-spacing: -0.005em;',
       '}',
       '.rw-inline-composer-bar {',
       '  display: flex; align-items: center; justify-content: space-between; gap: 10px;',
@@ -884,8 +926,14 @@
       '  transition: transform .12s ease, box-shadow .16s ease, opacity .12s ease, filter .12s ease;',
       '}',
       '.rw-inline-submit:not(:disabled):hover { transform: translateY(-1px); filter: brightness(1.04); box-shadow: 0 8px 18px -10px color-mix(in oklab, var(--rw-accent) 60%, transparent); }',
-      '.rw-inline-submit:disabled { background: transparent; color: var(--rw-muted); border-color: var(--rw-line-2); cursor: not-allowed; opacity: 0.85; }',
+      /* Disabled state keeps the accent color but fades the whole button —
+         hint that submit is real, just not yet armed (vs. swapping to a
+         transparent ghost button which felt like a different control). */
+      '.rw-inline-submit:disabled { cursor: not-allowed; opacity: 0.45; }',
       '.rw-inline-notice { margin-top: 10px; }',
+      /* Privacy hint sits next to the Private toggle and explains the
+         consequence of the toggle to first-time users. */
+      '.rw-priv-hint { font-size: 10.5px; color: var(--rw-muted); margin-left: 8px; letter-spacing: 0; }',
 
       /* recent-tickets-submitted strip (left pane bottom) */
       '.rw-others {',
@@ -912,9 +960,17 @@
       '  display: grid; grid-template-columns: 8px 1fr auto;',
       '  align-items: center; gap: 10px; width: 100%;',
       '  text-align: left; background: transparent; border: 0;',
-      '  border-radius: 8px; padding: 8px;',
+      '  border-radius: 8px; padding: 9px 8px;',
       '  cursor: pointer; color: var(--rw-fg); font: inherit;',
       '  transition: background 100ms;',
+      '}',
+      /* Two-line layout: title above, "{author} · {when}" below. Both clip
+         on overflow to keep the row a single physical line. */
+      '.rw-others-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }',
+      '.rw-others-sub {',
+      '  font-size: 10.5px; color: var(--rw-muted);',
+      '  letter-spacing: 0;',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
       '}',
       '.rw-others-row + .rw-others-row {',
       '  border-top: 1px dashed var(--rw-line);',
@@ -1046,18 +1102,6 @@
       '  transition: background .12s, color .12s, border-color .12s;',
       '}',
       '.rw-back-btn:hover { background: var(--rw-panel-2); color: var(--rw-fg); border-color: var(--rw-line-2); }',
-
-      /* dashboard footer */
-      '.rw-dash-ftr {',
-      '  flex: 0 0 auto;',
-      '  display: flex; align-items: center; justify-content: center; gap: 6px;',
-      '  padding: 8px 14px 12px;',
-      '  font-size: 11px; color: var(--rw-muted);',
-      '  border-top: 1px solid var(--rw-line);',
-      '  background: transparent;',
-      '}',
-      '.rw-dash-ftr b { color: var(--rw-fg-2); font-weight: 600; letter-spacing: 0.01em; }',
-      '.rw-dash-ftr-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); }',
 
       /* header */
       '.rw-hdr {',
@@ -1392,7 +1436,7 @@
       '.rw-td-head-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }',
       '.rw-td-head-ref { display: inline-flex; align-items: center; gap: 8px; }',
       '.rw-td-ref { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--rw-muted); letter-spacing: 0.04em; }',
-      '.rw-td-title { margin: 0 0 8px; font-family: var(--rw-serif); font-size: 18px; font-weight: 500; color: var(--rw-fg); line-height: 1.3; letter-spacing: -0.01em; }',
+      '.rw-td-title { margin: 6px 0 12px; font-family: inherit; font-size: 20px; font-weight: 600; color: var(--rw-fg); line-height: 1.22; letter-spacing: -0.018em; }',
       '.rw-td-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--rw-muted); }',
       '.rw-td-meta-author { color: var(--rw-fg-2); font-weight: 500; }',
 
@@ -1899,9 +1943,13 @@
     var privateBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
       Icons.lock(12), h("span", null, t("composer.private")),
     ]);
+    // Inline privacy hint that flips text based on the toggle. Helps
+    // first-time users understand the consequence before they submit.
+    var privHint = h("span", { className: "rw-priv-hint" }, t("composer.privateOff"));
     privateBtn.addEventListener("click", function () {
       isPrivate = !isPrivate;
       privateBtn.classList.toggle("rw-on", isPrivate);
+      privHint.textContent = isPrivate ? t("composer.privateOn") : t("composer.privateOff");
     });
 
     submitBtn.addEventListener("click", function () {
@@ -1954,7 +2002,7 @@
       ta,
       chipsEl,
       h("div", { className: "rw-inline-composer-bar" }, [
-        h("div", { className: "rw-inline-tools" }, [attachBtn, privateBtn]),
+        h("div", { className: "rw-inline-tools" }, [attachBtn, privateBtn, privHint]),
         submitBtn,
       ]),
       noticeSlot,
@@ -1978,12 +2026,19 @@
     } else {
       // Use `tk` for ticket — `t` is the i18n function.
       items.forEach(function (tk) {
+        var author = displayNameFromTicket(tk);
+        var when = timeAgo(tk.completedAt || tk.createdAt);
+        var sub = author + " · " + when;
         var row = h("button", {
           className: "rw-others-row", type: "button",
           "aria-label": t("aria.openTicket", { title: tk.title }),
         }, [
           h("span", { className: "rw-others-status", "data-status": tk.status, style: { background: statusMeta(tk.status).dot } }),
-          h("span", { className: "rw-others-title" }, tk.title),
+          // Two-line content cell: title above, author/when below.
+          h("span", { className: "rw-others-main" }, [
+            h("span", { className: "rw-others-title" }, tk.title),
+            h("span", { className: "rw-others-sub" }, sub),
+          ]),
           h("span", { className: "rw-others-meta" }, [Icons.arrowUp(9), String(tk.yesVotes || 0)]),
         ]);
         row.addEventListener("click", function () { openDetailModal(tk); });
@@ -2046,17 +2101,36 @@
       var split = h("div", { className: "rw-split" });
 
       var projectName = config.projectName || t("header.thisProduct");
+
+      // Powered-by link (right end of the eyebrow row). Replaces the
+      // bottom-of-modal footer that the previous design had.
+      var poweredLink = h("a", {
+        href: "https://www.runhq.io", target: "_blank",
+        rel: "noopener noreferrer",
+        "aria-label": t("header.visitRunhq"),
+      }, "RunHQ");
+      var poweredBy = h("div", { className: "rw-powered-by" }, [
+        document.createTextNode(t("header.poweredBy") + " "),
+        poweredLink,
+      ]);
+
       var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
-        h("div", { className: "rw-eyebrow" }, [
-          h("span", { className: "rw-eyebrow-dot" }),
-          h("span", null, t("header.feedback", { name: config.projectName || "" }).trim()),
+        h("div", { className: "rw-eyebrow-row" }, [
+          h("div", { className: "rw-eyebrow" }, [
+            h("span", { className: "rw-eyebrow-dot" }),
+            h("span", null, t("header.feedback", { name: config.projectName || "" }).trim()),
+          ]),
+          poweredBy,
         ]),
-        h("h1", { className: "rw-prompt" }, [
-          document.createTextNode(t("header.helpBefore")),
-          h("em", null, projectName),
-          document.createTextNode(t("header.helpAfter")),
+        h("h1", { className: "rw-prompt" }, t("header.headline", { name: projectName })),
+        // Sub-text: prefix + <em>tab name</em> + suffix. The em segment
+        // visually links the prose to the My Submissions tab so users know
+        // where to follow up on what they file.
+        h("p", { className: "rw-prompt-sub" }, [
+          document.createTextNode(t("header.subBefore")),
+          h("em", null, t("header.subEm")),
+          document.createTextNode(t("header.subAfter")),
         ]),
-        h("p", { className: "rw-prompt-sub" }, t("header.helpSub")),
         renderInlineComposer(),
         renderOthersList(),
       ]);
@@ -2529,10 +2603,9 @@
       style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" },
     });
 
-    footerEl = h("div", { className: "rw-dash-ftr" }, [
-      h("span", { className: "rw-dash-ftr-dot" }),
-      h("span", null, [document.createTextNode("Powered by "), h("b", null, "RunHQ")]),
-    ]);
+    // The "Powered by RunHQ" line moved to the left-pane eyebrow row
+    // (see renderPanelBody) — there is no bottom footer anymore.
+    footerEl = null;
 
     var cardModal = h("div", {
       className: "rw-card-modal", role: "dialog",
@@ -2540,7 +2613,6 @@
     }, [
       h("div", { className: "rw-shell-actions" }, [themeToggleBtn, closeShellBtn]),
       scrollEl,
-      footerEl,
     ]);
 
     // `widgetEl` aliases the outer scrim so existing open/close code that
