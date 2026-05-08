@@ -556,39 +556,35 @@
   }
 
   function buildTabIcon() {
-    // Star-shaped organism with rounded edges. Three-stage SVG filter:
-    //   1. feGaussianBlur — smears the sharp 5-point star into a blurry
-    //      cross. The bigger the stdDeviation, the rounder the result.
-    //   2. feColorMatrix (alpha threshold) — boosts alpha by a large
-    //      multiplier and subtracts a constant, hard-cutting the blurred
-    //      shape back to opaque. The combination turns the sharp star
-    //      into a soft 5-LOBED BLOB with no sharp tips.
-    //   3. feTurbulence + feDisplacementMap — wobbles the rounded blob
-    //      organically, with the displacement scale breathing over 5.5s.
-    // Combined with a 22s rotation, the silhouette never repeats a pose.
+    // Soft 5-lobed organism. The source path is ALREADY rounded — no
+    // sharp polygon tips anywhere — and the filter just adds organic
+    // wobble + slow rotation on top.
+    //
+    // How the path stays round: 5 "tip" points at radius 40, 5 "base"
+    // points placed at the geometric midpoint between adjacent tips
+    // (which puts each base on the straight line between its two
+    // neighboring tips). Connecting bases with quadratic Bézier curves
+    // that use the tip as the control point gives:
+    //   - Smooth round bulge at each tip (curve passes near, not through)
+    //   - C1 continuity at each base (tangents from both sides align,
+    //     because the base sits on the inter-tip line). No corners.
+    //
+    // The result is a smooth flower-like blob even before any filter.
     return h("span", { className: "rw-tab-icon", "aria-hidden": "true" },
       h("svg", { viewBox: "0 0 100 100", focusable: "false" }, [
         h("defs", null,
-          h("filter", { id: "rw-organic", x: "-30%", y: "-30%", width: "160%", height: "160%" }, [
-            // Soften — radius tuned so the star tips fully round into
-            // bulges at 18px display size.
-            h("feGaussianBlur", { in: "SourceGraphic", stdDeviation: "5", result: "blurred" }),
-            // Threshold the blur back to a solid shape. The matrix
-            // multiplies alpha by 22 and subtracts 10, which cuts a
-            // hard alpha edge near the middle of the blur falloff.
-            h("feColorMatrix", {
-              in: "blurred", type: "matrix",
-              values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10",
-              result: "rounded",
-            }),
+          h("filter", { id: "rw-organic", x: "-20%", y: "-20%", width: "140%", height: "140%" }, [
             h("feTurbulence", {
               type: "fractalNoise", baseFrequency: "0.05",
               numOctaves: "2", seed: "3", result: "noise",
             }),
-            h("feDisplacementMap", { in: "rounded", in2: "noise" },
+            h("feDisplacementMap", { in: "SourceGraphic", in2: "noise" },
+              // Scale stays modest (3 → 7 → 4 → 7 → 3) since the source
+              // is already smooth — the filter is just adding life, not
+              // doing rounding work.
               h("animate", {
                 attributeName: "scale",
-                values: "5;10;6;10;5",
+                values: "3;7;4;7;3",
                 dur: "5.5s",
                 repeatCount: "indefinite",
               })
@@ -596,11 +592,16 @@
           ])
         ),
         h("g", { filter: "url(#rw-organic)" }, [
-          // 5-point star is the SOURCE only — the gooey filter rounds
-          // every sharp tip into a soft bulge before the displacement.
-          h("polygon", {
+          h("path", {
             fill: "currentColor",
-            points: "50,8 60.6,35.4 89.9,37 66.5,56 75.7,84 50,68 24.3,84 33.5,56 10.1,37 39.4,35.4",
+            // Tips: T0(50,10) T1(88.04,37.64) T2(73.51,82.36) T3(26.49,82.36) T4(11.96,37.64)
+            // Bases (midpoints): B01(69.02,23.82) B12(80.78,60) B23(50,82.36) B34(19.22,60) B40(30.98,23.82)
+            d: "M 69.02 23.82" +
+               " Q 88.04 37.64 80.78 60" +
+               " Q 73.51 82.36 50 82.36" +
+               " Q 26.49 82.36 19.22 60" +
+               " Q 11.96 37.64 30.98 23.82" +
+               " Q 50 10 69.02 23.82 Z",
           }),
           h("animateTransform", {
             attributeName: "transform", type: "rotate",
@@ -851,7 +852,11 @@
       '}',
       '.rw-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }',
       '.rw-pane-left {',
-      '  padding: 26px 28px 22px;',
+      /* Top padding pushes the eyebrow row down so its text center
+         lands on the same horizontal line as the tab text in the right
+         pane. (left.pad-top 30 + eyebrow text center 7 = 37) matches
+         (right.pad-top 22 + tab.pad-top 6 + tab text center 9 = 37). */
+      '  padding: 30px 28px 22px;',
       '  background: var(--rw-panel);',
       '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 6%, transparent), transparent 70%);',
       '  border-right: 1px solid var(--rw-line);',
@@ -1012,7 +1017,9 @@
       '}',
       '.rw-dash-tab {',
       '  position: relative; display: inline-flex; align-items: center; gap: 7px;',
-      '  padding: 8px 14px 10px; margin-right: 4px;',
+      /* Top/bottom padding tuned so the tab text center is at y = 37
+         from the card top, matching the left-pane eyebrow center. */
+      '  padding: 6px 14px 10px; margin-right: 4px;',
       '  background: transparent; border: 0; cursor: pointer;',
       '  font-family: inherit; font-size: 13.5px; font-weight: 500;',
       '  color: var(--rw-muted); letter-spacing: -0.005em;',
