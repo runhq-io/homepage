@@ -1436,7 +1436,17 @@
       '}',
       '.rw-pill-btn:hover:not(:disabled) { background: rgba(255,255,255,0.04); color: var(--rw-fg); border-color: var(--rw-line-2); }',
       '.rw-modal-mount[data-theme="light"] .rw-pill-btn:hover:not(:disabled) { background: rgba(15,20,35,0.04); }',
-      '.rw-pill-btn.rw-on { color: var(--rw-fg); border-color: color-mix(in oklab, var(--rw-accent) 55%, transparent); background: color-mix(in oklab, var(--rw-accent) 12%, transparent); }',
+      /* Toggled-on pill: solid accent fill so the state change is
+         unmistakable. Earlier we used a 12% accent tint, which
+         rendered as a barely-visible pale blue and looked broken. */
+      '.rw-pill-btn.rw-on {',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  border-color: var(--rw-accent);',
+      '}',
+      '.rw-pill-btn.rw-on:hover:not(:disabled) {',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  border-color: var(--rw-accent); filter: brightness(1.05);',
+      '}',
       '.rw-pill-btn:disabled { cursor: not-allowed; opacity: 0.55; }',
 
       '.rw-submit-btn {',
