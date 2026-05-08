@@ -1540,7 +1540,16 @@
       '}',
       '.rw-vis-chip:disabled { cursor: wait; opacity: 0.55; }',
       '.rw-td-ref { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--rw-muted); letter-spacing: 0.04em; }',
-      '.rw-td-title { margin: 6px 0 12px; font-family: inherit; font-size: 20px; font-weight: 600; color: var(--rw-fg); line-height: 1.22; letter-spacing: -0.018em; }',
+      /* Title row: vote pill on the left, title text to its right. Items
+         align to the top so the vote sits on the title\'s first line for
+         multi-line titles. The pill\'s self-margin (4px) tunes the
+         baseline-with-text alignment. */
+      '.rw-td-title-row {',
+      '  display: flex; align-items: flex-start; gap: 12px;',
+      '  margin: 6px 0 12px;',
+      '}',
+      '.rw-td-title-row .rw-vote { margin-top: 2px; }',
+      '.rw-td-title { margin: 0; flex: 1 1 auto; min-width: 0; font-family: inherit; font-size: 20px; font-weight: 600; color: var(--rw-fg); line-height: 1.22; letter-spacing: -0.018em; }',
       '.rw-td-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--rw-muted); }',
       '.rw-td-meta-author { color: var(--rw-fg-2); font-weight: 500; }',
 
@@ -2403,21 +2412,24 @@
       visChip = visBtn;
     }
 
-    var headRefChildren = [
-      h("span", { className: "rw-td-ref" }, "#" + refId),
-      renderStatusChip(ticket.status),
-    ];
+    // The #refId chip used to live here too — it was visual noise (most
+    // users never reference it). Status chip + visibility chip stay.
+    var headRefChildren = [renderStatusChip(ticket.status)];
     if (visChip) headRefChildren.push(visChip);
+
+    // Title row: vote pill on the left, title to its right. Vote aligns
+    // to the title's first text line (flex-start + small padding on the
+    // vote so it visually sits on the same baseline as the headline).
+    var titleRow = h("div", { className: "rw-td-title-row" }, [
+      voteBtn,
+      h("h2", { className: "rw-td-title" }, ticket.title),
+    ]);
 
     var head = h("div", { className: "rw-td-head" }, [
       h("div", { className: "rw-td-head-top" }, [
         h("div", { className: "rw-td-head-ref" }, headRefChildren),
-        voteBtn,
       ]),
-      h("h2", { className: "rw-td-title" }, ticket.title),
-      // The author + when row used to live here too (renderHeadMeta), but
-      // it duplicated the avatar/author/time block in the post header
-      // immediately below. Single source of truth = the post header.
+      titleRow,
     ]);
     // Head + body share one scroll area so the entire ticket content
     // (title, description, attachments, activity thread) scrolls
