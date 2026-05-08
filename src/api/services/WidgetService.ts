@@ -168,10 +168,12 @@ function getHomepageUrl(): string {
  * Includes both widget-submitted and workspace-created public tasks.
  */
 function buildWidgetVisibleFilter(project: WidgetProjectContext) {
+  // Moderation gating was removed — workflow status (pending/planned/
+  // in_progress/done/etc.) covers triage now. moderation_status stays
+  // as a column for back-compat but is no longer consulted.
   const baseConditions = [
     eq(workspaceTasks.serverId, project.serverId),
     isNull(workspaceTasks.deletedAt),
-    eq(workspaceTasks.moderationStatus, 'approved'),
   ];
 
   if (project.channelId) {
@@ -517,7 +519,6 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     .where(and(
       eq(workspaceTasks.id, ticketId),
       eq(workspaceTasks.serverId, project.serverId),
-      ne(workspaceTasks.moderationStatus, 'rejected'),
       isNull(workspaceTasks.deletedAt),
       ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
     ))
@@ -526,9 +527,6 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   if (!task) return null;
 
   const isCreator = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
-
-  // Pending moderation tickets are only visible to their creator
-  if (task.moderationStatus === 'pending' && !isCreator) return null;
 
   // Private tasks are only visible to their creator
   if (task.visibility === 'private' && !isCreator) return null;
@@ -543,7 +541,6 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   const isOwner = isCreator;
   const isEditable = isOwner
     && task.status === 'pending'
-    && task.moderationStatus !== 'rejected'
     && comments.length === 0
     && activity.length === 0;
 
@@ -604,7 +601,6 @@ async function resolveTicketVisibleToWidget(
       eq(workspaceTasks.id, ticketId),
       eq(workspaceTasks.serverId, project.serverId),
       isNull(workspaceTasks.deletedAt),
-      ne(workspaceTasks.moderationStatus, 'rejected'),
       ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
     ))
     .limit(1);
@@ -613,12 +609,12 @@ async function resolveTicketVisibleToWidget(
 
   const isOwner = task.createdByType === 'external' && task.createdById === widgetUserId;
 
-  // Public + approved → anyone identified can comment
-  if (task.visibility === 'public' && task.moderationStatus === 'approved') {
+  // Public → anyone identified can comment.
+  if (task.visibility === 'public') {
     return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
   }
 
-  // Pending or private → owner only
+  // Private → owner only.
   if (isOwner) {
     return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
   }
@@ -793,7 +789,10 @@ export async function createTicket(
   }
   if (!title) title = 'Untitled';
 
-  const moderationStatus = project.autoApprove ? 'approved' : 'pending';
+  // Moderation gating was removed — every new ticket is immediately
+  // visible. Workflow status (pending/planned/in_progress) is the only
+  // triage axis now.
+  const moderationStatus = 'approved';
 
   let votingEndsAt: Date | undefined;
   if (project.votingPeriodHours && project.votingPeriodHours > 0) {
@@ -866,7 +865,6 @@ async function requireEditableTask(
   if (opts.skipPostActivityChecks) return;
 
   if (task.status !== 'pending') throw new Error('Ticket status is no longer pending');
-  if (task.moderationStatus === 'rejected') throw new Error('Ticket has been rejected');
 
   const [commentCount] = await db
     .select({ count: sql<number>`count(*)` })
@@ -1193,7 +1191,6 @@ export async function getTicketStats(projectId: string) {
   const conditions = [
     eq(workspaceTasks.serverId, project.serverId),
     eq(workspaceTasks.visibility, 'public'),
-    eq(workspaceTasks.moderationStatus, 'approved'),
     isNull(workspaceTasks.deletedAt),
     ...(channelCondition ? [channelCondition] : []),
   ];
@@ -1245,7 +1242,6 @@ export async function castVote(
     .select({
       id: workspaceTasks.id,
       serverId: workspaceTasks.serverId,
-      moderationStatus: workspaceTasks.moderationStatus,
       votingEndsAt: workspaceTasks.votingEndsAt,
     })
     .from(workspaceTasks)
@@ -1257,9 +1253,6 @@ export async function castVote(
     .limit(1);
 
   if (!task) throw new Error('Ticket not found');
-  if (task.moderationStatus !== 'approved') {
-    throw new Error('Voting is only allowed on approved tickets');
-  }
   if (task.votingEndsAt && new Date() > task.votingEndsAt) {
     throw new Error('Voting period has ended');
   }
@@ -1439,7 +1432,6 @@ export async function listPublicProjects() {
       .where(and(
         eq(workspaceTasks.serverId, p.serverId),
         eq(workspaceTasks.visibility, 'public'),
-        eq(workspaceTasks.moderationStatus, 'approved'),
         isNull(workspaceTasks.deletedAt),
         ...(channelCondition ? [channelCondition] : []),
       ));
