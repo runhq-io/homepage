@@ -252,6 +252,7 @@
     moon:      function (s) { return icon([{ d: "M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z" }], s); },
     link:      function (s) { return icon([{ d: "M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" }, { d: "M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" }], s); },
     image:     function (s) { return icon([{ tag: "rect", x: 3, y: 4, width: 18, height: 16, rx: 2 }, { tag: "circle", cx: 9, cy: 10, r: 1.5 }, { d: "M21 16l-5-5-8 8" }], s); },
+    globe:     function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 10 }, { d: "M2 12h20" }, { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" }], s); },
   };
 
   // ===========================================================================
@@ -299,7 +300,11 @@
         // freeing the sub-text above for the product-value pitch.
         placeholder: "Bugs, ideas, suggestions — please write them here.",
         attach: "Attach",
+        // Visibility toggle uses two distinct labels (Private / Public)
+        // rather than a single "Private" pill that lights up — the label
+        // swap reads as a state change at a glance.
         private: "Private",
+        public: "Public",
         privateOn: "Only you and the team will see this.",
         privateOff: "Others can see and upvote this.",
         submit: "Submit",
@@ -401,6 +406,7 @@
         placeholder: "버그, 아이디어, 제안 — 여기에 자유롭게 적어주세요.",
         attach: "첨부",
         private: "비공개",
+        public: "공개",
         privateOn: "본인과 팀에게만 표시됩니다.",
         privateOff: "다른 사용자가 보고 추천할 수 있습니다.",
         submit: "제출",
@@ -2059,15 +2065,22 @@
       Icons.paperclip(13), h("span", null, t("composer.attach")),
     ]);
     attachBtn.addEventListener("click", function () { fileInput.click(); });
+    // Visibility toggle: label flips between "Public" and "Private"
+    // (with matching globe / lock icon) instead of a single "Private"
+    // pill lighting up. Reads as a clear state change at a glance.
     var privateBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
-      Icons.lock(12), h("span", null, t("composer.private")),
+      Icons.globe(12),
+      h("span", null, t("composer.public")),
     ]);
-    // Inline privacy hint that flips text based on the toggle. Helps
-    // first-time users understand the consequence before they submit.
     var privHint = h("span", { className: "rw-priv-hint" }, t("composer.privateOff"));
+    function refreshPrivateBtn() {
+      clearChildren(privateBtn);
+      privateBtn.appendChild(isPrivate ? Icons.lock(12) : Icons.globe(12));
+      privateBtn.appendChild(h("span", null, isPrivate ? t("composer.private") : t("composer.public")));
+    }
     privateBtn.addEventListener("click", function () {
       isPrivate = !isPrivate;
-      privateBtn.classList.toggle("rw-on", isPrivate);
+      refreshPrivateBtn();
       privHint.textContent = isPrivate ? t("composer.privateOn") : t("composer.privateOff");
     });
 
@@ -2102,7 +2115,8 @@
         entries.length = 0;
         renderChips();
         isPrivate = false;
-        privateBtn.classList.remove("rw-on");
+        refreshPrivateBtn();
+        privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
         // Refresh data + the panel body. The composer instance is replaced
