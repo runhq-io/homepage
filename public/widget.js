@@ -316,6 +316,18 @@
       },
       others: { label: "Recent Submissions", empty: "No tickets yet." },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
+      // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
+      // Colors come from the registry (window.__RW_CONSTANTS__.status); only
+      // labels are locale-overridable here.
+      status: {
+        pending: "Pending",
+        planned: "Planned",
+        in_progress: "In progress",
+        needs_review: "Needs review",
+        done: "Done",
+        deployed: "Deployed",
+        cancelled: "Cancelled",
+      },
       visibility: {
         private: "Private",
         public: "Public",
@@ -418,6 +430,15 @@
       },
       others: { label: "최근 제출 내역", empty: "아직 티켓이 없습니다." },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
+      status: {
+        pending: "대기 중",
+        planned: "계획됨",
+        in_progress: "진행 중",
+        needs_review: "검토 필요",
+        done: "완료",
+        deployed: "배포됨",
+        cancelled: "취소됨",
+      },
       visibility: {
         private: "비공개",
         public: "공개",
@@ -519,17 +540,34 @@
   // bundle, mounted via an unexpected path, etc.). Surfaces the raw status
   // value so divergence is visible rather than silently mislabeled.
   var STATUS_FALLBACK = { label: "", dot: "#8a857d", bg: "rgba(85,80,74,0.08)", fg: "#55504a" };
+  // Locale-aware label resolver. The registry (window.__RW_CONSTANTS__.status)
+  // owns the canonical vocabulary + colors; per-locale labels live in
+  // LOCALES.{lang}.status. We use the locale label when it exists for the
+  // active language, otherwise fall back to the registry's English label.
+  function localizedStatusLabel(s) {
+    var path = "status." + s;
+    var localized = t(path);
+    if (localized && localized !== path) return localized;
+    var R = getStatusRegistry();
+    return (R && R[s] && R[s].label) || null;
+  }
   function statusMeta(s) {
     var R = getStatusRegistry();
-    if (R && R[s]) return R[s];
-    return { label: String(s == null ? "unknown" : s), dot: STATUS_FALLBACK.dot, bg: STATUS_FALLBACK.bg, fg: STATUS_FALLBACK.fg };
+    var entry = R && R[s];
+    var localized = localizedStatusLabel(s);
+    if (entry) {
+      return { label: localized || entry.label, dot: entry.dot, bg: entry.bg, fg: entry.fg };
+    }
+    return {
+      label: localized || String(s == null ? "unknown" : s),
+      dot: STATUS_FALLBACK.dot, bg: STATUS_FALLBACK.bg, fg: STATUS_FALLBACK.fg,
+    };
   }
-  // Returns the display label for a status, or null if no registry entry
-  // exists. Used by activity-row formatting where we want to omit the
-  // label rather than render a synthesized one.
+  // Returns the display label for a status, or null if neither the locale
+  // nor the registry has one. Used by activity-row formatting where we want
+  // to omit the label rather than render a synthesized one.
   function statusLabel(s) {
-    var R = getStatusRegistry();
-    return R && R[s] ? R[s].label : null;
+    return localizedStatusLabel(s);
   }
   function renderStatusChip(status) {
     var s = statusMeta(status);
@@ -1597,8 +1635,12 @@
       '  font-size: 11.5px; color: var(--rw-muted);',
       '}',
       '.rw-event-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--rw-line-2); flex: 0 0 auto; }',
-      '.rw-event-text { flex: 1 1 auto; }',
+      '.rw-event-text {',
+      '  flex: 1 1 auto;',
+      '  display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap;',
+      '}',
       '.rw-event-text b { color: var(--rw-fg-2); font-weight: 600; }',
+      '.rw-event-arrow { color: var(--rw-muted-2); padding: 0 2px; }',
       '.rw-event-when { color: var(--rw-muted-2); font-size: 11px; flex: 0 0 auto; }',
 
       /* avatar */
@@ -2562,12 +2604,25 @@
 
   function renderEventNode(e) {
     var actorName = e.createdByName || "Team";
+    var textChildren = [h("b", null, actorName)];
+    var m = e.metadata || {};
+
+    if (e.type === "status_change" && (m.from || m.to)) {
+      // Render status changes as actor + chip → chip rather than the
+      // older "[Pending] → [In progress]" bracketed text. Status chips
+      // are localized + colorized via the registry, so the row reads
+      // identically to chips elsewhere in the widget.
+      textChildren.push(document.createTextNode(" "));
+      if (m.from) textChildren.push(renderStatusChip(m.from));
+      textChildren.push(h("span", { className: "rw-event-arrow" }, " → "));
+      if (m.to) textChildren.push(renderStatusChip(m.to));
+    } else {
+      textChildren.push(document.createTextNode(" " + describeEvent(e)));
+    }
+
     return h("div", { className: "rw-event" }, [
       h("span", { className: "rw-event-dot" }),
-      h("span", { className: "rw-event-text" }, [
-        h("b", null, actorName),
-        document.createTextNode(" " + describeEvent(e)),
-      ]),
+      h("span", { className: "rw-event-text" }, textChildren),
       h("span", { className: "rw-event-when" }, timeAgo(e.createdAt)),
     ]);
   }
