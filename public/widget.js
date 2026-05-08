@@ -179,7 +179,8 @@
   var SVG_NS = "http://www.w3.org/2000/svg";
   var SVG_TAGS = {
     svg: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, g: 1,
-    defs: 1, filter: 1, feTurbulence: 1, feDisplacementMap: 1,
+    defs: 1, filter: 1,
+    feTurbulence: 1, feDisplacementMap: 1, feGaussianBlur: 1, feColorMatrix: 1,
     animate: 1, animateTransform: 1,
   };
 
@@ -558,29 +559,39 @@
   }
 
   function buildTabIcon() {
-    // A 5-point star polygon distorted by an animated turbulence noise
-    // field (feDisplacementMap driven by feTurbulence). The displacement
-    // softens the sharp star tips into rounded petals, and the animated
-    // displacement scale + slow base rotation make the silhouette wobble
-    // continuously without ever matching a pose it had before. Reads as a
-    // small "living organism" rather than anything specific.
+    // Star-shaped organism with rounded edges. Three-stage SVG filter:
+    //   1. feGaussianBlur — smears the sharp 5-point star into a blurry
+    //      cross. The bigger the stdDeviation, the rounder the result.
+    //   2. feColorMatrix (alpha threshold) — boosts alpha by a large
+    //      multiplier and subtracts a constant, hard-cutting the blurred
+    //      shape back to opaque. The combination turns the sharp star
+    //      into a soft 5-LOBED BLOB with no sharp tips.
+    //   3. feTurbulence + feDisplacementMap — wobbles the rounded blob
+    //      organically, with the displacement scale breathing over 5.5s.
+    // Combined with a 22s rotation, the silhouette never repeats a pose.
     return h("span", { className: "rw-tab-icon", "aria-hidden": "true" },
       h("svg", { viewBox: "0 0 100 100", focusable: "false" }, [
         h("defs", null,
-          // x/y/width/height extend the filter region so displacement at
-          // the star tips isn't clipped.
-          h("filter", { id: "rw-organic", x: "-25%", y: "-25%", width: "150%", height: "150%" }, [
+          h("filter", { id: "rw-organic", x: "-30%", y: "-30%", width: "160%", height: "160%" }, [
+            // Soften — radius tuned so the star tips fully round into
+            // bulges at 18px display size.
+            h("feGaussianBlur", { in: "SourceGraphic", stdDeviation: "5", result: "blurred" }),
+            // Threshold the blur back to a solid shape. The matrix
+            // multiplies alpha by 22 and subtracts 10, which cuts a
+            // hard alpha edge near the middle of the blur falloff.
+            h("feColorMatrix", {
+              in: "blurred", type: "matrix",
+              values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10",
+              result: "rounded",
+            }),
             h("feTurbulence", {
-              type: "fractalNoise", baseFrequency: "0.045",
+              type: "fractalNoise", baseFrequency: "0.05",
               numOctaves: "2", seed: "3", result: "noise",
             }),
-            h("feDisplacementMap", { in: "SourceGraphic", in2: "noise" },
-              // Scale pulses 9 → 14 → 11 → 14 → 9 over 5.5s so the
-              // silhouette breathes; the asymmetric rhythm reads as
-              // organic rather than mechanical.
+            h("feDisplacementMap", { in: "rounded", in2: "noise" },
               h("animate", {
                 attributeName: "scale",
-                values: "9;14;11;14;9",
+                values: "5;10;6;10;5",
                 dur: "5.5s",
                 repeatCount: "indefinite",
               })
@@ -588,20 +599,16 @@
           ])
         ),
         h("g", { filter: "url(#rw-organic)" }, [
-          // 5-point star (outer radius 42, inner radius 18, centered at
-          // 50,50). The source has sharp tips — the displacement filter
-          // is what gives them their soft, varying roundness.
+          // 5-point star is the SOURCE only — the gooey filter rounds
+          // every sharp tip into a soft bulge before the displacement.
           h("polygon", {
             fill: "currentColor",
             points: "50,8 60.6,35.4 89.9,37 66.5,56 75.7,84 50,68 24.3,84 33.5,56 10.1,37 39.4,35.4",
           }),
-          // Slow rotation paired with the breathing displacement: each
-          // tip's wobble pattern is always slightly different from the
-          // last revolution. No obvious loop.
           h("animateTransform", {
             attributeName: "transform", type: "rotate",
             from: "0 50 50", to: "360 50 50",
-            dur: "24s", repeatCount: "indefinite",
+            dur: "22s", repeatCount: "indefinite",
           }),
         ]),
       ])
@@ -671,7 +678,7 @@
     var fontLink = document.createElement("link");
     fontLink.id = "rw-fonts";
     fontLink.rel = "stylesheet";
-    fontLink.href = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap";
+    fontLink.href = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";
     document.head.appendChild(preconnect1);
     document.head.appendChild(preconnect2);
     document.head.appendChild(fontLink);
