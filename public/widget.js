@@ -1155,15 +1155,19 @@
       '  border-bottom: 1px solid var(--rw-line);',
       '  flex: 0 0 auto;',
       '}',
+      /* "Back to activity" is a primary navigation action — accent-filled
+         to match the rest of the action buttons in the dashboard. */
       '.rw-back-btn {',
       '  display: inline-flex; align-items: center; gap: 6px;',
-      '  padding: 6px 10px 6px 8px;',
-      '  background: transparent; border: 1px solid var(--rw-line);',
+      '  padding: 6px 12px 6px 10px;',
+      '  background: var(--rw-accent); border: 1px solid var(--rw-accent);',
       '  border-radius: 999px;',
-      '  color: var(--rw-fg-2); font: inherit; font-size: 12px; cursor: pointer;',
-      '  transition: background .12s, color .12s, border-color .12s;',
+      '  color: var(--rw-accent-ink); font: inherit; font-size: 12px; font-weight: 500;',
+      '  cursor: pointer;',
+      '  transition: filter .12s, transform .12s;',
       '}',
-      '.rw-back-btn:hover { background: var(--rw-panel-2); color: var(--rw-fg); border-color: var(--rw-line-2); }',
+      '.rw-back-btn:hover { filter: brightness(1.06); }',
+      '.rw-back-btn:active { transform: translateY(1px); }',
 
       /* header */
       '.rw-hdr {',
@@ -1500,8 +1504,10 @@
       '}',
       '.rw-submit-btn:hover:not(:disabled) { filter: brightness(1.06); }',
       '.rw-submit-btn:active:not(:disabled) { transform: translateY(1px); }',
-      '.rw-submit-btn:disabled { cursor: not-allowed; opacity: 0.75; background: transparent; color: var(--rw-muted); border-color: var(--rw-line); }',
-      '.rw-modal-mount[data-theme="light"] .rw-submit-btn:disabled { color: var(--rw-muted-2); }',
+      /* Disabled state keeps the accent fill — just fades it. Matches
+         the inline-submit treatment in the new-ticket composer so the
+         two submits read as the same control in different states. */
+      '.rw-submit-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
 
       /* detail modal head — head + body share one scroll area
          (.rw-td-scroll), so the head is no longer flex-pinned. */
