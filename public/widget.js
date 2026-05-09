@@ -874,15 +874,12 @@
       '  transition: transform .22s cubic-bezier(0.16,1,0.3,1);',
       '}',
       '.rw-shell-scrim.rw-open .rw-shell { transform: none; }',
-      '@media (max-width: 640px) {',
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
          browsers that don't parse dvh. */
+      '@media (max-width: 640px) {',
       '  .rw-shell { width: 100%; height: 100vh; height: 100dvh; min-height: 0; }',
-      /* Recent Submissions strip is desktop-only — on mobile it just
-         pushes the composer and tabs off-screen. */
-      '  .rw-others { display: none; }',
       '}',
 
       '.rw-card-modal {',
@@ -1042,6 +1039,9 @@
       '  transition: opacity 200ms ease;',
       '}',
       '.rw-pane-left:focus-within .rw-others { opacity: 0.32; }',
+      /* Hidden on mobile — base .rw-others sets display:flex, so this
+         override has to live AFTER that rule to win on source order. */
+      '@media (max-width: 640px) { .rw-others { display: none; } }',
       '.rw-others-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }',
       '.rw-others-label {',
       '  font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em;',
