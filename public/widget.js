@@ -36,6 +36,10 @@
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
+  // Current authenticated user info, populated after auth via /api/widget/me.
+  // Always present as an object so reads never throw — defaults to anonymous.
+  var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
+
   // Modal-shell view state. The shell is a centered card with two faces:
   //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
   //   "detail" — full-width ticket detail with a "Back to activity" button.
@@ -127,6 +131,7 @@
     });
   }
 
+  function loadMe()               { return api("/api/widget/me"); }
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
@@ -170,6 +175,31 @@
         throw err;
       }
       return data;
+    });
+  }
+
+  // Fetch the current authenticated user's profile from /api/widget/me and
+  // update currentUser. Safe for anonymous callers — 401/404 resolve to empty.
+  // After updating state, re-renders the panel body so the triager badge
+  // appears/disappears without requiring a full widget reload.
+  function fetchAndApplyMe() {
+    if (!config.token) {
+      currentUser.permissions = [];
+      currentUser.matchedRoles = [];
+      currentUser.isTriager = false;
+      return;
+    }
+    loadMe().then(function (me) {
+      currentUser.permissions = (me && me.permissions) || [];
+      currentUser.matchedRoles = (me && me.matchedRoles) || [];
+      currentUser.isTriager = !!(me && me.isTriager);
+      // Re-render so the badge appears/disappears in the eyebrow row.
+      if (scrollEl) renderPanelBody();
+    }).catch(function () {
+      currentUser.permissions = [];
+      currentUser.matchedRoles = [];
+      currentUser.isTriager = false;
+      // No re-render needed on failure — badge defaults to hidden.
     });
   }
 
@@ -1740,6 +1770,23 @@
 
       '.rw-stage button:focus-visible, .rw-stage textarea:focus-visible, .rw-stage input:focus-visible,',
       '.rw-modal-mount button:focus-visible, .rw-modal-mount textarea:focus-visible, .rw-modal-mount input:focus-visible { outline: none; }',
+
+      /* Triager badge — shown in the eyebrow row when the authenticated user has
+         the assign_agent permission. Intentionally subdued (small, blue pill) so
+         it doesn't compete with the composer. */
+      '.rw-triager-badge {',
+      '  display: inline-block;',
+      '  padding: 1px 6px;',
+      '  border-radius: 8px;',
+      '  background: #2d6cdf;',
+      '  color: #fff;',
+      '  font-size: 10px;',
+      '  font-weight: 600;',
+      '  margin-left: 6px;',
+      '  vertical-align: middle;',
+      '  letter-spacing: 0.04em;',
+      '  flex: 0 0 auto;',
+      '}',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -2301,10 +2348,20 @@
         // was removed — at small sizes it competed for visual weight with
         // the composer placeholder, which is the actual hero.
         h("div", { className: "rw-eyebrow-row" }, [
-          h("div", { className: "rw-eyebrow" }, [
-            h("span", { className: "rw-eyebrow-dot" }),
-            h("span", null, t("header.headline", { name: projectName })),
-          ]),
+          h("div", { className: "rw-eyebrow" }, (function () {
+            var eyebrowNodes = [
+              h("span", { className: "rw-eyebrow-dot" }),
+              h("span", null, t("header.headline", { name: projectName })),
+            ];
+            if (currentUser.isTriager) {
+              var badge = h("span", {
+                className: "rw-triager-badge",
+                title: "You can assign agents to tickets from this widget.",
+              }, "Triager");
+              eyebrowNodes.push(badge);
+            }
+            return eyebrowNodes;
+          })()),
           poweredBy,
         ]),
         // Sub-text is the product-value pitch: explains WHY the widget
@@ -2938,6 +2995,11 @@
         theme = resolveInitialTheme(opts.theme);
 
         mountDOM();
+
+        // Fetch the authenticated user's profile (permissions, isTriager) so the
+        // Triager badge can be shown in the eyebrow row. Fire-and-forget; failures
+        // leave currentUser at its default safe-empty state.
+        fetchAndApplyMe();
 
         if (config.token) {
           loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});
