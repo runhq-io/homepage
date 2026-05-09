@@ -4,10 +4,11 @@ const SIGNUP_URL = 'https://app.runhq.io/signup';
 const LOGIN_URL = 'https://app.runhq.io';
 
 const CHIP_PROMPTS = [
-  'Triage support tickets',
-  'Sync Stripe to Notion',
-  'Daily standup digest',
-  'Auto-tag GitHub issues',
+  'Develop app based on user feedback',
+  'Make daily X post',
+  'Optimize paid marketing funnel',
+  'Create and post blog articles',
+  'Handle contact form submissions',
 ];
 
 const PALETTE = {
