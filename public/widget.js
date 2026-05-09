@@ -832,7 +832,7 @@
       '  position: fixed; top: 50%;',
       '  ' + (isRight ? "right" : "left") + ': 0;',
       '  transform: translateY(-50%);',
-      '  height: 48px; min-width: 72px;',
+      '  height: 38px; min-width: 72px;',
       '  padding: ' + (isRight ? "0 6px 0 12px" : "0 12px 0 6px") + ';',
       '  background:',
       '    radial-gradient(120% 180% at 30% -30%, rgba(255,255,255,0.18), rgba(255,255,255,0) 60%),',
@@ -845,7 +845,7 @@
       '  border: none;',
       /* Round only the protruding edge so the pill reads as a tab anchored
          to the screen border. */
-      '  border-radius: ' + (isRight ? "24px 0 0 24px" : "0 24px 24px 0") + ';',
+      '  border-radius: ' + (isRight ? "10px 0 0 10px" : "0 10px 10px 0") + ';',
       '  z-index: 2147483646;',
       '  transition: padding .15s ease, box-shadow .2s ease, filter .15s ease, transform .15s ease;',
       '  box-shadow: 0 14px 28px -10px rgba(108,89,255,0.55), inset 0 0 0 1px rgba(255,255,255,0.08);',
