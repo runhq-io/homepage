@@ -2528,10 +2528,44 @@
   // Assign-agent modal
   // ===========================================================================
 
-  // STUB: wire the actual POST — Task 21 replaces this body.
   function submitAssign(ticketId, agentId, command, callback) {
-    console.log('[widget] would submit assign:', { ticketId: ticketId, agentId: agentId, command: command });
-    if (typeof callback === 'function') callback();
+    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ agentId: agentId, command: command }),
+    }).then(function (res) {
+      return res.json().then(function (body) {
+        return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: body };
+      }, function () {
+        return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: null };
+      });
+    }).then(function (r) {
+      if (r.status === 200) return callback(null, r.body);
+      if (r.status === 429) {
+        var seconds = parseInt(r.retryAfter || '0', 10);
+        var minutes = Math.max(1, Math.ceil(seconds / 60));
+        return callback("You've assigned the max number of agents this hour. Try again in " + minutes + ' minutes.');
+      }
+      if (r.status === 403) return callback('That agent is no longer available — please pick another.');
+      if (r.status === 503) return callback('Workspace is starting up — try again in a moment.');
+      if (r.status === 409) return callback('This ticket was just assigned by someone else. Refreshing.');
+      callback((r.body && r.body.error) || 'Could not assign agent.');
+    }).catch(function () {
+      callback('Network error — try again.');
+    });
+  }
+
+  function onAssignSuccess(ticketId, data) {
+    loadTicketDetail(ticketId).then(function (detail) {
+      var ticket = detail && detail.ticket;
+      if (ticket) {
+        openDetailModal(ticket);
+      }
+      var agentName = ticket && ticket.assignedAgentName;
+      showAssignToast(agentName ? agentName + ' started.' : 'Agent started.');
+    }).catch(function () {
+      showAssignToast('Agent started.');
+    });
   }
 
   // Show a temporary toast inside the shadow root.
@@ -2732,15 +2766,21 @@
     });
     observer.observe(modalMountEl, { childList: true });
 
-    // --- Confirm (stub — Task 21 wires the real POST) ---
+    // --- Confirm ---
     confirmBtn.addEventListener('click', function () {
       if (!selectedAgentId) return;
       setError('');
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Starting…';
-      submitAssign(ticketId, selectedAgentId, cmdEl.value, function () {
-        closeModal();
-        showAssignToast('Assign queued (Task 21 wires the actual call).');
+      submitAssign(ticketId, selectedAgentId, cmdEl.value, function (err, assignData) {
+        if (err) {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Start agent';
+          setError(err);
+          return;
+        }
+        overlay.remove();
+        onAssignSuccess(ticketId, assignData);
       });
     });
   }
