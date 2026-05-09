@@ -3,7 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
-import { users, servers, workspaceTasks, workspaceTaskComments, widgetProjects, widgetUsers } from '../../db/schema';
+import { users, servers, workspaceTasks, workspaceTaskComments, workspaceTaskActivity, widgetProjects, widgetUsers } from '../../db/schema';
 import { getPublicTicketDetail } from './WidgetService';
 
 const RUN_HEX = randomBytes(6).toString('hex');
@@ -48,6 +48,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, SERVER_ID));
   await db.delete(workspaceTaskComments).where(eq(workspaceTaskComments.serverId, SERVER_ID));
   await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_ID));
@@ -181,6 +182,57 @@ describe('getPublicTicketDetail comment payload', () => {
     const detail = await getPublicTicketDetail(PROJECT_ID, disabled!.id, WIDGET_USER_ID);
     expect(detail!.ticket.commentsDisabled).toBe(true);
     await db.delete(workspaceTasks).where(eq(workspaceTasks.id, disabled!.id));
+  });
+
+  it('returns assignedAgentName + lastTriager from latest agent_assigned activity', async () => {
+    // Insert an agent_assigned activity by an external user (triager scenario)
+    const [extTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Assign agent test', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: extTask!.id,
+      type: 'agent_assigned',
+      createdByType: 'external',
+      createdByName: 'Alice',
+      metadata: { agentName: 'TestBot' },
+    });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, extTask!.id);
+      expect(detail?.ticket.assignedAgentName).toBe('TestBot');
+      expect(detail?.ticket.lastTriager?.name).toBe('Alice');
+      expect(detail?.ticket.lastTriager?.at).toBeTruthy();
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, extTask!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, extTask!.id));
+    }
+  });
+
+  it('returns null lastTriager when latest assignment was done by an internal actor', async () => {
+    // Insert an agent_assigned activity by a member (not external)
+    const [intTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Internal assign test', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: intTask!.id,
+      type: 'agent_assigned',
+      createdByType: 'member',
+      createdByName: 'Admin',
+      metadata: { agentName: 'TestBot' },
+    });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, intTask!.id);
+      expect(detail?.ticket.assignedAgentName).toBe('TestBot');
+      expect(detail?.ticket.lastTriager).toBeNull();
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, intTask!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, intTask!.id));
+    }
   });
 
   it('channel-scoped widget project cannot resolve a task outside its channel by id', async () => {

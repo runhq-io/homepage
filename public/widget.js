@@ -1787,6 +1787,39 @@
       '  letter-spacing: 0.04em;',
       '  flex: 0 0 auto;',
       '}',
+
+      /* Assign-agent button — appears in the ticket detail head when the
+         triager is viewing an unassigned, actionable ticket. */
+      '.rw-assign-btn {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 4px;',
+      '  padding: 4px 10px;',
+      '  border-radius: 6px;',
+      '  background: #2d6cdf;',
+      '  color: #fff;',
+      '  font-size: 12px;',
+      '  font-weight: 600;',
+      '  border: none;',
+      '  cursor: pointer;',
+      '  letter-spacing: 0.02em;',
+      '  margin-top: 8px;',
+      '}',
+      '.rw-assign-btn:hover { background: #1e55c0; }',
+      '.rw-assign-btn:disabled { opacity: 0.5; cursor: default; }',
+
+      /* Agent attribution line — shown below the title when an agent is
+         assigned and the assignment was initiated by an external triager. */
+      '.rw-agent-attribution {',
+      '  font-size: 11px;',
+      '  color: var(--rw-muted, #8a857d);',
+      '  margin-top: 6px;',
+      '  display: flex;',
+      '  align-items: center;',
+      '  gap: 4px;',
+      '  flex-wrap: wrap;',
+      '}',
+      '.rw-agent-attribution strong { color: var(--rw-fg, #1a1a1a); font-weight: 600; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -2424,6 +2457,15 @@
   }
 
   // ===========================================================================
+  // Assign-agent modal (Task 19 stub — Task 20 implements the full modal)
+  // ===========================================================================
+
+  // Stub: Task 20 will replace this with the real agent-picker modal.
+  function openAssignModal(ticketId) {
+    console.log('[widget] open assign modal for', ticketId);
+  }
+
+  // ===========================================================================
   // Modal infra
   // ===========================================================================
 
@@ -2537,6 +2579,38 @@
     var headRefChildren = [renderStatusChip(ticket.status)];
     if (visChip) headRefChildren.push(visChip);
 
+    // "Assign agent" button — visible only to triagers on tickets that are
+    // actionable (not yet in progress / done / deployed) and not yet assigned.
+    var TERMINAL_STATUSES = { in_progress: true, done: true, deployed: true };
+    var canAssign = currentUser.isTriager
+      && !TERMINAL_STATUSES[ticket.status]
+      && !ticket.assignedAgentName;
+    var assignBtn = null;
+    if (canAssign) {
+      assignBtn = h("button", {
+        className: "rw-assign-btn",
+        type: "button",
+        title: "Assign an AI agent to work on this ticket",
+      }, "Assign agent");
+      assignBtn.addEventListener("click", function () {
+        openAssignModal(ticket.id);
+      });
+    }
+
+    // Attribution line — visible when an agent is assigned and the assignment
+    // was triggered by an external user (lastTriager is non-null).
+    var attributionEl = null;
+    if (ticket.assignedAgentName && ticket.lastTriager) {
+      attributionEl = h("div", { className: "rw-agent-attribution" }, [
+        document.createTextNode("🤖 "),
+        h("strong", null, ticket.assignedAgentName),
+        document.createTextNode(
+          "  — started by " + (ticket.lastTriager.name || "someone") +
+          ", " + timeAgo(ticket.lastTriager.at)
+        ),
+      ]);
+    }
+
     // Title row: vote pill on the left, title to its right. Vote aligns
     // to the title's first text line (flex-start + small padding on the
     // vote so it visually sits on the same baseline as the headline).
@@ -2545,12 +2619,16 @@
       h("h2", { className: "rw-td-title" }, ticket.title),
     ]);
 
-    var head = h("div", { className: "rw-td-head" }, [
+    var headChildren = [
       h("div", { className: "rw-td-head-top" }, [
         h("div", { className: "rw-td-head-ref" }, headRefChildren),
       ]),
       titleRow,
-    ]);
+    ];
+    if (attributionEl) headChildren.push(attributionEl);
+    if (assignBtn) headChildren.push(assignBtn);
+
+    var head = h("div", { className: "rw-td-head" }, headChildren);
     // Head + body share one scroll area so the entire ticket content
     // (title, description, attachments, activity thread) scrolls
     // together. The composer below stays pinned at the bottom of the

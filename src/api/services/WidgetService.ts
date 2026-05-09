@@ -96,6 +96,10 @@ export type PublicTicketDetail = {
     createdByType: CanonicalTaskActorType;
     externalUserId: string | null;
     commentsDisabled: boolean;
+    /** Name of the currently-assigned agent, if any */
+    assignedAgentName: string | null;
+    /** The external user who last triggered an assignment, or null if it was internal */
+    lastTriager: { name: string | null; at: string } | null;
   };
   /** Whether the requesting user owns this ticket */
   isOwner: boolean;
@@ -590,6 +594,18 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     && comments.length === 0
     && activity.length === 0;
 
+  // Look up the most recent agent_assigned activity for this ticket
+  const lastAssignment = await db
+    .select()
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.taskId, ticketId),
+      eq(workspaceTaskActivity.type, 'agent_assigned'),
+    ))
+    .orderBy(desc(workspaceTaskActivity.createdAt))
+    .limit(1);
+  const lastAssign = lastAssignment[0];
+
   const externalUserIdMap = await resolveExternalUserIds(project.id, [
     ...comments,
     { createdByType: task.createdByType, createdById: task.createdById },
@@ -607,6 +623,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       createdByType: task.createdByType,
       externalUserId: ticketExternalUserId,
       commentsDisabled: task.commentsDisabled,
+      assignedAgentName: lastAssign?.metadata && (lastAssign.metadata as any).agentName
+        ? String((lastAssign.metadata as any).agentName)
+        : null,
+      lastTriager: lastAssign?.createdByType === 'external'
+        ? { name: lastAssign.createdByName ?? null, at: lastAssign.createdAt.toISOString() }
+        : null,
     },
     isOwner,
     isEditable,
