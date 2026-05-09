@@ -420,8 +420,8 @@ const HERO_STYLES = `
     font-size: 16px;
     line-height: 1.5;
     color: var(--ink);
-    background: rgba(10, 12, 16, 0.65);
-    border: 1px solid var(--line);
+    background: rgba(14, 17, 22, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 16px;
     resize: none;
     outline: none;
@@ -477,8 +477,8 @@ const HERO_STYLES = `
     color: var(--ink);
     padding: 8px 14px;
     border-radius: 999px;
-    border: 1px solid var(--line);
-    background: rgba(10, 12, 16, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(14, 17, 22, 0.6);
     backdrop-filter: blur(10px);
     cursor: pointer;
     transition: border-color 0.18s, color 0.18s;
