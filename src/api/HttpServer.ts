@@ -28,7 +28,7 @@ import { getServerSessionKeyPair } from './auth/serverSessionKeys';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
-import { widgetRateLimiter } from './services/WidgetRateLimiter';
+import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -5168,6 +5168,41 @@ export function createHttpApp() {
   // Widget Public API (called by widget.js from customer websites)
   // ==========================================================================
 
+  /**
+   * Map a thrown error from the WidgetService layer onto an HTTP response.
+   *
+   * `WidgetError` / `WidgetAssignError` carry a stable `.code` and `.status`
+   * — callers can rely on these strings. Anything else is logged and reported
+   * as `{error: 'internal'}` so DB / driver internals don't leak to the
+   * unauthenticated public widget caller.
+   */
+  function widgetErrorResponse(c: any, err: unknown) {
+    if (err instanceof WidgetService.WidgetError || err instanceof WidgetService.WidgetAssignError) {
+      return c.json({ error: err.code }, err.status as any);
+    }
+    console.error('[widget] unhandled error:', err);
+    return c.json({ error: 'internal' }, 500);
+  }
+
+  /**
+   * Apply the per-action rate limit using the default limit table. Returns
+   * a 429 response if the user is over quota, or `null` to let the caller
+   * proceed.
+   */
+  function widgetRateLimit(
+    c: any,
+    projectId: string,
+    widgetUserId: string,
+    action: WidgetAction,
+  ) {
+    const rl = widgetRateLimiter.checkDefault(projectId, widgetUserId, action);
+    if (!rl.allowed) {
+      c.header('Retry-After', String(rl.retryAfterSec));
+      return c.json({ error: 'rate_limited' }, 429);
+    }
+    return null;
+  }
+
   app.options('/api/widget/*', (c) => {
     c.header('Access-Control-Allow-Origin', '*');
     c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
@@ -5229,12 +5264,12 @@ export function createHttpApp() {
       return c.json({ error: 'Agent not available' }, 403);
     }
 
-    // Gate 6: rate limit
+    // Gate 6: rate limit (per-project override)
     const limitPerHour = await WidgetService.getWidgetProjectRateLimit(auth.projectId);
-    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, limitPerHour);
+    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, 'triager_assign', limitPerHour);
     if (!rl.allowed) {
       c.header('Retry-After', String(rl.retryAfterSec));
-      return c.json({ error: 'Rate limit exceeded' }, 429);
+      return c.json({ error: 'rate_limited' }, 429);
     }
 
     // Resolve external user details for audit
@@ -5254,11 +5289,7 @@ export function createHttpApp() {
       });
       return c.json({ jobId: result.jobId, agentId: body.agentId });
     } catch (err) {
-      if (err instanceof WidgetService.WidgetAssignError) {
-        return c.json({ error: err.code }, err.status as any);
-      }
-      console.error('[HttpServer] widget assign error:', err);
-      return c.json({ error: 'internal' }, 500);
+      return widgetErrorResponse(c, err);
     }
   });
 
@@ -5300,77 +5331,82 @@ export function createHttpApp() {
 
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
       return c.json({ ticket }, 201);
     } catch (err) {
-      return c.json({ error: String(err) }, 400);
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    const { value } = await c.req.json();
+    if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
+    if (limited) return limited;
     try {
+      const { value } = await c.req.json();
       await WidgetService.castVote(auth.projectId, c.req.param('id'), auth.widgetUserId, value);
       return c.json({ ok: true });
     } catch (err) {
-      return c.json({ error: String(err) }, 400);
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
+    if (limited) return limited;
     try {
       await WidgetService.retractVote(auth.projectId, c.req.param('id'), auth.widgetUserId);
       return c.json({ ok: true });
     } catch (err) {
-      return c.json({ error: String(err) }, 400);
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.patch('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_update');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const ticket = await WidgetService.updateTicket(c.req.param('id'), auth.projectId, auth.widgetUserId, body);
       return c.json({ ticket });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_delete');
+    if (limited) return limited;
     try {
       await WidgetService.deleteTicket(c.req.param('id'), auth.projectId, auth.widgetUserId);
       return c.json({ ok: true });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/attachments', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
     try {
       const formData = await c.req.raw.formData();
       const file = formData.get('file');
       if (!file || typeof (file as any).arrayBuffer !== 'function') {
-        return c.json({ error: 'file field is required' }, 400);
+        return c.json({ error: 'file_required' }, 400);
       }
 
       const inputFile = file as globalThis.File;
@@ -5385,18 +5421,18 @@ export function createHttpApp() {
         { buffer, mimeType, filename, originalName: inputFile.name },
       );
       return c.json({ attachment }, 201);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id/attachments/:attachmentId', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    // Deletes share the upload bucket — they're cheap and rare; reuse the
+    // same budget rather than introduce a fourth attachment-related limit.
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
     try {
       await WidgetService.deleteTicketAttachment(
         c.req.param('id'),
@@ -5405,67 +5441,62 @@ export function createHttpApp() {
         auth.widgetUserId,
       );
       return c.json({ ok: true });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      if (msg === 'Attachment not found') return c.json({ error: msg }, 404);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/comments', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'comment_create');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const comment = await WidgetService.addWidgetComment(auth.projectId, c.req.param('id'), auth.widgetUserId, body.content);
       return c.json({ comment }, 201);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Comments are disabled for this task') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.patch('/api/widget/tickets/:id/comments/:commentId', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'comment_update');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const comment = await WidgetService.updateWidgetComment(auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId, body.content);
       return c.json({ comment });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found' || msg === 'Comment not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id/comments/:commentId', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'comment_delete');
+    if (limited) return limited;
     try {
       await WidgetService.deleteWidgetComment(auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId);
       return c.json({ ok: true });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found' || msg === 'Comment not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/comments/:commentId/attachments', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
     try {
       const formData = await c.req.raw.formData();
       const file = formData.get('file');
       if (!file || typeof (file as any).arrayBuffer !== 'function') {
-        return c.json({ error: 'file field is required' }, 400);
+        return c.json({ error: 'file_required' }, 400);
       }
       const inputFile = file as globalThis.File;
       const buffer = Buffer.from(await inputFile.arrayBuffer());
@@ -5474,11 +5505,8 @@ export function createHttpApp() {
         { buffer, mimeType: inputFile.type || 'application/octet-stream', filename: inputFile.name || 'attachment', originalName: inputFile.name },
       );
       return c.json({ attachment }, 201);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Comment not found' || msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 

@@ -12,6 +12,26 @@ vi.mock('./services/WidgetService', () => {
       this.name = 'WidgetSettingsValidationError';
     }
   }
+  class WidgetError extends Error {
+    code: string;
+    status: number;
+    constructor(code: string, status: number) {
+      super(code);
+      this.name = 'WidgetError';
+      this.code = code;
+      this.status = status;
+    }
+  }
+  class WidgetAssignError extends Error {
+    code: string;
+    status: number;
+    constructor(code: string, status: number) {
+      super(code);
+      this.name = 'WidgetAssignError';
+      this.code = code;
+      this.status = status;
+    }
+  }
   return {
     authenticateWidget: vi.fn(),
     listDoneTickets: vi.fn(),
@@ -23,8 +43,17 @@ vi.mock('./services/WidgetService', () => {
     disableWidget: vi.fn(),
     updateWidgetSettings: vi.fn(),
     WidgetSettingsValidationError,
+    WidgetError,
+    WidgetAssignError,
   };
 });
+
+vi.mock('./services/WidgetRateLimiter', () => ({
+  widgetRateLimiter: {
+    check: vi.fn().mockReturnValue({ allowed: true, retryAfterSec: 0 }),
+    checkDefault: vi.fn().mockReturnValue({ allowed: true, retryAfterSec: 0 }),
+  },
+}));
 
 vi.mock('./services/TaskAttachmentStorageService', () => ({
   TaskAttachmentStorageService: class { isConfigured() { return false; } },
@@ -32,11 +61,20 @@ vi.mock('./services/TaskAttachmentStorageService', () => ({
 
 import { createHttpApp } from './HttpServer';
 import * as WidgetService from './services/WidgetService';
+import { widgetRateLimiter } from './services/WidgetRateLimiter';
+
+// Re-apply rate-limiter default after each `vi.resetAllMocks()` since reset
+// clears the implementation.
+function resetMocks() {
+  vi.resetAllMocks();
+  (widgetRateLimiter.checkDefault as any).mockReturnValue({ allowed: true, retryAfterSec: 0 });
+  (widgetRateLimiter.check as any).mockReturnValue({ allowed: true, retryAfterSec: 0 });
+}
 
 const makeApp = () => createHttpApp();
 
 describe('GET /api/widget/tickets/updates', () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => resetMocks());
 
   it('401 when not authenticated', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue(null);
@@ -57,7 +95,7 @@ describe('GET /api/widget/tickets/updates', () => {
 });
 
 describe('POST /api/widget/tickets/:id/comments', () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => resetMocks());
 
   it('401 without signed token', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: false });
@@ -82,36 +120,39 @@ describe('POST /api/widget/tickets/:id/comments', () => {
 
   it('404 when Ticket not found', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
-    (WidgetService.addWidgetComment as any).mockRejectedValue(new Error('Ticket not found'));
+    (WidgetService.addWidgetComment as any).mockRejectedValue(new (WidgetService.WidgetError as any)('ticket_not_found', 404));
     const app = makeApp();
     const res = await app.request('/api/widget/tickets/t1/comments', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'hi' }),
     });
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'ticket_not_found' });
   });
 
   it('403 when Comments are disabled for this task', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
-    (WidgetService.addWidgetComment as any).mockRejectedValue(new Error('Comments are disabled for this task'));
+    (WidgetService.addWidgetComment as any).mockRejectedValue(new (WidgetService.WidgetError as any)('comments_disabled', 403));
     const app = makeApp();
     const res = await app.request('/api/widget/tickets/t1/comments', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'x' }),
     });
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'comments_disabled' });
   });
 });
 
 describe('PATCH /api/widget/tickets/:id/comments/:commentId', () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => resetMocks());
 
   it('403 when Not the comment author', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
-    (WidgetService.updateWidgetComment as any).mockRejectedValue(new Error('Not the comment author'));
+    (WidgetService.updateWidgetComment as any).mockRejectedValue(new (WidgetService.WidgetError as any)('comment_author_only', 403));
     const app = makeApp();
     const res = await app.request('/api/widget/tickets/t1/comments/c1', {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'hi' }),
     });
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'comment_author_only' });
   });
 
   it('200 on success with updated comment', async () => {
@@ -126,14 +167,15 @@ describe('PATCH /api/widget/tickets/:id/comments/:commentId', () => {
 });
 
 describe('DELETE /api/widget/tickets/:id/comments/:commentId', () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => resetMocks());
 
   it('403 when Not the comment author', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
-    (WidgetService.deleteWidgetComment as any).mockRejectedValue(new Error('Not the comment author'));
+    (WidgetService.deleteWidgetComment as any).mockRejectedValue(new (WidgetService.WidgetError as any)('comment_author_only', 403));
     const app = makeApp();
     const res = await app.request('/api/widget/tickets/t1/comments/c1', { method: 'DELETE' });
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'comment_author_only' });
   });
 
   it('200 on success', async () => {
@@ -146,9 +188,10 @@ describe('DELETE /api/widget/tickets/:id/comments/:commentId', () => {
 
   it('404 when Ticket not found on DELETE', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: true, widgetUserId: 'u' });
-    (WidgetService.deleteWidgetComment as any).mockRejectedValue(new Error('Ticket not found'));
+    (WidgetService.deleteWidgetComment as any).mockRejectedValue(new (WidgetService.WidgetError as any)('ticket_not_found', 404));
     const app = makeApp();
     const res = await app.request('/api/widget/tickets/t1/comments/c1', { method: 'DELETE' });
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'ticket_not_found' });
   });
 });

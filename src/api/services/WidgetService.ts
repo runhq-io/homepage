@@ -27,6 +27,11 @@ import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
+import { widgetSecretCrypto, WIDGET_JWT_MAX_TOKEN_AGE } from '../../lib/widgetSecretCrypto';
+
+// Re-export for backward compatibility — callers historically imported this
+// constant from WidgetService.
+export { WIDGET_JWT_MAX_TOKEN_AGE };
 
 const attachmentStorage = new TaskAttachmentStorageService();
 
@@ -356,12 +361,19 @@ export async function authenticateWidget(
 
   if (!project || !project.enabled) return null;
 
-  // Verify signature, expiry, and type using jose
+  // Verify signature, expiry, and type using jose.
+  // - requiredClaims: ['exp'] forces customer issuers to set an expiry.
+  //   Without this, jose only rejects exp when present — a missing exp
+  //   would let leaked tokens live forever.
+  // - maxTokenAge caps how long any single token can be valid even if the
+  //   customer sets a longer exp (e.g. a 10-year exp by mistake).
   let payload: jose.JWTPayload;
   try {
-    const secret = new TextEncoder().encode(project.apiSecretHash);
-    const { payload: verified } = await jose.jwtVerify(token, secret, {
+    const signingKey = await widgetSecretCrypto.getSigningKey(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
       algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
     });
     if (verified.type !== 'widget_user') return null;
     payload = verified;
@@ -697,8 +709,8 @@ export async function addWidgetComment(
   content: string,
 ) {
   const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
-  if (!visible) throw new Error('Ticket not found');
-  if (visible.commentsDisabled) throw new Error('Comments are disabled for this task');
+  if (!visible) throw new WidgetError('ticket_not_found', 404);
+  if (visible.commentsDisabled) throw new WidgetError('comments_disabled', 403);
 
   const [widgetUser] = await db
     .select({ name: widgetUsers.name })
@@ -724,7 +736,7 @@ async function loadAndAuthorizeWidgetComment(
   widgetUserId: string,
 ): Promise<{ serverId: string }> {
   const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
-  if (!visible) throw new Error('Ticket not found');
+  if (!visible) throw new WidgetError('ticket_not_found', 404);
   const [row] = await db
     .select({
       id: workspaceTaskComments.id,
@@ -738,9 +750,9 @@ async function loadAndAuthorizeWidgetComment(
       eq(workspaceTaskComments.taskId, ticketId),
     ))
     .limit(1);
-  if (!row || row.deletedAt) throw new Error('Comment not found');
+  if (!row || row.deletedAt) throw new WidgetError('comment_not_found', 404);
   if (row.createdByType !== 'external' || row.createdById !== widgetUserId) {
-    throw new Error('Not the comment author');
+    throw new WidgetError('comment_author_only', 403);
   }
   return { serverId: visible.serverId };
 }
@@ -754,7 +766,7 @@ export async function updateWidgetComment(
 ) {
   const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
   const updated = await WorkspaceTaskService.updateComment(serverId, ticketId, commentId, { content });
-  if (!updated) throw new Error('Comment not found');
+  if (!updated) throw new WidgetError('comment_not_found', 404);
   const externalUserIdMap = await resolveExternalUserIds(projectId, [updated]);
   return mapCommentToWidgetResponse(updated, externalUserIdMap, widgetUserId);
 }
@@ -849,7 +861,7 @@ export async function createTicket(
     .where(eq(widgetProjects.id, projectId))
     .limit(1);
 
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   let title = opts.title?.trim() || '';
   if (!title && opts.description) {
@@ -923,16 +935,16 @@ async function requireEditableTask(
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
-    throw new Error('Not the ticket owner');
+    throw new WidgetError('ticket_owner_only', 403);
   }
   // Visibility flips are exempt from the post-activity gate — toggling
   // private/public is a personal disclosure choice the owner should
   // retain regardless of triage state or comment count.
   if (opts.skipPostActivityChecks) return;
 
-  if (task.status !== 'pending') throw new Error('Ticket status is no longer pending');
+  if (task.status !== 'pending') throw new WidgetError('ticket_no_longer_editable', 409);
 
   const [commentCount] = await db
     .select({ count: sql<number>`count(*)` })
@@ -941,13 +953,13 @@ async function requireEditableTask(
       eq(workspaceTaskComments.taskId, taskId),
       isNull(workspaceTaskComments.deletedAt),
     ));
-  if (Number(commentCount.count) > 0) throw new Error('Ticket has comments and cannot be modified');
+  if (Number(commentCount.count) > 0) throw new WidgetError('ticket_has_comments', 409);
 
   const [activityCount] = await db
     .select({ count: sql<number>`count(*)` })
     .from(workspaceTaskActivity)
     .where(eq(workspaceTaskActivity.taskId, taskId));
-  if (Number(activityCount.count) > 0) throw new Error('Ticket has activity and cannot be modified');
+  if (Number(activityCount.count) > 0) throw new WidgetError('ticket_has_activity', 409);
 
   return task;
 }
@@ -959,7 +971,7 @@ export async function updateTicket(
   opts: { title?: string; description?: string; visibility?: 'public' | 'private' },
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   // Visibility-only edits bypass the post-activity lockout so the owner
   // can flip private/public at any time. Title/description still require
@@ -977,7 +989,7 @@ export async function updateTicket(
   if (opts.description !== undefined) updates.description = opts.description;
   if (opts.visibility !== undefined) {
     if (opts.visibility !== 'public' && opts.visibility !== 'private') {
-      throw new Error('Invalid visibility');
+      throw new WidgetError('invalid_visibility', 400);
     }
     updates.visibility = opts.visibility;
   }
@@ -997,7 +1009,7 @@ export async function deleteTicket(
   widgetUserId: string,
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   await requireEditableTask(ticketId, project.serverId, widgetUserId);
 
@@ -1010,7 +1022,10 @@ export async function deleteTicket(
 
 const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
 const MAX_ATTACHMENTS_PER_TICKET = 5;
-const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+// SVG is intentionally excluded: SVG is XML and can carry inline <script>,
+// which becomes stored XSS if the asset is ever opened directly or rendered
+// via <object>/<iframe>. Re-enabling requires server-side sanitization.
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 export async function uploadTicketAttachment(
   ticketId: string,
@@ -1019,20 +1034,20 @@ export async function uploadTicketAttachment(
   file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   if (!attachmentStorage.isConfigured()) {
-    throw new Error('Attachment storage is not configured');
+    throw new WidgetError('attachment_storage_unconfigured', 500);
   }
 
   // Validate image type
   if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
-    throw new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)');
+    throw new WidgetError('attachment_unsupported_type', 400);
   }
 
   // Validate file size
   if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
-    throw new Error('File size exceeds 5MB limit');
+    throw new WidgetError('attachment_too_large', 413);
   }
 
   // Verify ownership — task must exist, belong to this user, and be on this server
@@ -1046,9 +1061,9 @@ export async function uploadTicketAttachment(
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
-    throw new Error('Not the ticket owner');
+    throw new WidgetError('ticket_owner_only', 403);
   }
 
   // Check attachment count limit
@@ -1060,7 +1075,7 @@ export async function uploadTicketAttachment(
       eq(workspaceTaskAttachments.ownerType, 'task'),
     ));
   if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_TICKET) {
-    throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_TICKET} attachments per ticket`);
+    throw new WidgetError('attachment_count_exceeded', 400);
   }
 
   // Upload to R2
@@ -1116,13 +1131,13 @@ export async function addWidgetCommentAttachment(
   const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
 
   if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
-    throw new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)');
+    throw new WidgetError('attachment_unsupported_type', 400);
   }
   if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
-    throw new Error('File size exceeds 5MB limit');
+    throw new WidgetError('attachment_too_large', 413);
   }
   if (!attachmentStorage.isConfigured()) {
-    throw new Error('Attachment storage is not configured');
+    throw new WidgetError('attachment_storage_unconfigured', 500);
   }
 
   const [countRow] = await db
@@ -1133,7 +1148,7 @@ export async function addWidgetCommentAttachment(
       eq(workspaceTaskAttachments.ownerId, commentId),
     ));
   if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_COMMENT) {
-    throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_COMMENT} attachments per comment`);
+    throw new WidgetError('attachment_count_exceeded', 400);
   }
 
   const stored = await attachmentStorage.storeUpload({
@@ -1181,7 +1196,7 @@ export async function deleteTicketAttachment(
   widgetUserId: string,
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   // Verify ownership
   const [task] = await db
@@ -1194,9 +1209,9 @@ export async function deleteTicketAttachment(
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
-    throw new Error('Not the ticket owner');
+    throw new WidgetError('ticket_owner_only', 403);
   }
 
   // Find the attachment
@@ -1209,7 +1224,7 @@ export async function deleteTicketAttachment(
     ))
     .limit(1);
 
-  if (!attachment) throw new Error('Attachment not found');
+  if (!attachment) throw new WidgetError('attachment_not_found', 404);
 
   // Delete from object storage
   await attachmentStorage.deleteStoredObject({
@@ -1304,7 +1319,7 @@ export async function castVote(
   value: boolean
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   const [task] = await db
     .select({
@@ -1320,9 +1335,9 @@ export async function castVote(
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.votingEndsAt && new Date() > task.votingEndsAt) {
-    throw new Error('Voting period has ended');
+    throw new WidgetError('voting_period_ended', 400);
   }
 
   await db
@@ -1348,7 +1363,7 @@ export async function retractVote(
   widgetUserId: string,
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   const [task] = await db
     .select({ serverId: workspaceTasks.serverId })
@@ -1359,7 +1374,7 @@ export async function retractVote(
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
 
   await db
     .delete(workspaceTaskVotes)
@@ -1414,6 +1429,14 @@ export async function enableWidget(
   const slugSuffix = randomBytes(4).toString('hex');
   const slug = existing?.slug ?? generateSlug(opts.name, slugSuffix);
 
+  // Encrypt the signing secret at rest. The column name is `api_secret_hash`
+  // for historical reasons; what's actually stored is AES-256-GCM ciphertext
+  // (with the `enc:v1:` prefix) when WIDGET_SECRET_ENCRYPTION_KEY is set,
+  // and falls back to plaintext only in dev where no key is configured.
+  const apiSecretAtRest = widgetSecretCrypto.isConfigured()
+    ? widgetSecretCrypto.encrypt(apiSecret)
+    : apiSecret;
+
   const [project] = await db
     .insert(widgetProjects)
     .values({
@@ -1422,7 +1445,7 @@ export async function enableWidget(
       name: opts.name,
       slug,
       apiKey,
-      apiSecretHash: apiSecret,
+      apiSecretHash: apiSecretAtRest,
       enabled: true,
       channelId: opts.channelId,
     })
@@ -1432,7 +1455,7 @@ export async function enableWidget(
         enabled: true,
         name: opts.name,
         apiKey,
-        apiSecretHash: apiSecret,
+        apiSecretHash: apiSecretAtRest,
         channelId: opts.channelId,
         workspaceProjectId: opts.workspaceProjectId,
         updatedAt: new Date(),
@@ -1440,6 +1463,8 @@ export async function enableWidget(
     })
     .returning();
 
+  // The plaintext `apiSecret` is what the customer must use to sign JWTs;
+  // it is shown once in the workspace UI and never persisted as plaintext.
   return { ...project, apiSecret };
 }
 
@@ -1457,13 +1482,16 @@ export async function disableWidget(serverId: string, workspaceProjectId?: strin
 export async function regenerateSecret(serverId: string, workspaceProjectId?: string) {
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
+  const newSecretAtRest = widgetSecretCrypto.isConfigured()
+    ? widgetSecretCrypto.encrypt(newSecret)
+    : newSecret;
   const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
   if (workspaceProjectId) {
     conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
   }
   const [project] = await db
     .update(widgetProjects)
-    .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
+    .set({ apiSecretHash: newSecretAtRest, apiKey: newFingerprint, updatedAt: new Date() })
     .where(and(...conditions))
     .returning({ id: widgetProjects.id });
 
@@ -1516,8 +1544,11 @@ export async function listPublicProjects() {
 }
 
 /**
- * Sign a widget_user JWT. Pure function — takes all signing material as params
- * so it's testable without DB access.
+ * Sign a widget_user JWT.
+ *
+ * `apiSecretHash` is the value as stored in the DB — either AES-256-GCM
+ * ciphertext (with the `enc:v1:` prefix) or legacy plaintext. The crypto
+ * module handles both transparently so callers can pass the row directly.
  */
 export async function signWidgetUserJwt(params: {
   apiSecretHash: string;
@@ -1525,7 +1556,7 @@ export async function signWidgetUserJwt(params: {
   userId: string;
   userName?: string;
 }): Promise<string> {
-  const signingKey = new TextEncoder().encode(params.apiSecretHash);
+  const signingKey = await widgetSecretCrypto.getSigningKey(params.apiSecretHash);
   return await new jose.SignJWT({
     fp: params.apiKey,
     type: 'widget_user',
@@ -1534,7 +1565,7 @@ export async function signWidgetUserJwt(params: {
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(params.userId)
     .setIssuedAt()
-    .setExpirationTime('24h')
+    .setExpirationTime(WIDGET_JWT_MAX_TOKEN_AGE)
     .sign(signingKey);
 }
 
@@ -1994,6 +2025,52 @@ export class WidgetAssignError extends Error {
   ) {
     super(code);
     this.name = 'WidgetAssignError';
+  }
+}
+
+/**
+ * Stable error codes for the public widget API.
+ *
+ * Adding `as const` makes the codes a closed set so that route handlers
+ * can exhaustively map `.code` → HTTP status without catching arbitrary
+ * Error.message strings (which would risk leaking DB / driver internals
+ * to unauthenticated callers).
+ */
+export const WIDGET_ERROR_CODES = [
+  'project_not_found',
+  'ticket_not_found',
+  'comment_not_found',
+  'attachment_not_found',
+  'ticket_owner_only',
+  'comment_author_only',
+  'comments_disabled',
+  'ticket_no_longer_editable',
+  'ticket_has_comments',
+  'ticket_has_activity',
+  'invalid_visibility',
+  'voting_period_ended',
+  'attachment_unsupported_type',
+  'attachment_too_large',
+  'attachment_count_exceeded',
+  'attachment_storage_unconfigured',
+  'rate_limited',
+] as const;
+
+export type WidgetErrorCode = typeof WIDGET_ERROR_CODES[number];
+
+/**
+ * Service-layer error thrown by the public widget API. Routes map `.code`
+ * + `.status` to the response body; anything else that escapes is logged
+ * and reported as `{error: 'internal'}` to avoid leaking DB internals.
+ */
+export class WidgetError extends Error {
+  constructor(
+    public readonly code: WidgetErrorCode,
+    public readonly status: number,
+    public readonly cause?: unknown,
+  ) {
+    super(code);
+    this.name = 'WidgetError';
   }
 }
 
