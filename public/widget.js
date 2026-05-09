@@ -312,8 +312,9 @@
       },
       header: {
         feedback: "{name} Feedback",
-        // Headline interpolates the project name: e.g. "Staircase HQ".
-        headline: "{name} HQ",
+        // Headline is just the project name. The eyebrow renders it
+        // alongside the brand-locked "powered by RunHQ" link.
+        headline: "{name}",
         // Sub-text is rendered as: [subBefore]<em>{subEm}</em>[subAfter].
         // Explains the WHY of the widget — that the team treats user
         // feedback as direct input into the roadmap. Reads as a brief
@@ -322,8 +323,6 @@
         subEm: "",
         subAfter: "",
         thisProduct: "this product",
-        poweredBy: "Powered by",
-        visitRunhq: "Visit RunHQ",
       },
       composer: {
         // Placeholder picks up the prompt that used to live above the
@@ -432,9 +431,10 @@
       },
       header: {
         feedback: "{name} 피드백",
-        // Korean keeps the brand "HQ" mark — translating it to "본부" reads
-        // institutional and loses the product feel.
-        headline: "{name} HQ",
+        // Headline is just the project name. The eyebrow renders it
+        // alongside the brand-locked "powered by RunHQ" link, which
+        // stays in English regardless of locale.
+        headline: "{name}",
         // Korean drops the {name} interpolation — the eyebrow already
         // shows the product name, and Korean particle agreement (을/를,
         // 은/는) on a runtime-injected name reads as machine-translated.
@@ -442,8 +442,6 @@
         subEm: "",
         subAfter: "",
         thisProduct: "이 제품",
-        poweredBy: "제공",
-        visitRunhq: "RunHQ 방문",
       },
       composer: {
         placeholder: "버그, 아이디어, 제안 — 여기에 자유롭게 적어주세요.",
@@ -1102,18 +1100,23 @@
       '}',
 
       /* eyebrow + headline + sub */
-      /* Eyebrow row: kicker + "Powered by RunHQ" packed left, sharing the
-         same baseline as the project title. They were originally split to
-         opposite ends of the row, but on narrow widths "Powered by" landed
-         under the absolutely-positioned close X. */
+      /* Eyebrow row: project name + "powered by RunHQ" packed left so the
+         line reads as a single phrase ("[name] powered by RunHQ"). They
+         share the same baseline; the small inline gap is one space-width
+         at this font size. Originally split to opposite ends of the row,
+         but on narrow widths the powered-by landed under the
+         absolutely-positioned close X. */
       '.rw-eyebrow-row {',
-      '  display: flex; align-items: center; flex-wrap: wrap;',
-      '  gap: 14px; margin-bottom: 14px;',
+      '  display: flex; align-items: baseline; flex-wrap: wrap;',
+      '  gap: 6px; margin-bottom: 14px;',
       '}',
+      /* Project name text — styled to match the adjacent "powered by RunHQ"
+         tag so the whole eyebrow reads as one phrase. The previous
+         uppercase + 0.22em-spaced kicker treatment broke that flow. */
       '.rw-eyebrow {',
       '  display: inline-flex; align-items: center; gap: 8px;',
-      '  font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase;',
-      '  color: var(--rw-muted); font-weight: 500;',
+      '  font-size: 10.5px; letter-spacing: 0.02em;',
+      '  color: var(--rw-muted); font-weight: 600;',
       '  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
       '}',
       '.rw-eyebrow-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); flex: 0 0 auto; }',
@@ -2562,26 +2565,26 @@
 
       var projectName = config.projectName || t("header.thisProduct");
 
-      // Powered-by link (right end of the eyebrow row). Replaces the
-      // bottom-of-modal footer that the previous design had.
+      // "powered by RunHQ" tag — brand-locked, always English regardless
+      // of locale. Sits next to the project name in the eyebrow row so
+      // the line reads as a single phrase: "[project name] powered by RunHQ".
       var poweredLink = h("a", {
         href: "https://www.runhq.io", target: "_blank",
         rel: "noopener noreferrer",
-        "aria-label": t("header.visitRunhq"),
+        "aria-label": "Visit RunHQ",
       }, "RunHQ");
       var poweredBy = h("div", { className: "rw-powered-by" }, [
-        document.createTextNode(t("header.poweredBy") + " "),
+        document.createTextNode("powered by "),
         poweredLink,
       ]);
 
       var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
-        // Eyebrow row: project name+HQ label (small caps, the same
-        // micro-typography the older "FEEDBACK" eyebrow used) followed by
-        // the Powered-by link. Both sit on the left so the line stays
-        // clear of the absolutely-positioned shell-actions (theme + close).
-        // The big H1 headline was removed — at small sizes it competed for
-        // visual weight with the composer placeholder, which is the actual
-        // hero.
+        // Eyebrow row: project name + brand-locked "powered by RunHQ" tag,
+        // packed left so the line reads as one phrase. Both sit on the
+        // left so they stay clear of the absolutely-positioned
+        // shell-actions (theme + close). The big H1 headline was removed
+        // — at small sizes it competed for visual weight with the
+        // composer placeholder, which is the actual hero.
         h("div", { className: "rw-eyebrow-row" }, [
           h("div", { className: "rw-eyebrow" }, (function () {
             var eyebrowNodes = [
