@@ -875,7 +875,14 @@
       '}',
       '.rw-shell-scrim.rw-open .rw-shell { transform: none; }',
       '@media (max-width: 640px) {',
-      '  .rw-shell { width: 100%; height: 100vh; min-height: 0; }',
+      /* 100dvh excludes the iOS/Android dynamic toolbar so the top
+         (shell-actions) and bottom (composer) aren't clipped behind
+         browser chrome. The 100vh line is the fallback for older
+         browsers that don't parse dvh. */
+      '  .rw-shell { width: 100%; height: 100vh; height: 100dvh; min-height: 0; }',
+      /* Recent Submissions strip is desktop-only — on mobile it just
+         pushes the composer and tabs off-screen. */
+      '  .rw-others { display: none; }',
       '}',
 
       '.rw-card-modal {',
