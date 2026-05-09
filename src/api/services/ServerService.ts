@@ -43,7 +43,7 @@ import { flyTierToTierId, tierIdToFlyTier } from './providers/FlyProvider';
 import { workspaceAppName, workspaceNetworkName } from './FlyService';
 import type { ProviderId, VolumeInfo } from './providers/types';
 import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
-import { signPayload } from '../../lib/hmac.js';
+import { signPayload } from '../../lib/hmac';
 
 // Server is considered offline after 60 seconds without heartbeat
 const SERVER_HEARTBEAT_TIMEOUT_MS = 60_000;
