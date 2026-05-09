@@ -968,19 +968,16 @@
       '@media (max-width: 880px) {',
       '  .rw-split { grid-template-columns: 1fr; }',
       '  .rw-pane-left { border-right: 0; border-bottom: 1px solid var(--rw-line); }',
-      /* Reserve room for the absolutely-positioned shell-actions
-         (theme + close, ~60px wide at right:18). Without this padding,
-         "Powered by RunHQ" lands directly under the close button. */
-      '  .rw-eyebrow-row { padding-right: 64px; }',
       '}',
 
       /* eyebrow + headline + sub */
-      /* Eyebrow row: kicker on the left, "Powered by RunHQ" on the right.
-         The bottom-of-modal footer was moved up here so the modal's vertical
-         space goes entirely to content. */
+      /* Eyebrow row: kicker + "Powered by RunHQ" packed left, sharing the
+         same baseline as the project title. They were originally split to
+         opposite ends of the row, but on narrow widths "Powered by" landed
+         under the absolutely-positioned close X. */
       '.rw-eyebrow-row {',
-      '  display: flex; align-items: center; justify-content: space-between;',
-      '  gap: 12px; margin-bottom: 14px;',
+      '  display: flex; align-items: center; flex-wrap: wrap;',
+      '  gap: 14px; margin-bottom: 14px;',
       '}',
       '.rw-eyebrow {',
       '  display: inline-flex; align-items: center; gap: 8px;',
@@ -2447,11 +2444,13 @@
       ]);
 
       var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
-        // Eyebrow row carries the project name+HQ label (small caps, the
-        // same micro-typography the older "FEEDBACK" eyebrow used) on the
-        // left and the Powered-by link on the right. The big H1 headline
-        // was removed — at small sizes it competed for visual weight with
-        // the composer placeholder, which is the actual hero.
+        // Eyebrow row: project name+HQ label (small caps, the same
+        // micro-typography the older "FEEDBACK" eyebrow used) followed by
+        // the Powered-by link. Both sit on the left so the line stays
+        // clear of the absolutely-positioned shell-actions (theme + close).
+        // The big H1 headline was removed — at small sizes it competed for
+        // visual weight with the composer placeholder, which is the actual
+        // hero.
         h("div", { className: "rw-eyebrow-row" }, [
           h("div", { className: "rw-eyebrow" }, (function () {
             var eyebrowNodes = [
