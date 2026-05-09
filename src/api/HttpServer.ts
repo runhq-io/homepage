@@ -28,6 +28,7 @@ import { getServerSessionKeyPair } from './auth/serverSessionKeys';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
+import { widgetRateLimiter } from './services/WidgetRateLimiter';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -5150,6 +5151,60 @@ export function createHttpApp() {
     if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
     const result = await WidgetService.suggestAssignment(auth.projectId, c.req.param('id'));
     return c.json(result);
+  });
+
+  app.post('/api/widget/tickets/:id/assign', async (c) => {
+    // Gate 1: JWT auth
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Gate 2: assign_agent permission
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    // Gate 3: identified user required (widgetUserId only present for JWT-signed requests with sub)
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    // Gate 4: body validation
+    const body = await c.req.json().catch(() => null) as { agentId?: unknown; command?: unknown } | null;
+    if (!body || typeof body.agentId !== 'string' || typeof body.command !== 'string') {
+      return c.json({ error: 'agentId and command required' }, 400);
+    }
+
+    // Gate 5: re-validate agent exposure
+    const exposed = await WidgetService.listExposedAgents(auth.projectId);
+    if (!exposed.some((a) => a.id === body.agentId)) {
+      return c.json({ error: 'Agent not available' }, 403);
+    }
+
+    // Gate 6: rate limit
+    const limitPerHour = await WidgetService.getWidgetProjectRateLimit(auth.projectId);
+    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, limitPerHour);
+    if (!rl.allowed) {
+      c.header('Retry-After', String(rl.retryAfterSec));
+      return c.json({ error: 'Rate limit exceeded' }, 429);
+    }
+
+    // Resolve external user details for audit
+    const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
+    if (!wu) return c.json({ error: 'Widget user not found' }, 404);
+
+    try {
+      const result = await WidgetService.assignAgent(auth.projectId, c.req.param('id'), {
+        agentId: body.agentId,
+        command: body.command,
+        actor: {
+          widgetUserId: auth.widgetUserId,
+          externalUserId: wu.externalUserId,
+          name: wu.name,
+          matchedRoles: auth.matchedRoles,
+        },
+      });
+      return c.json({ jobId: result.jobId, agentId: body.agentId });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetAssignError) {
+        return c.json({ error: err.code }, err.status as any);
+      }
+      console.error('[HttpServer] widget assign error:', err);
+      return c.json({ error: 'internal' }, 500);
+    }
   });
 
   app.get('/api/widget/tickets', async (c) => {

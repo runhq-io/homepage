@@ -1922,6 +1922,130 @@ export async function listExposedAgents(widgetProjectId: string): Promise<Expose
 }
 
 // ============================================================================
+// Agent Assignment
+// ============================================================================
+
+export interface AssignAgentRequest {
+  agentId: string;
+  command: string;
+  actor: {
+    widgetUserId: string;
+    externalUserId: string;
+    name: string | null;
+    matchedRoles: string[];
+  };
+}
+
+export interface AssignAgentResult {
+  jobId: string;
+}
+
+export class WidgetAssignError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number,
+    public readonly cause?: unknown,
+  ) {
+    super(code);
+    this.name = 'WidgetAssignError';
+  }
+}
+
+/**
+ * Forwards an authorized triager assignment to the workspace and records
+ * an activity entry. Caller MUST have already passed:
+ *   - JWT auth + assign_agent permission
+ *   - Agent exposure check
+ *   - Rate-limit check
+ */
+/** Fetch the rate-limit quota for a widget project (returns default 30 if not found). */
+export async function getWidgetProjectRateLimit(projectId: string): Promise<number> {
+  const [proj] = await db
+    .select({ limit: widgetProjects.widgetAssignRateLimitPerHour })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+  return proj?.limit ?? 30;
+}
+
+/** Fetch the external user details for audit attribution. */
+export async function getWidgetUserAuditInfo(
+  widgetUserId: string,
+): Promise<{ externalUserId: string; name: string | null } | null> {
+  const [wu] = await db
+    .select({ externalUserId: widgetUsers.externalUserId, name: widgetUsers.name })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.id, widgetUserId))
+    .limit(1);
+  return wu ?? null;
+}
+
+export async function assignAgent(
+  widgetProjectId: string,
+  ticketId: string,
+  req: AssignAgentRequest,
+): Promise<AssignAgentResult> {
+  const [task] = await db
+    .select({ serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(and(eq(workspaceTasks.id, ticketId), eq(workspaceTasks.sourceType, 'widget')))
+    .limit(1);
+  if (!task) throw new WidgetAssignError('ticket_not_found', 404);
+
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, task.serverId))
+    .limit(1);
+  if (!server) throw new WidgetAssignError('server_not_found', 404);
+
+  let res: { jobId?: string } | null = null;
+  try {
+    res = await ServerService.serverTokenFetch<{ jobId?: string }>(
+      server,
+      '/api/internal/widget-triager-assign',
+      {
+        ticketId,
+        agentId: req.agentId,
+        command: req.command,
+        actor: {
+          externalUserId: req.actor.externalUserId,
+          name: req.actor.name,
+          via: 'widget_triage',
+        },
+      },
+    );
+  } catch (err) {
+    throw new WidgetAssignError('workspace_unreachable', 503, err);
+  }
+  if (!res?.jobId) throw new WidgetAssignError('workspace_error', 502, res);
+
+  // Audit row — best-effort; do not fail the request if this errors.
+  try {
+    await db.insert(workspaceTaskActivity).values({
+      taskId: ticketId,
+      serverId: task.serverId,
+      type: 'agent_assigned',
+      createdByType: 'external',
+      createdById: req.actor.widgetUserId,
+      createdByName: req.actor.name,
+      metadata: {
+        via: 'widget_triage',
+        widget_user_id: req.actor.widgetUserId,
+        external_user_id: req.actor.externalUserId,
+        agent_id: req.agentId,
+        command: req.command,
+        matched_roles: req.actor.matchedRoles,
+      },
+    });
+  } catch (err) {
+    console.warn('[WidgetService] audit row write failed:', err);
+  }
+
+  return { jobId: res.jobId };
+}
+
+// ============================================================================
 // Assignment Suggestion
 // ============================================================================
 
