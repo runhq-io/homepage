@@ -26,6 +26,7 @@ import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
+import * as ServerService from './ServerService';
 
 const attachmentStorage = new TaskAttachmentStorageService();
 
@@ -1918,4 +1919,62 @@ export async function listExposedAgents(widgetProjectId: string): Promise<Expose
     .from(widgetExposedAgents)
     .where(eq(widgetExposedAgents.widgetProjectId, widgetProjectId))
     .orderBy(widgetExposedAgents.agentName);
+}
+
+// ============================================================================
+// Assignment Suggestion
+// ============================================================================
+
+export interface SuggestAssignmentResult {
+  agentId: string | null;
+  command: string;
+}
+
+/**
+ * Ask the workspace's triager to suggest which exposed agent should handle
+ * the given ticket.
+ *
+ * Non-fatal: any forwarding failure returns { agentId: null, command: '' } so
+ * the modal stays usable even when the workspace is offline or the endpoint
+ * hasn't been deployed yet.
+ */
+export async function suggestAssignment(
+  widgetProjectId: string,
+  ticketId: string,
+): Promise<SuggestAssignmentResult> {
+  // Resolve ticket → server
+  const [task] = await db
+    .select({ serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(and(eq(workspaceTasks.id, ticketId), eq(workspaceTasks.sourceType, 'widget')))
+    .limit(1);
+  if (!task) return { agentId: null, command: '' };
+
+  // Only forward when there are agents exposed for this widget project
+  const exposed = await listExposedAgents(widgetProjectId);
+  if (exposed.length === 0) return { agentId: null, command: '' };
+  const agentIdAllowlist = exposed.map(a => a.id);
+
+  // Resolve server row (needed for URL + token hash)
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, task.serverId))
+    .limit(1);
+  if (!server) return { agentId: null, command: '' };
+
+  try {
+    const res = await ServerService.serverTokenFetch<{ agentId: string | null; command: string }>(
+      server,
+      '/api/internal/widget-triager-suggest',
+      { ticketId, agentIdAllowlist },
+    );
+    return {
+      agentId: typeof res?.agentId === 'string' ? res.agentId : null,
+      command: typeof res?.command === 'string' ? res.command : '',
+    };
+  } catch (err) {
+    console.warn('[WidgetService] suggestAssignment forward failed:', err);
+    return { agentId: null, command: '' };
+  }
 }

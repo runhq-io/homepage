@@ -5144,6 +5144,14 @@ export function createHttpApp() {
     return c.json({ agents });
   });
 
+  app.post('/api/widget/tickets/:id/suggest-assignment', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    const result = await WidgetService.suggestAssignment(auth.projectId, c.req.param('id'));
+    return c.json(result);
+  });
+
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
