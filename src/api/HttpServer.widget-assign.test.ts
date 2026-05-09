@@ -26,6 +26,16 @@ vi.mock('./services/WidgetService', () => ({
       this.status = status;
     }
   },
+  WidgetError: class WidgetError extends Error {
+    code: string;
+    status: number;
+    constructor(code: string, status: number, cause?: unknown) {
+      super(code);
+      this.name = 'WidgetError';
+      this.code = code;
+      this.status = status;
+    }
+  },
   // Other exports referenced by HttpServer widget routes
   suggestAssignment: vi.fn(),
   listPublicProjects: vi.fn(),
@@ -34,6 +44,7 @@ vi.mock('./services/WidgetService', () => ({
 vi.mock('./services/WidgetRateLimiter', () => ({
   widgetRateLimiter: {
     check: vi.fn(),
+    checkDefault: vi.fn(),
   },
 }));
 
@@ -155,7 +166,7 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     expect(res.status).toBe(429);
     expect(res.headers.get('Retry-After')).toBe('120');
     const body = await res.json();
-    expect(body.error).toBe('Rate limit exceeded');
+    expect(body.error).toBe('rate_limited');
   });
 
   it('404 when widget user lookup misses', async () => {
@@ -204,7 +215,7 @@ describe('POST /api/widget/tickets/:id/assign', () => {
   it('rate limiter is called with correct projectId and widgetUserId', async () => {
     const app = makeApp();
     await postAssign(app);
-    expect(widgetRateLimiter.check).toHaveBeenCalledWith('proj-1', 'wu-123', 30);
+    expect(widgetRateLimiter.check).toHaveBeenCalledWith('proj-1', 'wu-123', 'triager_assign', 30);
   });
 
   it('getWidgetProjectRateLimit is called with projectId', async () => {
