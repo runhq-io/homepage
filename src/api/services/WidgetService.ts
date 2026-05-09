@@ -1721,13 +1721,32 @@ export async function updateWidgetSettings(
     is_public?: boolean;
     auto_inject_in_preview?: boolean;
     slug?: string;
+    // Inline workspaceProjectId — accepted here as an alternative to opts.workspaceProjectId
+    workspaceProjectId?: string;
+    // Triager assignment policy fields
+    widgetAgentAssignmentEnabled?: boolean;
+    widgetAssignRoles?: string[];
+    widgetRoleClaimName?: string;
+    widgetAssignRateLimitPerHour?: number;
   },
   opts?: { workspaceProjectId?: string },
 ): Promise<UpdateWidgetSettingsResult> {
+  // Resolve workspaceProjectId from either location (settings object takes precedence).
+  const workspaceProjectId = settings.workspaceProjectId ?? opts?.workspaceProjectId;
+
+  // Empty-roles guard: enabling assignment without roles is a configuration error.
+  if (settings.widgetAgentAssignmentEnabled === true) {
+    if (!settings.widgetAssignRoles || settings.widgetAssignRoles.length === 0) {
+      throw new WidgetSettingsValidationError(
+        'Cannot enable widget agent assignment: add at least one role.',
+      );
+    }
+  }
+
   // Build a reusable conditions array for all three internal queries.
   const projConds = (): ReturnType<typeof eq>[] => {
     const c: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-    if (opts?.workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId));
+    if (workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
     return c;
   };
 
@@ -1769,6 +1788,11 @@ export async function updateWidgetSettings(
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
+      // Triager assignment policy — only set when caller explicitly provides the field
+      ...(settings.widgetAgentAssignmentEnabled !== undefined && { widgetAgentAssignmentEnabled: settings.widgetAgentAssignmentEnabled }),
+      ...(settings.widgetAssignRoles !== undefined && { widgetAssignRoles: settings.widgetAssignRoles }),
+      ...(settings.widgetRoleClaimName !== undefined && { widgetRoleClaimName: settings.widgetRoleClaimName }),
+      ...(settings.widgetAssignRateLimitPerHour !== undefined && { widgetAssignRateLimitPerHour: settings.widgetAssignRateLimitPerHour }),
       updatedAt: new Date(),
     })
     .where(and(...projConds()));

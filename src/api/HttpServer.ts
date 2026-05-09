@@ -5584,6 +5584,10 @@ export function createHttpApp() {
       is_public,
       auto_inject_in_preview,
       slug,
+      widgetAgentAssignmentEnabled,
+      widgetAssignRoles,
+      widgetRoleClaimName,
+      widgetAssignRateLimitPerHour,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     if (!projectId) return c.json({ error: 'projectId required' }, 400);
@@ -5593,6 +5597,10 @@ export function createHttpApp() {
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
         auto_approve, widget_position, widget_language, voting_period_hours, is_public, auto_inject_in_preview, slug,
+        widgetAgentAssignmentEnabled,
+        widgetAssignRoles,
+        widgetRoleClaimName,
+        widgetAssignRateLimitPerHour,
       }, { workspaceProjectId: projectId });
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {
