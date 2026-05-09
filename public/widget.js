@@ -938,6 +938,10 @@
       '@media (max-width: 880px) {',
       '  .rw-split { grid-template-columns: 1fr; }',
       '  .rw-pane-left { border-right: 0; border-bottom: 1px solid var(--rw-line); }',
+      /* Reserve room for the absolutely-positioned shell-actions
+         (theme + close, ~60px wide at right:18). Without this padding,
+         "Powered by RunHQ" lands directly under the close button. */
+      '  .rw-eyebrow-row { padding-right: 64px; }',
       '}',
 
       /* eyebrow + headline + sub */
