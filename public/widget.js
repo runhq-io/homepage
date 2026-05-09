@@ -335,7 +335,7 @@
         // swap reads as a state change at a glance.
         private: "Private",
         public: "Public",
-        privateOn: "Only you and the team will see this.",
+        privateOn: "Only you will see this.",
         privateOff: "Others can see and upvote this.",
         submit: "Submit",
         posting: "Posting…",
@@ -361,7 +361,7 @@
       visibility: {
         private: "Private",
         public: "Public",
-        privateTooltip: "Only you and the team can see this. Click to make it public.",
+        privateTooltip: "Only you can see this. Click to make it public.",
         publicTooltip: "Anyone can see this. Click to make it private.",
         failed: "Couldn't update visibility — try again.",
       },
@@ -449,7 +449,7 @@
         attach: "첨부",
         private: "비공개",
         public: "공개",
-        privateOn: "본인과 팀에게만 표시됩니다.",
+        privateOn: "본인에게만 표시됩니다.",
         privateOff: "다른 사용자가 보고 추천할 수 있습니다.",
         submit: "제출",
         posting: "게시 중…",
@@ -472,7 +472,7 @@
       visibility: {
         private: "비공개",
         public: "공개",
-        privateTooltip: "본인과 팀만 볼 수 있습니다. 클릭하면 공개로 전환됩니다.",
+        privateTooltip: "본인만 볼 수 있습니다. 클릭하면 공개로 전환됩니다.",
         publicTooltip: "누구나 볼 수 있습니다. 클릭하면 비공개로 전환됩니다.",
         failed: "공개 설정을 변경하지 못했습니다. 다시 시도해 주세요.",
       },
