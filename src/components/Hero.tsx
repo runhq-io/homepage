@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import HeroNavbar from './HeroNavbar';
 
 const SIGNUP_URL = 'https://app.runhq.io/signup';
-const LOGIN_URL = 'https://app.runhq.io';
 
 const CHIP_PROMPTS = [
   'Develop app based on user feedback',
@@ -259,19 +258,7 @@ export default function Hero({ variant = 'default' }: { variant?: HeroVariant } 
       <style>{HERO_STYLES}</style>
       <canvas ref={canvasRef} className="rh-stage" />
 
-      {variant === 'automate' ? (
-        <HeroNavbar />
-      ) : (
-        <header className="rh-topbar">
-          <div className="rh-brand">
-            <div className="rh-mark" />
-            <span>RunHQ</span>
-          </div>
-          <div className="rh-top-right">
-            <a className="rh-btn-sign" href={LOGIN_URL}>Sign in</a>
-          </div>
-        </header>
-      )}
+      <HeroNavbar />
 
       <div className="rh-copy">
         {variant === 'automate' ? (
@@ -388,40 +375,6 @@ const HERO_STYLES = `
       repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0 1px, transparent 1px 3px);
     pointer-events: none;
   }
-
-  /* Top bar */
-  .rh-topbar {
-    position: absolute; top: 0; left: 0; right: 0;
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 22px 32px;
-    z-index: 10;
-  }
-  .rh-brand {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 15px; font-weight: 600; letter-spacing: -0.01em;
-  }
-  .rh-mark { width: 18px; height: 18px; position: relative; }
-  .rh-mark::before, .rh-mark::after {
-    content: ""; position: absolute; inset: 0;
-    border: 1.5px solid var(--accent);
-    border-radius: 50%;
-  }
-  .rh-mark::after { animation: rh-ring 2.2s ease-out infinite; }
-  @keyframes rh-ring {
-    0%   { transform: scale(1);   opacity: 1; }
-    100% { transform: scale(2.2); opacity: 0; }
-  }
-  .rh-top-right {
-    display: flex; gap: 10px; align-items: center;
-    justify-self: end;
-  }
-  .rh-btn-sign {
-    color: var(--ink); text-decoration: none;
-    font-size: 13px; padding: 8px 14px;
-    border-radius: 8px; border: 1px solid var(--line);
-    background: rgba(10,12,16,0.5); backdrop-filter: blur(10px);
-  }
-  .rh-btn-sign:hover { border-color: var(--accent); color: var(--accent); }
 
   /* Center copy */
   .rh-copy {

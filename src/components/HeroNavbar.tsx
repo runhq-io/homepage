@@ -4,7 +4,7 @@ const SIGNUP_URL = 'https://app.runhq.io/signup';
 const LOGIN_URL = 'https://app.runhq.io';
 
 const PRODUCTS: { label: string; href: string; desc: string }[] = [
-  { label: 'Agent automation', href: '/automate', desc: 'Describe a workflow. Agents build it.' },
+  { label: 'Agent automation', href: '/agent-automation', desc: 'Describe a workflow. Agents build it.' },
   { label: 'Project management', href: '/projects', desc: 'Track every change, every signal.' },
   { label: 'Dev environment', href: '/runhq', desc: 'Agents code with full context.' },
   { label: 'Feedback widget', href: '/widget', desc: 'Capture user input from anywhere.' },
@@ -73,10 +73,9 @@ const NAVBAR_STYLES = `
   .rh-nav {
     position: absolute; top: 0; left: 0; right: 0;
     z-index: 10;
-    display: grid;
-    grid-template-columns: auto 1fr auto;
+    display: flex;
     align-items: center;
-    gap: 32px;
+    gap: 8px;
     padding: 18px 32px;
     font-family: 'Inter Tight', system-ui, sans-serif;
     font-size: 14px;
@@ -89,6 +88,7 @@ const NAVBAR_STYLES = `
     font-weight: 600; letter-spacing: -0.01em;
     color: inherit; text-decoration: none;
     font-size: 15px;
+    margin-right: 18px;
   }
   .rh-nav-mark { width: 18px; height: 18px; position: relative; }
   .rh-nav-mark::before, .rh-nav-mark::after {
@@ -103,8 +103,7 @@ const NAVBAR_STYLES = `
   }
 
   .rh-nav-links {
-    display: flex; align-items: center; gap: 6px;
-    justify-self: center;
+    display: flex; align-items: center; gap: 2px;
   }
   .rh-nav-link {
     display: inline-flex; align-items: center; gap: 6px;
@@ -153,7 +152,7 @@ const NAVBAR_STYLES = `
 
   .rh-nav-cta {
     display: inline-flex; align-items: center; gap: 8px;
-    justify-self: end;
+    margin-left: auto;
   }
   .rh-nav-signin {
     color: oklch(0.85 0.01 240); text-decoration: none;
@@ -179,7 +178,7 @@ const NAVBAR_STYLES = `
   .rh-nav-getstarted:hover { transform: translateY(-1px); }
 
   @media (max-width: 820px) {
-    .rh-nav { grid-template-columns: auto 1fr auto; gap: 12px; padding: 14px 18px; }
+    .rh-nav { gap: 8px; padding: 14px 18px; }
     .rh-nav-links { display: none; }
   }
 `;
