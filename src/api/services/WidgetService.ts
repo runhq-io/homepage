@@ -32,12 +32,18 @@ const attachmentStorage = new TaskAttachmentStorageService();
 // Types
 // ============================================================================
 
+export type WidgetPermission = 'assign_agent';
+
 export interface WidgetAuthResult {
   projectId: string;
   projectSlug: string;
   widgetUserId?: string;
   /** True when the request was authenticated via a signed JWT (customer's server vouched for it) */
   authenticated: boolean;
+  /** Permissions derived from JWT role claim ∩ project whitelist. Always present; empty for anonymous/raw-key auth. */
+  permissions: ReadonlySet<WidgetPermission>;
+  /** Subset of project's whitelist that this user's JWT carried — used for audit attribution. */
+  matchedRoles: string[];
 }
 
 interface HonoRequest {
@@ -255,6 +261,33 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 // Auth
 // ============================================================================
 
+const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
+
+interface PermissionPolicyRow {
+  widgetAgentAssignmentEnabled: boolean;
+  widgetAssignRoles: string[];
+  widgetRoleClaimName: string;
+}
+
+interface PermissionDerivation {
+  permissions: ReadonlySet<WidgetPermission>;
+  matchedRoles: string[];
+}
+
+function derivePermissions(
+  policy: PermissionPolicyRow,
+  jwtPayload: jose.JWTPayload,
+): PermissionDerivation {
+  if (!policy.widgetAgentAssignmentEnabled) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  if (policy.widgetAssignRoles.length === 0) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  const claim = jwtPayload[policy.widgetRoleClaimName];
+  if (!Array.isArray(claim)) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  const userRoles = claim.filter((r): r is string => typeof r === 'string');
+  const matchedRoles = userRoles.filter(r => policy.widgetAssignRoles.includes(r));
+  if (matchedRoles.length === 0) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  return { permissions: new Set<WidgetPermission>(['assign_agent']), matchedRoles };
+}
+
 /**
  * Authenticates a widget request using one of three modes:
  * 1. Public slug mode — no Authorization, X-RW-Project: {slug}
@@ -276,7 +309,7 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled || !project.isPublic) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
+    return { projectId: project.id, projectSlug: project.slug, authenticated: false, permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
   }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -293,7 +326,7 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
+    return { projectId: project.id, projectSlug: project.slug, authenticated: false, permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
   }
 
   // ---- Mode 3: Signed JWT (standard 3-part header.payload.signature) ----
@@ -307,6 +340,9 @@ export async function authenticateWidget(
       slug: widgetProjects.slug,
       enabled: widgetProjects.enabled,
       apiSecretHash: widgetProjects.apiSecretHash,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.apiKey, decoded.fp))
@@ -364,7 +400,15 @@ export async function authenticateWidget(
     }
   }
 
-  return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
+  const { permissions, matchedRoles } = derivePermissions(project, payload);
+  return {
+    projectId: project.id,
+    projectSlug: project.slug,
+    widgetUserId,
+    authenticated: true,
+    permissions,
+    matchedRoles,
+  };
 }
 
 // ============================================================================
