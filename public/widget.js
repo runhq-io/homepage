@@ -834,16 +834,16 @@
       '  position: fixed; top: 50%;',
       '  ' + (isRight ? "right" : "left") + ': 0;',
       '  transform: translateY(-50%);',
-      '  height: 48px; min-width: 88px;',
-      '  padding: ' + (isRight ? "0 12px 0 18px" : "0 18px 0 12px") + ';',
+      '  height: 48px; min-width: 72px;',
+      '  padding: ' + (isRight ? "0 6px 0 12px" : "0 12px 0 6px") + ';',
       '  background:',
       '    radial-gradient(120% 180% at 30% -30%, rgba(255,255,255,0.18), rgba(255,255,255,0) 60%),',
       '    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),',
       '    linear-gradient(180deg, #7c6dff 0%, #5e4cef 100%);',
       '  color: #ffffff;',
       '  cursor: pointer;',
-      '  display: inline-flex; align-items: center; justify-content: center; gap: 10px;',
-      '  font: inherit; font-size: 16px; font-weight: 600; letter-spacing: 0.02em;',
+      '  display: inline-flex; align-items: center; justify-content: center; gap: 6px;',
+      '  font: inherit; font-size: 14px; font-weight: 600; letter-spacing: 0.02em;',
       '  border: none;',
       /* Round only the protruding edge so the pill reads as a tab anchored
          to the screen border. */
@@ -857,7 +857,7 @@
       /* Hover slides the pill out a few pixels for affordance — direction
          depends on which edge we're attached to. The vertical anchor
          (translateY) is preserved so middle-anchored tabs stay centered. */
-      '.rw-tab:hover { filter: brightness(1.06); padding-' + (isRight ? "left" : "right") + ': 22px; }',
+      '.rw-tab:hover { filter: brightness(1.06); padding-' + (isRight ? "left" : "right") + ': 16px; }',
       /* Top / bottom anchored variants override the default centered transform. */
       '.rw-tab--top    { top: 24px;    bottom: auto; transform: none; }',
       '.rw-tab--bottom { top: auto;    bottom: 24px; transform: none; }',
@@ -866,17 +866,17 @@
          Mercury launcher mark — see buildTabIcon() for the SVG composition.
          The icon container is just a positioning shell; .rw-merc-blob
          holds the violet drop-shadow + the absolutely-positioned halo
-         layer behind the SVG. The SVG renders 80×80 viewBox into a 30×30
-         box (scale ≈0.375), so all design-space pixel offsets in the
+         layer behind the SVG. The SVG renders 80×80 viewBox into a 26×26
+         box (scale ≈0.325), so all design-space pixel offsets in the
          keyframes below shrink proportionally on screen. */
       '.rw-tab-icon {',
-      '  width: 30px; height: 30px;',
+      '  width: 26px; height: 26px;',
       '  flex: 0 0 auto;',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  position: relative;',
       '}',
       '.rw-merc-blob {',
-      '  width: 30px; height: 30px;',
+      '  width: 26px; height: 26px;',
       '  position: relative;',
       '  border-radius: 50%;',
       '  filter: drop-shadow(0 2px 5px rgba(80,60,200,0.45));',
