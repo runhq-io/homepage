@@ -1985,10 +1985,21 @@ export async function assignAgent(
   ticketId: string,
   req: AssignAgentRequest,
 ): Promise<AssignAgentResult> {
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  if (!proj) throw new WidgetAssignError('project_not_found', 404);
+
   const [task] = await db
     .select({ serverId: workspaceTasks.serverId })
     .from(workspaceTasks)
-    .where(and(eq(workspaceTasks.id, ticketId), eq(workspaceTasks.sourceType, 'widget')))
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, proj.serverId),
+    ))
     .limit(1);
   if (!task) throw new WidgetAssignError('ticket_not_found', 404);
 
@@ -2066,11 +2077,23 @@ export async function suggestAssignment(
   widgetProjectId: string,
   ticketId: string,
 ): Promise<SuggestAssignmentResult> {
-  // Resolve ticket → server
+  // Resolve calling project → server (cross-tenant guard)
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  if (!proj) return { agentId: null, command: '' };
+
+  // Resolve ticket → server, scoped to the calling project's server
   const [task] = await db
     .select({ serverId: workspaceTasks.serverId })
     .from(workspaceTasks)
-    .where(and(eq(workspaceTasks.id, ticketId), eq(workspaceTasks.sourceType, 'widget')))
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, proj.serverId),
+    ))
     .limit(1);
   if (!task) return { agentId: null, command: '' };
 
