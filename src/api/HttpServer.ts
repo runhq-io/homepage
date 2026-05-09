@@ -5189,6 +5189,17 @@ export function createHttpApp() {
     return c.json({ agents });
   });
 
+  app.get('/api/widget/me', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    return c.json({
+      widgetUserId: auth.widgetUserId ?? null,
+      permissions: Array.from(auth.permissions),
+      matchedRoles: auth.matchedRoles,
+      isTriager: auth.permissions.has('assign_agent'),
+    });
+  });
+
   app.post('/api/widget/tickets/:id/suggest-assignment', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);

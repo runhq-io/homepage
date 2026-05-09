@@ -96,3 +96,56 @@ describe('GET /api/widget/agents', () => {
     expect(body.agents[1]).toEqual({ id: 'agent-2', name: 'Beta Agent', description: null });
   });
 });
+
+describe('GET /api/widget/me', () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it('401 when authenticateWidget returns null', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue(null);
+    const app = makeApp();
+    const res = await app.request('/api/widget/me');
+    expect(res.status).toBe(401);
+  });
+
+  it('200 with isTriager=true when permissions include assign_agent', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue({
+      projectId: 'p1',
+      projectSlug: 's1',
+      widgetUserId: 'u1',
+      authenticated: true,
+      permissions: new Set(['assign_agent']),
+      matchedRoles: ['triager'],
+    });
+    const app = makeApp();
+    const res = await app.request('/api/widget/me');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      widgetUserId: 'u1',
+      permissions: ['assign_agent'],
+      matchedRoles: ['triager'],
+      isTriager: true,
+    });
+  });
+
+  it('200 with isTriager=false otherwise', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue({
+      projectId: 'p1',
+      projectSlug: 's1',
+      widgetUserId: undefined,
+      authenticated: false,
+      permissions: new Set(),
+      matchedRoles: [],
+    });
+    const app = makeApp();
+    const res = await app.request('/api/widget/me');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      widgetUserId: null,
+      permissions: [],
+      matchedRoles: [],
+      isTriager: false,
+    });
+  });
+});
