@@ -3443,6 +3443,50 @@ export function createHttpApp() {
     }
   });
 
+  /**
+   * Workspace → BE mirror push for `agent_entities.widget_exposed`.
+   * Called by WidgetAgentMirrorPush on every toggle and on boot.
+   * Auth: X-Server-Token; serverId in URL must match the token's server.
+   * Body: { projects: [{ workspaceProjectId, agents: [{ id, name, description }] }] }
+   * Semantics: full-replace per workspaceProjectId.
+   */
+  app.post('/api/internal/servers/:serverId/widget-agents/sync', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) return c.json({ error: 'Invalid server token' }, 401);
+
+      type Body = { projects?: Array<{ workspaceProjectId?: unknown; agents?: unknown }> };
+      const body = await c.req.json().catch(() => null) as Body | null;
+      if (
+        !body ||
+        !Array.isArray(body.projects) ||
+        !body.projects.every(p =>
+          typeof p?.workspaceProjectId === 'string' &&
+          Array.isArray(p?.agents) &&
+          (p.agents as unknown[]).every((a: any) =>
+            typeof a?.id === 'string' &&
+            typeof a?.name === 'string' &&
+            (a?.description === null || a?.description === undefined || typeof a?.description === 'string')
+          )
+        )
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+
+      const result = await WidgetService.syncWidgetExposedAgents(
+        serverId,
+        body.projects as WidgetService.SyncWidgetExposedAgentsInput[],
+      );
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      console.error('[HttpServer] widget-agents sync error:', err);
+      return c.json({ error: 'sync failed' }, 500);
+    }
+  });
+
   // Get server info for a server (called by client)
   app.get('/api/servers/:serverId/server', async (c) => {
     try {

@@ -2149,3 +2149,65 @@ export async function suggestAssignment(
     return { agentId: null, command: '' };
   }
 }
+
+// ============================================================================
+// Exposed-Agent Mirror (pushed by workspace on every toggle and on boot)
+// ============================================================================
+
+export interface SyncWidgetExposedAgentsInput {
+  workspaceProjectId: string;
+  agents: Array<{ id: string; name: string; description: string | null }>;
+}
+
+export interface SyncWidgetExposedAgentsResult {
+  upserted: number;
+  removed: number;
+}
+
+/**
+ * Full-replace per-(serverId, workspaceProjectId): atomic delete + insert.
+ * Projects in the input are replaced in their entirety; projects NOT in the
+ * input are left untouched (caller can sync incrementally).
+ *
+ * Silently skips projects that don't have a corresponding widget_projects row
+ * (widget hasn't been enabled for that workspace project yet).
+ */
+export async function syncWidgetExposedAgents(
+  serverId: string,
+  projects: SyncWidgetExposedAgentsInput[],
+): Promise<SyncWidgetExposedAgentsResult> {
+  let upserted = 0;
+  let removed = 0;
+
+  for (const proj of projects) {
+    const [wp] = await db
+      .select({ id: widgetProjects.id })
+      .from(widgetProjects)
+      .where(and(
+        eq(widgetProjects.serverId, serverId),
+        eq(widgetProjects.workspaceProjectId, proj.workspaceProjectId),
+      ))
+      .limit(1);
+    if (!wp) continue;
+
+    await db.transaction(async (tx) => {
+      const oldRows = await tx
+        .select({ agentId: widgetExposedAgents.agentId })
+        .from(widgetExposedAgents)
+        .where(eq(widgetExposedAgents.widgetProjectId, wp.id));
+      await tx.delete(widgetExposedAgents).where(eq(widgetExposedAgents.widgetProjectId, wp.id));
+      if (proj.agents.length > 0) {
+        await tx.insert(widgetExposedAgents).values(proj.agents.map(a => ({
+          widgetProjectId: wp.id,
+          agentId: a.id,
+          agentName: a.name,
+          agentDescription: a.description ?? null,
+        })));
+      }
+      upserted += proj.agents.length;
+      removed += oldRows.length;
+    });
+  }
+
+  return { upserted, removed };
+}
