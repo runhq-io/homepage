@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 
 const SIGNUP_URL = 'https://app.runhq.io/signup';
 const LOGIN_URL = 'https://app.runhq.io';
@@ -108,7 +108,6 @@ const SPEED = 0.45;
 export default function Hero() {
   const heroRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [telemetry, setTelemetry] = useState({ gen: 2847, cycle: 0 });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -223,17 +222,6 @@ export default function Hero() {
     };
   }, []);
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      setTelemetry(prev => {
-        const cycle = (prev.cycle + 1) % 60;
-        const gen = cycle === 0 ? prev.gen + 1 : prev.gen;
-        return { gen, cycle };
-      });
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
-
   return (
     <div className="rh-hero" ref={heroRef}>
       <style>{HERO_STYLES}</style>
@@ -245,10 +233,6 @@ export default function Hero() {
           <span>RunHQ</span>
         </div>
         <div className="rh-top-right">
-          <span className="rh-pill">
-            <span className="rh-pill-dot" />
-            <span className="mono">GEN <span>#{telemetry.gen.toLocaleString()}</span> · running</span>
-          </span>
           <a className="rh-btn-sign" href={LOGIN_URL}>Sign in</a>
         </div>
       </header>
@@ -335,22 +319,6 @@ const HERO_STYLES = `
     display: flex; gap: 10px; align-items: center;
     justify-self: end;
   }
-  .rh-pill {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 6px 11px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: rgba(10,12,16,0.5);
-    backdrop-filter: blur(10px);
-    font-size: 11px; color: var(--ink-dim);
-  }
-  .rh-pill-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--accent-2);
-    box-shadow: 0 0 8px var(--accent-2);
-    animation: rh-blink 1.8s ease-in-out infinite;
-  }
-  @keyframes rh-blink { 0%,100%{opacity:1} 50%{opacity:.35} }
   .rh-btn-sign {
     color: var(--ink); text-decoration: none;
     font-size: 13px; padding: 8px 14px;
@@ -374,7 +342,7 @@ const HERO_STYLES = `
   }
   .rh-copy > * { pointer-events: auto; }
   .rh-tagline {
-    font-size: clamp(44px, 6.8vw, 112px);
+    font-size: clamp(36px, 5.4vw, 88px);
     font-weight: 500;
     line-height: 0.95;
     letter-spacing: -0.045em;
@@ -431,7 +399,6 @@ const HERO_STYLES = `
 
   @media (max-width: 700px) {
     .rh-hero { min-height: 560px; }
-    .rh-top-right .rh-pill { display: none; }
     .rh-copy { padding: 80px 22px 72px; }
     .rh-tagline { margin-bottom: 18px; }
     .rh-sub { margin-bottom: 22px; }
