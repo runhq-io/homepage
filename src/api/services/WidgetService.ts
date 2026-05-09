@@ -20,6 +20,7 @@ import {
   workspaceTaskActivity,
   workspaceTaskAttachments,
   servers,
+  widgetExposedAgents,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
@@ -1895,4 +1896,26 @@ export async function generateTitle(description: string): Promise<string> {
   } catch {
     return fallback;
   }
+}
+
+// ============================================================================
+// Exposed Agents
+// ============================================================================
+
+export interface ExposedAgentSummary {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
+export async function listExposedAgents(widgetProjectId: string): Promise<ExposedAgentSummary[]> {
+  return await db
+    .select({
+      id: widgetExposedAgents.agentId,
+      name: widgetExposedAgents.agentName,
+      description: widgetExposedAgents.agentDescription,
+    })
+    .from(widgetExposedAgents)
+    .where(eq(widgetExposedAgents.widgetProjectId, widgetProjectId))
+    .orderBy(widgetExposedAgents.agentName);
 }
