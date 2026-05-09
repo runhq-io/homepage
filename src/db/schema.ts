@@ -1296,7 +1296,7 @@ export const widgetProjects = pgTable('widget_projects', {
   widgetLanguage: text('widget_language'),
   votingPeriodHours: integer('voting_period_hours'),
   widgetAgentAssignmentEnabled: boolean('widget_agent_assignment_enabled').default(false).notNull(),
-  widgetAssignRoles: text('widget_assign_roles').array().notNull().default(sql`'{}'::text[]`),
+  widgetAssignRoles: text('widget_assign_roles').array().notNull().default(sql`ARRAY[]::text[]`),
   widgetRoleClaimName: text('widget_role_claim_name').notNull().default('runhq_roles'),
   widgetAssignRateLimitPerHour: integer('widget_assign_rate_limit_per_hour').notNull().default(30),
   channelId: text('channel_id'),
@@ -1334,6 +1334,7 @@ export const widgetExposedAgents = pgTable('widget_exposed_agents', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [
   primaryKey({ columns: [t.widgetProjectId, t.agentId] }),
+  index('widget_exposed_agents_project_idx').on(t.widgetProjectId),
 ]);
 
 export type WidgetExposedAgent = typeof widgetExposedAgents.$inferSelect;
