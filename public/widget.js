@@ -2388,6 +2388,12 @@
       submitBtn.disabled = !config.isIdentified || ta.value.trim().length === 0;
     }
     ta.addEventListener("input", updateSubmitEnabled);
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        if (!submitBtn.disabled) submitBtn.click();
+      }
+    });
 
     var isPrivate = false;
     var attachBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
@@ -3303,6 +3309,12 @@
       ta.style.height = "auto";
       ta.style.height = Math.min(200, Math.max(56, ta.scrollHeight)) + "px";
       updateSubmitEnabled();
+    });
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        if (!submitBtn.disabled) submitBtn.click();
+      }
     });
 
     submitBtn.addEventListener("click", function () {
