@@ -213,6 +213,7 @@
     defs: 1, filter: 1,
     feTurbulence: 1, feDisplacementMap: 1, feGaussianBlur: 1, feColorMatrix: 1,
     animate: 1, animateTransform: 1,
+    radialGradient: 1, stop: 1, clipPath: 1,
   };
 
   function h(tag, attrs, children) {
@@ -652,58 +653,69 @@
   }
 
   function buildTabIcon() {
-    // Soft 5-lobed organism. The source path is ALREADY rounded — no
-    // sharp polygon tips anywhere — and the filter just adds organic
-    // wobble + slow rotation on top.
-    //
-    // How the path stays round: 5 "tip" points at radius 40, 5 "base"
-    // points placed at the geometric midpoint between adjacent tips
-    // (which puts each base on the straight line between its two
-    // neighboring tips). Connecting bases with quadratic Bézier curves
-    // that use the tip as the control point gives:
-    //   - Smooth round bulge at each tip (curve passes near, not through)
-    //   - C1 continuity at each base (tangents from both sides align,
-    //     because the base sits on the inter-tip line). No corners.
-    //
-    // The result is a smooth flower-like blob even before any filter.
+    // Mercury — gooey liquid-metal organism. A base circle plus six
+    // perimeter-orbiting bulges share one SVG goo filter (Gaussian
+    // blur + alpha-threshold matrix), so bulges that pass near the
+    // edge stretch the silhouette outward like real liquid mercury.
+    // Layered on top: an iridescent oil-slick rim (cyan + violet
+    // radial glows orbiting at offset phases, screen-blended), an
+    // inner roaming specular highlight, and a CSS-driven outer halo
+    // that breathes in sync. All motion is CSS-keyframe driven so
+    // prefers-reduced-motion can freeze it.
     return h("span", { className: "rw-tab-icon", "aria-hidden": "true" },
-      h("svg", { viewBox: "0 0 100 100", focusable: "false" }, [
-        h("defs", null,
-          h("filter", { id: "rw-organic", x: "-20%", y: "-20%", width: "140%", height: "140%" }, [
-            h("feTurbulence", {
-              type: "fractalNoise", baseFrequency: "0.05",
-              numOctaves: "2", seed: "3", result: "noise",
-            }),
-            h("feDisplacementMap", { in: "SourceGraphic", in2: "noise" },
-              // Scale stays modest (3 → 7 → 4 → 7 → 3) since the source
-              // is already smooth — the filter is just adding life, not
-              // doing rounding work.
-              h("animate", {
-                attributeName: "scale",
-                values: "3;7;4;7;3",
-                dur: "5.5s",
-                repeatCount: "indefinite",
-              })
+      h("span", { className: "rw-merc-blob" }, [
+        h("span", { className: "rw-merc-halo" }),
+        h("svg", { viewBox: "0 0 80 80", focusable: "false", overflow: "visible" }, [
+          h("defs", null, [
+            h("filter", { id: "rw-merc-goo", x: "-40%", y: "-40%", width: "180%", height: "180%" }, [
+              h("feGaussianBlur", { in: "SourceGraphic", stdDeviation: "3.4" }),
+              h("feColorMatrix", {
+                values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 24 -11",
+              }),
+            ]),
+            h("radialGradient", { id: "rw-merc-fill", cx: "38%", cy: "28%", r: "80%" }, [
+              h("stop", { offset: "0%",   "stop-color": "#ffffff" }),
+              h("stop", { offset: "30%",  "stop-color": "#f4f0ff" }),
+              h("stop", { offset: "58%",  "stop-color": "#cfd8ff" }),
+              h("stop", { offset: "82%",  "stop-color": "#b9aaf0" }),
+              h("stop", { offset: "100%", "stop-color": "#7d6dc8" }),
+            ]),
+            h("radialGradient", { id: "rw-merc-spec-grad", cx: "50%", cy: "50%", r: "50%" }, [
+              h("stop", { offset: "0%",   "stop-color": "rgba(255,255,255,1)" }),
+              h("stop", { offset: "60%",  "stop-color": "rgba(255,255,255,0.45)" }),
+              h("stop", { offset: "100%", "stop-color": "rgba(255,255,255,0)" }),
+            ]),
+            h("radialGradient", { id: "rw-merc-cyan-grad", cx: "50%", cy: "50%", r: "50%" }, [
+              h("stop", { offset: "0%",   "stop-color": "rgba(150,210,255,0.55)" }),
+              h("stop", { offset: "100%", "stop-color": "rgba(150,210,255,0)" }),
+            ]),
+            h("radialGradient", { id: "rw-merc-violet-grad", cx: "50%", cy: "50%", r: "50%" }, [
+              h("stop", { offset: "0%",   "stop-color": "rgba(180,130,255,0.45)" }),
+              h("stop", { offset: "100%", "stop-color": "rgba(180,130,255,0)" }),
+            ]),
+            h("clipPath", { id: "rw-merc-inner-clip", clipPathUnits: "userSpaceOnUse" },
+              h("circle", { cx: "40", cy: "40", r: "22" })
             ),
-          ])
-        ),
-        h("g", { filter: "url(#rw-organic)" }, [
-          h("path", {
-            fill: "currentColor",
-            // Tips: T0(50,10) T1(88.04,37.64) T2(73.51,82.36) T3(26.49,82.36) T4(11.96,37.64)
-            // Bases (midpoints): B01(69.02,23.82) B12(80.78,60) B23(50,82.36) B34(19.22,60) B40(30.98,23.82)
-            d: "M 69.02 23.82" +
-               " Q 88.04 37.64 80.78 60" +
-               " Q 73.51 82.36 50 82.36" +
-               " Q 26.49 82.36 19.22 60" +
-               " Q 11.96 37.64 30.98 23.82" +
-               " Q 50 10 69.02 23.82 Z",
-          }),
-          h("animateTransform", {
-            attributeName: "transform", type: "rotate",
-            from: "0 50 50", to: "360 50 50",
-            dur: "22s", repeatCount: "indefinite",
-          }),
+          ]),
+          // Base + 6 bulges merge into a rippling liquid silhouette.
+          h("g", { filter: "url(#rw-merc-goo)" }, [
+            h("circle", { className: "rw-merc-base",         cx: "40", cy: "40", r: "18",  fill: "url(#rw-merc-fill)" }),
+            h("circle", { className: "rw-merc-bulge rw-mb1", cx: "40", cy: "40", r: "9",   fill: "url(#rw-merc-fill)" }),
+            h("circle", { className: "rw-merc-bulge rw-mb2", cx: "40", cy: "40", r: "8",   fill: "url(#rw-merc-fill)" }),
+            h("circle", { className: "rw-merc-bulge rw-mb3", cx: "40", cy: "40", r: "9.5", fill: "url(#rw-merc-fill)" }),
+            h("circle", { className: "rw-merc-bulge rw-mb4", cx: "40", cy: "40", r: "7.5", fill: "url(#rw-merc-fill)" }),
+            h("circle", { className: "rw-merc-bulge rw-mb5", cx: "40", cy: "40", r: "6.5", fill: "url(#rw-merc-fill)" }),
+            h("circle", { className: "rw-merc-bulge rw-mb6", cx: "40", cy: "40", r: "7",   fill: "url(#rw-merc-fill)" }),
+          ]),
+          // Iridescent rim — cyan + violet glows orbit at offset phases.
+          h("g", { "clip-path": "url(#rw-merc-inner-clip)", style: { mixBlendMode: "screen" } }, [
+            h("circle", { className: "rw-merc-tint rw-merc-cyan",   cx: "40", cy: "40", r: "14", fill: "url(#rw-merc-cyan-grad)" }),
+            h("circle", { className: "rw-merc-tint rw-merc-violet", cx: "40", cy: "40", r: "14", fill: "url(#rw-merc-violet-grad)" }),
+          ]),
+          // Inner roaming specular highlight.
+          h("g", { "clip-path": "url(#rw-merc-inner-clip)" },
+            h("circle", { className: "rw-merc-spec", cx: "40", cy: "40", r: "5", fill: "url(#rw-merc-spec-grad)" })
+          ),
         ]),
       ])
     );
@@ -810,57 +822,176 @@
       '.rw-stage *, .rw-stage *::before, .rw-stage *::after,',
       '.rw-modal-mount *, .rw-modal-mount *::before, .rw-modal-mount *::after { box-sizing: border-box; }',
 
-      /* Side launcher — protrudes from the screen edge (left or right).
-         Content reads horizontally regardless of vertical anchor (top /
-         middle / bottom). Earlier versions rotated the text 90° via
-         writing-mode: vertical-rl, which only made sense for long labels;
-         "HQ" + the orbital mark is short enough to read naturally
-         left-to-right. */
+      /* Side launcher — a violet pill that protrudes from the screen edge.
+         The pill is brand-fixed (always violet) so it reads consistently
+         across customer sites and across the widget's own light/dark
+         themes; only the inner tab text/badge inherit theme tokens.
+         Layered chrome: outer violet gradient → thin inner radial highlight
+         (top-left bloom) → 1px white border via inset box-shadow. Together
+         they give the pill an embossed, slightly liquid feel that pairs
+         with the Mercury blob inside it. */
       '.rw-tab {',
       '  position: fixed; top: 50%;',
       '  ' + (isRight ? "right" : "left") + ': 0;',
       '  transform: translateY(-50%);',
-      '  height: 36px; min-width: 64px;',
-      '  padding: ' + (isRight ? "0 10px 0 14px" : "0 14px 0 10px") + ';',
-      '  background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  height: 48px; min-width: 88px;',
+      '  padding: ' + (isRight ? "0 12px 0 18px" : "0 18px 0 12px") + ';',
+      '  background:',
+      '    radial-gradient(120% 180% at 30% -30%, rgba(255,255,255,0.18), rgba(255,255,255,0) 60%),',
+      '    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),',
+      '    linear-gradient(180deg, #7c6dff 0%, #5e4cef 100%);',
+      '  color: #ffffff;',
       '  cursor: pointer;',
-      '  display: inline-flex; align-items: center; justify-content: center; gap: 6px;',
-      '  font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.04em;',
-      '  text-transform: uppercase; border: none;',
+      '  display: inline-flex; align-items: center; justify-content: center; gap: 10px;',
+      '  font: inherit; font-size: 16px; font-weight: 600; letter-spacing: 0.02em;',
+      '  border: none;',
       /* Round only the protruding edge so the pill reads as a tab anchored
          to the screen border. */
-      '  border-radius: ' + (isRight ? "10px 0 0 10px" : "0 10px 10px 0") + ';',
+      '  border-radius: ' + (isRight ? "24px 0 0 24px" : "0 24px 24px 0") + ';',
       '  z-index: 2147483646;',
       '  transition: padding .15s ease, box-shadow .2s ease, filter .15s ease, transform .15s ease;',
-      '  box-shadow: 0 8px 24px -6px rgba(249,115,22,0.45), 0 1px 0 rgba(255,255,255,0.2) inset;',
+      '  box-shadow: 0 14px 28px -10px rgba(108,89,255,0.55), inset 0 0 0 1px rgba(255,255,255,0.08);',
       '  user-select: none; -webkit-user-select: none;',
       '  white-space: nowrap;',
       '}',
       /* Hover slides the pill out a few pixels for affordance — direction
          depends on which edge we're attached to. The vertical anchor
          (translateY) is preserved so middle-anchored tabs stay centered. */
-      '.rw-tab:hover { filter: brightness(1.06); padding-' + (isRight ? "left" : "right") + ': 18px; }',
+      '.rw-tab:hover { filter: brightness(1.06); padding-' + (isRight ? "left" : "right") + ': 22px; }',
       /* Top / bottom anchored variants override the default centered transform. */
       '.rw-tab--top    { top: 24px;    bottom: auto; transform: none; }',
       '.rw-tab--bottom { top: auto;    bottom: 24px; transform: none; }',
 
       /* ------------------------------------------------------------------
-         Animated tab mark — a 5-point star deformed by an animated SVG
-         turbulence/displacement filter (built in buildTabIcon). The
-         outer span just sizes the SVG and adds a soft halo. */
+         Mercury launcher mark — see buildTabIcon() for the SVG composition.
+         The icon container is just a positioning shell; .rw-merc-blob
+         holds the violet drop-shadow + the absolutely-positioned halo
+         layer behind the SVG. The SVG renders 80×80 viewBox into a 30×30
+         box (scale ≈0.375), so all design-space pixel offsets in the
+         keyframes below shrink proportionally on screen. */
       '.rw-tab-icon {',
-      '  width: 18px; height: 18px;',
+      '  width: 30px; height: 30px;',
       '  flex: 0 0 auto;',
       '  display: inline-flex; align-items: center; justify-content: center;',
-      '  /* very subtle outer halo for depth */',
-      '  filter: drop-shadow(0 0 2px color-mix(in oklab, currentColor 50%, transparent));',
+      '  position: relative;',
       '}',
-      '.rw-tab-icon svg { display: block; width: 100%; height: 100%; overflow: visible; }',
-      /* Reduced motion: stop the SMIL animation by hiding the displacement
-         entirely (CSS can\'t pause SMIL, but it can hide the animator).
-         The plain star polygon stays visible. */
+      '.rw-merc-blob {',
+      '  width: 30px; height: 30px;',
+      '  position: relative;',
+      '  border-radius: 50%;',
+      '  filter: drop-shadow(0 2px 5px rgba(80,60,200,0.45));',
+      '}',
+      '.rw-merc-blob > svg {',
+      '  display: block; width: 100%; height: 100%;',
+      '  overflow: visible;',
+      '  position: relative; z-index: 1;',
+      '}',
+      /* Outer breathing halo — soft violet bloom expanding outside the
+         silhouette, gives the widget gravity in the surrounding UI. */
+      '.rw-merc-halo {',
+      '  position: absolute; inset: -45%;',
+      '  border-radius: 50%;',
+      '  background: radial-gradient(circle, rgba(180,165,255,0.45) 0%, rgba(180,165,255,0.12) 40%, transparent 65%);',
+      '  animation: rw-merc-halo 4.8s ease-in-out infinite;',
+      '  pointer-events: none;',
+      '  z-index: 0;',
+      '}',
+      '@keyframes rw-merc-halo {',
+      '  0%, 100% { opacity: 0.65; transform: scale(0.95); }',
+      '  50%      { opacity: 1;    transform: scale(1.15); }',
+      '}',
+      /* Base circle subtly breathes so the silhouette is never static. */
+      '.rw-merc-base {',
+      '  transform-origin: 40px 40px;',
+      '  animation: rw-merc-base 5.4s ease-in-out infinite;',
+      '}',
+      '@keyframes rw-merc-base {',
+      '  0%, 100% { transform: scale(1); }',
+      '  50%      { transform: scale(1.05); }',
+      '}',
+      /* Six bulges orbit at radii larger than the base circle, so each
+         pass physically stretches the silhouette outward through the goo
+         filter. Each gets its own keyframe + duration to keep the motion
+         non-repeating to the eye. */
+      '.rw-merc-bulge { transform-origin: 40px 40px; }',
+      '.rw-mb1 { animation: rw-mb-a 3.6s ease-in-out infinite; }',
+      '.rw-mb2 { animation: rw-mb-b 4.4s ease-in-out infinite; }',
+      '.rw-mb3 { animation: rw-mb-c 3.2s ease-in-out infinite; }',
+      '.rw-mb4 { animation: rw-mb-d 4.0s ease-in-out infinite; }',
+      '.rw-mb5 { animation: rw-mb-e 3.8s ease-in-out infinite; }',
+      '.rw-mb6 { animation: rw-mb-f 4.6s ease-in-out infinite; }',
+      '@keyframes rw-mb-a {',
+      '  0%   { transform: translate(20px, -2px)   scale(1.15); }',
+      '  25%  { transform: translate(14px, 15px)   scale(0.95); }',
+      '  50%  { transform: translate(-17px, 11px)  scale(1.2); }',
+      '  75%  { transform: translate(-13px, -16px) scale(0.9); }',
+      '  100% { transform: translate(20px, -2px)   scale(1.15); }',
+      '}',
+      '@keyframes rw-mb-b {',
+      '  0%   { transform: translate(-18px, 10px) scale(1.0); }',
+      '  33%  { transform: translate(10px, -18px) scale(1.25); }',
+      '  66%  { transform: translate(17px, 14px)  scale(0.85); }',
+      '  100% { transform: translate(-18px, 10px) scale(1.0); }',
+      '}',
+      '@keyframes rw-mb-c {',
+      '  0%   { transform: translate(2px, -20px)  scale(1.1); }',
+      '  25%  { transform: translate(18px, -9px)  scale(0.9); }',
+      '  50%  { transform: translate(11px, 18px)  scale(1.2); }',
+      '  75%  { transform: translate(-19px, 6px)  scale(1.0); }',
+      '  100% { transform: translate(2px, -20px)  scale(1.1); }',
+      '}',
+      '@keyframes rw-mb-d {',
+      '  0%   { transform: translate(15px, -11px)  scale(1.05); }',
+      '  33%  { transform: translate(-15px, -10px) scale(1.15); }',
+      '  66%  { transform: translate(3px, 19px)    scale(0.95); }',
+      '  100% { transform: translate(15px, -11px)  scale(1.05); }',
+      '}',
+      '@keyframes rw-mb-e {',
+      '  0%   { transform: translate(-9px, -17px) scale(1.0); }',
+      '  50%  { transform: translate(9px, 17px)   scale(1.15); }',
+      '  100% { transform: translate(-9px, -17px) scale(1.0); }',
+      '}',
+      '@keyframes rw-mb-f {',
+      '  0%   { transform: translate(17px, 9px)   scale(0.95); }',
+      '  50%  { transform: translate(-17px, -9px) scale(1.2); }',
+      '  100% { transform: translate(17px, 9px)   scale(0.95); }',
+      '}',
+      /* Iridescent oil-slick rim — cyan + violet glows orbit at opposing
+         phases inside the silhouette, screen-blended so colors shift
+         subtly as they pass each other. */
+      '.rw-merc-tint { transform-origin: 40px 40px; }',
+      '.rw-merc-cyan   { animation: rw-merc-cyan   7.2s ease-in-out infinite; }',
+      '.rw-merc-violet { animation: rw-merc-violet 7.2s ease-in-out infinite; }',
+      '@keyframes rw-merc-cyan {',
+      '  0%   { transform: translate(-8px, -6px); }',
+      '  50%  { transform: translate(8px, 6px); }',
+      '  100% { transform: translate(-8px, -6px); }',
+      '}',
+      '@keyframes rw-merc-violet {',
+      '  0%   { transform: translate(8px, 6px); }',
+      '  50%  { transform: translate(-8px, -6px); }',
+      '  100% { transform: translate(8px, 6px); }',
+      '}',
+      /* Inner roaming specular — the catch-light, drifts inside the
+         silhouette with a slight scale + opacity wobble for life. */
+      '.rw-merc-spec {',
+      '  transform-origin: 40px 40px;',
+      '  animation: rw-merc-spec 6.4s ease-in-out infinite;',
+      '  filter: blur(0.4px);',
+      '}',
+      '@keyframes rw-merc-spec {',
+      '  0%   { transform: translate(-7px, -8px) scale(1);   opacity: 0.95; }',
+      '  25%  { transform: translate(8px, -6px)  scale(1.2); opacity: 0.7; }',
+      '  50%  { transform: translate(7px, 7px)   scale(0.9); opacity: 0.95; }',
+      '  75%  { transform: translate(-8px, 6px)  scale(1.1); opacity: 0.7; }',
+      '  100% { transform: translate(-7px, -8px) scale(1);   opacity: 0.95; }',
+      '}',
+      /* Reduced motion — freeze the organism. The static silhouette
+         (base + violet rim) still reads as a brand mark. */
       '@media (prefers-reduced-motion: reduce) {',
-      '  .rw-tab-icon svg g { filter: none !important; }',
+      '  .rw-merc-halo, .rw-merc-base, .rw-merc-bulge, .rw-merc-tint, .rw-merc-spec {',
+      '    animation: none !important;',
+      '  }',
       '}',
 
       '.rw-tab-count {',
