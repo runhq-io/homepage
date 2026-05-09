@@ -1505,13 +1505,13 @@
 
       /* vote */
       '.rw-vote {',
-      '  flex: 0 0 auto; align-self: flex-start;',
+      '  flex: 0 0 auto;',
       '  display: inline-flex; flex-direction: column; align-items: center; justify-content: center;',
-      '  gap: 1px; width: 32px; padding: 6px 0;',
+      '  gap: 0; width: 30px; padding: 4px 0;',
       '  background: var(--rw-panel);',
       '  border: 1px solid var(--rw-line);',
       '  border-radius: 8px; color: var(--rw-fg-2);',
-      '  font: inherit; font-size: 11px; font-weight: 600;',
+      '  font: inherit; font-size: 11px; font-weight: 600; line-height: 1.2;',
       '  cursor: pointer; transition: all .15s ease;',
       '  font-variant-numeric: tabular-nums;',
       '}',
@@ -1727,7 +1727,7 @@
 
       /* detail modal head — head + body share one scroll area
          (.rw-td-scroll), so the head is no longer flex-pinned. */
-      '.rw-td-head { padding: 16px 18px 14px; border-bottom: 1px solid var(--rw-line); background: rgba(255,255,255,0.015); }',
+      '.rw-td-head { padding: 16px 18px 4px; }',
       '.rw-td-head-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }',
       '.rw-td-head-ref { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }',
 
@@ -1756,15 +1756,12 @@
       '}',
       '.rw-vis-chip:disabled { cursor: wait; opacity: 0.55; }',
       '.rw-td-ref { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--rw-muted); letter-spacing: 0.04em; }',
-      /* Title row: vote pill on the left, title text to its right. Items
-         align to the top so the vote sits on the title\'s first line for
-         multi-line titles. The pill\'s self-margin (4px) tunes the
-         baseline-with-text alignment. */
+      /* Title row: vote pill on the left, title text to its right. Centered
+         so the compact pill visually balances against the headline. */
       '.rw-td-title-row {',
-      '  display: flex; align-items: flex-start; gap: 12px;',
+      '  display: flex; align-items: center; gap: 12px;',
       '  margin: 6px 0 12px;',
       '}',
-      '.rw-td-title-row .rw-vote { margin-top: 2px; }',
       '.rw-td-title { margin: 0; flex: 1 1 auto; min-width: 0; font-family: inherit; font-size: 20px; font-weight: 600; color: var(--rw-fg); line-height: 1.22; letter-spacing: -0.018em; }',
       '.rw-td-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--rw-muted); }',
       '.rw-td-meta-author { color: var(--rw-fg-2); font-weight: 500; }',
@@ -1778,7 +1775,7 @@
       '.rw-td-scroll::-webkit-scrollbar-thumb { background: var(--rw-line-2); border-radius: 999px; }',
       '.rw-td-scroll::-webkit-scrollbar-thumb:hover { background: var(--rw-muted-2); }',
 
-      '.rw-td-body { padding: 18px 18px 8px; }',
+      '.rw-td-body { padding: 8px 18px; }',
 
       /* original post */
       '.rw-td-post { margin-bottom: 14px; }',
