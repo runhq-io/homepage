@@ -1820,6 +1820,74 @@
       '  flex-wrap: wrap;',
       '}',
       '.rw-agent-attribution strong { color: var(--rw-fg, #1a1a1a); font-weight: 600; }',
+
+      /* Assign-agent modal overlay — rendered inside modalMountEl (shadow DOM) */
+      '.rw-assign-modal-overlay {',
+      '  position: fixed; inset: 0;',
+      '  background: rgba(0,0,0,0.4);',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  z-index: 1000000;',
+      '}',
+      '.rw-assign-modal {',
+      '  background: #fff; border-radius: 8px; padding: 20px; width: 420px;',
+      '  max-width: calc(100% - 32px); box-shadow: 0 10px 40px rgba(0,0,0,0.2);',
+      '  font-family: inherit; color: #1a1a1a;',
+      '}',
+      '.rw-assign-modal h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }',
+      '.rw-assign-modal .rw-suggested-row {',
+      '  font-size: 12px; color: #666; margin: 0 0 8px;',
+      '  display: flex; align-items: center; gap: 6px;',
+      '}',
+      '.rw-assign-modal ul.rw-agent-list {',
+      '  list-style: none; padding: 0; margin: 0 0 12px;',
+      '  max-height: 220px; overflow-y: auto;',
+      '}',
+      '.rw-assign-modal ul.rw-agent-list li {',
+      '  padding: 8px; border-radius: 4px; cursor: pointer;',
+      '  display: flex; align-items: center; gap: 8px;',
+      '}',
+      '.rw-assign-modal ul.rw-agent-list li:hover { background: #f4f6f8; }',
+      '.rw-assign-modal ul.rw-agent-list li input { margin: 0; }',
+      '.rw-assign-modal textarea {',
+      '  width: 100%; box-sizing: border-box; min-height: 60px;',
+      '  border: 1px solid #ddd; border-radius: 4px; padding: 8px; font-family: inherit;',
+      '  font-size: 13px; resize: vertical;',
+      '}',
+      '.rw-assign-modal .rw-modal-actions {',
+      '  display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;',
+      '}',
+      '.rw-assign-modal .rw-modal-error {',
+      '  background: #fef0f0; color: #b00020; padding: 8px; border-radius: 4px;',
+      '  margin-top: 8px; font-size: 12px;',
+      '}',
+      '.rw-assign-modal .rw-recommended {',
+      '  color: #2d6cdf; font-size: 11px; font-weight: 600;',
+      '}',
+      '.rw-assign-modal .rw-assign-inline-spinner {',
+      '  width: 12px; height: 12px;',
+      '  border: 1.5px solid #ddd; border-top-color: #2d6cdf;',
+      '  border-radius: 50%; animation: rw-spin 0.7s linear infinite;',
+      '  display: inline-block; flex: 0 0 auto;',
+      '}',
+      '.rw-assign-modal-btn {',
+      '  padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;',
+      '  cursor: pointer; border: 1px solid transparent; font-family: inherit;',
+      '}',
+      '.rw-assign-modal-btn--cancel {',
+      '  background: transparent; border-color: #ddd; color: #444;',
+      '}',
+      '.rw-assign-modal-btn--cancel:hover { background: #f4f6f8; }',
+      '.rw-assign-modal-btn--confirm {',
+      '  background: #2d6cdf; color: #fff; border-color: #2d6cdf;',
+      '}',
+      '.rw-assign-modal-btn--confirm:hover:not(:disabled) { background: #1e55c0; border-color: #1e55c0; }',
+      '.rw-assign-modal-btn--confirm:disabled { opacity: 0.5; cursor: default; }',
+      '.rw-assign-modal .rw-cmd-label {',
+      '  font-size: 12px; font-weight: 600; color: #444; margin: 0 0 4px; display: block;',
+      '}',
+      '.rw-assign-modal .rw-empty-agents {',
+      '  font-size: 13px; color: #666; padding: 12px 0; line-height: 1.5;',
+      '}',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -2457,12 +2525,224 @@
   }
 
   // ===========================================================================
-  // Assign-agent modal (Task 19 stub — Task 20 implements the full modal)
+  // Assign-agent modal
   // ===========================================================================
 
-  // Stub: Task 20 will replace this with the real agent-picker modal.
+  // STUB: wire the actual POST — Task 21 replaces this body.
+  function submitAssign(ticketId, agentId, command, callback) {
+    console.log('[widget] would submit assign:', { ticketId: ticketId, agentId: agentId, command: command });
+    if (typeof callback === 'function') callback();
+  }
+
+  // Show a temporary toast inside the shadow root.
+  function showAssignToast(msg) {
+    var toast = h('div', {
+      style: {
+        position: 'fixed',
+        bottom: '20px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        background: '#1a1a1a',
+        color: '#fff',
+        padding: '8px 16px',
+        borderRadius: '6px',
+        fontSize: '13px',
+        zIndex: '2000000',
+        whiteSpace: 'nowrap',
+        boxShadow: '0 4px 16px rgba(0,0,0,0.25)',
+      },
+    }, msg);
+    modalMountEl.appendChild(toast);
+    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3000);
+  }
+
   function openAssignModal(ticketId) {
-    console.log('[widget] open assign modal for', ticketId);
+    // Tear down any existing assign modal.
+    var existing = modalMountEl.querySelector('.rw-assign-modal-overlay');
+    if (existing) existing.parentNode.removeChild(existing);
+
+    // --- Build modal skeleton ---
+
+    var suggestedLabel = h('span', null, '');
+    var suggestedSpinner = h('span', { className: 'rw-assign-inline-spinner' });
+    var suggestedRow = h('div', { className: 'rw-suggested-row' }, [
+      h('strong', null, 'Suggested:'),
+      suggestedSpinner,
+      suggestedLabel,
+    ]);
+
+    var listEl = h('ul', { className: 'rw-agent-list' });
+
+    var cmdLabel = h('label', { className: 'rw-cmd-label' }, 'Command');
+    var cmdEl = h('textarea', { placeholder: 'What should the agent do?' });
+
+    var errEl = h('div', { className: 'rw-modal-error', style: { display: 'none' } });
+
+    var cancelBtn = h('button', {
+      className: 'rw-assign-modal-btn rw-assign-modal-btn--cancel',
+      type: 'button',
+    }, 'Cancel');
+
+    var confirmBtn = h('button', {
+      className: 'rw-assign-modal-btn rw-assign-modal-btn--confirm',
+      type: 'button',
+      disabled: true,
+    }, 'Start agent');
+
+    var actionsRow = h('div', { className: 'rw-modal-actions' }, [cancelBtn, confirmBtn]);
+
+    var modal = h('div', { className: 'rw-assign-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Hand to agent' }, [
+      h('h3', null, 'Hand to agent'),
+      suggestedRow,
+      listEl,
+      cmdLabel,
+      cmdEl,
+      errEl,
+      actionsRow,
+    ]);
+
+    var overlay = h('div', { className: 'rw-assign-modal-overlay' }, modal);
+
+    modalMountEl.appendChild(overlay);
+
+    // --- State ---
+    var selectedAgentId = null;
+
+    function setError(msg) {
+      if (msg) {
+        errEl.textContent = msg;
+        errEl.style.display = 'block';
+      } else {
+        errEl.textContent = '';
+        errEl.style.display = 'none';
+      }
+    }
+
+    function pickAgent(id) {
+      selectedAgentId = id;
+      confirmBtn.disabled = false;
+      // Sync all radio inputs.
+      var radios = listEl.querySelectorAll('input[type="radio"]');
+      for (var i = 0; i < radios.length; i++) {
+        radios[i].checked = (radios[i].value === String(id));
+      }
+    }
+
+    function buildAgentList(agents, suggestedAgentId) {
+      clearChildren(listEl);
+      agents.forEach(function (agent) {
+        var isRecommended = suggestedAgentId && String(agent.id) === String(suggestedAgentId);
+        var radio = h('input', { type: 'radio', name: 'rw-agent-pick', value: String(agent.id) });
+        var nameSpan = h('span', null, agent.name || agent.id);
+        var children = [radio, nameSpan];
+        if (isRecommended) {
+          children.push(h('span', { className: 'rw-recommended' }, 'Recommended'));
+        }
+        var li = h('li', null, children);
+        li.addEventListener('click', function () { pickAgent(agent.id); });
+        listEl.appendChild(li);
+      });
+    }
+
+    // --- Load agents + suggestion in parallel ---
+    Promise.all([
+      api('/api/widget/agents'),
+      api(
+        '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/suggest-assignment',
+        { method: 'POST', body: {} }
+      ).catch(function () { return null; }),
+    ]).then(function (results) {
+      var agentsRes = results[0];
+      var suggestion = results[1];
+      var agents = (agentsRes && agentsRes.agents) || [];
+
+      // Remove spinner; update suggested label.
+      if (suggestedSpinner.parentNode) suggestedSpinner.parentNode.removeChild(suggestedSpinner);
+      var suggestedAgentId = suggestion && suggestion.agentId ? suggestion.agentId : null;
+      var suggestedName = null;
+      if (suggestedAgentId) {
+        // Find name from agent list.
+        for (var i = 0; i < agents.length; i++) {
+          if (String(agents[i].id) === String(suggestedAgentId)) {
+            suggestedName = agents[i].name || agents[i].id;
+            break;
+          }
+        }
+      }
+      suggestedLabel.textContent = suggestedName || '(none)';
+
+      if (agents.length === 0) {
+        // Empty state: replace list + actions.
+        clearChildren(listEl);
+        listEl.appendChild(
+          h('li', { style: { padding: '0' } },
+            h('p', { className: 'rw-empty-agents' },
+              'No agents are available — ask a workspace admin to expose one.'
+            )
+          )
+        );
+        clearChildren(actionsRow);
+        var closeOnlyBtn = h('button', {
+          className: 'rw-assign-modal-btn rw-assign-modal-btn--cancel',
+          type: 'button',
+        }, 'Close');
+        closeOnlyBtn.addEventListener('click', function () {
+          if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        });
+        actionsRow.appendChild(closeOnlyBtn);
+        return;
+      }
+
+      buildAgentList(agents, suggestedAgentId);
+
+      if (suggestedAgentId) {
+        pickAgent(suggestedAgentId);
+        cmdEl.value = (suggestion && suggestion.command) || '';
+      }
+    }).catch(function () {
+      if (suggestedSpinner.parentNode) suggestedSpinner.parentNode.removeChild(suggestedSpinner);
+      suggestedLabel.textContent = '(none)';
+      setError('Failed to load agents. Try again.');
+    });
+
+    // --- Close handlers ---
+    function closeModal() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+
+    cancelBtn.addEventListener('click', closeModal);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) closeModal();
+    });
+
+    var onKey = function (e) {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        closeModal();
+        document.removeEventListener('keydown', onKey, true);
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    // Clean up key listener when overlay is removed via any path.
+    var observer = new MutationObserver(function () {
+      if (!overlay.parentNode) {
+        document.removeEventListener('keydown', onKey, true);
+        observer.disconnect();
+      }
+    });
+    observer.observe(modalMountEl, { childList: true });
+
+    // --- Confirm (stub — Task 21 wires the real POST) ---
+    confirmBtn.addEventListener('click', function () {
+      if (!selectedAgentId) return;
+      setError('');
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Starting…';
+      submitAssign(ticketId, selectedAgentId, cmdEl.value, function () {
+        closeModal();
+        showAssignToast('Assign queued (Task 21 wires the actual call).');
+      });
+    });
   }
 
   // ===========================================================================
