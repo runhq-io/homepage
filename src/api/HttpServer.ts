@@ -28,6 +28,7 @@ import { getServerSessionKeyPair } from './auth/serverSessionKeys';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
+import { widgetRateLimiter } from './services/WidgetRateLimiter';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -3442,6 +3443,50 @@ export function createHttpApp() {
     }
   });
 
+  /**
+   * Workspace → BE mirror push for `agent_entities.widget_exposed`.
+   * Called by WidgetAgentMirrorPush on every toggle and on boot.
+   * Auth: X-Server-Token; serverId in URL must match the token's server.
+   * Body: { projects: [{ workspaceProjectId, agents: [{ id, name, description }] }] }
+   * Semantics: full-replace per workspaceProjectId.
+   */
+  app.post('/api/internal/servers/:serverId/widget-agents/sync', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) return c.json({ error: 'Invalid server token' }, 401);
+
+      type Body = { projects?: Array<{ workspaceProjectId?: unknown; agents?: unknown }> };
+      const body = await c.req.json().catch(() => null) as Body | null;
+      if (
+        !body ||
+        !Array.isArray(body.projects) ||
+        !body.projects.every(p =>
+          typeof p?.workspaceProjectId === 'string' &&
+          Array.isArray(p?.agents) &&
+          (p.agents as unknown[]).every((a: any) =>
+            typeof a?.id === 'string' &&
+            typeof a?.name === 'string' &&
+            (a?.description === null || a?.description === undefined || typeof a?.description === 'string')
+          )
+        )
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+
+      const result = await WidgetService.syncWidgetExposedAgents(
+        serverId,
+        body.projects as WidgetService.SyncWidgetExposedAgentsInput[],
+      );
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      console.error('[HttpServer] widget-agents sync error:', err);
+      return c.json({ error: 'sync failed' }, 500);
+    }
+  });
+
   // Get server info for a server (called by client)
   app.get('/api/servers/:serverId/server', async (c) => {
     try {
@@ -5136,6 +5181,87 @@ export function createHttpApp() {
     return c.json({ projects });
   });
 
+  app.get('/api/widget/agents', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    const agents = await WidgetService.listExposedAgents(auth.projectId);
+    return c.json({ agents });
+  });
+
+  app.get('/api/widget/me', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    return c.json({
+      widgetUserId: auth.widgetUserId ?? null,
+      permissions: Array.from(auth.permissions),
+      matchedRoles: auth.matchedRoles,
+      isTriager: auth.permissions.has('assign_agent'),
+    });
+  });
+
+  app.post('/api/widget/tickets/:id/suggest-assignment', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    const result = await WidgetService.suggestAssignment(auth.projectId, c.req.param('id'));
+    return c.json(result);
+  });
+
+  app.post('/api/widget/tickets/:id/assign', async (c) => {
+    // Gate 1: JWT auth
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Gate 2: assign_agent permission
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    // Gate 3: identified user required (widgetUserId only present for JWT-signed requests with sub)
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    // Gate 4: body validation
+    const body = await c.req.json().catch(() => null) as { agentId?: unknown; command?: unknown } | null;
+    if (!body || typeof body.agentId !== 'string' || typeof body.command !== 'string') {
+      return c.json({ error: 'agentId and command required' }, 400);
+    }
+
+    // Gate 5: re-validate agent exposure
+    const exposed = await WidgetService.listExposedAgents(auth.projectId);
+    if (!exposed.some((a) => a.id === body.agentId)) {
+      return c.json({ error: 'Agent not available' }, 403);
+    }
+
+    // Gate 6: rate limit
+    const limitPerHour = await WidgetService.getWidgetProjectRateLimit(auth.projectId);
+    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, limitPerHour);
+    if (!rl.allowed) {
+      c.header('Retry-After', String(rl.retryAfterSec));
+      return c.json({ error: 'Rate limit exceeded' }, 429);
+    }
+
+    // Resolve external user details for audit
+    const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
+    if (!wu) return c.json({ error: 'Widget user not found' }, 404);
+
+    try {
+      const result = await WidgetService.assignAgent(auth.projectId, c.req.param('id'), {
+        agentId: body.agentId,
+        command: body.command,
+        actor: {
+          widgetUserId: auth.widgetUserId,
+          externalUserId: wu.externalUserId,
+          name: wu.name,
+          matchedRoles: auth.matchedRoles,
+        },
+      });
+      return c.json({ jobId: result.jobId, agentId: body.agentId });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetAssignError) {
+        return c.json({ error: err.code }, err.status as any);
+      }
+      console.error('[HttpServer] widget assign error:', err);
+      return c.json({ error: 'internal' }, 500);
+    }
+  });
+
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
@@ -5513,6 +5639,10 @@ export function createHttpApp() {
       is_public,
       auto_inject_in_preview,
       slug,
+      widgetAgentAssignmentEnabled,
+      widgetAssignRoles,
+      widgetRoleClaimName,
+      widgetAssignRateLimitPerHour,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     if (!projectId) return c.json({ error: 'projectId required' }, 400);
@@ -5522,6 +5652,10 @@ export function createHttpApp() {
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
         auto_approve, widget_position, widget_language, voting_period_hours, is_public, auto_inject_in_preview, slug,
+        widgetAgentAssignmentEnabled,
+        widgetAssignRoles,
+        widgetRoleClaimName,
+        widgetAssignRateLimitPerHour,
       }, { workspaceProjectId: projectId });
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {

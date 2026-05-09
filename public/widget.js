@@ -36,6 +36,10 @@
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
+  // Current authenticated user info, populated after auth via /api/widget/me.
+  // Always present as an object so reads never throw — defaults to anonymous.
+  var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
+
   // Modal-shell view state. The shell is a centered card with two faces:
   //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
   //   "detail" — full-width ticket detail with a "Back to activity" button.
@@ -127,6 +131,7 @@
     });
   }
 
+  function loadMe()               { return api("/api/widget/me"); }
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
@@ -170,6 +175,31 @@
         throw err;
       }
       return data;
+    });
+  }
+
+  // Fetch the current authenticated user's profile from /api/widget/me and
+  // update currentUser. Safe for anonymous callers — 401/404 resolve to empty.
+  // After updating state, re-renders the panel body so the triager badge
+  // appears/disappears without requiring a full widget reload.
+  function fetchAndApplyMe() {
+    if (!config.token) {
+      currentUser.permissions = [];
+      currentUser.matchedRoles = [];
+      currentUser.isTriager = false;
+      return;
+    }
+    loadMe().then(function (me) {
+      currentUser.permissions = (me && me.permissions) || [];
+      currentUser.matchedRoles = (me && me.matchedRoles) || [];
+      currentUser.isTriager = !!(me && me.isTriager);
+      // Re-render so the badge appears/disappears in the eyebrow row.
+      if (scrollEl) renderPanelBody();
+    }).catch(function () {
+      currentUser.permissions = [];
+      currentUser.matchedRoles = [];
+      currentUser.isTriager = false;
+      // No re-render needed on failure — badge defaults to hidden.
     });
   }
 
@@ -1744,6 +1774,124 @@
 
       '.rw-stage button:focus-visible, .rw-stage textarea:focus-visible, .rw-stage input:focus-visible,',
       '.rw-modal-mount button:focus-visible, .rw-modal-mount textarea:focus-visible, .rw-modal-mount input:focus-visible { outline: none; }',
+
+      /* Triager badge — shown in the eyebrow row when the authenticated user has
+         the assign_agent permission. Intentionally subdued (small, blue pill) so
+         it doesn't compete with the composer. */
+      '.rw-triager-badge {',
+      '  display: inline-block;',
+      '  padding: 1px 6px;',
+      '  border-radius: 8px;',
+      '  background: #2d6cdf;',
+      '  color: #fff;',
+      '  font-size: 10px;',
+      '  font-weight: 600;',
+      '  margin-left: 6px;',
+      '  vertical-align: middle;',
+      '  letter-spacing: 0.04em;',
+      '  flex: 0 0 auto;',
+      '}',
+
+      /* Assign-agent button — appears in the ticket detail head when the
+         triager is viewing an unassigned, actionable ticket. */
+      '.rw-assign-btn {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 4px;',
+      '  padding: 4px 10px;',
+      '  border-radius: 6px;',
+      '  background: #2d6cdf;',
+      '  color: #fff;',
+      '  font-size: 12px;',
+      '  font-weight: 600;',
+      '  border: none;',
+      '  cursor: pointer;',
+      '  letter-spacing: 0.02em;',
+      '  margin-top: 8px;',
+      '}',
+      '.rw-assign-btn:hover { background: #1e55c0; }',
+      '.rw-assign-btn:disabled { opacity: 0.5; cursor: default; }',
+
+      /* Agent attribution line — shown below the title when an agent is
+         assigned and the assignment was initiated by an external triager. */
+      '.rw-agent-attribution {',
+      '  font-size: 11px;',
+      '  color: var(--rw-muted, #8a857d);',
+      '  margin-top: 6px;',
+      '  display: flex;',
+      '  align-items: center;',
+      '  gap: 4px;',
+      '  flex-wrap: wrap;',
+      '}',
+      '.rw-agent-attribution strong { color: var(--rw-fg, #1a1a1a); font-weight: 600; }',
+
+      /* Assign-agent modal overlay — rendered inside modalMountEl (shadow DOM) */
+      '.rw-assign-modal-overlay {',
+      '  position: fixed; inset: 0;',
+      '  background: rgba(0,0,0,0.4);',
+      '  display: flex; align-items: center; justify-content: center;',
+      '  z-index: 1000000;',
+      '}',
+      '.rw-assign-modal {',
+      '  background: #fff; border-radius: 8px; padding: 20px; width: 420px;',
+      '  max-width: calc(100% - 32px); box-shadow: 0 10px 40px rgba(0,0,0,0.2);',
+      '  font-family: inherit; color: #1a1a1a;',
+      '}',
+      '.rw-assign-modal h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }',
+      '.rw-assign-modal .rw-suggested-row {',
+      '  font-size: 12px; color: #666; margin: 0 0 8px;',
+      '  display: flex; align-items: center; gap: 6px;',
+      '}',
+      '.rw-assign-modal ul.rw-agent-list {',
+      '  list-style: none; padding: 0; margin: 0 0 12px;',
+      '  max-height: 220px; overflow-y: auto;',
+      '}',
+      '.rw-assign-modal ul.rw-agent-list li {',
+      '  padding: 8px; border-radius: 4px; cursor: pointer;',
+      '  display: flex; align-items: center; gap: 8px;',
+      '}',
+      '.rw-assign-modal ul.rw-agent-list li:hover { background: #f4f6f8; }',
+      '.rw-assign-modal ul.rw-agent-list li input { margin: 0; }',
+      '.rw-assign-modal textarea {',
+      '  width: 100%; box-sizing: border-box; min-height: 60px;',
+      '  border: 1px solid #ddd; border-radius: 4px; padding: 8px; font-family: inherit;',
+      '  font-size: 13px; resize: vertical;',
+      '}',
+      '.rw-assign-modal .rw-modal-actions {',
+      '  display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;',
+      '}',
+      '.rw-assign-modal .rw-modal-error {',
+      '  background: #fef0f0; color: #b00020; padding: 8px; border-radius: 4px;',
+      '  margin-top: 8px; font-size: 12px;',
+      '}',
+      '.rw-assign-modal .rw-recommended {',
+      '  color: #2d6cdf; font-size: 11px; font-weight: 600;',
+      '}',
+      '.rw-assign-modal .rw-assign-inline-spinner {',
+      '  width: 12px; height: 12px;',
+      '  border: 1.5px solid #ddd; border-top-color: #2d6cdf;',
+      '  border-radius: 50%; animation: rw-spin 0.7s linear infinite;',
+      '  display: inline-block; flex: 0 0 auto;',
+      '}',
+      '.rw-assign-modal-btn {',
+      '  padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;',
+      '  cursor: pointer; border: 1px solid transparent; font-family: inherit;',
+      '}',
+      '.rw-assign-modal-btn--cancel {',
+      '  background: transparent; border-color: #ddd; color: #444;',
+      '}',
+      '.rw-assign-modal-btn--cancel:hover { background: #f4f6f8; }',
+      '.rw-assign-modal-btn--confirm {',
+      '  background: #2d6cdf; color: #fff; border-color: #2d6cdf;',
+      '}',
+      '.rw-assign-modal-btn--confirm:hover:not(:disabled) { background: #1e55c0; border-color: #1e55c0; }',
+      '.rw-assign-modal-btn--confirm:disabled { opacity: 0.5; cursor: default; }',
+      '.rw-assign-modal .rw-cmd-label {',
+      '  font-size: 12px; font-weight: 600; color: #444; margin: 0 0 4px; display: block;',
+      '}',
+      '.rw-assign-modal .rw-empty-agents {',
+      '  font-size: 13px; color: #666; padding: 12px 0; line-height: 1.5;',
+      '}',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -2305,10 +2453,20 @@
         // was removed — at small sizes it competed for visual weight with
         // the composer placeholder, which is the actual hero.
         h("div", { className: "rw-eyebrow-row" }, [
-          h("div", { className: "rw-eyebrow" }, [
-            h("span", { className: "rw-eyebrow-dot" }),
-            h("span", null, t("header.headline", { name: projectName })),
-          ]),
+          h("div", { className: "rw-eyebrow" }, (function () {
+            var eyebrowNodes = [
+              h("span", { className: "rw-eyebrow-dot" }),
+              h("span", null, t("header.headline", { name: projectName })),
+            ];
+            if (currentUser.isTriager) {
+              var badge = h("span", {
+                className: "rw-triager-badge",
+                title: "You can assign agents to tickets from this widget.",
+              }, "Triager");
+              eyebrowNodes.push(badge);
+            }
+            return eyebrowNodes;
+          })()),
           poweredBy,
         ]),
         // Sub-text is the product-value pitch: explains WHY the widget
@@ -2367,6 +2525,267 @@
     }).catch(function (err) {
       clearChildren(scrollEl);
       scrollEl.appendChild(renderNotice("error", t("list.loadFailed", { msg: err.message || "" })));
+    });
+  }
+
+  // ===========================================================================
+  // Assign-agent modal
+  // ===========================================================================
+
+  function submitAssign(ticketId, agentId, command, callback) {
+    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ agentId: agentId, command: command }),
+    }).then(function (res) {
+      return res.json().then(function (body) {
+        return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: body };
+      }, function () {
+        return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: null };
+      });
+    }).then(function (r) {
+      if (r.status === 200) return callback(null, r.body);
+      if (r.status === 429) {
+        var seconds = parseInt(r.retryAfter || '0', 10);
+        var minutes = Math.max(1, Math.ceil(seconds / 60));
+        return callback("You've assigned the max number of agents this hour. Try again in " + minutes + ' minutes.');
+      }
+      if (r.status === 403) return callback('That agent is no longer available — please pick another.');
+      if (r.status === 503) return callback('Workspace is starting up — try again in a moment.');
+      if (r.status === 409) return callback('This ticket was just assigned by someone else. Refreshing.');
+      callback((r.body && r.body.error) || 'Could not assign agent.');
+    }).catch(function () {
+      callback('Network error — try again.');
+    });
+  }
+
+  function onAssignSuccess(ticketId, data) {
+    loadTicketDetail(ticketId).then(function (detail) {
+      var ticket = detail && detail.ticket;
+      if (ticket) {
+        openDetailModal(ticket);
+      }
+      var agentName = ticket && ticket.assignedAgentName;
+      showAssignToast(agentName ? agentName + ' started.' : 'Agent started.');
+    }).catch(function () {
+      showAssignToast('Agent started.');
+    });
+  }
+
+  // Show a temporary toast inside the shadow root.
+  function showAssignToast(msg) {
+    var toast = h('div', {
+      style: {
+        position: 'fixed',
+        bottom: '20px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        background: '#1a1a1a',
+        color: '#fff',
+        padding: '8px 16px',
+        borderRadius: '6px',
+        fontSize: '13px',
+        zIndex: '2000000',
+        whiteSpace: 'nowrap',
+        boxShadow: '0 4px 16px rgba(0,0,0,0.25)',
+      },
+    }, msg);
+    modalMountEl.appendChild(toast);
+    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3000);
+  }
+
+  function openAssignModal(ticketId) {
+    // Tear down any existing assign modal.
+    var existing = modalMountEl.querySelector('.rw-assign-modal-overlay');
+    if (existing) existing.parentNode.removeChild(existing);
+
+    // --- Build modal skeleton ---
+
+    var suggestedLabel = h('span', null, '');
+    var suggestedSpinner = h('span', { className: 'rw-assign-inline-spinner' });
+    var suggestedRow = h('div', { className: 'rw-suggested-row' }, [
+      h('strong', null, 'Suggested:'),
+      suggestedSpinner,
+      suggestedLabel,
+    ]);
+
+    var listEl = h('ul', { className: 'rw-agent-list' });
+
+    var cmdLabel = h('label', { className: 'rw-cmd-label' }, 'Command');
+    var cmdEl = h('textarea', { placeholder: 'What should the agent do?' });
+
+    var errEl = h('div', { className: 'rw-modal-error', style: { display: 'none' } });
+
+    var cancelBtn = h('button', {
+      className: 'rw-assign-modal-btn rw-assign-modal-btn--cancel',
+      type: 'button',
+    }, 'Cancel');
+
+    var confirmBtn = h('button', {
+      className: 'rw-assign-modal-btn rw-assign-modal-btn--confirm',
+      type: 'button',
+      disabled: true,
+    }, 'Start agent');
+
+    var actionsRow = h('div', { className: 'rw-modal-actions' }, [cancelBtn, confirmBtn]);
+
+    var modal = h('div', { className: 'rw-assign-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Hand to agent' }, [
+      h('h3', null, 'Hand to agent'),
+      suggestedRow,
+      listEl,
+      cmdLabel,
+      cmdEl,
+      errEl,
+      actionsRow,
+    ]);
+
+    var overlay = h('div', { className: 'rw-assign-modal-overlay' }, modal);
+
+    modalMountEl.appendChild(overlay);
+
+    // --- State ---
+    var selectedAgentId = null;
+
+    function setError(msg) {
+      if (msg) {
+        errEl.textContent = msg;
+        errEl.style.display = 'block';
+      } else {
+        errEl.textContent = '';
+        errEl.style.display = 'none';
+      }
+    }
+
+    function pickAgent(id) {
+      selectedAgentId = id;
+      confirmBtn.disabled = false;
+      // Sync all radio inputs.
+      var radios = listEl.querySelectorAll('input[type="radio"]');
+      for (var i = 0; i < radios.length; i++) {
+        radios[i].checked = (radios[i].value === String(id));
+      }
+    }
+
+    function buildAgentList(agents, suggestedAgentId) {
+      clearChildren(listEl);
+      agents.forEach(function (agent) {
+        var isRecommended = suggestedAgentId && String(agent.id) === String(suggestedAgentId);
+        var radio = h('input', { type: 'radio', name: 'rw-agent-pick', value: String(agent.id) });
+        var nameSpan = h('span', null, agent.name || agent.id);
+        var children = [radio, nameSpan];
+        if (isRecommended) {
+          children.push(h('span', { className: 'rw-recommended' }, 'Recommended'));
+        }
+        var li = h('li', null, children);
+        li.addEventListener('click', function () { pickAgent(agent.id); });
+        listEl.appendChild(li);
+      });
+    }
+
+    // --- Load agents + suggestion in parallel ---
+    Promise.all([
+      api('/api/widget/agents'),
+      api(
+        '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/suggest-assignment',
+        { method: 'POST', body: {} }
+      ).catch(function () { return null; }),
+    ]).then(function (results) {
+      var agentsRes = results[0];
+      var suggestion = results[1];
+      var agents = (agentsRes && agentsRes.agents) || [];
+
+      // Remove spinner; update suggested label.
+      if (suggestedSpinner.parentNode) suggestedSpinner.parentNode.removeChild(suggestedSpinner);
+      var suggestedAgentId = suggestion && suggestion.agentId ? suggestion.agentId : null;
+      var suggestedName = null;
+      if (suggestedAgentId) {
+        // Find name from agent list.
+        for (var i = 0; i < agents.length; i++) {
+          if (String(agents[i].id) === String(suggestedAgentId)) {
+            suggestedName = agents[i].name || agents[i].id;
+            break;
+          }
+        }
+      }
+      suggestedLabel.textContent = suggestedName || '(none)';
+
+      if (agents.length === 0) {
+        // Empty state: replace list + actions.
+        clearChildren(listEl);
+        listEl.appendChild(
+          h('li', { style: { padding: '0' } },
+            h('p', { className: 'rw-empty-agents' },
+              'No agents are available — ask a workspace admin to expose one.'
+            )
+          )
+        );
+        clearChildren(actionsRow);
+        var closeOnlyBtn = h('button', {
+          className: 'rw-assign-modal-btn rw-assign-modal-btn--cancel',
+          type: 'button',
+        }, 'Close');
+        closeOnlyBtn.addEventListener('click', function () {
+          if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        });
+        actionsRow.appendChild(closeOnlyBtn);
+        return;
+      }
+
+      buildAgentList(agents, suggestedAgentId);
+
+      if (suggestedAgentId) {
+        pickAgent(suggestedAgentId);
+        cmdEl.value = (suggestion && suggestion.command) || '';
+      }
+    }).catch(function () {
+      if (suggestedSpinner.parentNode) suggestedSpinner.parentNode.removeChild(suggestedSpinner);
+      suggestedLabel.textContent = '(none)';
+      setError('Failed to load agents. Try again.');
+    });
+
+    // --- Close handlers ---
+    function closeModal() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+
+    cancelBtn.addEventListener('click', closeModal);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) closeModal();
+    });
+
+    var onKey = function (e) {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        closeModal();
+        document.removeEventListener('keydown', onKey, true);
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    // Clean up key listener when overlay is removed via any path.
+    var observer = new MutationObserver(function () {
+      if (!overlay.parentNode) {
+        document.removeEventListener('keydown', onKey, true);
+        observer.disconnect();
+      }
+    });
+    observer.observe(modalMountEl, { childList: true });
+
+    // --- Confirm ---
+    confirmBtn.addEventListener('click', function () {
+      if (!selectedAgentId) return;
+      setError('');
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Starting…';
+      submitAssign(ticketId, selectedAgentId, cmdEl.value, function (err, assignData) {
+        if (err) {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Start agent';
+          setError(err);
+          return;
+        }
+        overlay.remove();
+        onAssignSuccess(ticketId, assignData);
+      });
     });
   }
 
@@ -2484,6 +2903,38 @@
     var headRefChildren = [renderStatusChip(ticket.status)];
     if (visChip) headRefChildren.push(visChip);
 
+    // "Assign agent" button — visible only to triagers on tickets that are
+    // actionable (not yet in progress / done / deployed) and not yet assigned.
+    var TERMINAL_STATUSES = { in_progress: true, done: true, deployed: true };
+    var canAssign = currentUser.isTriager
+      && !TERMINAL_STATUSES[ticket.status]
+      && !ticket.assignedAgentName;
+    var assignBtn = null;
+    if (canAssign) {
+      assignBtn = h("button", {
+        className: "rw-assign-btn",
+        type: "button",
+        title: "Assign an AI agent to work on this ticket",
+      }, "Assign agent");
+      assignBtn.addEventListener("click", function () {
+        openAssignModal(ticket.id);
+      });
+    }
+
+    // Attribution line — visible when an agent is assigned and the assignment
+    // was triggered by an external user (lastTriager is non-null).
+    var attributionEl = null;
+    if (ticket.assignedAgentName && ticket.lastTriager) {
+      attributionEl = h("div", { className: "rw-agent-attribution" }, [
+        document.createTextNode("🤖 "),
+        h("strong", null, ticket.assignedAgentName),
+        document.createTextNode(
+          "  — started by " + (ticket.lastTriager.name || "someone") +
+          ", " + timeAgo(ticket.lastTriager.at)
+        ),
+      ]);
+    }
+
     // Title row: vote pill on the left, title to its right. Vote aligns
     // to the title's first text line (flex-start + small padding on the
     // vote so it visually sits on the same baseline as the headline).
@@ -2492,12 +2943,16 @@
       h("h2", { className: "rw-td-title" }, ticket.title),
     ]);
 
-    var head = h("div", { className: "rw-td-head" }, [
+    var headChildren = [
       h("div", { className: "rw-td-head-top" }, [
         h("div", { className: "rw-td-head-ref" }, headRefChildren),
       ]),
       titleRow,
-    ]);
+    ];
+    if (attributionEl) headChildren.push(attributionEl);
+    if (assignBtn) headChildren.push(assignBtn);
+
+    var head = h("div", { className: "rw-td-head" }, headChildren);
     // Head + body share one scroll area so the entire ticket content
     // (title, description, attachments, activity thread) scrolls
     // together. The composer below stays pinned at the bottom of the
@@ -2942,6 +3397,11 @@
         theme = resolveInitialTheme(opts.theme);
 
         mountDOM();
+
+        // Fetch the authenticated user's profile (permissions, isTriager) so the
+        // Triager badge can be shown in the eyebrow row. Fire-and-forget; failures
+        // leave currentUser at its default safe-empty state.
+        fetchAndApplyMe();
 
         if (config.token) {
           loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});

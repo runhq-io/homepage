@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
@@ -1295,6 +1295,10 @@ export const widgetProjects = pgTable('widget_projects', {
   widgetPosition: text('widget_position'),
   widgetLanguage: text('widget_language'),
   votingPeriodHours: integer('voting_period_hours'),
+  widgetAgentAssignmentEnabled: boolean('widget_agent_assignment_enabled').default(false).notNull(),
+  widgetAssignRoles: text('widget_assign_roles').array().notNull().default(sql`ARRAY[]::text[]`),
+  widgetRoleClaimName: text('widget_role_claim_name').notNull().default('runhq_roles'),
+  widgetAssignRateLimitPerHour: integer('widget_assign_rate_limit_per_hour').notNull().default(30),
   channelId: text('channel_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -1318,6 +1322,23 @@ export const widgetUsers = pgTable('widget_users', {
 }, (t) => [
   { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
 ]);
+
+// Mirror of workspace agent_entities rows where widget_exposed=true.
+// Source of truth lives in workspace SQLite; BE caches for fast modal open.
+// Written only by /api/internal/servers/:serverId/widget-agents/sync.
+export const widgetExposedAgents = pgTable('widget_exposed_agents', {
+  widgetProjectId: uuid('widget_project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id').notNull(),
+  agentName: text('agent_name').notNull(),
+  agentDescription: text('agent_description'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.widgetProjectId, t.agentId] }),
+  index('widget_exposed_agents_project_idx').on(t.widgetProjectId),
+]);
+
+export type WidgetExposedAgent = typeof widgetExposedAgents.$inferSelect;
+export type NewWidgetExposedAgent = typeof widgetExposedAgents.$inferInsert;
 
 // Legacy widget tables — kept in schema to prevent db:push from dropping them.
 // Data will be migrated to workspace_tasks, then these can be removed.

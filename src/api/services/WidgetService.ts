@@ -20,11 +20,13 @@ import {
   workspaceTaskActivity,
   workspaceTaskAttachments,
   servers,
+  widgetExposedAgents,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
+import * as ServerService from './ServerService';
 
 const attachmentStorage = new TaskAttachmentStorageService();
 
@@ -32,12 +34,18 @@ const attachmentStorage = new TaskAttachmentStorageService();
 // Types
 // ============================================================================
 
+export type WidgetPermission = 'assign_agent';
+
 export interface WidgetAuthResult {
   projectId: string;
   projectSlug: string;
   widgetUserId?: string;
   /** True when the request was authenticated via a signed JWT (customer's server vouched for it) */
   authenticated: boolean;
+  /** Permissions derived from JWT role claim ∩ project whitelist. Always present; empty for anonymous/raw-key auth. */
+  permissions: ReadonlySet<WidgetPermission>;
+  /** Subset of project's whitelist that this user's JWT carried — used for audit attribution. */
+  matchedRoles: string[];
 }
 
 interface HonoRequest {
@@ -88,6 +96,10 @@ export type PublicTicketDetail = {
     createdByType: CanonicalTaskActorType;
     externalUserId: string | null;
     commentsDisabled: boolean;
+    /** Name of the currently-assigned agent, if any */
+    assignedAgentName: string | null;
+    /** The external user who last triggered an assignment, or null if it was internal */
+    lastTriager: { name: string | null; at: string } | null;
   };
   /** Whether the requesting user owns this ticket */
   isOwner: boolean;
@@ -255,6 +267,33 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 // Auth
 // ============================================================================
 
+const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
+
+interface PermissionPolicyRow {
+  widgetAgentAssignmentEnabled: boolean;
+  widgetAssignRoles: string[];
+  widgetRoleClaimName: string;
+}
+
+interface PermissionDerivation {
+  permissions: ReadonlySet<WidgetPermission>;
+  matchedRoles: string[];
+}
+
+function derivePermissions(
+  policy: PermissionPolicyRow,
+  jwtPayload: jose.JWTPayload,
+): PermissionDerivation {
+  if (!policy.widgetAgentAssignmentEnabled) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  if (policy.widgetAssignRoles.length === 0) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  const claim = jwtPayload[policy.widgetRoleClaimName];
+  if (!Array.isArray(claim)) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  const userRoles = claim.filter((r): r is string => typeof r === 'string');
+  const matchedRoles = userRoles.filter(r => policy.widgetAssignRoles.includes(r));
+  if (matchedRoles.length === 0) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+  return { permissions: new Set<WidgetPermission>(['assign_agent']), matchedRoles };
+}
+
 /**
  * Authenticates a widget request using one of three modes:
  * 1. Public slug mode — no Authorization, X-RW-Project: {slug}
@@ -276,7 +315,7 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled || !project.isPublic) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
+    return { projectId: project.id, projectSlug: project.slug, authenticated: false, permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
   }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -293,7 +332,7 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
+    return { projectId: project.id, projectSlug: project.slug, authenticated: false, permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
   }
 
   // ---- Mode 3: Signed JWT (standard 3-part header.payload.signature) ----
@@ -307,6 +346,9 @@ export async function authenticateWidget(
       slug: widgetProjects.slug,
       enabled: widgetProjects.enabled,
       apiSecretHash: widgetProjects.apiSecretHash,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.apiKey, decoded.fp))
@@ -364,7 +406,15 @@ export async function authenticateWidget(
     }
   }
 
-  return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
+  const { permissions, matchedRoles } = derivePermissions(project, payload);
+  return {
+    projectId: project.id,
+    projectSlug: project.slug,
+    widgetUserId,
+    authenticated: true,
+    permissions,
+    matchedRoles,
+  };
 }
 
 // ============================================================================
@@ -544,6 +594,18 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     && comments.length === 0
     && activity.length === 0;
 
+  // Look up the most recent agent_assigned activity for this ticket
+  const lastAssignment = await db
+    .select()
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.taskId, ticketId),
+      eq(workspaceTaskActivity.type, 'agent_assigned'),
+    ))
+    .orderBy(desc(workspaceTaskActivity.createdAt))
+    .limit(1);
+  const lastAssign = lastAssignment[0];
+
   const externalUserIdMap = await resolveExternalUserIds(project.id, [
     ...comments,
     { createdByType: task.createdByType, createdById: task.createdById },
@@ -561,6 +623,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       createdByType: task.createdByType,
       externalUserId: ticketExternalUserId,
       commentsDisabled: task.commentsDisabled,
+      assignedAgentName: lastAssign?.metadata && (lastAssign.metadata as any).agentName
+        ? String((lastAssign.metadata as any).agentName)
+        : null,
+      lastTriager: lastAssign?.createdByType === 'external'
+        ? { name: lastAssign.createdByName ?? null, at: lastAssign.createdAt.toISOString() }
+        : null,
     },
     isOwner,
     isEditable,
@@ -1675,13 +1743,32 @@ export async function updateWidgetSettings(
     is_public?: boolean;
     auto_inject_in_preview?: boolean;
     slug?: string;
+    // Inline workspaceProjectId — accepted here as an alternative to opts.workspaceProjectId
+    workspaceProjectId?: string;
+    // Triager assignment policy fields
+    widgetAgentAssignmentEnabled?: boolean;
+    widgetAssignRoles?: string[];
+    widgetRoleClaimName?: string;
+    widgetAssignRateLimitPerHour?: number;
   },
   opts?: { workspaceProjectId?: string },
 ): Promise<UpdateWidgetSettingsResult> {
+  // Resolve workspaceProjectId from either location (settings object takes precedence).
+  const workspaceProjectId = settings.workspaceProjectId ?? opts?.workspaceProjectId;
+
+  // Empty-roles guard: enabling assignment without roles is a configuration error.
+  if (settings.widgetAgentAssignmentEnabled === true) {
+    if (!settings.widgetAssignRoles || settings.widgetAssignRoles.length === 0) {
+      throw new WidgetSettingsValidationError(
+        'Cannot enable widget agent assignment: add at least one role.',
+      );
+    }
+  }
+
   // Build a reusable conditions array for all three internal queries.
   const projConds = (): ReturnType<typeof eq>[] => {
     const c: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-    if (opts?.workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId));
+    if (workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
     return c;
   };
 
@@ -1723,6 +1810,11 @@ export async function updateWidgetSettings(
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
+      // Triager assignment policy — only set when caller explicitly provides the field
+      ...(settings.widgetAgentAssignmentEnabled !== undefined && { widgetAgentAssignmentEnabled: settings.widgetAgentAssignmentEnabled }),
+      ...(settings.widgetAssignRoles !== undefined && { widgetAssignRoles: settings.widgetAssignRoles }),
+      ...(settings.widgetRoleClaimName !== undefined && { widgetRoleClaimName: settings.widgetRoleClaimName }),
+      ...(settings.widgetAssignRateLimitPerHour !== undefined && { widgetAssignRateLimitPerHour: settings.widgetAssignRateLimitPerHour }),
       updatedAt: new Date(),
     })
     .where(and(...projConds()));
@@ -1851,4 +1943,293 @@ export async function generateTitle(description: string): Promise<string> {
   } catch {
     return fallback;
   }
+}
+
+// ============================================================================
+// Exposed Agents
+// ============================================================================
+
+export interface ExposedAgentSummary {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
+export async function listExposedAgents(widgetProjectId: string): Promise<ExposedAgentSummary[]> {
+  return await db
+    .select({
+      id: widgetExposedAgents.agentId,
+      name: widgetExposedAgents.agentName,
+      description: widgetExposedAgents.agentDescription,
+    })
+    .from(widgetExposedAgents)
+    .where(eq(widgetExposedAgents.widgetProjectId, widgetProjectId))
+    .orderBy(widgetExposedAgents.agentName);
+}
+
+// ============================================================================
+// Agent Assignment
+// ============================================================================
+
+export interface AssignAgentRequest {
+  agentId: string;
+  command: string;
+  actor: {
+    widgetUserId: string;
+    externalUserId: string;
+    name: string | null;
+    matchedRoles: string[];
+  };
+}
+
+export interface AssignAgentResult {
+  jobId: string;
+}
+
+export class WidgetAssignError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number,
+    public readonly cause?: unknown,
+  ) {
+    super(code);
+    this.name = 'WidgetAssignError';
+  }
+}
+
+/**
+ * Forwards an authorized triager assignment to the workspace and records
+ * an activity entry. Caller MUST have already passed:
+ *   - JWT auth + assign_agent permission
+ *   - Agent exposure check
+ *   - Rate-limit check
+ */
+/** Fetch the rate-limit quota for a widget project (returns default 30 if not found). */
+export async function getWidgetProjectRateLimit(projectId: string): Promise<number> {
+  const [proj] = await db
+    .select({ limit: widgetProjects.widgetAssignRateLimitPerHour })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+  return proj?.limit ?? 30;
+}
+
+/** Fetch the external user details for audit attribution. */
+export async function getWidgetUserAuditInfo(
+  widgetUserId: string,
+): Promise<{ externalUserId: string; name: string | null } | null> {
+  const [wu] = await db
+    .select({ externalUserId: widgetUsers.externalUserId, name: widgetUsers.name })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.id, widgetUserId))
+    .limit(1);
+  return wu ?? null;
+}
+
+export async function assignAgent(
+  widgetProjectId: string,
+  ticketId: string,
+  req: AssignAgentRequest,
+): Promise<AssignAgentResult> {
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  if (!proj) throw new WidgetAssignError('project_not_found', 404);
+
+  const [task] = await db
+    .select({ serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, proj.serverId),
+    ))
+    .limit(1);
+  if (!task) throw new WidgetAssignError('ticket_not_found', 404);
+
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, task.serverId))
+    .limit(1);
+  if (!server) throw new WidgetAssignError('server_not_found', 404);
+
+  let res: { jobId?: string } | null = null;
+  try {
+    res = await ServerService.serverTokenFetch<{ jobId?: string }>(
+      server,
+      '/api/internal/widget-triager-assign',
+      {
+        ticketId,
+        agentId: req.agentId,
+        command: req.command,
+        actor: {
+          externalUserId: req.actor.externalUserId,
+          name: req.actor.name,
+          via: 'widget_triage',
+        },
+      },
+    );
+  } catch (err) {
+    throw new WidgetAssignError('workspace_unreachable', 503, err);
+  }
+  if (!res?.jobId) throw new WidgetAssignError('workspace_error', 502, res);
+
+  // Audit row — best-effort; do not fail the request if this errors.
+  try {
+    await db.insert(workspaceTaskActivity).values({
+      taskId: ticketId,
+      serverId: task.serverId,
+      type: 'agent_assigned',
+      createdByType: 'external',
+      createdById: req.actor.widgetUserId,
+      createdByName: req.actor.name,
+      metadata: {
+        via: 'widget_triage',
+        widget_user_id: req.actor.widgetUserId,
+        external_user_id: req.actor.externalUserId,
+        agent_id: req.agentId,
+        command: req.command,
+        matched_roles: req.actor.matchedRoles,
+      },
+    });
+  } catch (err) {
+    console.warn('[WidgetService] audit row write failed:', err);
+  }
+
+  return { jobId: res.jobId };
+}
+
+// ============================================================================
+// Assignment Suggestion
+// ============================================================================
+
+export interface SuggestAssignmentResult {
+  agentId: string | null;
+  command: string;
+}
+
+/**
+ * Ask the workspace's triager to suggest which exposed agent should handle
+ * the given ticket.
+ *
+ * Non-fatal: any forwarding failure returns { agentId: null, command: '' } so
+ * the modal stays usable even when the workspace is offline or the endpoint
+ * hasn't been deployed yet.
+ */
+export async function suggestAssignment(
+  widgetProjectId: string,
+  ticketId: string,
+): Promise<SuggestAssignmentResult> {
+  // Resolve calling project → server (cross-tenant guard)
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  if (!proj) return { agentId: null, command: '' };
+
+  // Resolve ticket → server, scoped to the calling project's server
+  const [task] = await db
+    .select({ serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, proj.serverId),
+    ))
+    .limit(1);
+  if (!task) return { agentId: null, command: '' };
+
+  // Only forward when there are agents exposed for this widget project
+  const exposed = await listExposedAgents(widgetProjectId);
+  if (exposed.length === 0) return { agentId: null, command: '' };
+  const agentIdAllowlist = exposed.map(a => a.id);
+
+  // Resolve server row (needed for URL + token hash)
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, task.serverId))
+    .limit(1);
+  if (!server) return { agentId: null, command: '' };
+
+  try {
+    const res = await ServerService.serverTokenFetch<{ agentId: string | null; command: string }>(
+      server,
+      '/api/internal/widget-triager-suggest',
+      { ticketId, agentIdAllowlist },
+    );
+    return {
+      agentId: typeof res?.agentId === 'string' ? res.agentId : null,
+      command: typeof res?.command === 'string' ? res.command : '',
+    };
+  } catch (err) {
+    console.warn('[WidgetService] suggestAssignment forward failed:', err);
+    return { agentId: null, command: '' };
+  }
+}
+
+// ============================================================================
+// Exposed-Agent Mirror (pushed by workspace on every toggle and on boot)
+// ============================================================================
+
+export interface SyncWidgetExposedAgentsInput {
+  workspaceProjectId: string;
+  agents: Array<{ id: string; name: string; description: string | null }>;
+}
+
+export interface SyncWidgetExposedAgentsResult {
+  upserted: number;
+  removed: number;
+}
+
+/**
+ * Full-replace per-(serverId, workspaceProjectId): atomic delete + insert.
+ * Projects in the input are replaced in their entirety; projects NOT in the
+ * input are left untouched (caller can sync incrementally).
+ *
+ * Silently skips projects that don't have a corresponding widget_projects row
+ * (widget hasn't been enabled for that workspace project yet).
+ */
+export async function syncWidgetExposedAgents(
+  serverId: string,
+  projects: SyncWidgetExposedAgentsInput[],
+): Promise<SyncWidgetExposedAgentsResult> {
+  let upserted = 0;
+  let removed = 0;
+
+  for (const proj of projects) {
+    const [wp] = await db
+      .select({ id: widgetProjects.id })
+      .from(widgetProjects)
+      .where(and(
+        eq(widgetProjects.serverId, serverId),
+        eq(widgetProjects.workspaceProjectId, proj.workspaceProjectId),
+      ))
+      .limit(1);
+    if (!wp) continue;
+
+    await db.transaction(async (tx) => {
+      const oldRows = await tx
+        .select({ agentId: widgetExposedAgents.agentId })
+        .from(widgetExposedAgents)
+        .where(eq(widgetExposedAgents.widgetProjectId, wp.id));
+      await tx.delete(widgetExposedAgents).where(eq(widgetExposedAgents.widgetProjectId, wp.id));
+      if (proj.agents.length > 0) {
+        await tx.insert(widgetExposedAgents).values(proj.agents.map(a => ({
+          widgetProjectId: wp.id,
+          agentId: a.id,
+          agentName: a.name,
+          agentDescription: a.description ?? null,
+        })));
+      }
+      upserted += proj.agents.length;
+      removed += oldRows.length;
+    });
+  }
+
+  return { upserted, removed };
 }

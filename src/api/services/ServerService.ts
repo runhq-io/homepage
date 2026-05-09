@@ -43,6 +43,7 @@ import { flyTierToTierId, tierIdToFlyTier } from './providers/FlyProvider';
 import { workspaceAppName, workspaceNetworkName } from './FlyService';
 import type { ProviderId, VolumeInfo } from './providers/types';
 import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
+import { signPayload } from '../../lib/hmac.js';
 
 // Server is considered offline after 60 seconds without heartbeat
 const SERVER_HEARTBEAT_TIMEOUT_MS = 60_000;
@@ -1515,6 +1516,71 @@ export async function fetchFromServer<T = unknown>(
 
   if (!res.ok) {
     throw new Error(`Server responded with HTTP ${res.status}`);
+  }
+
+  return res.json() as Promise<T>;
+}
+
+/**
+ * POST to a running server's internal endpoint authenticated via HMAC.
+ *
+ * Uses the same HMAC signing scheme as the workflow cron-fire dispatcher:
+ *   - secret = servers.tokenHash  (SHA-256 hex digest of the plaintext SERVER_TOKEN)
+ *   - signature covers: `x-runhq-timestamp + "." + body`
+ *
+ * The workspace verifies by computing SHA256(SERVER_TOKEN) and comparing to the
+ * HMAC, so both sides agree on the secret without BE ever holding the plaintext.
+ *
+ * URL routing mirrors fetchFromServer: Fly machine routing header is added when
+ * machineId is present so requests reach the correct machine.
+ */
+export async function serverTokenFetch<T = unknown>(
+  server: Server,
+  path: string,
+  body?: unknown,
+  options?: { timeoutMs?: number },
+): Promise<T> {
+  if (!server.tokenHash) {
+    throw new Error(`Server ${server.id} has no tokenHash — cannot sign request`);
+  }
+
+  let baseUrl: string;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (server.machineId) {
+    const provider = getProvider((server.provider || 'fly') as ProviderId);
+    const routing = provider.getRoutingInfo(server.machineId, server.flyAppName);
+    baseUrl = routing.serverUrl;
+    if (routing.routingToken && routing.requiresRoutingHeaders) {
+      headers['fly-force-instance-id'] = routing.routingToken;
+    }
+  } else {
+    if (!server.serverUrl) {
+      throw new Error(`Server ${server.id} has no serverUrl — cannot route request`);
+    }
+    baseUrl = server.serverUrl;
+  }
+
+  const url = new URL(path, baseUrl);
+  const ts = new Date().toISOString();
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const sig = signPayload(server.tokenHash, ts, bodyStr);
+
+  const res = await fetch(url.toString(), {
+    method: 'POST',
+    headers: {
+      ...headers,
+      'x-runhq-timestamp': ts,
+      'x-runhq-signature': sig,
+    },
+    body: bodyStr || undefined,
+    signal: AbortSignal.timeout(options?.timeoutMs ?? 5000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Workspace responded HTTP ${res.status}`);
   }
 
   return res.json() as Promise<T>;
