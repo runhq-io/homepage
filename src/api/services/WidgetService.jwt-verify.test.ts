@@ -10,7 +10,11 @@
 
 import { describe, it, expect } from 'vitest';
 import * as jose from 'jose';
-import { WIDGET_JWT_MAX_TOKEN_AGE } from '../../lib/widgetSecretCrypto';
+
+// Mirror of WidgetService.WIDGET_JWT_MAX_TOKEN_AGE. Inlined here so this test
+// stays pure (importing WidgetService drags in the DB layer, which needs
+// DATABASE_URL at module load time). Keep in sync.
+const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 
 const SECRET = new TextEncoder().encode('a'.repeat(32));
 

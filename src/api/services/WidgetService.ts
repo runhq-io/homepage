@@ -27,13 +27,16 @@ import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
-import { widgetSecretCrypto, WIDGET_JWT_MAX_TOKEN_AGE } from '../../lib/widgetSecretCrypto';
-
-// Re-export for backward compatibility — callers historically imported this
-// constant from WidgetService.
-export { WIDGET_JWT_MAX_TOKEN_AGE };
 
 const attachmentStorage = new TaskAttachmentStorageService();
+
+/**
+ * Maximum age of a widget_user JWT regardless of the `exp` value the
+ * customer's issuer sets. 24h matches what `signWidgetUserJwt` mints
+ * server-side; tokens minted by customer backends cannot exceed this even
+ * with a longer `exp`.
+ */
+export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 
 // ============================================================================
 // Types
@@ -369,7 +372,7 @@ export async function authenticateWidget(
   //   customer sets a longer exp (e.g. a 10-year exp by mistake).
   let payload: jose.JWTPayload;
   try {
-    const signingKey = await widgetSecretCrypto.getSigningKey(project.apiSecretHash);
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
     const { payload: verified } = await jose.jwtVerify(token, signingKey, {
       algorithms: ['HS256'],
       requiredClaims: ['exp'],
@@ -1429,14 +1432,6 @@ export async function enableWidget(
   const slugSuffix = randomBytes(4).toString('hex');
   const slug = existing?.slug ?? generateSlug(opts.name, slugSuffix);
 
-  // Encrypt the signing secret at rest. The column name is `api_secret_hash`
-  // for historical reasons; what's actually stored is AES-256-GCM ciphertext
-  // (with the `enc:v1:` prefix) when WIDGET_SECRET_ENCRYPTION_KEY is set,
-  // and falls back to plaintext only in dev where no key is configured.
-  const apiSecretAtRest = widgetSecretCrypto.isConfigured()
-    ? widgetSecretCrypto.encrypt(apiSecret)
-    : apiSecret;
-
   const [project] = await db
     .insert(widgetProjects)
     .values({
@@ -1445,7 +1440,7 @@ export async function enableWidget(
       name: opts.name,
       slug,
       apiKey,
-      apiSecretHash: apiSecretAtRest,
+      apiSecretHash: apiSecret,
       enabled: true,
       channelId: opts.channelId,
     })
@@ -1455,7 +1450,7 @@ export async function enableWidget(
         enabled: true,
         name: opts.name,
         apiKey,
-        apiSecretHash: apiSecretAtRest,
+        apiSecretHash: apiSecret,
         channelId: opts.channelId,
         workspaceProjectId: opts.workspaceProjectId,
         updatedAt: new Date(),
@@ -1463,8 +1458,6 @@ export async function enableWidget(
     })
     .returning();
 
-  // The plaintext `apiSecret` is what the customer must use to sign JWTs;
-  // it is shown once in the workspace UI and never persisted as plaintext.
   return { ...project, apiSecret };
 }
 
@@ -1482,16 +1475,13 @@ export async function disableWidget(serverId: string, workspaceProjectId?: strin
 export async function regenerateSecret(serverId: string, workspaceProjectId?: string) {
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
-  const newSecretAtRest = widgetSecretCrypto.isConfigured()
-    ? widgetSecretCrypto.encrypt(newSecret)
-    : newSecret;
   const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
   if (workspaceProjectId) {
     conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
   }
   const [project] = await db
     .update(widgetProjects)
-    .set({ apiSecretHash: newSecretAtRest, apiKey: newFingerprint, updatedAt: new Date() })
+    .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
     .where(and(...conditions))
     .returning({ id: widgetProjects.id });
 
@@ -1544,11 +1534,8 @@ export async function listPublicProjects() {
 }
 
 /**
- * Sign a widget_user JWT.
- *
- * `apiSecretHash` is the value as stored in the DB — either AES-256-GCM
- * ciphertext (with the `enc:v1:` prefix) or legacy plaintext. The crypto
- * module handles both transparently so callers can pass the row directly.
+ * Sign a widget_user JWT. Pure function — takes all signing material as params
+ * so it's testable without DB access.
  */
 export async function signWidgetUserJwt(params: {
   apiSecretHash: string;
@@ -1556,7 +1543,7 @@ export async function signWidgetUserJwt(params: {
   userId: string;
   userName?: string;
 }): Promise<string> {
-  const signingKey = await widgetSecretCrypto.getSigningKey(params.apiSecretHash);
+  const signingKey = new TextEncoder().encode(params.apiSecretHash);
   return await new jose.SignJWT({
     fp: params.apiKey,
     type: 'widget_user',
@@ -1960,10 +1947,12 @@ export async function generateTitle(description: string): Promise<string> {
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 60,
+      system:
+        'You are a labeling function. Given a feature request or bug report, output a concise title (max 10 words). IMPORTANT: Output the title in the SAME LANGUAGE as the input — do NOT translate. Do NOT interpret the report, do NOT respond conversationally, do NOT add quotes or trailing punctuation. Just output the title.\n\nExamples:\nInput: "Users keep getting logged out after 30 minutes of inactivity"\nOutput: Session timeout logs users out too quickly\n\nInput: "로그인 페이지에서 비밀번호 재설정이 안 되는 버그를 수정해주세요"\nOutput: 로그인 페이지 비밀번호 재설정 버그',
       messages: [
         {
           role: 'user',
-          content: `Generate a concise title (max 10 words) for this feature request or bug report. Reply with only the title, no quotes or punctuation at the end.\n\n${description}`,
+          content: `Input: "${description}"\nOutput:`,
         },
       ],
     });

@@ -31,24 +31,11 @@ import * as ServerService from './api/services/ServerService';
 import { registerCronSyncRoute } from './api/internal/cron-sync';
 import { WorkflowCronScheduler } from './api/services/WorkflowCronScheduler';
 import { ServerRegistry } from './api/services/ServerRegistry';
-import { widgetSecretCrypto } from './lib/widgetSecretCrypto';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
 async function main() {
   console.log('[be] Starting unified server...');
-
-  // ── Required-secret invariants ────────────────────────────────────────
-  // In production every widget JWT signing secret must be encrypted at
-  // rest. Refusing to start without the encryption key is the only way to
-  // make sure no deploy ever falls back to plaintext writes silently.
-  if (process.env.NODE_ENV === 'production' && !widgetSecretCrypto.isConfigured()) {
-    console.error('[be] WIDGET_SECRET_ENCRYPTION_KEY is required in production. Exiting.');
-    process.exit(1);
-  }
-  if (!widgetSecretCrypto.isConfigured()) {
-    console.warn('[be] WIDGET_SECRET_ENCRYPTION_KEY is not set — widget signing secrets will be stored as plaintext (dev/test only).');
-  }
 
   // ── Database ──────────────────────────────────────────────────────────
   try {
