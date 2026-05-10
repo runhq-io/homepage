@@ -30,22 +30,23 @@ const PLANS: Plan[] = [
   {
     key: 'pro', name: 'Pro', tag: 'Best for shipping teams',
     monthly: 100, annual: 75, unit: '/mo', seat: 15,
-    pitch: 'Add the embeddable widget and 5× the agent credit.',
+    pitch: 'Internal feedback widget for your team and 5× the agent credit.',
     cta: 'Get started', ghost: false,
     highlights: [
       'Everything in Starter, plus:',
       '$75 in agent credit / mo',
-      'Embeddable feedback widget',
+      'Internal feedback widget (team members only)',
     ],
   },
   {
     key: 'scale', name: 'Scale', tag: 'Best for scale-ups',
     monthly: 250, annual: 200, unit: '/mo', seat: 25,
-    pitch: 'Graph-based agent flow, higher credit, more concurrency.',
+    pitch: 'Public user-facing widget, graph-based agent flow, higher credit.',
     cta: 'Get started', ghost: false, popular: true,
     highlights: [
       'Everything in Pro, plus:',
       '$200 in agent credit / mo',
+      'Public user-facing widget',
       'Graph-based agent flow',
       'Higher concurrency limits',
     ],
@@ -69,7 +70,8 @@ const COMPARE: { sec: string; rows: [string, Cell, Cell, Cell, Cell][] }[] = [
   { sec: 'Workspace', rows: [
     ['Projects',                  '3',          'Unlimited',         'Unlimited',         'Unlimited'],
     ['Reviewers (read-only)',     'Unlimited',  'Unlimited',         'Unlimited',         'Unlimited'],
-    ['Embeddable feedback widget', false,       true,                true,                true],
+    ['Internal widget (team members)', false,    true,                true,                true],
+    ['Public user-facing widget', false,         false,               true,                true],
   ]},
   { sec: 'Agents & credit', rows: [
     ['Monthly agent credit',      '$15',        '$75',               '$200',              'Custom'],
@@ -95,13 +97,8 @@ const FAQ = [
     a: 'Every plan includes a pool of agent credit that resets at the start of each billing cycle — $15 on Starter, $75 on Pro, $200 on Scale. Credit pays for token spend across all supported coding agents. Unused credit does not roll over.' },
   { q: 'What happens if I run out of credit?',
     a: "Agent runs pause until the next cycle or until you top up. We never auto-charge overages — you'll see usage in-app long before you hit zero, and you can upgrade or add credit with one click." },
-  { q: 'Which coding agents do you support today?',
-    a: 'Claude Code and Codex are first-class on every plan, with formal agent templates and full diff provenance.' },
-  { q: 'Do you offer non-profit or academic discounts?',
-    a: "Yes. 50% off Pro for verified non-profits and accredited universities. Email hi@runhq.io with proof and we'll set it up the same day." },
-  { q: "What's the cancellation policy?",
-    a: "Cancel any time from Settings → Billing. You keep access through the period you've already paid for. No clawbacks, no exit interview.",
-  },
+  { q: 'Which coding agents do you support?',
+    a: 'All of them. Each RunHQ workspace runs on its own VPS, so anything that works on Linux — Claude Code, Codex, Cursor CLI, Aider, custom scripts — runs out of the box. You bring your own Claude or Codex subscription; RunHQ never sits between you and the model provider.' },
 ];
 
 const CompareCell = ({ v }: { v: Cell }) => {

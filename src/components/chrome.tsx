@@ -3,14 +3,6 @@ import { Link } from 'react-router-dom';
 export const SIGNUP_URL = 'https://app.runhq.io/signup';
 export const LOGIN_URL = 'https://app.runhq.io';
 
-export const RHMark = ({ size = 22, color = 'currentColor' }: { size?: number; color?: string }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <circle cx="12" cy="12" r="9.2" stroke={color} strokeWidth="1.4" />
-    <circle cx="12" cy="12" r="3" fill={color} />
-    <path d="M12 2.5v3.2M12 18.3v3.2M2.5 12h3.2M18.3 12h3.2" stroke={color} strokeWidth="1.4" strokeLinecap="round" />
-  </svg>
-);
-
 export const MercuryMark = ({ size = 24 }: { size?: number }) => (
   <span className="rhc-merc" style={{ width: size, height: size }} aria-hidden="true">
     <span className="rhc-merc-halo" />
@@ -163,7 +155,7 @@ export const AgentIcon = ({ agent, size = 14 }: { agent: string; size?: number }
 };
 
 export const LOGOS = [
-  'jeju.com', 'staircasestudios.ai', 'smartbid.ai', 'socialrealtr.com',
+  'jeju.com', 'smartbid.ai', 'socialrealtr.com',
 ];
 
 type NavActive = 'products' | 'pricing' | 'docs' | null;
@@ -198,54 +190,33 @@ export function Footer() {
       <div className="rhc-footer-grid">
         <div>
           <div className="rhc-footer-brand">
-            <span className="rhc-brand-mark" style={{ width: 24, height: 24, borderRadius: 6 }}>
-              <RHMark size={14} color="#fff" />
-            </span>
+            <span className="rhc-brand-mark"><MercuryMark size={22} /></span>
             <span>RunHQ</span>
           </div>
           <p className="rhc-footer-blurb">
-            The operations layer for AI coding agents. San Francisco · Berlin · Remote.
+            The operations layer for AI coding agents. Vancouver, BC.
           </p>
-          <div className="rhc-footer-status">
-            <span className="rhc-live-dot" />
-            All systems normal · status.runhq.io
-          </div>
         </div>
         <div>
           <div className="rhc-footer-h">Products</div>
-          <Link to="/agent-automation">Agent automation</Link>
-          <Link to="/projects">Project management</Link>
-          <Link to="/runhq">Dev environment</Link>
-          <Link to="/widget">Feedback widget</Link>
-        </div>
-        <div>
-          <div className="rhc-footer-h">Resources</div>
-          <Link to="/docs">Docs</Link>
-          <a href="#">Changelog</a>
-          <a href="#">Status</a>
-          <a href="#">CLI reference</a>
-          <a href="#">Brand kit</a>
+          <Link to="/products">Agent automation</Link>
+          <Link to="/products">Project management</Link>
+          <Link to="/products">Dev environment</Link>
+          <Link to="/products">Feedback widget</Link>
         </div>
         <div>
           <div className="rhc-footer-h">Company</div>
-          <a href="#">About</a>
-          <a href="#">Customers</a>
-          <a href="#">Careers — hiring</a>
-          <a href="#">Press kit</a>
-        </div>
-        <div>
-          <div className="rhc-footer-h">Legal</div>
-          <a href="#">Privacy</a>
-          <a href="#">Terms</a>
-          <a href="#">Security · SOC 2</a>
-          <a href="#">DPA</a>
+          <Link to="/docs">Docs</Link>
+          <Link to="/about">About</Link>
+          <Link to="/privacy">Privacy</Link>
+          <Link to="/terms">Terms</Link>
         </div>
       </div>
       <div className="rhc-footer-base">
-        <span>© 2026 RunHQ Inc.</span>
+        <span>© 2026 RunHQ Solutions Inc.</span>
         <span>·</span>
         <span>Closed-loop product development</span>
-        <span style={{ marginLeft: 'auto' }}>SOC 2 Type II · GDPR · HIPAA-ready</span>
+        <span style={{ marginLeft: 'auto' }}>Built for agent-driven product teams</span>
       </div>
     </footer>
   );
@@ -441,7 +412,7 @@ const FOOTER_STYLES = `
   .rhc-footer a:hover { color: var(--rhw-accent); }
   .rhc-footer-grid {
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+    grid-template-columns: 2fr 1fr 1fr;
     gap: 48px;
     padding-bottom: 36px;
     border-bottom: 1px solid var(--rhw-line);
@@ -453,16 +424,11 @@ const FOOTER_STYLES = `
     margin-bottom: 14px;
     color: var(--rhw-ink);
   }
-  .rhc-footer-brand .rhc-brand-mark { background: var(--rhw-ink); }
   .rhc-footer-blurb {
     font-size: 13.5px; line-height: 1.55;
     color: var(--rhw-ink-soft);
     max-width: 320px;
     margin: 0 0 14px;
-  }
-  .rhc-footer-status {
-    display: inline-flex; align-items: center; gap: 9px;
-    font-size: 12px; color: var(--rhw-ink-mute);
   }
   .rhc-footer-h {
     font-size: 12px; letter-spacing: 0.04em;
@@ -478,14 +444,6 @@ const FOOTER_STYLES = `
     align-items: center;
     max-width: 1320px; margin: 0 auto;
   }
-  .rhc-live-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--rhw-good);
-    box-shadow: 0 0 0 3px rgba(28,139,80,0.18);
-    animation: rhc-pulse 2.4s ease-in-out infinite;
-    display: inline-block;
-  }
-  @keyframes rhc-pulse { 50% { box-shadow: 0 0 0 6px rgba(28,139,80,0.05); } }
 
   @media (max-width: 880px) {
     .rhc-footer-grid { grid-template-columns: 1fr 1fr; gap: 28px; }

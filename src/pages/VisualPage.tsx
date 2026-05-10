@@ -42,6 +42,7 @@ interface Particle {
   vy: number;
   target: string | null;  // station id this particle is gravitating toward; null = shipped
   inProcess: boolean;     // true while sitting in a slot (frozen, acts as a solid obstacle)
+  transitioning: boolean; // true after a fresh retarget — uses direct velocity (not force) so it plows through any cluster in its way
   processingStart?: number;
   processingDuration?: number;
   slotStationId?: string;
@@ -59,31 +60,31 @@ const GRAVITY_F = 0.5;        // max attraction force toward target station (per
 const GRAVITY_RAMP = 0.02;    // force ramps as `min(GRAVITY_F, dist * GRAVITY_RAMP)` — weak near target so clusters settle instead of rotating
 const DAMP = 0.88;
 const SPAWN_Y_JITTER = 18;    // ±9px deterministic vertical spread at spawn so collisions have y-components
+const TRANSITION_SPEED = 3;   // px/frame — direct velocity for a freshly-retargeted particle so it plows out of its old cluster
+const TRANSITION_END_BUFFER = 16; // particle switches back to force-based gravity once within (target_radius + this) of the new target
 const PR = 5;                 // particle radius
 const NODE_RADIUS = 40;       // visual radius for real stations
 const PASS_RADIUS = 22;       // visual radius for pass-through routers
 const COLLISION_ITERS = 4;    // pairwise collision passes per frame
 const CLAIM_DISTANCE = 18;    // distance from station center at which a particle is claimed
 
-const BEFORE_STATIONS: StationConfig[] = [
-  { id: 'user',    label: 'USER',      capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5 }, outputs: ['support'] },
-  { id: 'support', label: 'SUPPORT',   capacity: 1, processingTime: 1800, pos: { x: 0.22, y: 0.5 }, outputs: ['mgmt'] },
-  { id: 'mgmt',    label: 'MANAGER',   capacity: 1, processingTime: 3500, pos: { x: 0.37, y: 0.5 }, outputs: ['dev'] },
-  { id: 'dev',     label: 'DEVELOPER (USING AI)', capacity: 1, processingTime: 2000, pos: { x: 0.54, y: 0.5 }, outputs: ['review'] },
-  { id: 'review',  label: 'REVIEW',    capacity: 1, processingTime: 2500, pos: { x: 0.70, y: 0.5 }, outputs: ['qa'] },
-  { id: 'qa',      label: 'QA',        capacity: 1, processingTime: 3500, pos: { x: 0.83, y: 0.5 }, outputs: ['deploy'] },
-  { id: 'deploy',  label: 'SHIP',      capacity: 1, processingTime: 1000, pos: { x: 0.94, y: 0.5 }, outputs: [] },
+export const BEFORE_STATIONS: StationConfig[] = [
+  { id: 'user',    label: 'USER FEEDBACK',    capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5 }, outputs: ['support'] },
+  { id: 'support', label: 'SUPPORT',   capacity: 1, processingTime: 1568, pos: { x: 0.22, y: 0.5 }, outputs: ['mgmt'] },
+  { id: 'mgmt',    label: 'MANAGER',   capacity: 1, processingTime: 2400, pos: { x: 0.37, y: 0.5 }, outputs: ['dev'] },
+  { id: 'dev',     label: 'DEVELOPER (USING AI)', capacity: 1, processingTime: 3000, pos: { x: 0.54, y: 0.5 }, outputs: ['review'] },
+  { id: 'review',  label: 'CODE REVIEW + QA', capacity: 1, processingTime: 800,  pos: { x: 0.74, y: 0.5 }, outputs: ['deploy'] },
+  { id: 'deploy',  label: 'DEPLOY',           capacity: 1, processingTime: 1000, pos: { x: 0.94, y: 0.5 }, outputs: [] },
 ];
 
-const AFTER_STATIONS: StationConfig[] = [
-  { id: 'user',    label: 'USER',     capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5  }, outputs: ['widget'] },
-  { id: 'widget',  label: 'WIDGET',   capacity: 0, processingTime: 0,    pos: { x: 0.22, y: 0.5  }, outputs: ['agent_1', 'agent_2', 'agent_3'] },
-  { id: 'agent_1', label: 'AGENT DEVELOPER', capacity: 1, processingTime: 2000, pos: { x: 0.45, y: 0.18 }, outputs: ['review'] },
-  { id: 'agent_2', label: 'AGENT DEVELOPER', capacity: 1, processingTime: 2000, pos: { x: 0.45, y: 0.50 }, outputs: ['review'] },
-  { id: 'agent_3', label: 'AGENT DEVELOPER', capacity: 1, processingTime: 2000, pos: { x: 0.45, y: 0.82 }, outputs: ['review'] },
-  { id: 'review',  label: 'DEV REVIEW', capacity: 1, processingTime: 800, pos: { x: 0.66, y: 0.5 }, outputs: ['qa'] },
-  { id: 'qa',      label: 'AI QA',      capacity: 4, processingTime: 500, pos: { x: 0.80, y: 0.5 }, outputs: ['deploy'] },
-  { id: 'deploy',  label: 'SHIP',       capacity: 1, processingTime: 300, pos: { x: 0.94, y: 0.5 }, outputs: [] },
+export const AFTER_STATIONS: StationConfig[] = [
+  { id: 'user',    label: 'USER FEEDBACK',   capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5  }, outputs: ['widget'] },
+  { id: 'widget',  label: 'RUNHQ WIDGET', capacity: 1, processingTime: 500, pos: { x: 0.22, y: 0.5  }, outputs: ['agent_1', 'agent_2', 'agent_3'] },
+  { id: 'agent_1', label: 'CODING AGENT', capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.22 }, outputs: ['review'] },
+  { id: 'agent_2', label: 'CODING AGENT', capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.50 }, outputs: ['review'] },
+  { id: 'agent_3', label: 'CODING AGENT', capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.78 }, outputs: ['review'] },
+  { id: 'review',  label: 'CODE REVIEW + QA', capacity: 1, processingTime: 800, pos: { x: 0.70, y: 0.5 }, outputs: ['deploy'] },
+  { id: 'deploy',  label: 'DEPLOY',           capacity: 1, processingTime: 300, pos: { x: 0.94, y: 0.5 }, outputs: [] },
 ];
 
 class Simulation {
@@ -138,6 +139,7 @@ class Simulation {
       vy: 0,
       target: user.config.outputs[0],
       inProcess: false,
+      transitioning: true,
     });
   }
 
@@ -151,7 +153,8 @@ class Simulation {
     const cursor = this.outputCursors.get(fromStationId) ?? 0;
     p.target = s.config.outputs[cursor % s.config.outputs.length];
     this.outputCursors.set(fromStationId, cursor + 1);
-    // No velocity kick. Gravity to the new target accelerates the particle naturally.
+    // Enter transition mode: direct velocity through any cluster until close to the new target
+    p.transitioning = true;
   }
 
   // ─── Frame ────────────────────────────────────────────────────────────────
@@ -164,17 +167,27 @@ class Simulation {
       this.lastSpawn = now;
     }
 
-    // 2. Physics: EVERY particle (free OR in-process) accelerates toward its target's center.
-    //    For an in-process particle this means gravity holds it near the station naturally —
-    //    no freeze, no teleport, no special case.
+    // 2. Physics. Two modes:
+    //      - transitioning: direct velocity toward target (ignores damping). Plows through
+    //        any cluster in its way because the post-collision velocity is overwritten next
+    //        frame. Switches to gravity once it reaches the new target's vicinity.
+    //      - default: force-based gravity, ramped down near the target so clusters settle.
     for (const p of this.particles) {
       if (!p.target) continue;
       const tp = this.posOf(p.target);
       const dx = tp.x - p.x, dy = tp.y - p.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const f = Math.min(GRAVITY_F, dist * GRAVITY_RAMP);
-      p.vx = (p.vx + (dx / dist) * f) * DAMP;
-      p.vy = (p.vy + (dy / dist) * f) * DAMP;
+      if (p.transitioning) {
+        p.vx = (dx / dist) * TRANSITION_SPEED;
+        p.vy = (dy / dist) * TRANSITION_SPEED;
+        if (dist < this.nodeRadius(p.target) + TRANSITION_END_BUFFER) {
+          p.transitioning = false;
+        }
+      } else {
+        const f = Math.min(GRAVITY_F, dist * GRAVITY_RAMP);
+        p.vx = (p.vx + (dx / dist) * f) * DAMP;
+        p.vy = (p.vy + (dy / dist) * f) * DAMP;
+      }
       p.x += p.vx;
       p.y += p.vy;
     }
@@ -350,7 +363,7 @@ class Simulation {
   }
 }
 
-function PipelineCanvas({
+export function PipelineCanvas({
   configs,
   label,
   resetTick,
@@ -427,6 +440,11 @@ function PipelineCanvas({
 export default function VisualPage() {
   const [resetTick, setResetTick] = useState(0);
 
+  useEffect(() => {
+    const id = setInterval(() => setResetTick(t => t + 1), 4 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <div className="vp-root">
       <style>{VP_STYLES}</style>
@@ -442,15 +460,12 @@ export default function VisualPage() {
             Both pipelines receive feedback at the same rate. Each station has a fixed
             processing time. Watch the bottlenecks emerge.
           </p>
-          <div className="vp-actions">
-            <button className="vp-reset" onClick={() => setResetTick(t => t + 1)}>↻ Restart</button>
-          </div>
         </div>
       </section>
 
       <section className="vp-section">
         <PipelineCanvas configs={BEFORE_STATIONS} label="BEFORE" resetTick={resetTick} height={200} />
-        <PipelineCanvas configs={AFTER_STATIONS} label="AFTER WITH RUNHQ" resetTick={resetTick} height={320} />
+        <PipelineCanvas configs={AFTER_STATIONS} label="WITH RUNHQ" resetTick={resetTick} height={360} />
       </section>
 
       <Footer />
@@ -458,7 +473,7 @@ export default function VisualPage() {
   );
 }
 
-const VP_STYLES = `
+export const VP_STYLES = `
 .vp-root {
   background: var(--rhw-bg);
   min-height: 100vh;
@@ -496,23 +511,6 @@ const VP_STYLES = `
   margin: 0;
   max-width: 640px;
 }
-
-.vp-actions {
-  display: flex;
-  margin-top: 8px;
-}
-.vp-reset {
-  background: transparent;
-  border: 1px solid var(--rhw-line);
-  color: var(--rhw-ink-soft);
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-family: inherit;
-  font-size: 11px;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
-}
-.vp-reset:hover { background: var(--rhw-bg-2); border-color: var(--rhw-ink-faint); }
 
 .vp-section {
   max-width: 1100px;

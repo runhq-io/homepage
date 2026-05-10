@@ -673,7 +673,7 @@ const PAGES: DocPage[] = [
         heading: 'When to turn tools off',
         body: (
           <UL>
-            <li><Em>Compliance</Em> — turn off HTTP and Browser if outbound network traffic from agent runs is restricted.</li>
+            <li><Em>Restricted networks</Em> — turn off HTTP and Browser if outbound network traffic from agent runs is restricted.</li>
             <li><Em>Speed</Em> — a research-only agent doesn't need Files or Terminal; turning them off makes it cheaper and faster.</li>
             <li><Em>Safety rails</Em> — a junior-engineer-style agent might not get HTTP at first.</li>
           </UL>
@@ -1200,7 +1200,7 @@ function HelpBlock() {
       </div>
       <div className="rhpd-help-r">
         <a className="rhp-btn-ghost" href={SIGNUP_URL}>Open chat</a>
-        <a className="rhp-btn-primary" href="mailto:hi@runhq.io">Email support →</a>
+        <a className="rhp-btn-primary" href="mailto:admin@runhq.io">Email support →</a>
       </div>
     </div>
   );

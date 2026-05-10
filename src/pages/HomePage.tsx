@@ -1,42 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, SIGNUP_URL, LOGIN_URL } from '../components/chrome';
+import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
 import heroScreenshot from '../assets/screenshot.png';
 import heroScreenshotSm from '../assets/smaller_screenshot.png';
-
-const QUOTES = [
-  { body: "We replaced four tools with RunHQ. The PR-from-feedback flow is the part nobody else does.", name: "Mira Solberg", role: "Co-founder, Hover Labs" },
-  { body: "Our support inbox now writes its own pull requests. I read diffs at breakfast and ship before lunch.", name: "Daniel Park", role: "CTO, Tessera" },
-  { body: "The audit log alone is worth the price. Every agent action, every prompt, every diff — versioned.", name: "Esme Chen", role: "Head of Eng, Plot" },
-  { body: "Closed twelve P1 bugs in a single morning. The agent didn't sleep. I did.", name: "Kwame Boateng", role: "Founding engineer, Drift Labs" },
-];
-
-const Sparkline = ({ values, accent, reverse }: { values: number[]; accent?: boolean; reverse?: boolean }) => {
-  const max = Math.max(...values), min = Math.min(...values);
-  const w = 240, h = 56;
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * w;
-    const norm = (v - min) / (max - min || 1);
-    const y = (reverse ? norm : 1 - norm) * h;
-    return `${x},${y}`;
-  }).join(' ');
-  const fillPts = `0,${h} ${points} ${w},${h}`;
-  const stroke = accent ? 'var(--rhw-accent)' : 'var(--rhw-ink-mute)';
-  const fill = accent ? 'var(--rhw-accent-soft)' : 'rgba(0,0,0,0.04)';
-  return (
-    <svg className="rhw-spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
-      <polygon points={fillPts} fill={fill} />
-      <polyline points={points} fill="none" stroke={stroke} strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  );
-};
-
-const Bars = ({ values }: { values: number[] }) => (
-  <div className="rhw-bars">
-    {values.map((v, i) => (
-      <span key={i} style={{ height: `${v * 100}%`, opacity: 0.4 + v * 0.6 }} />
-    ))}
-  </div>
-);
 
 const LoopCapture = () => (
   <div className="rhw-lv">
@@ -114,25 +80,8 @@ const LOOP_STAGES = [
     Visual: LoopReview },
   { n: '04', t: 'Deploy', s: 'Ship through your pipeline',
     body: 'Approved PRs flow into the deploy pipeline you already run — Vercel, Render, Fly, AWS. Every release is logged with the chain back to the original ticket.',
-    keys: ['GitHub merge', 'Existing CD', 'SOC 2 audit log'],
+    keys: ['GitHub merge', 'Existing CD', 'Audit log export'],
     Visual: LoopDeploy },
-];
-
-const INTEGRATIONS = [
-  { h: 'CAPTURE',  items: ['Intercom', 'Linear', 'Slack', 'GitHub Issues', 'Email', 'Widget', 'Plain', 'Front'] },
-  { h: 'EXECUTE',  items: ['Claude Code', 'Cursor', 'Codex', 'Devin', 'Aider', 'Custom CLI', 'Anthropic', 'OpenAI'] },
-  { h: 'SHIP',     items: ['GitHub', 'GitLab', 'Bitbucket', 'Vercel', 'Render', 'Fly', 'AWS', 'Heroku'] },
-  { h: 'NOTIFY',   items: ['Slack', 'Discord', 'Teams', 'Email', 'PagerDuty', 'Linear', 'Webhook', 'CLI'] },
-];
-
-const AUDIT_ROWS: { t: string; who: string; e: string; ctx: string; tag: 'agent' | 'human' | 'system' | 'capture' }[] = [
-  { t: '11:42', who: 'claude-sonnet-4', e: 'Opened PR #4821',         ctx: 'RH-184 · Stripe portal redirect',    tag: 'agent' },
-  { t: '11:38', who: 'Mira Solberg',    e: 'Approved diff',           ctx: '+8 −3 across ./auth/portal.tsx',     tag: 'human' },
-  { t: '11:33', who: 'claude-sonnet-4', e: 'Tests passed',            ctx: '23 / 23 · ./auth.test.ts',           tag: 'agent' },
-  { t: '11:31', who: 'system',          e: 'Plateau detected → fallback', ctx: 'cursor-3 → claude-sonnet-4',     tag: 'system' },
-  { t: '11:28', who: 'cursor-3',        e: 'Run started',             ctx: 'tokens: 8,124 · budget: 12,000',     tag: 'agent' },
-  { t: '11:26', who: 'system',          e: 'Packaged context',        ctx: '12 files · 2 related PRs · 1 trace', tag: 'system' },
-  { t: '11:24', who: 'Jen K. (Intercom)', e: 'Captured ticket',       ctx: 'safari · /billing · 1 console err',  tag: 'capture' },
 ];
 
 function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: React.RefObject<HTMLButtonElement | null> }) {
@@ -168,10 +117,17 @@ function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: R
 export default function HomePage() {
   const [demoOpen, setDemoOpen] = useState(false);
   const demoBtnRef = useRef<HTMLButtonElement>(null);
+  const [pipelineResetTick, setPipelineResetTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setPipelineResetTick(t => t + 1), 4 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div className="rhw-root">
       <style>{HOME_STYLES}</style>
+      <style>{VP_STYLES}</style>
 
       <Navbar />
 
@@ -233,79 +189,23 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* DASHBOARD STRIP */}
-      <section className="rhw-dash">
+      {/* BEFORE / AFTER pipeline simulation */}
+      <section className="rhw-pipeline">
         <div className="rhw-section-head">
-          <div className="rhw-eyebrow"><span className="rhw-dot" /> This week, at one customer</div>
-          <h2 className="rhw-h2">A dashboard&rsquo;s worth of<br />shipped product.</h2>
+          <h2 className="rhw-h2">Why teams ship faster<br />on RunHQ.</h2>
+          <p className="rhw-section-deck">
+            Same feedback rate into both pipelines. The human handoff chain piles up at every step. Parallel coding agents drain the queue as fast as it arrives.
+          </p>
         </div>
-
-        <div className="rhw-dash-grid">
-          <div className="rhw-stat-card rhw-stat-hero">
-            <div className="rhw-stat-h">PRs merged · last 7 days</div>
-            <div className="rhw-stat-v">2,847</div>
-            <div className="rhw-stat-delta rhw-stat-up">↑ 38% vs last week</div>
-            <Sparkline values={[12, 18, 16, 22, 28, 34, 41, 38, 44, 56, 62, 71]} accent />
-          </div>
-
-          <div className="rhw-stat-card">
-            <div className="rhw-stat-h">p50 capture → PR</div>
-            <div className="rhw-stat-v">11m <span>32s</span></div>
-            <div className="rhw-stat-delta rhw-stat-up">↑ 12m faster</div>
-            <Sparkline values={[28, 24, 22, 19, 18, 15, 14, 13, 12, 12, 11, 11]} reverse />
-          </div>
-
-          <div className="rhw-stat-card">
-            <div className="rhw-stat-h">First review SLA</div>
-            <div className="rhw-stat-v">&lt; 1<span>h</span></div>
-            <div className="rhw-stat-delta rhw-stat-flat">100% met · 7d</div>
-            <Bars values={[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]} />
-          </div>
-
-          <div className="rhw-stat-card">
-            <div className="rhw-stat-h">Human-reviewed merges</div>
-            <div className="rhw-stat-v">100<span>%</span></div>
-            <div className="rhw-stat-delta rhw-stat-flat">No agent merges. Ever.</div>
-            <div className="rhw-fill-100" />
-          </div>
-
-          <div className="rhw-stat-card">
-            <div className="rhw-stat-h">Untracked agent runs</div>
-            <div className="rhw-stat-v">0</div>
-            <div className="rhw-stat-delta rhw-stat-flat">Audit log is gospel</div>
-            <div className="rhw-fill-0" />
-          </div>
-        </div>
-
-        <div className="rhw-audit">
-          <div className="rhw-audit-h">
-            <div className="rhw-audit-title">
-              <span className="rhw-live-dot" />
-              Audit log · last 90 minutes
-            </div>
-            <div className="rhw-audit-actions">
-              <span className="rhw-chip">⊕ Filter</span>
-              <span className="rhw-chip">⤓ Export JSONL</span>
-            </div>
-          </div>
-          <div className="rhw-audit-list">
-            {AUDIT_ROWS.map((row, i) => (
-              <div key={i} className="rhw-audit-row">
-                <div className="rhw-audit-t">{row.t}</div>
-                <div className={`rhw-audit-tag rhw-audit-tag-${row.tag}`}>{row.tag}</div>
-                <div className="rhw-audit-who">{row.who}</div>
-                <div className="rhw-audit-e">{row.e}</div>
-                <div className="rhw-audit-ctx">{row.ctx}</div>
-              </div>
-            ))}
-          </div>
+        <div className="rhw-pipeline-grid">
+          <PipelineCanvas configs={BEFORE_STATIONS} label="BEFORE" resetTick={pipelineResetTick} height={200} />
+          <PipelineCanvas configs={AFTER_STATIONS} label="WITH RUNHQ" resetTick={pipelineResetTick} height={360} />
         </div>
       </section>
 
       {/* THE LOOP */}
       <section className="rhw-loop">
         <div className="rhw-section-head">
-          <div className="rhw-eyebrow"><span className="rhw-dot" /> Four stages, one path</div>
           <h2 className="rhw-h2">Every release walks<br />the same loop.</h2>
           <p className="rhw-section-deck">
             Most coding-agent stacks stop at &ldquo;the agent finished.&rdquo; That&rsquo;s the middle. RunHQ owns the ends — capture before, review after — so the middle can run unattended without scaring anyone.
@@ -332,59 +232,9 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* PROOF / QUOTES */}
-      <section className="rhw-proof">
-        <div className="rhw-section-head">
-          <div className="rhw-eyebrow"><span className="rhw-dot" /> From eng leaders who closed the loop</div>
-          <h2 className="rhw-h2">Voices from the queue.</h2>
-        </div>
-        <div className="rhw-quote-grid">
-          {QUOTES.map((q, i) => (
-            <figure key={i} className="rhw-quote-card">
-              <div className="rhw-quote-mark">&ldquo;</div>
-              <blockquote className="rhw-quote-body">{q.body}</blockquote>
-              <figcaption className="rhw-quote-cap">
-                <Avatar name={q.name} size={36} />
-                <div>
-                  <div className="rhw-quote-name">{q.name}</div>
-                  <div className="rhw-quote-role">{q.role}</div>
-                </div>
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      </section>
-
-      {/* INTEGRATIONS */}
-      <section className="rhw-int">
-        <div className="rhw-section-head">
-          <div className="rhw-eyebrow"><span className="rhw-dot" /> Plugs into the stack you have</div>
-          <h2 className="rhw-h2">No replatform. Just plug in.</h2>
-        </div>
-        <div className="rhw-int-grid">
-          {INTEGRATIONS.map((g) => (
-            <div key={g.h} className="rhw-int-col">
-              <div className="rhw-int-h">{g.h}</div>
-              <div className="rhw-int-list">
-                {g.items.map((i) => (
-                  <div key={i} className="rhw-int-i">
-                    <span className="rhw-int-dot" />
-                    {i}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
       {/* CTA */}
       <section className="rhw-cta-band">
         <div className="rhw-cta-inner">
-          <div className="rhw-cta-eyebrow">
-            <span className="rhw-dot" />
-            <span>Begin a 14-day pilot — no credit card</span>
-          </div>
           <h2 className="rhw-cta-h">
             Stop translating feedback by hand.<br />
             Start shipping it.
@@ -395,7 +245,7 @@ export default function HomePage() {
           </div>
           <div className="rhw-cta-meta">
             <div><strong>Live in 60 minutes.</strong> Drop the widget, connect a source, ship before lunch.</div>
-            <div><strong>SOC 2 Type II.</strong> Audit log export. PII strip at ingest. EU residency Q3.</div>
+            <div><strong>Audit log export.</strong> PII strip at ingest. Every agent action versioned.</div>
             <div><strong>Cancel anytime.</strong> Take the audit log with you on the way out.</div>
           </div>
         </div>
@@ -816,104 +666,20 @@ const HOME_STYLES = `
   .rhw-modal-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
   .rhw-modal-video { width: 100%; height: 100%; display: block; }
 
-  /* Dashboard / stats */
-  .rhw-dash { padding-bottom: 80px; }
-  .rhw-dash-grid {
-    display: grid;
-    grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
-    gap: 14px;
+  /* Before / After pipeline simulation */
+  .rhw-pipeline { padding-bottom: 80px; }
+  .rhw-pipeline-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
     padding: 0 48px;
+    max-width: 1200px;
+    margin: 0 auto;
   }
-  .rhw-stat-card {
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-radius: 14px;
-    padding: 22px 22px 14px;
-    overflow: hidden;
-    position: relative;
-  }
-  .rhw-stat-h { font-size: 12px; color: var(--rhw-ink-mute); margin-bottom: 14px; }
-  .rhw-stat-v {
-    font-size: 44px; line-height: 1;
-    letter-spacing: -0.035em; font-weight: 600;
-    color: var(--rhw-ink);
-    margin-bottom: 8px;
-  }
-  .rhw-stat-v span { font-size: 18px; color: var(--rhw-ink-mute); margin-left: 2px; }
-  .rhw-stat-hero .rhw-stat-v { font-size: 64px; }
-  .rhw-stat-delta { font-size: 11.5px; margin-bottom: 12px; }
-  .rhw-stat-up { color: var(--rhw-good); }
-  .rhw-stat-flat { color: var(--rhw-ink-mute); }
-  .rhw-spark { width: 100%; height: 56px; }
-  .rhw-bars { height: 56px; display: flex; gap: 2px; align-items: flex-end; }
-  .rhw-bars span { flex: 1; background: var(--rhw-accent); border-radius: 1.5px; }
-  .rhw-fill-100 {
-    height: 56px;
-    background: var(--rhw-accent);
-    border-radius: 6px;
-  }
-  .rhw-fill-0 {
-    height: 56px;
-    background: repeating-linear-gradient(45deg, var(--rhw-bg-2) 0 6px, var(--rhw-line-soft) 6px 12px);
-    border-radius: 6px;
+  @media (max-width: 768px) {
+    .rhw-pipeline-grid { padding: 0 16px; }
   }
 
-  /* Audit log */
-  .rhw-audit {
-    margin: 32px 48px 0;
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-radius: 14px;
-    overflow: hidden;
-  }
-  .rhw-audit-h {
-    display: flex; align-items: center;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--rhw-line-soft);
-  }
-  .rhw-audit-title {
-    display: inline-flex; align-items: center; gap: 9px;
-    font-size: 13px; font-weight: 500;
-  }
-  .rhw-audit-actions { margin-left: auto; display: flex; gap: 8px; }
-  .rhw-chip {
-    font-size: 11.5px;
-    padding: 4px 10px;
-    background: var(--rhw-bg-2);
-    border-radius: 6px;
-    color: var(--rhw-ink-soft);
-    cursor: pointer;
-  }
-  .rhw-audit-list { display: flex; flex-direction: column; }
-  .rhw-audit-row {
-    display: grid;
-    grid-template-columns: 60px 64px 160px 200px 1fr;
-    gap: 16px;
-    padding: 11px 18px;
-    border-bottom: 1px solid var(--rhw-line-soft);
-    font-size: 12.5px;
-    align-items: center;
-  }
-  .rhw-audit-row:last-child { border-bottom: none; }
-  .rhw-audit-t { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--rhw-ink-mute); }
-  .rhw-audit-tag {
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    text-align: center;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    font-weight: 500;
-  }
-  .rhw-audit-tag-agent { background: oklch(0.52 0.20 277 / 0.10); color: var(--rhw-accent); }
-  .rhw-audit-tag-human { background: oklch(0.62 0.18 145 / 0.12); color: oklch(0.42 0.16 145); }
-  .rhw-audit-tag-system { background: var(--rhw-bg-2); color: var(--rhw-ink-mute); }
-  .rhw-audit-tag-capture { background: oklch(0.62 0.20 27 / 0.12); color: oklch(0.45 0.18 27); }
-  .rhw-audit-who { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--rhw-ink); }
-  .rhw-audit-e { color: var(--rhw-ink); font-weight: 500; }
-  .rhw-audit-ctx { color: var(--rhw-ink-mute); font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
-
-  /* Loop */
   .rhw-loop {
     background: var(--rhw-bg-2);
     border-top: 1px solid var(--rhw-line);
@@ -1036,40 +802,6 @@ const HOME_STYLES = `
   }
   .rhw-lv-pr-btn-on { background: var(--rhw-good); color: #fff; border-color: var(--rhw-good); }
 
-  /* Proof */
-  .rhw-proof { padding-bottom: 80px; }
-  .rhw-quote-grid {
-    display: grid; grid-template-columns: repeat(2, 1fr);
-    gap: 14px;
-    padding: 0 48px;
-  }
-  .rhw-quote-card {
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-radius: 16px;
-    padding: 28px;
-    margin: 0;
-    position: relative;
-  }
-  .rhw-quote-mark {
-    font-family: 'Instrument Serif', 'Newsreader', serif;
-    font-size: 80px; line-height: 0.6;
-    color: var(--rhw-accent);
-    height: 24px;
-    margin-bottom: 8px;
-  }
-  .rhw-quote-body {
-    font-size: 22px; line-height: 1.35;
-    color: var(--rhw-ink);
-    margin: 0 0 24px;
-    letter-spacing: -0.012em;
-    font-weight: 500;
-    text-wrap: pretty;
-  }
-  .rhw-quote-cap { display: flex; gap: 12px; align-items: center; }
-  .rhw-quote-name { font-size: 14px; font-weight: 500; }
-  .rhw-quote-role { font-size: 12px; color: var(--rhw-ink-mute); margin-top: 2px; }
-
   /* Integrations */
   .rhw-int { padding-bottom: 80px; }
   .rhw-int-grid {
@@ -1161,14 +893,8 @@ const HOME_STYLES = `
     .rhw-hero-app { margin-right: 0; width: 100%; padding-bottom: 80px; }
     .rhw-run-card { right: 0; }
     .rhw-section-head { padding: 64px 32px 28px; }
-    .rhw-dash-grid { grid-template-columns: repeat(2, 1fr); padding: 0 32px; }
-    .rhw-stat-hero { grid-column: span 2; }
     .rhw-loop-grid { grid-template-columns: repeat(2, 1fr); padding: 0 32px; }
     .rhw-int-grid { grid-template-columns: repeat(2, 1fr); padding: 0 32px; }
-    .rhw-quote-grid { grid-template-columns: 1fr; padding: 0 32px; }
-    .rhw-audit { margin: 32px 32px 0; }
-    .rhw-audit-row { grid-template-columns: 50px 60px 1fr; }
-    .rhw-audit-who, .rhw-audit-ctx { display: none; }
     .rhw-cta-band { margin: 0 32px 48px; padding: 56px 28px; }
     .rhw-cta-h { font-size: 40px; }
     .rhw-cta-meta { grid-template-columns: 1fr; gap: 16px; }
@@ -1178,9 +904,7 @@ const HOME_STYLES = `
   @media (max-width: 720px) {
     .rhw-hero-h1 { font-size: 44px; }
     .rhw-h2 { font-size: 36px; }
-    .rhw-stat-hero .rhw-stat-v { font-size: 48px; }
-    .rhw-dash-grid, .rhw-loop-grid, .rhw-int-grid { grid-template-columns: 1fr; }
-    .rhw-stat-hero { grid-column: auto; }
+    .rhw-loop-grid, .rhw-int-grid { grid-template-columns: 1fr; }
     .rhw-run-card { width: 100%; right: 0; }
     .rhw-cta-h { font-size: 32px; }
   }
