@@ -24,7 +24,7 @@ const HERO_ROLES = ['PM', 'Engineer', 'Design', 'QA', 'Support', 'Sales', 'Found
 
 const HeroRoles = () => (
   <div className="rhw-hero-roles">
-    <div className="rhw-hero-roles-h">Built for everyone who ships</div>
+    <div className="rhw-hero-roles-h">Empower the entire team with agentic automation</div>
     <div className="rhw-hero-roles-pills">
       {HERO_ROLES.map((role) => (
         <span key={role} className="rhw-hero-role-pill">{role}</span>
