@@ -5665,6 +5665,7 @@ export function createHttpApp() {
       widget_language,
       voting_period_hours,
       is_public,
+      login_url,
       auto_inject_in_preview,
       slug,
       widgetAgentAssignmentEnabled,
@@ -5679,7 +5680,7 @@ export function createHttpApp() {
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
-        auto_approve, widget_position, widget_language, voting_period_hours, is_public, auto_inject_in_preview, slug,
+        auto_approve, widget_position, widget_language, voting_period_hours, is_public, login_url, auto_inject_in_preview, slug,
         widgetAgentAssignmentEnabled,
         widgetAssignRoles,
         widgetRoleClaimName,

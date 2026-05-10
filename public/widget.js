@@ -178,6 +178,142 @@
     });
   }
 
+  // ===========================================================================
+  // Anon write gate (public widget, read-only-until-login flow)
+  //
+  // When a project is "public" (isPublic) but the current viewer is anonymous
+  // (no token / no widgetUserId), every write affordance — submit ticket,
+  // upvote, comment — must redirect the user to the project's configured
+  // login URL instead of hitting the API. The composer state (description,
+  // queued image files) is captured into sessionStorage as a base64 JSON
+  // intent so the user's draft survives the redirect, and is reapplied when
+  // the widget bootstraps next under an authenticated identity. Files are
+  // never uploaded to the server while the viewer is anonymous.
+  // ===========================================================================
+
+  // Holds an intent read from sessionStorage at init time. Applied after
+  // the panel is mounted and the first data load finishes so the composer
+  // / detail view exists to receive the prefilled state.
+  var pendingIntent = null;
+
+  // Sized just under the lowest common sessionStorage quota (~5MB). Leaves
+  // headroom for other storage on the host page. Drafts that would exceed
+  // this drop queued images (oldest first) until they fit.
+  var INTENT_MAX_BYTES = 4 * 1024 * 1024;
+
+  function isAnonViewer() {
+    return !!(config.isPublic && !config.isIdentified);
+  }
+
+  // True if an anonymous viewer can usefully click a write affordance —
+  // public + a configured login URL. Without a URL the gate has nowhere
+  // to send them, so the affordance stays disabled (matching the
+  // pre-feature behavior of "anon can't write").
+  function canAnonInteract() {
+    return isAnonViewer() && !!config.loginUrl;
+  }
+
+  function intentStorageKey() {
+    var slug = config.projectId || config.project || "default";
+    return "runhq:widget:draft:" + slug;
+  }
+
+  function buildLoginUrl(base) {
+    try {
+      var url = new URL(base, window.location.href);
+      // If the owner already supplied a return_to (custom flow), respect
+      // it. Otherwise inject the current page so they land back here.
+      if (!url.searchParams.has("return_to")) {
+        url.searchParams.set("return_to", window.location.href);
+      }
+      return url.toString();
+    } catch (_) {
+      return base;
+    }
+  }
+
+  // Read a File as a base64 data URL so it can be persisted in
+  // sessionStorage across the login redirect.
+  function fileToDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        resolve({
+          name: file.name || "image",
+          mime: file.type || "application/octet-stream",
+          dataUrl: String(reader.result || ""),
+        });
+      };
+      reader.onerror = function () { reject(reader.error || new Error("File read failed")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Inverse of fileToDataUrl. Resolves to a real File so the composer's
+  // existing addFiles flow accepts it without modification.
+  function dataUrlToFile(serialized) {
+    return fetch(serialized.dataUrl)
+      .then(function (r) { return r.blob(); })
+      .then(function (blob) { return new File([blob], serialized.name, { type: serialized.mime }); });
+  }
+
+  function trySaveIntent(intent) {
+    var serialized = JSON.stringify(intent);
+    var droppedFiles = false;
+    while (
+      serialized.length > INTENT_MAX_BYTES &&
+      intent.draft && Array.isArray(intent.draft.files) && intent.draft.files.length > 0
+    ) {
+      intent.draft.files.shift();
+      droppedFiles = true;
+      serialized = JSON.stringify(intent);
+    }
+    try {
+      sessionStorage.setItem(intentStorageKey(), serialized);
+      return { ok: true, droppedFiles: droppedFiles };
+    } catch (_) {
+      return { ok: false, droppedFiles: droppedFiles };
+    }
+  }
+
+  function readIntent() {
+    try {
+      var raw = sessionStorage.getItem(intentStorageKey());
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearIntent() {
+    try { sessionStorage.removeItem(intentStorageKey()); } catch (_) {}
+  }
+
+  // Single entry point for write affordances. If the viewer is anonymous on
+  // a public widget with a configured login URL, capture the intent and
+  // redirect. Otherwise the action proceeds via `intent.proceed`.
+  function gateWriteAction(intent) {
+    if (!isAnonViewer()) {
+      if (intent.proceed) intent.proceed();
+      return;
+    }
+    if (!config.loginUrl) {
+      if (intent.onMisconfigured) intent.onMisconfigured();
+      return;
+    }
+    // Strip non-serializable fields before persisting.
+    var persisted = {
+      type: intent.type,
+      projectSlug: config.projectId || config.project || null,
+      ticketId: intent.ticketId || null,
+      direction: intent.direction || null,
+      draft: intent.draft || null,
+    };
+    trySaveIntent(persisted);
+    window.location.href = buildLoginUrl(config.loginUrl);
+  }
+
   // Fetch the current authenticated user's profile from /api/widget/me and
   // update currentUser. Safe for anonymous callers — 401/404 resolve to empty.
   // After updating state, re-renders the panel body so the triager badge
@@ -340,7 +476,9 @@
         submit: "Submit",
         posting: "Posting…",
         uploading: "Uploading…",
+        savingDraft: "Redirecting to log in…",
         needSignIn: "You must be signed in to submit a ticket.",
+        loginNotConfigured: "This project owner hasn't set up a login URL — submitting isn't available right now.",
         failed: "Failed to submit: {msg}",
         pastedImage: "Pasted image",
       },
@@ -395,9 +533,14 @@
         submit: "Comment",
         posting: "Posting…",
         uploading: "Uploading…",
+        savingDraft: "Redirecting to log in…",
         failed: "Failed to post: {msg}",
         signInPrompt: "Sign in to post a comment.",
         disabledPrompt: "Comments are disabled on this ticket.",
+      },
+      restore: {
+        welcomeBack: "Welcome back — your draft is ready to submit.",
+        voteWelcomeBack: "Welcome back — click vote again to confirm.",
       },
       theme: {
         dark: "Dark mode",
@@ -453,7 +596,9 @@
         submit: "제출",
         posting: "게시 중…",
         uploading: "업로드 중…",
+        savingDraft: "로그인 페이지로 이동 중…",
         needSignIn: "티켓을 제출하려면 로그인해야 합니다.",
+        loginNotConfigured: "프로젝트 소유자가 로그인 URL을 설정하지 않아 지금은 제출할 수 없습니다.",
         failed: "제출 실패: {msg}",
         pastedImage: "붙여넣은 이미지",
       },
@@ -505,9 +650,14 @@
         submit: "댓글",
         posting: "게시 중…",
         uploading: "업로드 중…",
+        savingDraft: "로그인 페이지로 이동 중…",
         failed: "게시 실패: {msg}",
         signInPrompt: "댓글을 작성하려면 로그인하세요.",
         disabledPrompt: "이 티켓의 댓글이 비활성화되었습니다.",
+      },
+      restore: {
+        welcomeBack: "다시 오셨네요 — 작성 중이던 내용을 그대로 제출할 수 있어요.",
+        voteWelcomeBack: "다시 오셨네요 — 추천 버튼을 다시 눌러 확정해 주세요.",
       },
       theme: {
         dark: "다크 모드",
@@ -2191,6 +2341,18 @@
 
   function handleVoteClick(ticket, voteBtn, countSpan, e) {
     e.preventDefault(); e.stopPropagation();
+    // Anonymous viewer on a public widget: persist a vote intent and
+    // redirect to login. On return, the widget reopens to this ticket
+    // with the vote button enabled (the user clicks again to confirm).
+    if (isAnonViewer()) {
+      if (!config.loginUrl) return;
+      gateWriteAction({
+        type: "vote",
+        ticketId: ticket.id,
+        direction: ticket.userVote === true ? "retract" : "up",
+      });
+      return;
+    }
     if (!config.isIdentified) return;
     var wasVoted = ticket.userVote === true;
     var optimistic = (ticket.yesVotes || 0) + (wasVoted ? -1 : 1);
@@ -2218,7 +2380,11 @@
       className: "rw-dash-vote" + (voted ? " rw-voted" : ""),
       type: "button",
       "aria-label": t("aria.upvote"),
-      disabled: !config.isIdentified,
+      // Authed users vote directly. Anonymous viewers of a public widget
+      // can click — the click is gated and redirects to the login URL
+      // with their intent preserved. Anonymous viewers without a login
+      // URL fall through to disabled (matches old behavior).
+      disabled: !(config.isIdentified || canAnonInteract()),
       title: config.isIdentified ? t("aria.upvote") : t("aria.upvoteSignedOut"),
     }, [Icons.arrowUp(11), countSpan]);
     voteBtn.addEventListener("click", function (e) {
@@ -2385,7 +2551,12 @@
       h("span", null, t("composer.submit")),
     ]);
     function updateSubmitEnabled() {
-      submitBtn.disabled = !config.isIdentified || ta.value.trim().length === 0;
+      // Empty composer never submits, regardless of auth state.
+      if (ta.value.trim().length === 0) { submitBtn.disabled = true; return; }
+      // Authed users can always submit. Anonymous viewers of a public widget
+      // can submit too — the click triggers a login redirect that preserves
+      // their draft. Anything else (private widget without auth) stays disabled.
+      submitBtn.disabled = !(config.isIdentified || canAnonInteract());
     }
     ta.addEventListener("input", updateSubmitEnabled);
     ta.addEventListener("keydown", function (e) {
@@ -2420,13 +2591,50 @@
     });
 
     submitBtn.addEventListener("click", function () {
+      var description = ta.value.trim();
+      if (!description) return;
+
+      // Anonymous viewer on a public widget: serialize the draft (description,
+      // private toggle, queued image files as base64) into sessionStorage,
+      // then redirect to the configured login URL with ?return_to=<page>.
+      // The widget restores the draft on its next bootstrap once the user is
+      // authenticated. Files are NEVER uploaded to the server in this branch —
+      // images stay in the browser until a real authenticated submit fires.
+      if (isAnonViewer()) {
+        if (!config.loginUrl) {
+          clearChildren(noticeSlot);
+          noticeSlot.appendChild(renderNotice("error", t("composer.loginNotConfigured")));
+          return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.firstChild.textContent = t("composer.savingDraft");
+        Promise.all(entries.map(function (e) { return fileToDataUrl(e.file); }))
+          .then(function (serializedFiles) {
+            gateWriteAction({
+              type: "submit-ticket",
+              draft: {
+                description: description,
+                isPrivate: isPrivate,
+                files: serializedFiles,
+              },
+            });
+          })
+          .catch(function () {
+            // On serialization failure, drop the files and redirect with
+            // text only so the user isn't stranded with an unclickable button.
+            gateWriteAction({
+              type: "submit-ticket",
+              draft: { description: description, isPrivate: isPrivate, files: [] },
+            });
+          });
+        return;
+      }
+
       if (!config.isIdentified) {
         clearChildren(noticeSlot);
         noticeSlot.appendChild(renderNotice("error", t("composer.needSignIn")));
         return;
       }
-      var description = ta.value.trim();
-      if (!description) return;
       submitBtn.disabled = true;
       submitBtn.firstChild.textContent = t("composer.posting");
       clearChildren(noticeSlot);
@@ -2647,6 +2855,10 @@
       // without requiring the embedding page to reload.
       if (data.language) config.language = data.language;
       config.isIdentified = !!data.isIdentified;
+      // Refresh public/login fields too — owner toggling Public off mid-session
+      // should disable the anon-redirect path on next refresh.
+      config.isPublic = !!data.isPublic;
+      config.loginUrl = data.loginUrl || null;
     });
     var updP = loadUpdates().then(function (data) {
       updatesCache = data.tickets || [];
@@ -2998,7 +3210,7 @@
       className: "rw-vote" + (voted ? " rw-voted" : ""),
       type: "button",
       "aria-label": t("aria.upvote"),
-      disabled: !config.isIdentified,
+      disabled: !(config.isIdentified || canAnonInteract()),
     }, [Icons.arrowUp(12), countSpan]);
     voteBtn.addEventListener("click", function (e) { handleVoteClick(ticket, voteBtn, countSpan, e); });
 
@@ -3251,8 +3463,11 @@
     chipsEl.style.display = "none";
     var fileInput = h("input", { type: "file", accept: "image/*", multiple: "true", style: "display:none" });
 
-    var disabled = !config.isIdentified || !!ticket.commentsDisabled;
-    var placeholder = !config.isIdentified ? t("reply.signInPlaceholder")
+    // Anonymous viewers of a public widget can compose a reply — the submit
+    // click is gated and redirects to the login URL with the draft preserved.
+    var canPostComment = config.isIdentified || canAnonInteract();
+    var disabled = !canPostComment || !!ticket.commentsDisabled;
+    var placeholder = !canPostComment ? t("reply.signInPlaceholder")
                     : ticket.commentsDisabled ? t("reply.disabledPlaceholder")
                     : t("reply.placeholder");
 
@@ -3321,6 +3536,32 @@
       if (disabled) return;
       var text = ta.value.trim();
       if (!text && entries.length === 0) return;
+
+      // Anonymous viewer on a public widget: serialize body + queued image
+      // files into sessionStorage and redirect to login. Files are not
+      // uploaded to the server in this branch.
+      if (isAnonViewer()) {
+        if (!config.loginUrl) return;
+        submitBtn.disabled = true;
+        submitBtn.firstChild.textContent = t("reply.savingDraft");
+        Promise.all(entries.map(function (e) { return fileToDataUrl(e.file); }))
+          .then(function (serializedFiles) {
+            gateWriteAction({
+              type: "comment",
+              ticketId: ticket.id,
+              draft: { body: text, files: serializedFiles },
+            });
+          })
+          .catch(function () {
+            gateWriteAction({
+              type: "comment",
+              ticketId: ticket.id,
+              draft: { body: text, files: [] },
+            });
+          });
+        return;
+      }
+
       submitBtn.disabled = true;
       submitBtn.firstChild.textContent = t("reply.posting");
       clearChildren(noticeSlot);
@@ -3366,7 +3607,7 @@
     ]);
 
     var composer = h("div", { className: "rw-td-composer" });
-    if (!config.isIdentified) {
+    if (!canPostComment) {
       composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, t("reply.signInPrompt")));
     } else if (ticket.commentsDisabled) {
       composer.appendChild(h("div", { className: "rw-login-prompt", style: { marginBottom: "8px" } }, t("reply.disabledPrompt")));
@@ -3384,13 +3625,128 @@
   // Panel open/close
   // ===========================================================================
 
-  function openPanel() {
-    if (isOpen) return;
+  function openPanel(afterRefresh) {
+    if (isOpen) {
+      if (afterRefresh) afterRefresh();
+      return;
+    }
     isOpen = true;
     widgetEl.classList.add("rw-open");
     tabEl.classList.add("rw-open");
     markPanelOpened();
-    refreshAll();
+    var p = refreshAll();
+    if (afterRefresh && p && typeof p.then === "function") {
+      p.then(afterRefresh);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Restore intent on return from login
+  //
+  // After a successful login redirect, the widget bootstraps under an
+  // authenticated identity. If a saved intent matches the current project,
+  // apply it: open the composer/detail with prefilled state and surface a
+  // "welcome back" toast. The user still confirms the action with a second
+  // click — we never auto-submit on their behalf.
+  // ---------------------------------------------------------------------------
+
+  function showRestoreToast(message) {
+    if (!scrollEl) return;
+    var toast = h("div", {
+      className: "rw-restore-toast",
+      style: {
+        position: "absolute", top: "12px", left: "50%", transform: "translateX(-50%)",
+        background: "var(--rw-accent, #2563eb)", color: "#fff",
+        padding: "8px 14px", borderRadius: "8px", fontSize: "12px",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.2)", zIndex: "10",
+        opacity: "0", transition: "opacity 200ms ease",
+      },
+    }, message);
+    scrollEl.appendChild(toast);
+    requestAnimationFrame(function () { toast.style.opacity = "1"; });
+    setTimeout(function () {
+      toast.style.opacity = "0";
+      setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 250);
+    }, 4000);
+  }
+
+  // Replays a serialized File array into a composer's existing addFiles flow
+  // by populating the hidden input.files via DataTransfer and dispatching a
+  // synthetic 'change' event. Returns nothing; the composer reflects the
+  // queued files via its own renderChips on receipt.
+  function rehydrateFilesIntoComposer(composerRoot, serializedFiles) {
+    if (!composerRoot || !Array.isArray(serializedFiles) || serializedFiles.length === 0) return;
+    var fileInput = composerRoot.querySelector('input[type="file"]');
+    if (!fileInput) return;
+    Promise.all(serializedFiles.map(dataUrlToFile)).then(function (files) {
+      try {
+        var dt = new DataTransfer();
+        files.forEach(function (f) { dt.items.add(f); });
+        fileInput.files = dt.files;
+        fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      } catch (_) {
+        // DataTransfer is widely supported but fall back silently if not.
+      }
+    }).catch(function () {});
+  }
+
+  function applyIntent(intent) {
+    if (!intent) return;
+    try {
+      if (intent.type === "submit-ticket" && intent.draft) {
+        var composerRoot = scrollEl && scrollEl.querySelector(".rw-inline-composer");
+        var ta = composerRoot && composerRoot.querySelector(".rw-inline-composer-ta");
+        if (!ta) return;
+        ta.value = intent.draft.description || "";
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        rehydrateFilesIntoComposer(composerRoot, intent.draft.files);
+        showRestoreToast(t("restore.welcomeBack"));
+        return;
+      }
+      if (intent.type === "vote" && intent.ticketId) {
+        var summary = (topTicketsCache || []).find(function (tk) { return tk.id === intent.ticketId; })
+          || (updatesCache || []).find(function (tk) { return tk.id === intent.ticketId; })
+          || (myTicketsCache || []).find(function (tk) { return tk.id === intent.ticketId; });
+        if (!summary) return;
+        view = "detail";
+        currentDetailTicket = summary;
+        renderPanelBody();
+        showRestoreToast(t("restore.voteWelcomeBack"));
+        return;
+      }
+      if (intent.type === "comment" && intent.ticketId && intent.draft) {
+        var commentSummary = (topTicketsCache || []).find(function (tk) { return tk.id === intent.ticketId; })
+          || (updatesCache || []).find(function (tk) { return tk.id === intent.ticketId; })
+          || (myTicketsCache || []).find(function (tk) { return tk.id === intent.ticketId; });
+        if (!commentSummary) return;
+        view = "detail";
+        currentDetailTicket = commentSummary;
+        renderPanelBody();
+        // The comment composer renders inside loadTicketDetail's resolve
+        // callback (a separate fetch, see renderPanelBody for the detail
+        // branch). We poll briefly for the textarea since intent restore
+        // is a one-shot and over-engineering a render-event hook for a
+        // rare flow isn't worth the complexity.
+        var commentDraft = intent.draft;
+        var attempts = 0;
+        var poll = function () {
+          var commentRoot = scrollEl && scrollEl.querySelector(".rw-td-composer");
+          var commentTa = commentRoot && commentRoot.querySelector(".rw-td-composer-ta");
+          if (commentTa) {
+            commentTa.value = commentDraft.body || "";
+            commentTa.dispatchEvent(new Event("input", { bubbles: true }));
+            rehydrateFilesIntoComposer(commentRoot, commentDraft.files);
+            showRestoreToast(t("restore.welcomeBack"));
+            return;
+          }
+          if (attempts++ < 20) setTimeout(poll, 100);
+        };
+        poll();
+        return;
+      }
+    } catch (_) {
+      // Restore failures are silent — the user just sees the regular widget.
+    }
   }
   function closePanel() {
     if (!isOpen) return;
@@ -3523,6 +3879,10 @@
         config.projectId = data.projectSlug || config.project;
         config.projectName = data.projectName || config.project;
         config.isIdentified = !!data.isIdentified;
+        config.isPublic = !!data.isPublic;
+        // Login URL is only present in the response when the caller is an
+        // anonymous viewer of a public project. Authed users get null.
+        config.loginUrl = data.loginUrl || null;
         // language must be set BEFORE mountDOM — the launcher tab's aria-label
         // and any first-render strings read t() at construction time.
         config.language = data.language || opts.language || "en";
@@ -3551,6 +3911,18 @@
         } else {
           myTicketsCache = [];
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () { updatesCache = []; });
+        }
+
+        // If we redirected an anon user to the login URL on a previous page
+        // load and they came back authenticated, restore their draft (or
+        // navigate them to the ticket they were about to vote on). Only
+        // applies when the saved intent matches the current project — this
+        // prevents drafts written for project A from leaking into project B.
+        var savedIntent = readIntent();
+        if (savedIntent && config.isIdentified
+            && savedIntent.projectSlug === (config.projectId || config.project)) {
+          clearIntent();
+          openPanel(function () { applyIntent(savedIntent); });
         }
       }).catch(function (err) {
         console.error("RunHQWidget: failed to initialize", err);

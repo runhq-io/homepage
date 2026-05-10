@@ -55,3 +55,94 @@ describe('updateWidgetSettings — policy fields', () => {
     // No throw — pass implies success
   });
 });
+
+describe('updateWidgetSettings — login URL gating', () => {
+  it('rejects flipping is_public on without a login URL', async () => {
+    // Ensure starting state: is_public false, no login URL.
+    await db.update(widgetProjects)
+      .set({ isPublic: false, widgetLoginUrl: null })
+      .where(eq(widgetProjects.id, projectId));
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      is_public: true,
+    })).rejects.toThrow(/login url is required/i);
+  });
+
+  it('rejects clearing the login URL while is_public stays true', async () => {
+    await db.update(widgetProjects)
+      .set({ isPublic: true, widgetLoginUrl: 'https://acme.test/login' })
+      .where(eq(widgetProjects.id, projectId));
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      login_url: null,
+    })).rejects.toThrow(/login url is required/i);
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      login_url: '',
+    })).rejects.toThrow(/login url is required/i);
+  });
+
+  it('rejects javascript: and other non-http schemes', async () => {
+    await db.update(widgetProjects)
+      .set({ isPublic: false, widgetLoginUrl: null })
+      .where(eq(widgetProjects.id, projectId));
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      is_public: true,
+      login_url: 'javascript:alert(1)',
+    })).rejects.toThrow(/valid http/i);
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      is_public: true,
+      login_url: 'not a url at all',
+    })).rejects.toThrow(/valid http/i);
+  });
+
+  it('persists a valid http(s) login URL and trims whitespace', async () => {
+    await db.update(widgetProjects)
+      .set({ isPublic: false, widgetLoginUrl: null })
+      .where(eq(widgetProjects.id, projectId));
+
+    await WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      is_public: true,
+      login_url: '  https://acme.test/login  ',
+    });
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
+    expect(row.isPublic).toBe(true);
+    expect(row.widgetLoginUrl).toBe('https://acme.test/login');
+  });
+
+  it('allows clearing login URL when is_public is also being turned off', async () => {
+    await db.update(widgetProjects)
+      .set({ isPublic: true, widgetLoginUrl: 'https://acme.test/login' })
+      .where(eq(widgetProjects.id, projectId));
+
+    await WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      is_public: false,
+      login_url: '',
+    });
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
+    expect(row.isPublic).toBe(false);
+    expect(row.widgetLoginUrl).toBeNull();
+  });
+
+  it('exposes login_url through getWidgetSettings', async () => {
+    await db.update(widgetProjects)
+      .set({ isPublic: true, widgetLoginUrl: 'https://acme.test/login' })
+      .where(eq(widgetProjects.id, projectId));
+
+    const settings = await WidgetService.getWidgetSettings(SERVER_ID, 'wsp_settings');
+    expect(settings).not.toBeNull();
+    expect(settings!.is_public).toBe(true);
+    expect(settings!.login_url).toBe('https://acme.test/login');
+  });
+});

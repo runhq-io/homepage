@@ -1290,6 +1290,7 @@ export const widgetProjects = pgTable('widget_projects', {
   apiSecretHash: text('api_secret_hash').notNull(),
   enabled: boolean('enabled').default(true).notNull(),
   isPublic: boolean('is_public').default(false).notNull(),
+  widgetLoginUrl: text('widget_login_url'),
   autoApprove: boolean('auto_approve').default(false).notNull(),
   autoInjectInPreview: boolean('auto_inject_in_preview').default(false).notNull(),
   widgetPosition: text('widget_position'),

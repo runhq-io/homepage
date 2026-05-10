@@ -66,6 +66,8 @@ interface WidgetProjectContext {
   slug: string;
   widgetPosition: string | null;
   widgetLanguage: string | null;
+  isPublic: boolean;
+  widgetLoginUrl: string | null;
   serverId: string;
   channelId: string | null;
 }
@@ -166,6 +168,8 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       slug: widgetProjects.slug,
       widgetPosition: widgetProjects.widgetPosition,
       widgetLanguage: widgetProjects.widgetLanguage,
+      isPublic: widgetProjects.isPublic,
+      widgetLoginUrl: widgetProjects.widgetLoginUrl,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
     })
@@ -181,6 +185,21 @@ function getHomepageUrl(): string {
   return cloudApiUrl
     .replace('console-staging.', 'staging.')
     .replace('console.', 'www.');
+}
+
+/**
+ * Whitelist-validates a URL provided by a project owner (currently
+ * widget_login_url). Allows only http: and https:; rejects javascript:,
+ * data:, file:, and any other scheme regardless of how the URL parses.
+ */
+function isSafeHttpUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:';
 }
 
 /**
@@ -481,6 +500,11 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     position: project?.widgetPosition ?? null,
     language: project?.widgetLanguage ?? 'en',
     isIdentified: !!widgetUserId,
+    isPublic: !!project?.isPublic,
+    // Only surface the configured login URL to anonymous viewers of public
+    // projects — that's the only audience that needs it. Authed users never
+    // get redirected, and non-public projects must not leak owner config.
+    loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     tickets,
   };
 }
@@ -524,6 +548,8 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
     position: project?.widgetPosition ?? null,
     language: project?.widgetLanguage ?? 'en',
     isIdentified: !!widgetUserId,
+    isPublic: !!project?.isPublic,
+    loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     tickets,
   };
 }
@@ -1714,6 +1740,7 @@ export async function getWidgetSettings(serverId: string, workspaceProjectId?: s
       widgetLanguage: widgetProjects.widgetLanguage,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       isPublic: widgetProjects.isPublic,
+      widgetLoginUrl: widgetProjects.widgetLoginUrl,
       autoInjectInPreview: widgetProjects.autoInjectInPreview,
       channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
@@ -1730,6 +1757,7 @@ export async function getWidgetSettings(serverId: string, workspaceProjectId?: s
     widget_language: project.widgetLanguage,
     voting_period_hours: project.votingPeriodHours,
     is_public: project.isPublic,
+    login_url: project.widgetLoginUrl,
     auto_inject_in_preview: project.autoInjectInPreview,
     channel_id: project.channelId,
     slug: project.slug,
@@ -1759,6 +1787,7 @@ export async function updateWidgetSettings(
     widget_language?: string | null;
     voting_period_hours?: number;
     is_public?: boolean;
+    login_url?: string | null;
     auto_inject_in_preview?: boolean;
     slug?: string;
     // Inline workspaceProjectId — accepted here as an alternative to opts.workspaceProjectId
@@ -1779,6 +1808,16 @@ export async function updateWidgetSettings(
     if (!settings.widgetAssignRoles || settings.widgetAssignRoles.length === 0) {
       throw new WidgetSettingsValidationError(
         'Cannot enable widget agent assignment: add at least one role.',
+      );
+    }
+  }
+
+  // Validate login_url shape on every update that touches it. The
+  // "required when public" check happens after we read existing state below.
+  if (settings.login_url !== undefined && settings.login_url !== null && settings.login_url !== '') {
+    if (!isSafeHttpUrl(settings.login_url)) {
+      throw new WidgetSettingsValidationError(
+        'Login URL must be a valid http:// or https:// URL.',
       );
     }
   }
@@ -1805,6 +1844,35 @@ export async function updateWidgetSettings(
     }
   }
 
+  // Required-when-public guard for login_url. We need to know the *resulting*
+  // state after this update is applied: if the row would end up with
+  // is_public=true but no login_url, reject. This blocks both
+  //   (a) flipping is_public on without supplying a URL when none is stored, and
+  //   (b) clearing login_url while is_public is already true.
+  if (settings.is_public === true || settings.login_url === '' || settings.login_url === null) {
+    const [current] = await db
+      .select({
+        isPublic: widgetProjects.isPublic,
+        widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      })
+      .from(widgetProjects)
+      .where(and(...projConds()))
+      .limit(1);
+
+    const finalIsPublic =
+      settings.is_public !== undefined ? settings.is_public : !!current?.isPublic;
+    const finalLoginUrl =
+      settings.login_url !== undefined
+        ? (settings.login_url ?? '').trim()
+        : (current?.widgetLoginUrl ?? '').trim();
+
+    if (finalIsPublic && !finalLoginUrl) {
+      throw new WidgetSettingsValidationError(
+        'A Login URL is required when the project is public.',
+      );
+    }
+  }
+
   // Detect whether auto-inject flipped so the caller can push-invalidate.
   let autoInjectChanged = false;
   if (settings.auto_inject_in_preview !== undefined) {
@@ -1826,6 +1894,11 @@ export async function updateWidgetSettings(
       ...(settings.widget_language !== undefined && { widgetLanguage: settings.widget_language }),
       ...(settings.voting_period_hours !== undefined && { votingPeriodHours: settings.voting_period_hours }),
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
+      // Empty string is normalized to null so the DB has a single
+      // representation for "no login URL set".
+      ...(settings.login_url !== undefined && {
+        widgetLoginUrl: settings.login_url && settings.login_url.trim() ? settings.login_url.trim() : null,
+      }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
       // Triager assignment policy — only set when caller explicitly provides the field
