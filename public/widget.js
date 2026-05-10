@@ -2513,7 +2513,8 @@
   // Ticket card
   // ===========================================================================
 
-  function renderTicketCard(ticket) {
+  function renderTicketCard(ticket, opts) {
+    var hideStatus = !!(opts && opts.hideStatus);
     var voted = ticket.userVote === true;
     var countSpan = h("span", null, String(ticket.yesVotes || 0));
     var voteBtn = h("button", {
@@ -2534,12 +2535,14 @@
     });
 
     var authorName = displayNameFromTicket(ticket);
-    var metaChildren = [renderStatusChip(ticket.status)];
+    // Status chip is suppressed on the Latest Updates tab — every ticket there
+    // is already shipped (done/deployed), so the chip carries no information.
+    var metaChildren = hideStatus ? [] : [renderStatusChip(ticket.status)];
     if (authorName) {
-      metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
       metaChildren.push(h("span", { className: "rw-meta-author" }, authorName));
     }
-    metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+    if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
     metaChildren.push(h("span", { className: "rw-meta-when" }, timeAgo(ticket.completedAt || ticket.createdAt)));
 
     var mainChildren = [h("div", { className: "rw-dash-row-title" }, ticket.title)];
@@ -2623,8 +2626,9 @@
     }
 
     var list = h("div", { className: "rw-dash-list" });
+    var cardOpts = tab === "updates" ? { hideStatus: true } : null;
     // Use `tk` for the loop variable — `t` is the i18n function.
-    items.forEach(function (tk) { list.appendChild(renderTicketCard(tk)); });
+    items.forEach(function (tk) { list.appendChild(renderTicketCard(tk, cardOpts)); });
     return list;
   }
 

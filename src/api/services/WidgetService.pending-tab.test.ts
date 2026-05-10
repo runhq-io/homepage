@@ -46,16 +46,16 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, USER_ID));
 });
 
-describe('listTickets (Pending tab)', () => {
-  it('excludes done, deployed, and cancelled tickets', async () => {
+describe('listTickets (Hot tab)', () => {
+  it('includes only pending, planned, and in_progress tickets', async () => {
     const result = await listTickets(PROJECT_ID);
     const titles = result.tickets.map(t => t.title);
 
     expect(titles).toContain('Pending ticket');
     expect(titles).toContain('Planned ticket');
     expect(titles).toContain('In progress ticket');
-    expect(titles).toContain('Needs review ticket');
 
+    expect(titles).not.toContain('Needs review ticket');
     expect(titles).not.toContain('Shipped ticket');
     expect(titles).not.toContain('Deployed ticket');
     expect(titles).not.toContain('Cancelled ticket');
