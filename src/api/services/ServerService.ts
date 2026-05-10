@@ -34,7 +34,7 @@ import { nanoid } from 'nanoid';
 import { createHash } from 'crypto';
 import * as CloudflareTunnelService from './CloudflareTunnelService';
 import * as PublicPortService from './PublicPortService';
-import { getOrCreateSubscription, PLAN_CONFIG, isAdmin } from './UsageService';
+import { getOrCreateSubscription, PLAN_CONFIG, isAdmin, hasReachedServerLimit, isUnlimitedServers } from './UsageService';
 import * as MachineUsageService from './MachineUsageService';
 import * as ServerSessionService from './ServerSessionService';
 import { getUserByEmail } from '../../db/services';
@@ -3455,10 +3455,11 @@ export async function transferOwnership(
       .where(eq(servers.ownerId, recipient.id));
     const ownedCount = Number(countResult?.count ?? 0);
 
-    if (ownedCount >= planConfig.maxServers) {
+    if (hasReachedServerLimit(ownedCount, planConfig.maxServers)) {
+      const limitDisplay = isUnlimitedServers(planConfig.maxServers) ? 'unlimited' : String(planConfig.maxServers);
       return {
         success: false,
-        error: `Recipient has reached their server limit (${ownedCount}/${planConfig.maxServers} on ${planConfig.name} plan). They need to upgrade or free up a server.`,
+        error: `Recipient has reached their server limit (${ownedCount}/${limitDisplay} on ${planConfig.name} plan). They need to upgrade or free up a server.`,
       };
     }
   }

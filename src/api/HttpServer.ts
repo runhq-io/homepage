@@ -39,6 +39,7 @@ import {
 import { TaskAttachmentStorageService } from './services/TaskAttachmentStorageService';
 import * as PreviewCoordinator from './services/PreviewCoordinator';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
+import { inferRegionFromCountry, DEFAULT_REGION } from './services/regionInference';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
@@ -2205,18 +2206,47 @@ export function createHttpApp() {
         return c.json({ error: `Invalid tier. Must be one of: ${validTiers.join(', ')}` }, 400);
       }
 
-      // Enforce server limit per plan (admins bypass)
+      // Resolve region: 'auto' (or empty for remote deployments) → infer from
+      // Cloudflare's CF-IPCountry header so the auto-provisioned signup flow
+      // doesn't have to make the user pick a region. Local deployments keep
+      // the legacy 'ash' default.
+      let resolvedRegion: string;
+      if (deploymentType === 'remote' || (region && region !== '')) {
+        if (!region || region === 'auto') {
+          resolvedRegion = inferRegionFromCountry(c.req.header('cf-ipcountry') ?? c.req.header('CF-IPCountry'));
+        } else {
+          resolvedRegion = region;
+        }
+      } else {
+        resolvedRegion = region || 'ash';
+      }
+
+      // Enforce server limit + tier-vs-plan rules per plan (admins bypass).
       const userIsAdmin = await UsageService.isAdmin(userId);
       if (!userIsAdmin) {
         const subscription = await UsageService.getOrCreateSubscription(userId);
-        const planConfig = UsageService.PLAN_CONFIG[subscription.planId as keyof typeof UsageService.PLAN_CONFIG] || UsageService.PLAN_CONFIG.free;
+        const planId = subscription.planId as keyof typeof UsageService.PLAN_CONFIG;
+        const planConfig = UsageService.PLAN_CONFIG[planId] || UsageService.PLAN_CONFIG.free;
+
         const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(servers).where(eq(servers.ownerId, userId));
         const currentCount = Number(countResult?.count ?? 0);
-        if (currentCount >= planConfig.maxServers) {
+        if (UsageService.hasReachedServerLimit(currentCount, planConfig.maxServers)) {
           return c.json({
             error: 'Server limit reached',
             maxServers: planConfig.maxServers,
             currentCount,
+          }, 403);
+        }
+
+        // Free plan is locked to the lowest-tier machine. Reject anything else
+        // before we hit the provider — surfaces a clear upgrade message rather
+        // than a billing/quota failure deeper in.
+        if (tier && !UsageService.isTierAllowedForPlan(planId, tier)) {
+          return c.json({
+            error: `The ${planConfig.name} plan is limited to the ${UsageService.FREE_PLAN_TIER} machine. Upgrade to choose a larger tier.`,
+            plan: planId,
+            requestedTier: tier,
+            allowedTier: UsageService.FREE_PLAN_TIER,
           }, 403);
         }
       }
@@ -2227,7 +2257,7 @@ export function createHttpApp() {
         id: serverId,
         name,
         deploymentType: deploymentType || 'local',
-        region: region || 'ash',
+        region: resolvedRegion,
         tier: tier || 'micro',
         provider: providerId,
       });

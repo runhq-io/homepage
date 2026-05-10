@@ -55,6 +55,35 @@ export interface UsageTrackResult {
 // Default Plan Configuration (credit-based)
 // ============================================================================
 
+/**
+ * Sentinel value for unlimited servers. Stored as `-1` in `PLAN_CONFIG.maxServers`
+ * so the value JSON-serializes safely (cf. `Number.POSITIVE_INFINITY` → `null`).
+ * Use `isUnlimitedServers()` and `hasReachedServerLimit()` instead of comparing
+ * directly.
+ */
+export const UNLIMITED_SERVERS = -1;
+
+export function isUnlimitedServers(maxServers: number): boolean {
+  return maxServers === UNLIMITED_SERVERS;
+}
+
+export function hasReachedServerLimit(currentCount: number, maxServers: number): boolean {
+  if (isUnlimitedServers(maxServers)) return false;
+  return currentCount >= maxServers;
+}
+
+/**
+ * The single machine tier available to free-plan users. Matches the
+ * "Lowest-tier machine only" promise on the Free plan in the pricing page.
+ * Paid plans can pick any tier from `FlyService.TIER_CONFIGS`.
+ */
+export const FREE_PLAN_TIER = 'shared-4x-1gb';
+
+export function isTierAllowedForPlan(planId: PlanId, tier: string): boolean {
+  if (planId === 'free') return tier === FREE_PLAN_TIER;
+  return true;
+}
+
 export const PLAN_CONFIG: Record<PlanId, {
   id: PlanId;
   name: string;
@@ -62,7 +91,7 @@ export const PLAN_CONFIG: Record<PlanId, {
   monthlyPriceCents: number;
   monthlyCreditsCents: number;  // Credits given each month
   maxConcurrentAgents: number;
-  maxServers: number;            // Max servers a user can own
+  maxServers: number;            // Max servers a user can own; -1 = unlimited (see UNLIMITED_SERVERS)
   signupBonusCents: number;     // One-time bonus for first subscription
   features: string[];
   isActive: boolean;
@@ -86,9 +115,9 @@ export const PLAN_CONFIG: Record<PlanId, {
     monthlyPriceCents: 2000,    // $20/month
     monthlyCreditsCents: 2500,  // $25 in credits
     maxConcurrentAgents: 3,
-    maxServers: 3,
+    maxServers: UNLIMITED_SERVERS,
     signupBonusCents: 500,      // $5 signup bonus
-    features: ['$25 monthly credits', '3 concurrent workers', '3 servers', '$5 signup bonus'],
+    features: ['$25 monthly credits', '3 concurrent workers', 'Unlimited servers', '$5 signup bonus'],
     isActive: true,
   },
   pro: {
@@ -98,9 +127,9 @@ export const PLAN_CONFIG: Record<PlanId, {
     monthlyPriceCents: 10000,   // $100/month
     monthlyCreditsCents: 12500, // $125 in credits
     maxConcurrentAgents: 5,
-    maxServers: 10,
+    maxServers: UNLIMITED_SERVERS,
     signupBonusCents: 1000,     // $10 signup bonus
-    features: ['$125 monthly credits', '5 concurrent workers', '10 servers', '$10 signup bonus'],
+    features: ['$125 monthly credits', '5 concurrent workers', 'Unlimited servers', '$10 signup bonus'],
     isActive: true,
   },
   team: {
@@ -110,9 +139,9 @@ export const PLAN_CONFIG: Record<PlanId, {
     monthlyPriceCents: 23900,   // $239/month
     monthlyCreditsCents: 30000, // $300 in credits
     maxConcurrentAgents: 10,
-    maxServers: 25,
+    maxServers: UNLIMITED_SERVERS,
     signupBonusCents: 2500,     // $25 signup bonus
-    features: ['$300 monthly credits', '10 concurrent workers', '25 servers', '$25 signup bonus', 'Priority support'],
+    features: ['$300 monthly credits', '10 concurrent workers', 'Unlimited servers', '$25 signup bonus', 'Priority support'],
     isActive: false,
   },
 };
