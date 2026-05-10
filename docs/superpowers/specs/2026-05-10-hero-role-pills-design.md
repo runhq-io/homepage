@@ -12,7 +12,7 @@ The hero lede claims "anyone on your team assigns tickets to coding agents" — 
 
 ## Goal
 
-Replace the integration list with a **role pills** block that names who RunHQ is for and shows, in one short paragraph per role, what RunHQ does for that person. The slot should add interactivity to an otherwise static hero without becoming heavy.
+Replace the integration list with a **role pills** block that names who RunHQ is for and shows, in one short paragraph per role, what RunHQ does for that person. The role set spans the whole company — not just engineering-adjacent — because RunHQ's thesis is that everyone files work agents can ship.
 
 ## Non-goals
 
@@ -33,9 +33,10 @@ The block keeps its position at the bottom of the hero left column, beneath the 
 ```
 ─────────────────────────────────────────── (existing border-top)
 
-Built for the whole team
+Built for everyone who ships
 
-◉ PM    ○ Engineer    ○ Support
+◉ PM    ○ Engineer    ○ Design    ○ QA
+○ Support    ○ Sales    ○ Founder
 
 Ship product without rewriting your ticket as a spec.
 You file the work, RunHQ scopes the branch, an agent
@@ -45,27 +46,31 @@ the rewriting loop.
 
 ### Roles and copy
 
-Three pills, in this order. First (PM) is selected on initial render.
+Seven pills, in this order. First (PM) is selected on initial render.
 
 | Pill label | Role copy (≤ 280 chars) |
 |---|---|
 | **PM** | Ship product without rewriting your ticket as a spec. You file the work, RunHQ scopes the branch, an agent opens the PR. Engineering reviews — you stay out of the rewriting loop. |
 | **Engineer** | Triage to agents instead of context-switching. The small fixes, the cleanups, the "while you're in there" — an agent picks them up, you review the diff. You keep the deep work. |
+| **Design** | Push a copy tweak or a spacing fix straight to a branch. An agent ships the diff, you check the preview, no eng meeting needed for the changes you can already see. |
+| **QA** | File the bug with a repro and assign it. The agent writes a failing test, lands the fix, and you re-run your suite against the PR. No "added to the backlog" black hole. |
 | **Support** | Turn the Intercom thread into a fix in motion. Captured ticket → scoped task → agent shipping a branch — often before the customer hears back from you. |
+| **Sales** | The deal-blocking edge case the prospect demoed yesterday? Open a ticket, assign an agent. By the next call you're showing them the PR, not promising a roadmap slot. |
+| **Founder** | Your whole company can ship to the codebase. The hundred small fixes that pile up between the things engineering "should be doing" finally get shipped — without anyone context-switching to do them. |
 
-Header above the pills: **"Built for the whole team"** (small caps eyebrow, same treatment as existing `.rhw-eyebrow` style on the page).
+Header above the pills: **"Built for everyone who ships"** (small caps eyebrow, same treatment as existing `.rhw-eyebrow` style on the page).
 
 ### Interaction
 
 - **Default selection:** PM pill is active on mount.
 - **Click:** Switching pills swaps the paragraph below with a soft fade (~150ms opacity transition, no layout shift — paragraph slot has a fixed min-height matching the longest copy).
-- **Auto-rotate:** Every 5 seconds, the active pill advances to the next role (PM → Engineer → Support → PM …). The first user click on any pill cancels the rotation permanently for the session.
-- **Keyboard:** Pills are buttons in a single tab stop with arrow-key navigation between them (left/right). Enter / Space activates.
+- **Auto-rotate:** Every 5 seconds, the active pill advances to the next role (PM → Engineer → Design → QA → Support → Sales → Founder → PM …). Full cycle is 35s. The first user click on any pill cancels the rotation permanently for the session.
+- **Keyboard:** Pills are buttons in a single tab stop with arrow-key navigation between them (left/right, wrapping at the ends). Enter / Space activates.
 - **Reduced motion:** If `prefers-reduced-motion: reduce` matches, auto-rotate is disabled and the fade is skipped (instant swap).
 
 ### Visual treatment
 
-- Pills: pill-shaped buttons, ~32px tall, 12px horizontal padding, gap of 8px between them. Inactive: transparent background, `var(--rhw-line)` border, `var(--rhw-ink-mute)` text. Active: `var(--rhw-ink)` background, white text, no border.
+- Pills: pill-shaped buttons, ~32px tall, 12px horizontal padding, gap of 8px between them. **The row wraps to a second line when needed** — natural flex-wrap, no scroll. Inactive: transparent background, `var(--rhw-line)` border, `var(--rhw-ink-mute)` text. Active: `var(--rhw-ink)` background, white text, no border.
 - Header eyebrow: 11px, 0.12em letter-spacing, uppercase, `var(--rhw-ink-mute)` — matches the existing `.rhw-hero-bullet-k` styling so the section still visually anchors to the hero's typographic system.
 - Paragraph: 13.5px, `var(--rhw-ink)`, line-height 1.5 — same as the current `.rhw-hero-bullet-v`.
 - Spacing: 12px between header and pill row, 16px between pill row and paragraph.
@@ -90,12 +95,12 @@ No icons in pills. No counts, no badges. Plain word, plain pill.
 
 - Linking each role to a dedicated landing page.
 - Tracking which pill the user clicks (analytics).
-- Adding a fourth role (Founders / Designer / etc.). The block is sized for three.
+- Adding an eighth role (Marketing, Ops, CS, Data, etc.). The block is sized for seven; adding more risks pushing the pill row to three lines and crowding the hero.
 - Showing an integration chip strip beneath the paragraph. The logo strip below the hero carries breadth already.
 
 ## Acceptance
 
-- The hero left column ends with a `Built for the whole team` header, three role pills, and a single paragraph that swaps when a pill is clicked.
+- The hero left column ends with a `Built for everyone who ships` header, seven role pills (PM / Engineer / Design / QA / Support / Sales / Founder), and a single paragraph that swaps when a pill is clicked.
 - PM is selected on load. Auto-rotation advances every 5s until first interaction.
 - No vertical layout shift between role swaps.
 - Reduced-motion users get instant swaps and no rotation.
