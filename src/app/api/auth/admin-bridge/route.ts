@@ -106,6 +106,14 @@ export async function GET(request: NextRequest) {
     path: '/',
     maxAge: 30 * 24 * 60 * 60,
   });
+  const isProd = process.env.NODE_ENV === 'production';
+  response.cookies.set('rw_session', freshToken, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/api/widget/',
+    maxAge: 7 * 24 * 60 * 60,
+  });
   return response;
 }
 
