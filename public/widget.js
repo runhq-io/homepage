@@ -106,18 +106,49 @@
     return "https://www.runhq.io";
   })();
 
-  function authHeaders(extra) {
+  // Build auth headers. Identity precedence runs server-side; the widget
+  // only knows which channel to use after /api/widget/identity resolves
+  // (config.identitySource). Until then, fall back to the historic
+  // token-or-slug heuristic so the very first identity probe still authenticates.
+  //
+  //   identitySource === 'runhq' → cookie path. Send X-RW-Project (so the
+  //                                server can resolve the project) and the
+  //                                CSRF token on writes. Authorization is
+  //                                explicitly omitted — server reads cookie.
+  //   identitySource === 'app'   → token bearer (existing behavior).
+  //   null / unresolved          → fall back to bearer-or-slug heuristic.
+  function authHeaders(extra, opts) {
     var headers = extra || {};
+    var method = (opts && opts.method) ? String(opts.method).toUpperCase() : "GET";
+    if (config.identitySource === "runhq") {
+      if (config.project) headers["X-RW-Project"] = config.project;
+      if (config.csrfToken && method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+        headers["X-RunHQ-CSRF"] = config.csrfToken;
+      }
+      return headers;
+    }
+    if (config.identitySource === "app" && config.token) {
+      headers["Authorization"] = "Bearer " + config.token;
+      if (config.project) headers["X-RW-Project"] = config.project;
+      return headers;
+    }
+    // Pre-bootstrap or unresolved identity: legacy heuristic.
     if (config.token) headers["Authorization"] = "Bearer " + config.token;
     else if (config.project) headers["X-RW-Project"] = config.project;
     return headers;
   }
 
   function api(path, opts) {
-    var headers = authHeaders({ "Content-Type": "application/json" });
+    var method = (opts && opts.method) || "GET";
+    var headers = authHeaders({ "Content-Type": "application/json" }, { method: method });
     return fetch(RUNHQ_API + path, {
-      method: (opts && opts.method) || "GET",
+      method: method,
       headers: headers,
+      // Always include credentials so the rw_session cookie flows on the
+      // RunHQ-member path. The browser strips cookies if the server
+      // doesn't echo Allow-Credentials, so this is harmless on the
+      // token-bearer and anon paths.
+      credentials: "include",
       body: (opts && opts.body) ? JSON.stringify(opts.body) : undefined,
     }).then(function (r) {
       if (!r.ok) {
@@ -131,6 +162,7 @@
     });
   }
 
+  function loadIdentity()         { return api("/api/widget/identity"); }
   function loadMe()               { return api("/api/widget/me"); }
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
@@ -151,7 +183,8 @@
     fd.append("file", file, file.name || "upload");
     return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId) + "/attachments", {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders({}, { method: "POST" }),
+      credentials: "include",
       body: fd,
     }).then(readJsonOrThrow);
   }
@@ -162,7 +195,8 @@
     return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId)
       + "/comments/" + encodeURIComponent(commentId) + "/attachments", {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders({}, { method: "POST" }),
+      credentials: "include",
       body: fd,
     }).then(readJsonOrThrow);
   }
@@ -319,7 +353,10 @@
   // After updating state, re-renders the panel body so the triager badge
   // appears/disappears without requiring a full widget reload.
   function fetchAndApplyMe() {
-    if (!config.token) {
+    // Skip if no auth source resolved at all — both app (token) and runhq
+    // (cookie) paths return permissions on /api/widget/me, so we hit it
+    // for either. Pure-anon callers fall through to the empty-state branch.
+    if (!config.token && config.identitySource !== "runhq") {
       currentUser.permissions = [];
       currentUser.matchedRoles = [];
       currentUser.isTriager = false;
@@ -4031,11 +4068,38 @@
       config = {
         token: opts.token || null,
         project: opts.project || null,
+        // Resolved by /api/widget/identity below. Until then, authHeaders()
+        // uses the legacy token-or-slug heuristic so the bootstrap probe
+        // itself can authenticate.
+        identitySource: null,
+        csrfToken: null,
+        identityName: null,
+        identityAvatar: null,
       };
 
       hookConsole();
 
-      loadTopTickets().then(function (data) {
+      // Identity probe runs FIRST so subsequent calls (loadTopTickets,
+      // loadMyTickets, etc.) carry the right header set. Failure resolves
+      // to null identity — same effect as today's anon path.
+      var identityP = loadIdentity()
+        .then(function (idData) {
+          var src = idData && idData.identity && idData.identity.source;
+          if (src === "runhq" || src === "app") {
+            config.identitySource = src;
+            config.csrfToken = (idData && idData.csrfToken) || null;
+            config.identityName = (idData && idData.identity && idData.identity.displayName) || null;
+            config.identityAvatar = (idData && idData.identity && idData.identity.avatarUrl) || null;
+            // Pre-populate currentUser from the same response so the triager
+            // badge appears on first render without waiting for /api/widget/me.
+            currentUser.permissions = (idData && idData.permissions) || [];
+            currentUser.matchedRoles = (idData && idData.matchedRoles) || [];
+            currentUser.isTriager = !!(idData && idData.isTriager);
+          }
+        })
+        .catch(function () { /* identity probe failure → anon path, no log spam */ });
+
+      identityP.then(function () { return loadTopTickets(); }).then(function (data) {
         topTicketsCache = data.tickets || [];
         config.projectId = data.projectSlug || config.project;
         config.projectName = data.projectName || config.project;
@@ -4066,7 +4130,9 @@
         // leave currentUser at its default safe-empty state.
         fetchAndApplyMe();
 
-        if (config.token) {
+        // Authenticated viewers (app token OR runhq cookie) get their own
+        // ticket list. Pure-anon viewers only get the public update feed.
+        if (config.isIdentified) {
           loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
         } else {

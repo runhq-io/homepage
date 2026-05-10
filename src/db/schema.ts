@@ -1300,6 +1300,14 @@ export const widgetProjects = pgTable('widget_projects', {
   widgetAssignRoles: text('widget_assign_roles').array().notNull().default(sql`ARRAY[]::text[]`),
   widgetRoleClaimName: text('widget_role_claim_name').notNull().default('runhq_roles'),
   widgetAssignRateLimitPerHour: integer('widget_assign_rate_limit_per_hour').notNull().default(30),
+  // Origins (e.g. https://acme.com) where the widget is allowed to use
+  // cookie-based RunHQ-member auto-recognition. Required when
+  // autoRecognizeRunhqMembers is true; enforced at the CORS + auth layer.
+  allowedOrigins: text('allowed_origins').array().notNull().default(sql`ARRAY[]::text[]`),
+  // Opt-in toggle. When true, viewers with a valid rw_session cookie who are
+  // members of this project's serverId are identified as their RunHQ user.
+  // Identity precedence: runhq > app (customer JWT) > anonymous.
+  autoRecognizeRunhqMembers: boolean('auto_recognize_runhq_members').notNull().default(false),
   channelId: text('channel_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -1316,12 +1324,17 @@ export const widgetUsers = pgTable('widget_users', {
   id: uuid('id').primaryKey().defaultRandom(),
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   externalUserId: text('external_user_id').notNull(),
+  // Discriminates between identity sources so the same human authenticated
+  // via two paths produces two distinct rows (no silent identity merging).
+  // 'app'   = customer-issued JWT (sub claim)
+  // 'runhq' = workspace-member cookie auth (externalUserId = 'runhq:<userId>')
+  authSource: text('auth_source').notNull().default('app'),
   name: text('name'),
   username: text('username'),
   avatarUrl: text('avatar_url'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [
-  { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
+  { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
 ]);
 
 // Mirror of workspace agent_entities rows where widget_exposed=true.

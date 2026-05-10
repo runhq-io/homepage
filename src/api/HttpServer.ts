@@ -7,7 +7,7 @@
  * - Usage tracking
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import Anthropic from '@anthropic-ai/sdk';
@@ -5203,12 +5203,53 @@ export function createHttpApp() {
     return null;
   }
 
-  app.options('/api/widget/*', (c) => {
-    c.header('Access-Control-Allow-Origin', '*');
+  /**
+   * Credentialed CORS support for the widget cookie-auth path.
+   *
+   * The widget API has been wide-open `Origin: *` historically — fine for
+   * the token-bearer flow which carries no cookies. The new RunHQ-member
+   * cookie path requires `credentials: include` on the browser side, which
+   * means the server must echo a specific origin (never `*`) AND set
+   * `Access-Control-Allow-Credentials: true`. We do this only when the
+   * request's Origin appears in some project's `allowed_origins` list —
+   * random sites can't harvest identities by embedding the widget.
+   *
+   * For non-allowlisted origins we keep the legacy `Origin: *` response
+   * so the existing token-bearer flow continues to work everywhere.
+   */
+  async function isAllowlistedOrigin(origin: string | undefined): Promise<boolean> {
+    if (!origin) return false;
+    return WidgetService.isOriginAllowlisted(origin);
+  }
+
+  app.options('/api/widget/*', async (c) => {
+    const origin = c.req.header('Origin');
+    if (origin && await isAllowlistedOrigin(origin)) {
+      c.header('Access-Control-Allow-Origin', origin);
+      c.header('Access-Control-Allow-Credentials', 'true');
+      c.header('Vary', 'Origin');
+    } else {
+      c.header('Access-Control-Allow-Origin', '*');
+    }
     c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project, X-Server-Token');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project, X-RunHQ-CSRF, X-Server-Token');
     return c.body(null, 204);
   });
+
+  /**
+   * Per-response CORS helper — call before returning JSON from any widget
+   * endpoint that may be hit on the cookie path. Sets credentialed headers
+   * when the request's Origin matches a project's allowlist; otherwise
+   * leaves the existing `Origin: *` from the global cors() middleware.
+   */
+  async function applyWidgetCorsHeaders(c: Context) {
+    const origin = c.req.header('Origin');
+    if (origin && await isAllowlistedOrigin(origin)) {
+      c.header('Access-Control-Allow-Origin', origin);
+      c.header('Access-Control-Allow-Credentials', 'true');
+      c.header('Vary', 'Origin');
+    }
+  }
 
   // Public: list all public widget projects (no auth needed)
   app.get('/api/widget/projects', async (c) => {
@@ -5227,11 +5268,51 @@ export function createHttpApp() {
   app.get('/api/widget/me', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    await applyWidgetCorsHeaders(c);
     return c.json({
       widgetUserId: auth.widgetUserId ?? null,
       permissions: Array.from(auth.permissions),
       matchedRoles: auth.matchedRoles,
       isTriager: auth.permissions.has('assign_agent'),
+    });
+  });
+
+  /**
+   * Bootstrap identity endpoint for the widget.
+   *
+   * Always returns 200 with an `identity` object describing whichever
+   * auth path resolved (runhq | app | null). The widget calls this once
+   * at init time to decide which header set to use on subsequent
+   * requests (Authorization vs cookie+CSRF). A null identity means the
+   * viewer is anonymous — callers should fall back to public-read or
+   * the configured login-URL redirect flow.
+   *
+   * `csrfToken` is present iff identity.source === 'runhq'. Bearer auth
+   * doesn't need CSRF (token is in a header, not a cookie).
+   *
+   * Distinct from /api/widget/me which 401s on unauth — that's the
+   * legacy contract, kept for backward compatibility with already-
+   * deployed widget bundles.
+   */
+  app.get('/api/widget/identity', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    await applyWidgetCorsHeaders(c);
+    if (!auth) {
+      return c.json({ identity: null, csrfToken: null });
+    }
+    return c.json({
+      identity: {
+        source: auth.authSource === 'runhq' ? 'runhq'
+              : auth.authSource === 'app'   ? 'app'
+              : null,
+        widgetUserId: auth.widgetUserId ?? null,
+        displayName: auth.displayName ?? null,
+        avatarUrl: auth.avatarUrl ?? null,
+      },
+      permissions: Array.from(auth.permissions),
+      matchedRoles: auth.matchedRoles,
+      isTriager: auth.permissions.has('assign_agent'),
+      csrfToken: auth.csrfToken ?? null,
     });
   });
 
@@ -5666,6 +5747,8 @@ export function createHttpApp() {
       voting_period_hours,
       is_public,
       login_url,
+      allowed_origins,
+      auto_recognize_runhq_members,
       auto_inject_in_preview,
       slug,
       widgetAgentAssignmentEnabled,
@@ -5680,7 +5763,7 @@ export function createHttpApp() {
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
-        auto_approve, widget_position, widget_language, voting_period_hours, is_public, login_url, auto_inject_in_preview, slug,
+        auto_approve, widget_position, widget_language, voting_period_hours, is_public, login_url, allowed_origins, auto_recognize_runhq_members, auto_inject_in_preview, slug,
         widgetAgentAssignmentEnabled,
         widgetAssignRoles,
         widgetRoleClaimName,

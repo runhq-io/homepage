@@ -146,3 +146,86 @@ describe('updateWidgetSettings — login URL gating', () => {
     expect(settings!.login_url).toBe('https://acme.test/login');
   });
 });
+
+describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
+  it('rejects auto_recognize_runhq_members=true with empty allowed_origins', async () => {
+    await db.update(widgetProjects)
+      .set({ autoRecognizeRunhqMembers: false, allowedOrigins: [] })
+      .where(eq(widgetProjects.id, projectId));
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      auto_recognize_runhq_members: true,
+    })).rejects.toThrow(/at least one allowed origin/i);
+  });
+
+  it('rejects clearing allowed_origins while auto_recognize is on', async () => {
+    await db.update(widgetProjects)
+      .set({ autoRecognizeRunhqMembers: true, allowedOrigins: ['https://acme.test'] })
+      .where(eq(widgetProjects.id, projectId));
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      allowed_origins: [],
+    })).rejects.toThrow(/at least one allowed origin/i);
+  });
+
+  it('rejects malformed origins', async () => {
+    await db.update(widgetProjects)
+      .set({ autoRecognizeRunhqMembers: false })
+      .where(eq(widgetProjects.id, projectId));
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      allowed_origins: ['not a url'],
+    })).rejects.toThrow(/Invalid origin/i);
+
+    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      allowed_origins: ['javascript:alert(1)'],
+    })).rejects.toThrow(/Invalid origin/i);
+  });
+
+  it('normalizes and deduplicates origins (lowercase host, drop default ports + paths, dedupe)', async () => {
+    await WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      auto_recognize_runhq_members: true,
+      allowed_origins: [
+        'https://Acme.Test/login',
+        'https://acme.test:443',
+        'https://acme.test',
+      ],
+    });
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
+    expect(row.allowedOrigins).toEqual(['https://acme.test']);
+    expect(row.autoRecognizeRunhqMembers).toBe(true);
+  });
+
+  it('allows clearing allowed_origins when auto_recognize is also being turned off', async () => {
+    await db.update(widgetProjects)
+      .set({ autoRecognizeRunhqMembers: true, allowedOrigins: ['https://acme.test'] })
+      .where(eq(widgetProjects.id, projectId));
+
+    await WidgetService.updateWidgetSettings(SERVER_ID, {
+      workspaceProjectId: 'wsp_settings',
+      auto_recognize_runhq_members: false,
+      allowed_origins: [],
+    });
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
+    expect(row.autoRecognizeRunhqMembers).toBe(false);
+    expect(row.allowedOrigins).toEqual([]);
+  });
+
+  it('exposes allowed_origins and auto_recognize_runhq_members through getWidgetSettings', async () => {
+    await db.update(widgetProjects)
+      .set({ autoRecognizeRunhqMembers: true, allowedOrigins: ['https://acme.test', 'https://staging.acme.test'] })
+      .where(eq(widgetProjects.id, projectId));
+
+    const settings = await WidgetService.getWidgetSettings(SERVER_ID, 'wsp_settings');
+    expect(settings).not.toBeNull();
+    expect(settings!.auto_recognize_runhq_members).toBe(true);
+    expect(settings!.allowed_origins).toEqual(['https://acme.test', 'https://staging.acme.test']);
+  });
+});

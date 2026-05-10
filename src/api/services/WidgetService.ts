@@ -20,6 +20,8 @@ import {
   workspaceTaskActivity,
   workspaceTaskAttachments,
   servers,
+  serverMembers,
+  users,
   widgetExposedAgents,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
@@ -27,6 +29,13 @@ import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
+import {
+  RW_SESSION_COOKIE,
+  verifyRwSession,
+  csrfTokenFor,
+  verifyCsrfToken,
+  normalizeOrigin,
+} from './WidgetCookieAuth';
 
 const attachmentStorage = new TaskAttachmentStorageService();
 
@@ -43,22 +52,45 @@ export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 // ============================================================================
 
 export type WidgetPermission = 'assign_agent';
+export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 export interface WidgetAuthResult {
   projectId: string;
   projectSlug: string;
   widgetUserId?: string;
-  /** True when the request was authenticated via a signed JWT (customer's server vouched for it) */
+  /** True when the request was authenticated (signed JWT or rw_session cookie that resolved to a workspace member) */
   authenticated: boolean;
-  /** Permissions derived from JWT role claim ∩ project whitelist. Always present; empty for anonymous/raw-key auth. */
+  /** Permissions derived from JWT role claim ∩ project whitelist (or auto-granted for workspace admins on the runhq path). */
   permissions: ReadonlySet<WidgetPermission>;
   /** Subset of project's whitelist that this user's JWT carried — used for audit attribution. */
   matchedRoles: string[];
+  /** Which of the three identity paths produced this result. Influences write-path CSRF requirements. */
+  authSource: WidgetAuthSource;
+  /**
+   * RunHQ user ID when authSource === 'runhq'. NOT exposed to the widget;
+   * used internally for audit attribution and admin checks.
+   */
+  runhqUserId?: string;
+  /** CSRF token for the cookie-authenticated session. Returned to the client; required on all writes when authSource === 'runhq'. */
+  csrfToken?: string;
+  /** Display name resolved from the underlying identity (RunHQ user, JWT name claim, etc.). */
+  displayName?: string;
+  /** Avatar URL (RunHQ users today; null for app users unless the JWT supplies it). */
+  avatarUrl?: string | null;
 }
 
 interface HonoRequest {
   header(name: string): string | undefined;
+  /**
+   * HTTP method — used by the cookie-auth path to decide when CSRF is required.
+   * Optional so unit tests can pass minimal mock requests for read-only paths.
+   */
+  method?: string;
+  raw?: { headers: Headers };
 }
+
+/** Methods that change server state and therefore require CSRF protection on the cookie path. */
+const CSRF_PROTECTED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 interface WidgetProjectContext {
   id: string;
@@ -68,6 +100,9 @@ interface WidgetProjectContext {
   widgetLanguage: string | null;
   isPublic: boolean;
   widgetLoginUrl: string | null;
+  allowedOrigins: string[];
+  autoRecognizeRunhqMembers: boolean;
+  widgetAgentAssignmentEnabled: boolean;
   serverId: string;
   channelId: string | null;
 }
@@ -170,6 +205,9 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       widgetLanguage: widgetProjects.widgetLanguage,
       isPublic: widgetProjects.isPublic,
       widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      allowedOrigins: widgetProjects.allowedOrigins,
+      autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
     })
@@ -178,6 +216,77 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
     .limit(1);
 
   return project ?? null;
+}
+
+/**
+ * Look up a project by its slug for cookie-auth pre-resolution. The cookie
+ * itself carries no project info, so the widget tells the server which
+ * project it's running for via `X-RW-Project: <slug>`.
+ */
+async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContext | null> {
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      name: widgetProjects.name,
+      slug: widgetProjects.slug,
+      widgetPosition: widgetProjects.widgetPosition,
+      widgetLanguage: widgetProjects.widgetLanguage,
+      isPublic: widgetProjects.isPublic,
+      widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      allowedOrigins: widgetProjects.allowedOrigins,
+      autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      serverId: widgetProjects.serverId,
+      channelId: widgetProjects.channelId,
+    })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.slug, slug), eq(widgetProjects.enabled, true)))
+    .limit(1);
+
+  return project ?? null;
+}
+
+/**
+ * Whether ANY enabled widget project lists this origin in its
+ * `allowed_origins`. Used by the HTTP layer to decide whether to echo
+ * credentialed CORS headers (Allow-Credentials + reflected Origin) for
+ * a given request. Per-project membership/auth is still enforced by
+ * `authenticateWidget`; this only widens the CORS envelope so the
+ * browser will SEND cookies in the first place.
+ */
+export async function isOriginAllowlisted(origin: string): Promise<boolean> {
+  // PostgreSQL `text[] @> ARRAY[$1]` checks if the column contains the
+  // supplied value. Faster than a sequential scan when the list is short.
+  const [match] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(
+      and(
+        eq(widgetProjects.enabled, true),
+        sql`${widgetProjects.allowedOrigins} @> ARRAY[${origin}]::text[]`,
+      ),
+    )
+    .limit(1);
+  return !!match;
+}
+
+/**
+ * Returns membership status (and admin flag) for a (server, user) pair.
+ * Returns null when the user is not a member at all.
+ */
+async function getServerMembership(
+  serverId: string,
+  userId: string,
+): Promise<{ role: string; isAdmin: boolean } | null> {
+  const [row] = await db
+    .select({
+      role: serverMembers.role,
+      isAdmin: serverMembers.isAdmin,
+    })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+  return row ?? null;
 }
 
 function getHomepageUrl(): string {
@@ -322,16 +431,146 @@ function derivePermissions(
 }
 
 /**
- * Authenticates a widget request using one of three modes:
- * 1. Public slug mode — no Authorization, X-RW-Project: {slug}
- * 2. Raw API key mode — Authorization: Bearer rw_xxx (no dot)
- * 3. Signed JWT mode — Authorization: Bearer {payload}.{signature}
+ * Parses a single named cookie out of a `Cookie:` header. Hono's
+ * `getCookie` helper requires the Context, but `authenticateWidget`
+ * accepts a raw HonoRequest for unit-testability. Manual parse keeps
+ * the API surface narrow.
+ */
+function readCookie(req: HonoRequest, name: string): string | null {
+  const header = req.header('Cookie');
+  if (!header) return null;
+  const parts = header.split(';');
+  for (const part of parts) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    if (k === name) {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    }
+  }
+  return null;
+}
+
+/**
+ * Authenticates a widget request using one of four modes, in priority order.
+ *
+ * Identity precedence: runhq > app > anon. The cookie path is tried first; if
+ * it doesn't qualify (cookie absent, user not a member, origin not allowlisted,
+ * project not opted in), we fall through silently to the existing token paths.
+ *
+ *   0. RunHQ-member cookie — rw_session + X-RW-Project + Origin ∈ allowed_origins
+ *   1. Public slug         — no Authorization, X-RW-Project: {slug}
+ *   2. Raw API key         — Authorization: Bearer rw_xxx (no dot)
+ *   3. Signed JWT          — Authorization: Bearer {payload}.{signature}
  */
 export async function authenticateWidget(
   req: HonoRequest
 ): Promise<WidgetAuthResult | null> {
   const authHeader = req.header('Authorization');
   const projectSlugHeader = req.header('X-RW-Project');
+  const originHeader = req.header('Origin');
+
+  // ---- Mode 0: rw_session cookie (RunHQ workspace member) ----
+  // Highest priority. Tried first so cookie-recognized members never get
+  // mis-attributed to the customer's JWT identity even when both are present.
+  const rwSession = readCookie(req, RW_SESSION_COOKIE);
+  if (rwSession && projectSlugHeader && originHeader) {
+    const verified = await verifyRwSession(rwSession);
+    if (verified) {
+      const project = await getWidgetProjectBySlug(projectSlugHeader);
+      if (
+        project &&
+        project.autoRecognizeRunhqMembers &&
+        project.allowedOrigins.includes(originHeader)
+      ) {
+        const membership = await getServerMembership(project.serverId, verified.userId);
+        if (membership) {
+          // CSRF check — required on all state-changing methods. We do this
+          // BEFORE the DB upsert so a forged write doesn't accidentally
+          // create/refresh a widget_users row. Reads (GET, plus the
+          // identity bootstrap itself) are exempt because they're idempotent
+          // and intrinsically CSRF-safe.
+          if (req.method && CSRF_PROTECTED_METHODS.has(req.method.toUpperCase())) {
+            const presented = req.header('X-RunHQ-CSRF');
+            if (!verifyCsrfToken(presented, verified.userId, verified.iat)) {
+              return null; // 401 from caller; treat invalid CSRF as auth failure
+            }
+          }
+
+          // Upsert the widget_user under auth_source='runhq' so this row
+          // never collides with an app-path row for the same human.
+          const externalUserId = `runhq:${verified.userId}`;
+          let widgetUserId: string;
+          const [existing] = await db
+            .select({ id: widgetUsers.id })
+            .from(widgetUsers)
+            .where(
+              and(
+                eq(widgetUsers.projectId, project.id),
+                eq(widgetUsers.externalUserId, externalUserId),
+                eq(widgetUsers.authSource, 'runhq'),
+              ),
+            )
+            .limit(1);
+
+          // Pull fresh display name from users table on every auth — name
+          // changes in console should reflect immediately in the widget UI.
+          const [user] = await db
+            .select({ name: users.name, email: users.email })
+            .from(users)
+            .where(eq(users.id, verified.userId))
+            .limit(1);
+          const displayName = user?.name || user?.email || 'RunHQ user';
+
+          if (existing) {
+            widgetUserId = existing.id;
+            await db
+              .update(widgetUsers)
+              .set({ name: displayName })
+              .where(eq(widgetUsers.id, existing.id));
+          } else {
+            const [inserted] = await db
+              .insert(widgetUsers)
+              .values({
+                projectId: project.id,
+                externalUserId,
+                authSource: 'runhq',
+                name: displayName,
+              })
+              .returning({ id: widgetUsers.id });
+            widgetUserId = inserted.id;
+          }
+
+          // Workspace admins auto-grant the assign_agent permission when
+          // the project has triager-assignment enabled. Regular members
+          // continue to need explicit role-claim configuration via JWT —
+          // expanding the trust boundary further requires explicit owner opt-in.
+          const isAdmin = !!membership.isAdmin;
+          const permissions: ReadonlySet<WidgetPermission> =
+            isAdmin && project.widgetAgentAssignmentEnabled
+              ? new Set<WidgetPermission>(['assign_agent'])
+              : EMPTY_PERMISSIONS;
+
+          return {
+            projectId: project.id,
+            projectSlug: project.slug,
+            widgetUserId,
+            authenticated: true,
+            permissions,
+            matchedRoles: isAdmin ? ['admin'] : [],
+            authSource: 'runhq',
+            runhqUserId: verified.userId,
+            csrfToken: csrfTokenFor(verified.userId, verified.iat),
+            displayName,
+            avatarUrl: null,
+          };
+        }
+      }
+    }
+    // Cookie present but didn't qualify — fall through to the other modes.
+    // Crucially: do NOT short-circuit to anonymous. The same request might
+    // still carry a valid app JWT we should honor.
+  }
 
   // ---- Mode 1: Public slug (no auth header) ----
   if (!authHeader && projectSlugHeader) {
@@ -342,7 +581,14 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled || !project.isPublic) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false, permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+    return {
+      projectId: project.id,
+      projectSlug: project.slug,
+      authenticated: false,
+      permissions: EMPTY_PERMISSIONS,
+      matchedRoles: [],
+      authSource: 'anon',
+    };
   }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -359,7 +605,14 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false, permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
+    return {
+      projectId: project.id,
+      projectSlug: project.slug,
+      authenticated: false,
+      permissions: EMPTY_PERMISSIONS,
+      matchedRoles: [],
+      authSource: 'anon',
+    };
   }
 
   // ---- Mode 3: Signed JWT (standard 3-part header.payload.signature) ----
@@ -414,7 +667,8 @@ export async function authenticateWidget(
       .where(
         and(
           eq(widgetUsers.projectId, project.id),
-          eq(widgetUsers.externalUserId, sub)
+          eq(widgetUsers.externalUserId, sub),
+          eq(widgetUsers.authSource, 'app'),
         )
       )
       .limit(1);
@@ -433,6 +687,7 @@ export async function authenticateWidget(
         .values({
           projectId: project.id,
           externalUserId: sub,
+          authSource: 'app',
           name,
         })
         .returning({ id: widgetUsers.id });
@@ -448,6 +703,8 @@ export async function authenticateWidget(
     authenticated: true,
     permissions,
     matchedRoles,
+    authSource: 'app',
+    displayName: name,
   };
 }
 
@@ -1741,6 +1998,8 @@ export async function getWidgetSettings(serverId: string, workspaceProjectId?: s
       votingPeriodHours: widgetProjects.votingPeriodHours,
       isPublic: widgetProjects.isPublic,
       widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      allowedOrigins: widgetProjects.allowedOrigins,
+      autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
       autoInjectInPreview: widgetProjects.autoInjectInPreview,
       channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
@@ -1758,6 +2017,8 @@ export async function getWidgetSettings(serverId: string, workspaceProjectId?: s
     voting_period_hours: project.votingPeriodHours,
     is_public: project.isPublic,
     login_url: project.widgetLoginUrl,
+    allowed_origins: project.allowedOrigins,
+    auto_recognize_runhq_members: project.autoRecognizeRunhqMembers,
     auto_inject_in_preview: project.autoInjectInPreview,
     channel_id: project.channelId,
     slug: project.slug,
@@ -1788,6 +2049,8 @@ export async function updateWidgetSettings(
     voting_period_hours?: number;
     is_public?: boolean;
     login_url?: string | null;
+    allowed_origins?: string[];
+    auto_recognize_runhq_members?: boolean;
     auto_inject_in_preview?: boolean;
     slug?: string;
     // Inline workspaceProjectId — accepted here as an alternative to opts.workspaceProjectId
@@ -1820,6 +2083,32 @@ export async function updateWidgetSettings(
         'Login URL must be a valid http:// or https:// URL.',
       );
     }
+  }
+
+  // Validate + normalize allowed_origins. Each entry must parse as
+  // http(s) URL; otherwise reject with a per-entry message. After
+  // normalization, duplicates collapse — two entries that differ only
+  // in trailing slash or default port resolve to the same origin.
+  let normalizedOrigins: string[] | undefined;
+  if (settings.allowed_origins !== undefined) {
+    if (!Array.isArray(settings.allowed_origins)) {
+      throw new WidgetSettingsValidationError('allowed_origins must be an array.');
+    }
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of settings.allowed_origins) {
+      const normalized = normalizeOrigin(raw);
+      if (!normalized) {
+        throw new WidgetSettingsValidationError(
+          `Invalid origin "${raw}". Origins must be http(s) URLs (e.g. https://acme.com).`,
+        );
+      }
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        out.push(normalized);
+      }
+    }
+    normalizedOrigins = out;
   }
 
   // Build a reusable conditions array for all three internal queries.
@@ -1873,6 +2162,38 @@ export async function updateWidgetSettings(
     }
   }
 
+  // Required-when-auto-recognize guard for allowed_origins. Mirrors the
+  // login-URL pattern: the resulting state must have at least one origin
+  // when auto-recognize is on. Blocks both
+  //   (a) flipping auto-recognize on without supplying origins, and
+  //   (b) clearing origins while auto-recognize is already on.
+  if (
+    settings.auto_recognize_runhq_members === true ||
+    (normalizedOrigins !== undefined && normalizedOrigins.length === 0)
+  ) {
+    const [current] = await db
+      .select({
+        autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
+        allowedOrigins: widgetProjects.allowedOrigins,
+      })
+      .from(widgetProjects)
+      .where(and(...projConds()))
+      .limit(1);
+
+    const finalAutoRecognize =
+      settings.auto_recognize_runhq_members !== undefined
+        ? settings.auto_recognize_runhq_members
+        : !!current?.autoRecognizeRunhqMembers;
+    const finalOrigins =
+      normalizedOrigins !== undefined ? normalizedOrigins : (current?.allowedOrigins ?? []);
+
+    if (finalAutoRecognize && finalOrigins.length === 0) {
+      throw new WidgetSettingsValidationError(
+        'Add at least one allowed origin before enabling RunHQ-member auto-recognition.',
+      );
+    }
+  }
+
   // Detect whether auto-inject flipped so the caller can push-invalidate.
   let autoInjectChanged = false;
   if (settings.auto_inject_in_preview !== undefined) {
@@ -1898,6 +2219,10 @@ export async function updateWidgetSettings(
       // representation for "no login URL set".
       ...(settings.login_url !== undefined && {
         widgetLoginUrl: settings.login_url && settings.login_url.trim() ? settings.login_url.trim() : null,
+      }),
+      ...(normalizedOrigins !== undefined && { allowedOrigins: normalizedOrigins }),
+      ...(settings.auto_recognize_runhq_members !== undefined && {
+        autoRecognizeRunhqMembers: settings.auto_recognize_runhq_members,
       }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
