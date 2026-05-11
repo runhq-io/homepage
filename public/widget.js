@@ -956,24 +956,31 @@
     );
   }
 
-  // The chevron-only "hide launcher" handle. Lives inside the pill on the
-  // protruding (screen-interior) edge — for a right-anchored launcher the
-  // chevron is on the LEFT of the pill and points left; mirrored on left-
-  // anchored. Visible only when the pill is fully expanded AND hovered (CSS
-  // gates visibility via :hover); the pill never advertises the affordance
-  // when it's already collapsed because the user can't re-hide what's hidden.
+  // Inline chevron that toggles the launcher between expanded and collapsed.
+  // The arrow always points in the direction the pill will *move* when
+  // clicked, which is how every IDE sidebar handles collapse affordances:
+  //   - expanded:  arrow points TOWARD the anchored edge (motion = tuck)
+  //   - collapsed: arrow points AWAY from the edge       (motion = come back)
+  // Visible only when the pill is hovered; in the peeked (collapsed+hover)
+  // state the chevron becomes the "permanently un-hide" affordance —
+  // clicking the pill body still opens the panel as before, but the
+  // chevron lets the user pin it visible without opening anything.
   function buildHideBtn() {
     var isRight = config.position === "right";
+    var collapsed = shouldRenderCollapsed();
+    // XOR: expanded+right or collapsed+left → point right (>); otherwise left (<).
+    var pointRight = isRight !== collapsed;
+    var label = collapsed ? t("aria.collapsedLauncher") : t("aria.hideLauncher");
     var btn = h("span", {
       className: "rw-tab-hide-btn",
       role: "button",
       tabindex: "-1",
-      "aria-label": t("aria.hideLauncher"),
-      title: t("aria.hideLauncher"),
+      "aria-label": label,
+      title: label,
     });
-    var path = isRight ? "M14 6l-6 6 6 6" : "M10 6l6 6-6 6";
+    var path = pointRight ? "M10 6l6 6-6 6" : "M14 6l-6 6 6 6";
     var svg = h("svg", {
-      width: 10, height: 10, viewBox: "0 0 24 24",
+      width: 9, height: 9, viewBox: "0 0 24 24",
       fill: "none", stroke: "currentColor",
       "stroke-width": 2.4, "stroke-linecap": "round", "stroke-linejoin": "round",
       "aria-hidden": "true",
@@ -983,8 +990,11 @@
     btn.addEventListener("click", function (e) {
       // Stop the click bubbling to tabEl which would otherwise open the panel.
       e.stopPropagation();
-      setCollapsed(true);
-      applyCollapsedState();
+      // Toggle the rendered state. If a badge is forcing the pill open we
+      // still flip the underlying preference; the next render that lacks
+      // a badge will honor it.
+      setCollapsed(!shouldRenderCollapsed());
+      refreshTabLabel();
     });
     return btn;
   }
@@ -1142,30 +1152,29 @@
       '.rw-tab--top    { top: 24px;    bottom: auto; transform: none; }',
       '.rw-tab--bottom { top: auto;    bottom: 24px; transform: none; }',
 
-      /* Hide-launcher chevron — slim handle on the protruding edge of the
-         pill. Width animates from 0 to 12px on parent hover so the pill
-         visibly grows to reveal the affordance; collapses back when the
-         pointer leaves. Hidden entirely while the pill is in its
-         collapsed (tucked) state — the only way out of collapsed is a
-         click on the peeked pill, not on the chevron. */
+      /* Toggle chevron — slim handle on the protruding edge of the pill.
+         Width animates from 0 to 9px on parent hover so the pill visibly
+         grows to reveal the affordance; collapses back when the pointer
+         leaves. Visible on hover in BOTH the expanded and peeked states:
+         in the expanded state it collapses; in the peeked state it pins
+         the pill open. No divider line — the icon is light enough that
+         the section reads as a slim handle, not a separate panel. */
       '.rw-tab-hide-btn {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  flex: 0 0 auto;',
-      '  width: 0; height: 18px;',
+      '  width: 0; height: 16px;',
       '  ' + (isRight ? "margin-right" : "margin-left") + ': 0;',
       '  color: rgba(255,255,255,0.78);',
-      '  border-' + (isRight ? "right" : "left") + ': 1px solid rgba(255,255,255,0); /* fades in via :hover */',
       '  padding: 0;',
       '  overflow: hidden;',
       '  opacity: 0; pointer-events: none;',
       '  cursor: pointer;',
-      '  transition: width .15s ease, opacity .12s ease 0s, color .12s ease, border-color .12s ease, margin .15s ease;',
+      '  transition: width .15s ease, opacity .12s ease 0s, color .12s ease, margin .15s ease;',
       '}',
-      '.rw-tab:not(.rw-tab--collapsed):hover .rw-tab-hide-btn {',
-      '  width: 12px;',
+      '.rw-tab:hover .rw-tab-hide-btn {',
+      '  width: 9px;',
       '  opacity: 1; pointer-events: auto;',
-      '  ' + (isRight ? "margin-right" : "margin-left") + ': 4px;',
-      '  border-' + (isRight ? "right" : "left") + '-color: rgba(255,255,255,0.18);',
+      '  ' + (isRight ? "margin-right" : "margin-left") + ': 2px;',
       '}',
       '.rw-tab-hide-btn:hover { color: #ffffff; }',
       '.rw-tab-hide-btn > svg { display: block; flex: 0 0 auto; }',
