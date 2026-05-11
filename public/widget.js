@@ -138,16 +138,21 @@
     return headers;
   }
 
-  // Whether the current init is eligible for the cookie (RunHQ-member) auth
-  // path. The Mode 0 server check requires the X-RW-Project header, which is
-  // only sent when config.project is set. Pure-bearer integrations that pass
-  // only `token` to init() can never trigger Mode 0, so requesting
-  // credentialed CORS for them is dead weight — and actively harmful: when
-  // the host origin is not in the project's allowed_origins, the server
-  // falls back to `Access-Control-Allow-Origin: *`, which the browser
-  // refuses to pair with `credentials: "include"`, blocking the response.
+  // Whether this widget instance is opted into the cookie (RunHQ-member)
+  // auth path. EXPLICIT opt-in via init({ useCookieAuth: true }) — gating
+  // on config.project would silently enable credentialed CORS for every
+  // embed that supplies a slug (public-anon embeds, pure-bearer embeds
+  // that also pass `project` for any reason). When the host origin is
+  // NOT in the project's allowed_origins, the server returns
+  // `Access-Control-Allow-Origin: *`, which the browser refuses to pair
+  // with `credentials: "include"` — the entire response is blocked.
+  //
+  // Explicit opt-in means: cookie auth is only attempted by embeds that
+  // have explicitly enrolled (auto-recognize ON + allowlisted origin).
+  // Everyone else gets the wide-open legacy CORS envelope and works
+  // exactly as before.
   function wantsCookieAuth() {
-    return !!config.project;
+    return !!config.useCookieAuth;
   }
 
   function api(path, opts) {
@@ -4114,6 +4119,12 @@
       config = {
         token: opts.token || null,
         project: opts.project || null,
+        // Explicit opt-in for the RunHQ-member cookie auth path. When true,
+        // widget fetches use `credentials: include` and the server is
+        // expected to have this origin in `widget_projects.allowed_origins`.
+        // When false (default), the widget operates wide-open without
+        // credentials — same envelope as before this feature shipped.
+        useCookieAuth: !!opts.useCookieAuth,
         // Resolved by /api/widget/identity below. Until then, authHeaders()
         // uses the legacy token-or-slug heuristic so the bootstrap probe
         // itself can authenticate.
