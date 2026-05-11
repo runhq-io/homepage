@@ -62,4 +62,9 @@ EXPOSE 8080
 ENV PORT=8080
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["npx", "tsx", "src/server.ts"]
+# Run pending DB migrations before starting the server. A schema-vs-code
+# mismatch fails fast at startup here rather than silently 500-ing on the
+# first query that references the missing column — better to refuse to
+# serve than to serve broken. Idempotent: scripts/run-migration.js tracks
+# applied migrations in the schema_migrations table.
+CMD ["sh", "-c", "node scripts/run-migration.js && exec npx tsx src/server.ts"]
