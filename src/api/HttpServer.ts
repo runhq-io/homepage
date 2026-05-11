@@ -2187,6 +2187,10 @@ export function createHttpApp() {
 
       // Validate and resolve provider
       const providerId = requestedProvider || getDefaultProviderId();
+      try {
+        const { appendFileSync } = await import('node:fs');
+        appendFileSync('/tmp/be-create-server.log', `${new Date().toISOString()} requestedProvider=${requestedProvider ?? '(none)'} providerId=${providerId} tier=${tier ?? '(none)'} bodyKeys=${Object.keys(body).join(',')}\n`);
+      } catch {}
       if (requestedProvider && !hasProvider(requestedProvider)) {
         return c.json({ error: `Provider '${requestedProvider}' is not available` }, 400);
       }
@@ -2221,9 +2225,12 @@ export function createHttpApp() {
         resolvedRegion = region || 'ash';
       }
 
-      // Enforce server limit + tier-vs-plan rules per plan (admins bypass).
+      // Enforce server limit + tier-vs-plan rules per plan. Admins bypass.
+      // Providers with no usage cost (DockerProvider — all tier rates $0)
+      // also bypass: plan gating is a billing construct, and free-plan
+      // developers must be able to exercise local docker workspaces.
       const userIsAdmin = await UsageService.isAdmin(userId);
-      if (!userIsAdmin) {
+      if (!userIsAdmin && UsageService.enforcesPlanLimits(providerId)) {
         const subscription = await UsageService.getOrCreateSubscription(userId);
         const planId = subscription.planId as keyof typeof UsageService.PLAN_CONFIG;
         const planConfig = UsageService.PLAN_CONFIG[planId] || UsageService.PLAN_CONFIG.free;

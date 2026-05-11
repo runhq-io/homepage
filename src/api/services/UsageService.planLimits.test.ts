@@ -6,6 +6,7 @@ import {
   hasReachedServerLimit,
   isUnlimitedServers,
   isTierAllowedForPlan,
+  enforcesPlanLimits,
 } from './UsageService';
 
 describe('plan server-limit helpers', () => {
@@ -44,5 +45,15 @@ describe('isTierAllowedForPlan', () => {
     expect(isTierAllowedForPlan(planId, 'shared-4x-1gb')).toBe(true);
     expect(isTierAllowedForPlan(planId, 'shared-4x-4gb')).toBe(true);
     expect(isTierAllowedForPlan(planId, 'perf-4x-16gb')).toBe(true);
+  });
+});
+
+describe('enforcesPlanLimits', () => {
+  it('enforces plan limits on the fly provider (paid infrastructure)', () => {
+    expect(enforcesPlanLimits('fly')).toBe(true);
+  });
+
+  it('exempts the docker provider (no usage cost; local dev)', () => {
+    expect(enforcesPlanLimits('docker')).toBe(false);
   });
 });

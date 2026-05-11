@@ -20,6 +20,7 @@ import {
   type Plan,
 } from '../../db/schema';
 import type { TokenCounts } from './pricing';
+import type { ProviderId } from './providers/types';
 
 // ============================================================================
 // Types
@@ -82,6 +83,20 @@ export const FREE_PLAN_TIER = 'shared-4x-1gb';
 export function isTierAllowedForPlan(planId: PlanId, tier: string): boolean {
   if (planId === 'free') return tier === FREE_PLAN_TIER;
   return true;
+}
+
+/**
+ * Whether plan-based quotas (server limit + tier allowlist) apply when
+ * provisioning to a given provider. Providers with no usage-based cost — i.e.
+ * all `HOURLY_RATES[provider][tier] === 0` — are exempt: they're local-dev
+ * helpers, not paid infrastructure, so gating them by billing plan would
+ * arbitrarily block free-plan developers from testing the feature locally.
+ *
+ * DockerProvider is the only such provider today (all tier rates $0 in
+ * `providers/registry.ts`).
+ */
+export function enforcesPlanLimits(providerId: ProviderId): boolean {
+  return providerId !== 'docker';
 }
 
 /**
