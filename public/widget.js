@@ -138,19 +138,28 @@
     return headers;
   }
 
+  // Whether the current init is eligible for the cookie (RunHQ-member) auth
+  // path. The Mode 0 server check requires the X-RW-Project header, which is
+  // only sent when config.project is set. Pure-bearer integrations that pass
+  // only `token` to init() can never trigger Mode 0, so requesting
+  // credentialed CORS for them is dead weight — and actively harmful: when
+  // the host origin is not in the project's allowed_origins, the server
+  // falls back to `Access-Control-Allow-Origin: *`, which the browser
+  // refuses to pair with `credentials: "include"`, blocking the response.
+  function wantsCookieAuth() {
+    return !!config.project;
+  }
+
   function api(path, opts) {
     var method = (opts && opts.method) || "GET";
     var headers = authHeaders({ "Content-Type": "application/json" }, { method: method });
-    return fetch(RUNHQ_API + path, {
+    var init = {
       method: method,
       headers: headers,
-      // Always include credentials so the rw_session cookie flows on the
-      // RunHQ-member path. The browser strips cookies if the server
-      // doesn't echo Allow-Credentials, so this is harmless on the
-      // token-bearer and anon paths.
-      credentials: "include",
       body: (opts && opts.body) ? JSON.stringify(opts.body) : undefined,
-    }).then(function (r) {
+    };
+    if (wantsCookieAuth()) init.credentials = "include";
+    return fetch(RUNHQ_API + path, init).then(function (r) {
       if (!r.ok) {
         return r.json().catch(function () { return {}; }).then(function (data) {
           var err = new Error((data && data.error) || ("API error: " + r.status));
@@ -181,24 +190,26 @@
   function uploadTicketAttachment(ticketId, file) {
     var fd = new FormData();
     fd.append("file", file, file.name || "upload");
-    return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId) + "/attachments", {
+    var init = {
       method: "POST",
       headers: authHeaders({}, { method: "POST" }),
-      credentials: "include",
       body: fd,
-    }).then(readJsonOrThrow);
+    };
+    if (wantsCookieAuth()) init.credentials = "include";
+    return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId) + "/attachments", init).then(readJsonOrThrow);
   }
 
   function uploadCommentAttachment(ticketId, commentId, file) {
     var fd = new FormData();
     fd.append("file", file, file.name || "upload");
-    return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId)
-      + "/comments/" + encodeURIComponent(commentId) + "/attachments", {
+    var init = {
       method: "POST",
       headers: authHeaders({}, { method: "POST" }),
-      credentials: "include",
       body: fd,
-    }).then(readJsonOrThrow);
+    };
+    if (wantsCookieAuth()) init.credentials = "include";
+    return fetch(RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId)
+      + "/comments/" + encodeURIComponent(commentId) + "/attachments", init).then(readJsonOrThrow);
   }
 
   function readJsonOrThrow(r) {
