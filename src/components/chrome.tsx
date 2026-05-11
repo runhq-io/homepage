@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useT, useLocale, useLocalePath, useLocaleSwitch } from '../i18n/context';
+import { useT, useLocale, useLocalePath, useLocaleSwitch, LOCALES, type Locale } from '../i18n/context';
 
 export const SIGNUP_URL = 'https://app.runhq.io/signup';
 export const LOGIN_URL = 'https://app.runhq.io';
@@ -11,8 +12,7 @@ const NAV_T = {
     docs: 'Docs',
     signIn: 'Sign in',
     startFree: 'Start free',
-    switchToKorean: '한국어',
-    switchToEnglish: 'EN',
+    langMenuAria: 'Change language',
   },
   ko: {
     products: '제품',
@@ -20,8 +20,7 @@ const NAV_T = {
     docs: '문서',
     signIn: '로그인',
     startFree: '무료 시작',
-    switchToKorean: '한국어',
-    switchToEnglish: 'EN',
+    langMenuAria: '언어 변경',
   },
 } as const;
 
@@ -43,9 +42,9 @@ const FOOTER_T = {
     builtFor: 'Built for agent-driven product teams',
   },
   ko: {
-    blurb: 'AI 코딩 에이전트를 위한 운영 레이어. 캐나다 밴쿠버.',
+    blurb: 'AI 코딩 agent를 위한 운영 레이어. 캐나다 밴쿠버.',
     productsH: '제품',
-    agentAutomation: '에이전트 자동화',
+    agentAutomation: 'agent 자동화',
     projectManagement: '프로젝트 관리',
     devEnvironment: '개발 환경',
     feedbackWidget: '피드백 위젯',
@@ -56,7 +55,7 @@ const FOOTER_T = {
     terms: '약관',
     copyright: '© 2026 RunHQ Solutions Inc.',
     tagline: '닫힌 루프 제품 개발',
-    builtFor: '에이전트 중심의 제품 팀을 위해 만들어졌습니다',
+    builtFor: 'agent 중심의 제품 팀을 위해 만들어졌습니다',
   },
 } as const;
 
@@ -64,24 +63,76 @@ function LangSwitcher() {
   const locale = useLocale();
   const switchLocale = useLocaleSwitch();
   const t = useT(NAV_T);
-  const targetLocale = locale === 'ko' ? 'en' : 'ko';
-  const label = targetLocale === 'ko' ? t.switchToKorean : t.switchToEnglish;
-  const aria = targetLocale === 'ko' ? 'Switch to Korean' : 'Switch to English';
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const current = LOCALES.find((l) => l.code === locale) ?? LOCALES[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const pick = (code: Locale) => {
+    setOpen(false);
+    if (code !== locale) switchLocale(code);
+  };
+
   return (
-    <button
-      type="button"
-      className="rhc-lang"
-      aria-label={aria}
-      onClick={() => switchLocale(targetLocale)}
-    >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" />
-        <path d="M3 12h18" />
-        <path d="M12 3a14 14 0 0 1 0 18" />
-        <path d="M12 3a14 14 0 0 0 0 18" />
-      </svg>
-      <span>{label}</span>
-    </button>
+    <div className="rhc-lang-root" ref={rootRef}>
+      <button
+        type="button"
+        className="rhc-lang"
+        aria-label={t.langMenuAria}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3a14 14 0 0 1 0 18" />
+          <path d="M12 3a14 14 0 0 0 0 18" />
+        </svg>
+        <span>{current.label}</span>
+        <svg className="rhc-lang-caret" width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <ul className="rhc-lang-menu" role="listbox" aria-label={t.langMenuAria}>
+          {LOCALES.map((l) => {
+            const selected = l.code === locale;
+            return (
+              <li
+                key={l.code}
+                role="option"
+                aria-selected={selected}
+                className={`rhc-lang-opt ${selected ? 'rhc-lang-opt-on' : ''}`}
+                onClick={() => pick(l.code)}
+              >
+                <span className="rhc-lang-opt-label">{l.label}</span>
+                {selected && (
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                    <path d="M2 6L5 9L10 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -460,9 +511,10 @@ const NAV_STYLES = `
   .rhc-nav-i:hover { background: var(--rhw-bg-2); color: var(--rhw-ink); }
   .rhc-nav-on { background: var(--rhw-bg-2); color: var(--rhw-ink); }
   .rhc-nav-r { display: flex; align-items: center; gap: 10px; justify-self: end; }
+  .rhc-lang-root { position: relative; }
   .rhc-lang {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 6px 10px;
+    padding: 6px 9px 6px 10px;
     background: transparent;
     border: 1px solid var(--rhw-line);
     border-radius: 7px;
@@ -472,9 +524,42 @@ const NAV_STYLES = `
     cursor: pointer;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
   }
-  .rhc-lang svg { opacity: 0.8; }
-  .rhc-lang:hover { background: var(--rhw-bg-2); color: var(--rhw-ink); border-color: var(--rhw-line); }
+  .rhc-lang > svg { opacity: 0.75; }
+  .rhc-lang:hover { background: var(--rhw-bg-2); color: var(--rhw-ink); }
   .rhc-lang:focus-visible { outline: 2px solid var(--rhw-accent); outline-offset: 2px; }
+  .rhc-lang[aria-expanded="true"] { background: var(--rhw-bg-2); color: var(--rhw-ink); }
+  .rhc-lang-caret {
+    opacity: 0.55;
+    transition: transform 0.15s ease;
+    margin-left: 1px;
+  }
+  .rhc-lang[aria-expanded="true"] .rhc-lang-caret { transform: rotate(180deg); }
+  .rhc-lang-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 148px;
+    margin: 0; padding: 4px;
+    list-style: none;
+    background: var(--rhw-surface);
+    border: 1px solid var(--rhw-line);
+    border-radius: 9px;
+    box-shadow: 0 8px 24px -6px rgba(0,0,0,0.18), 0 2px 6px -2px rgba(0,0,0,0.08);
+    z-index: 40;
+    font-size: 13px;
+  }
+  .rhc-lang-opt {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    color: var(--rhw-ink-soft);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .rhc-lang-opt:hover { background: var(--rhw-bg-2); color: var(--rhw-ink); }
+  .rhc-lang-opt-on { color: var(--rhw-ink); }
+  .rhc-lang-opt-on svg { opacity: 0.7; }
+  .rhc-lang-opt-label { flex: 1; }
   .rhc-signin {
     padding: 7px 12px;
     font-size: 13.5px;

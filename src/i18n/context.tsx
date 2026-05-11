@@ -3,6 +3,11 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 export type Locale = 'en' | 'ko';
 
+export const LOCALES: { code: Locale; label: string }[] = [
+  { code: 'en', label: 'English' },
+  { code: 'ko', label: '한국어' },
+];
+
 const LocaleContext = createContext<Locale>('en');
 
 const LOCALE_KEY = 'runhq_locale';

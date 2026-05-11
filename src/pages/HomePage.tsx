@@ -111,15 +111,15 @@ const HOME_T = {
   },
   ko: {
     // Hero
-    heroH1Line1: 'AI 코딩 에이전트를',
+    heroH1Line1: 'AI 코딩 agent를',
     heroH1Line2: '오케스트레이션하세요.',
-    heroLede: 'RunHQ는 팀 누구나 코딩 에이전트에게 티켓을 할당할 수 있게 해줍니다. 모든 작업이 자체 브랜치에서 범위가 정해진 채로 리뷰 준비 상태로 도착해, 프로덕트와 엔지니어링 사이의 병목을 없앱니다.',
+    heroLede: 'RunHQ는 팀 누구나 코딩 agent에게 티켓을 할당할 수 있게 해줍니다. 모든 작업이 자체 브랜치에서 범위가 정해진 채로 리뷰 준비 상태로 도착해, 프로덕트와 엔지니어링 사이의 병목을 없앱니다.',
     ctaStartFree: '무료로 시작하기',
     ctaWatchDemo: '데모 보기',
     heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
     heroScreenshotSmAlt: 'RunHQ 피드백 위젯과 최신 업데이트',
     // Hero roles
-    heroRolesH: '에이전트 자동화로 팀 전체에 힘을 실어주세요',
+    heroRolesH: 'agent 자동화로 팀 전체에 힘을 실어주세요',
     rolePM: 'PM',
     roleEngineer: '엔지니어',
     roleDesign: '디자인',
@@ -128,17 +128,17 @@ const HOME_T = {
     roleSales: '세일즈',
     roleFounder: '창업자',
     // Logos
-    logosH: '에이전트와 함께 배포하는 엔지니어링 팀들이 신뢰합니다',
+    logosH: 'agent와 함께 배포하는 엔지니어링 팀들이 신뢰합니다',
     // Pipeline section
     pipelineH2Line1: 'RunHQ에서 팀이',
     pipelineH2Line2: '더 빠르게 배포하는 이유.',
-    pipelineDeck: '두 파이프라인에 같은 속도로 피드백이 들어옵니다. 사람 인수인계 방식은 매 단계마다 쌓이고, 병렬로 실행되는 코딩 에이전트는 들어오는 속도만큼 빠르게 큐를 비워냅니다.',
+    pipelineDeck: '두 파이프라인에 같은 속도로 피드백이 들어옵니다. 사람 인수인계 방식은 매 단계마다 쌓이고, 병렬로 실행되는 코딩 agent는 들어오는 속도만큼 빠르게 큐를 비워냅니다.',
     pipelineLabelBefore: '이전',
     pipelineLabelAfter: 'RUNHQ와 함께',
     // Loop section
     loopH2Line1: '모든 릴리스는 같은',
     loopH2Line2: '루프를 따라갑니다.',
-    loopDeck: '대부분의 코딩 에이전트 스택은 “에이전트 완료”에서 멈춥니다. 그건 중간 단계일 뿐입니다. RunHQ는 양쪽 끝 — 앞에서의 수집과 뒤에서의 리뷰 — 을 책임지기 때문에, 중간은 누구도 불안하지 않게 무인으로 돌아갈 수 있습니다.',
+    loopDeck: '대부분의 코딩 agent 스택은 “agent 완료”에서 멈춥니다. 그건 중간 단계일 뿐입니다. RunHQ는 양쪽 끝 — 앞에서의 수집과 뒤에서의 리뷰 — 을 책임지기 때문에, 중간은 누구도 불안하지 않게 무인으로 돌아갈 수 있습니다.',
     // Loop stage 01 — Collect feedback
     loop1Title: '피드백 수집',
     loop1Sub: '위젯 하나, 추가 로그인 없음.',
@@ -147,16 +147,16 @@ const HOME_T = {
     loop1Key2: '로그인 장벽 없음',
     loop1Key3: '자동 컨텍스트',
     // Loop stage 02 — Assign coding agents
-    loop2Title: '코딩 에이전트 할당',
+    loop2Title: '코딩 agent 할당',
     loop2Sub: '병렬로 실행하세요.',
-    loop2Body: 'Claude Code, Cursor, Codex, 또는 직접 만든 커스텀 에이전트에 작업을 할당하세요. RunHQ는 프로세스를 병렬로 띄우면서 중요한 세부 사항을 모두 기록해 완전한 투명성을 제공합니다.',
-    loop2Key1: '내 에이전트 연결',
+    loop2Body: 'Claude Code, Cursor, Codex, 또는 직접 만든 커스텀 agent에 작업을 할당하세요. RunHQ는 프로세스를 병렬로 띄우면서 중요한 세부 사항을 모두 기록해 완전한 투명성을 제공합니다.',
+    loop2Key1: '내 agent 연결',
     loop2Key2: '병렬 실행',
     loop2Key3: '전체 감사 로그',
     // Loop stage 03 — Review code
     loop3Title: '코드 리뷰',
     loop3Sub: 'PR이 바로 읽을 준비된 채로 도착합니다.',
-    loop3Body: '모든 에이전트 실행은 diff, 요약, 출처가 첨부된 깔끔한 풀 리퀘스트로 도착합니다 — 리뷰어는 이미 쓰던 GitHub 플로우 안에서 훑고, 코멘트하고, 승인하면 됩니다.',
+    loop3Body: '모든 agent 실행은 diff, 요약, 출처가 첨부된 깔끔한 풀 리퀘스트로 도착합니다 — 리뷰어는 이미 쓰던 GitHub 플로우 안에서 훑고, 코멘트하고, 승인하면 됩니다.',
     loop3Key1: 'GitHub PR',
     loop3Key2: '인라인 diff',
     loop3Key3: '원클릭 되돌리기',
@@ -205,7 +205,7 @@ const HOME_T = {
     ctaMeta1Strong: '60분 안에 라이브.',
     ctaMeta1: '위젯을 붙이고, 소스를 연결하고, 점심 전에 배포하세요.',
     ctaMeta2Strong: '감사 로그 내보내기.',
-    ctaMeta2: '수집 단계에서 PII 제거. 모든 에이전트 액션 버전 관리.',
+    ctaMeta2: '수집 단계에서 PII 제거. 모든 agent 액션 버전 관리.',
     ctaMeta3Strong: '언제든 해지.',
     ctaMeta3: '나갈 때 감사 로그를 그대로 가져가세요.',
     // Modal

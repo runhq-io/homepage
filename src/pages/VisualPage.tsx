@@ -100,9 +100,9 @@ export const BEFORE_STATIONS_KO: StationConfig[] = [
 export const AFTER_STATIONS_KO: StationConfig[] = [
   { id: 'user',    label: '사용자 피드백',     capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5  }, outputs: ['widget'] },
   { id: 'widget',  label: 'RUNHQ',             capacity: 1, processingTime: 500,  pos: { x: 0.22, y: 0.5  }, outputs: ['agent_1', 'agent_2', 'agent_3'] },
-  { id: 'agent_1', label: '코딩 에이전트',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.22 }, outputs: ['review'] },
-  { id: 'agent_2', label: '코딩 에이전트',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.50 }, outputs: ['review'] },
-  { id: 'agent_3', label: '코딩 에이전트',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.78 }, outputs: ['review'] },
+  { id: 'agent_1', label: '코딩 agent',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.22 }, outputs: ['review'] },
+  { id: 'agent_2', label: '코딩 agent',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.50 }, outputs: ['review'] },
+  { id: 'agent_3', label: '코딩 agent',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.78 }, outputs: ['review'] },
   { id: 'review',  label: '코드 리뷰 + QA',    capacity: 1, processingTime: 800,  pos: { x: 0.70, y: 0.5  }, outputs: ['deploy'] },
   { id: 'deploy',  label: '배포',              capacity: 1, processingTime: 300,  pos: { x: 0.94, y: 0.5  }, outputs: [] },
 ];
