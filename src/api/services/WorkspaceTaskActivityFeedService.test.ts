@@ -7,7 +7,7 @@
  */
 import 'dotenv/config';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import {
@@ -609,27 +609,27 @@ describe('WorkspaceTaskActivityFeedService.memberActivity', () => {
       .values({ id: WIDGET_SERVER, name: `Widget Activity Test ${RUN_HEX}`, ownerId: ALICE_ID })
       .onConflictDoNothing();
 
-    const [widgetProject] = await db
-      .insert(widgetProjects)
-      .values({
-        serverId: WIDGET_SERVER,
-        name: `Widget Project ${RUN_HEX}`,
-        slug: `widget-${RUN_HEX}-${WIDGET_PROJECT}`,
-        apiKey: `apikey-${RUN_HEX}-${WIDGET_PROJECT}`,
-        apiSecretHash: `secret-${RUN_HEX}-${WIDGET_PROJECT}`,
-      })
-      .returning({ id: widgetProjects.id });
+    const widgetProjectResult = await db.execute<{ id: string }>(sql`
+      INSERT INTO widget_projects (server_id, name, slug, api_key, api_secret_hash)
+      VALUES (
+        ${WIDGET_SERVER},
+        ${`Widget Project ${RUN_HEX}`},
+        ${`widget-${RUN_HEX}-${WIDGET_PROJECT}`},
+        ${`apikey-${RUN_HEX}-${WIDGET_PROJECT}`},
+        ${`secret-${RUN_HEX}-${WIDGET_PROJECT}`}
+      )
+      RETURNING id
+    `);
+    const [widgetProject] = widgetProjectResult.rows;
     if (!widgetProject) throw new Error('Failed to insert widget project');
 
     // Widget user whose external_user_id is ALICE_ID — same human as the member row below.
-    const [aliceWidget] = await db
-      .insert(widgetUsers)
-      .values({
-        projectId: widgetProject.id,
-        externalUserId: ALICE_ID,
-        name: 'J N',
-      })
-      .returning({ id: widgetUsers.id });
+    const aliceWidgetResult = await db.execute<{ id: string }>(sql`
+      INSERT INTO widget_users (project_id, external_user_id, name)
+      VALUES (${widgetProject.id}, ${ALICE_ID}, ${'J N'})
+      RETURNING id
+    `);
+    const [aliceWidget] = aliceWidgetResult.rows;
     if (!aliceWidget) throw new Error('Failed to insert widget user');
 
     const [task] = await db
