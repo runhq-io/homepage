@@ -2775,7 +2775,12 @@
     // Visibility toggle: label flips between "Public" and "Private"
     // (with matching globe / lock icon) instead of a single "Private"
     // pill lighting up. Reads as a clear state change at a glance.
-    var privateBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
+    // Unique class so applyIntent can find and toggle this button when
+    // restoring a draft that was saved with privacy on. Without this,
+    // an anon user who chose "private" before login redirects ends up
+    // submitting publicly on return — the description and files restore
+    // but the privacy toggle silently resets.
+    var privateBtn = h("button", { className: "rw-pill-btn rw-priv-toggle", type: "button", "data-rw-private": "false" }, [
       Icons.globe(12),
       h("span", null, t("composer.public")),
     ]);
@@ -2784,6 +2789,7 @@
       clearChildren(privateBtn);
       privateBtn.appendChild(isPrivate ? Icons.lock(12) : Icons.globe(12));
       privateBtn.appendChild(h("span", null, isPrivate ? t("composer.private") : t("composer.public")));
+      privateBtn.setAttribute("data-rw-private", isPrivate ? "true" : "false");
     }
     privateBtn.addEventListener("click", function () {
       isPrivate = !isPrivate;
@@ -3064,7 +3070,11 @@
     var updP = loadUpdates().then(function (data) {
       updatesCache = data.tickets || [];
     }).catch(function () { updatesCache = []; });
-    var mineP = config.token
+    // RunHQ-cookie users have config.token === null but ARE authenticated.
+    // Gating on isIdentified (set after the topTickets / identity response)
+    // keeps their "My Submissions" list populated on every refresh; gating
+    // on config.token alone would silently empty it on panel re-open.
+    var mineP = config.isIdentified
       ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
       : Promise.resolve().then(function () { myTicketsCache = []; });
 
@@ -3082,11 +3092,17 @@
   // ===========================================================================
 
   function submitAssign(ticketId, agentId, command, callback) {
-    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', {
+    // Match the api() helper: pass {method: 'POST'} so authHeaders attaches
+    // X-RunHQ-CSRF on the cookie path, and send credentials when the cookie
+    // path is in play. Without these, an admin under cookie auth sees the
+    // triager controls but the POST 401s or CSRF-rejects.
+    var init = {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      headers: authHeaders({ 'Content-Type': 'application/json' }, { method: 'POST' }),
       body: JSON.stringify({ agentId: agentId, command: command }),
-    }).then(function (res) {
+    };
+    if (wantsCookieAuth()) init.credentials = 'include';
+    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', init).then(function (res) {
       return res.json().then(function (body) {
         return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: body };
       }, function () {
@@ -3901,6 +3917,16 @@
         ta.value = intent.draft.description || "";
         ta.dispatchEvent(new Event("input", { bubbles: true }));
         rehydrateFilesIntoComposer(composerRoot, intent.draft.files);
+        // Restore the privacy toggle. The composer renders with isPrivate=false
+        // by default, so we only need to click when the saved draft was private.
+        // The button's data-rw-private attribute reflects its current state,
+        // so we won't double-toggle if applyIntent fires more than once.
+        if (intent.draft.isPrivate) {
+          var privBtn = composerRoot && composerRoot.querySelector(".rw-priv-toggle");
+          if (privBtn && privBtn.getAttribute("data-rw-private") !== "true") {
+            privBtn.click();
+          }
+        }
         showRestoreToast(t("restore.welcomeBack"));
         return;
       }
