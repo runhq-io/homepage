@@ -7,8 +7,7 @@
  * - Usage tracking
  */
 
-import { Hono, type Context } from 'hono';
-import { cors } from 'hono/cors';
+import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import Anthropic from '@anthropic-ai/sdk';
 import oauth from './oauth/index';
@@ -172,12 +171,68 @@ interface ClaudeAnalyzeResponse {
 export function createHttpApp() {
   const app = new Hono();
 
-  // Enable CORS for all routes
-  app.use('*', cors({
-    origin: '*',
-    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-RW-Project', 'X-Server-Token'],
-  }));
+  /**
+   * Unified CORS middleware (replaces the prior `hono/cors` global).
+   *
+   * Two response shapes, chosen per request:
+   *
+   * 1. **Widget cookie-auth path** — when the request is on `/api/widget/*`
+   *    and its `Origin` matches an entry in some enabled project's
+   *    `allowed_origins`: echo `Access-Control-Allow-Origin: <origin>`
+   *    plus `Allow-Credentials: true` and `Vary: Origin`. This is the
+   *    ONLY shape browsers will accept alongside `credentials: include`,
+   *    so it's how the rw_session cookie + X-RunHQ-CSRF traffic flows.
+   *
+   * 2. **Legacy `*` path** — everything else: `Access-Control-Allow-Origin: *`,
+   *    no credentials. Token-bearer widgets, the public widget.js script
+   *    asset, and the rest of the cloud API all keep working unchanged.
+   *
+   * Why not use hono/cors with an `origin` function: the allowlist check is
+   * async (DB lookup) and hono/cors's origin callback is sync. We could
+   * cache the allowlist in memory, but the lookup is a single indexed
+   * `text[] @> ARRAY[$1]::text[]` query — cheap enough to do per request,
+   * and skipping the cache avoids stale-allowlist windows when an owner
+   * adds/removes an origin.
+   *
+   * Headers list intentionally includes `X-RunHQ-CSRF`. Without it, the
+   * browser strips the header at the preflight stage and our CSRF gate
+   * sees no token → write requests on the cookie path 403 even when the
+   * client is doing everything right.
+   */
+  app.use('*', async (c, next) => {
+    const origin = c.req.header('Origin');
+    const isWidgetPath = c.req.path.startsWith('/api/widget/');
+
+    let allowOriginValue = '*';
+    let withCredentials = false;
+    if (isWidgetPath && origin) {
+      // isOriginAllowlisted returns true iff any enabled project lists this
+      // origin. Per-project enforcement of "which user can authenticate
+      // here" happens later in authenticateWidget Mode 0; this only widens
+      // the CORS envelope so the browser will send cookies in the first place.
+      if (await WidgetService.isOriginAllowlisted(origin)) {
+        allowOriginValue = origin;
+        withCredentials = true;
+      }
+    }
+
+    c.header('Access-Control-Allow-Origin', allowOriginValue);
+    if (withCredentials) {
+      c.header('Access-Control-Allow-Credentials', 'true');
+      c.header('Vary', 'Origin');
+    }
+    c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    c.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, Cache-Control, X-RW-Project, X-RunHQ-CSRF, X-Server-Token',
+    );
+
+    if (c.req.method === 'OPTIONS') {
+      return c.body(null, 204);
+    }
+
+    await next();
+  });
 
   // Serve widget.js with the canonical status registry injected at the
   // top of the body. The widget reads from window.__RW_CONSTANTS__.status
@@ -5240,53 +5295,10 @@ export function createHttpApp() {
     return null;
   }
 
-  /**
-   * Credentialed CORS support for the widget cookie-auth path.
-   *
-   * The widget API has been wide-open `Origin: *` historically — fine for
-   * the token-bearer flow which carries no cookies. The new RunHQ-member
-   * cookie path requires `credentials: include` on the browser side, which
-   * means the server must echo a specific origin (never `*`) AND set
-   * `Access-Control-Allow-Credentials: true`. We do this only when the
-   * request's Origin appears in some project's `allowed_origins` list —
-   * random sites can't harvest identities by embedding the widget.
-   *
-   * For non-allowlisted origins we keep the legacy `Origin: *` response
-   * so the existing token-bearer flow continues to work everywhere.
-   */
-  async function isAllowlistedOrigin(origin: string | undefined): Promise<boolean> {
-    if (!origin) return false;
-    return WidgetService.isOriginAllowlisted(origin);
-  }
-
-  app.options('/api/widget/*', async (c) => {
-    const origin = c.req.header('Origin');
-    if (origin && await isAllowlistedOrigin(origin)) {
-      c.header('Access-Control-Allow-Origin', origin);
-      c.header('Access-Control-Allow-Credentials', 'true');
-      c.header('Vary', 'Origin');
-    } else {
-      c.header('Access-Control-Allow-Origin', '*');
-    }
-    c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project, X-RunHQ-CSRF, X-Server-Token');
-    return c.body(null, 204);
-  });
-
-  /**
-   * Per-response CORS helper — call before returning JSON from any widget
-   * endpoint that may be hit on the cookie path. Sets credentialed headers
-   * when the request's Origin matches a project's allowlist; otherwise
-   * leaves the existing `Origin: *` from the global cors() middleware.
-   */
-  async function applyWidgetCorsHeaders(c: Context) {
-    const origin = c.req.header('Origin');
-    if (origin && await isAllowlistedOrigin(origin)) {
-      c.header('Access-Control-Allow-Origin', origin);
-      c.header('Access-Control-Allow-Credentials', 'true');
-      c.header('Vary', 'Origin');
-    }
-  }
+  // CORS for /api/widget/* (preflight, credentialed echo, X-RunHQ-CSRF
+  // header allowlisting) is handled by the unified global middleware
+  // registered at the top of createHttpApp. Per-route helpers are no
+  // longer needed.
 
   // Public: list all public widget projects (no auth needed)
   app.get('/api/widget/projects', async (c) => {
@@ -5305,7 +5317,6 @@ export function createHttpApp() {
   app.get('/api/widget/me', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    await applyWidgetCorsHeaders(c);
     return c.json({
       widgetUserId: auth.widgetUserId ?? null,
       permissions: Array.from(auth.permissions),
@@ -5333,7 +5344,6 @@ export function createHttpApp() {
    */
   app.get('/api/widget/identity', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    await applyWidgetCorsHeaders(c);
     if (!auth) {
       return c.json({ identity: null, csrfToken: null });
     }

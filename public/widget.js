@@ -132,22 +132,30 @@
       if (config.project) headers["X-RW-Project"] = config.project;
       return headers;
     }
-    // Pre-bootstrap or unresolved identity: legacy heuristic.
+    // Pre-bootstrap or unresolved identity. Cookie-auth embeds must include
+    // both signals so the server can prefer RunHQ cookie identity while still
+    // falling back to the app token when no qualifying cookie is present.
+    if (wantsCookieAuth() && config.project) headers["X-RW-Project"] = config.project;
     if (config.token) headers["Authorization"] = "Bearer " + config.token;
     else if (config.project) headers["X-RW-Project"] = config.project;
     return headers;
   }
 
-  // Whether the current init is eligible for the cookie (RunHQ-member) auth
-  // path. The Mode 0 server check requires the X-RW-Project header, which is
-  // only sent when config.project is set. Pure-bearer integrations that pass
-  // only `token` to init() can never trigger Mode 0, so requesting
-  // credentialed CORS for them is dead weight — and actively harmful: when
-  // the host origin is not in the project's allowed_origins, the server
-  // falls back to `Access-Control-Allow-Origin: *`, which the browser
-  // refuses to pair with `credentials: "include"`, blocking the response.
+  // Whether this widget instance is opted into the cookie (RunHQ-member)
+  // auth path. EXPLICIT opt-in via init({ useCookieAuth: true }) — gating
+  // on config.project would silently enable credentialed CORS for every
+  // embed that supplies a slug (public-anon embeds, pure-bearer embeds
+  // that also pass `project` for any reason). When the host origin is
+  // NOT in the project's allowed_origins, the server returns
+  // `Access-Control-Allow-Origin: *`, which the browser refuses to pair
+  // with `credentials: "include"` — the entire response is blocked.
+  //
+  // Explicit opt-in means: cookie auth is only attempted by embeds that
+  // have explicitly enrolled (auto-recognize ON + allowlisted origin).
+  // Everyone else gets the wide-open legacy CORS envelope and works
+  // exactly as before.
   function wantsCookieAuth() {
-    return !!config.project;
+    return !!config.useCookieAuth;
   }
 
   function api(path, opts) {
@@ -2775,7 +2783,12 @@
     // Visibility toggle: label flips between "Public" and "Private"
     // (with matching globe / lock icon) instead of a single "Private"
     // pill lighting up. Reads as a clear state change at a glance.
-    var privateBtn = h("button", { className: "rw-pill-btn", type: "button" }, [
+    // Unique class so applyIntent can find and toggle this button when
+    // restoring a draft that was saved with privacy on. Without this,
+    // an anon user who chose "private" before login redirects ends up
+    // submitting publicly on return — the description and files restore
+    // but the privacy toggle silently resets.
+    var privateBtn = h("button", { className: "rw-pill-btn rw-priv-toggle", type: "button", "data-rw-private": "false" }, [
       Icons.globe(12),
       h("span", null, t("composer.public")),
     ]);
@@ -2784,6 +2797,7 @@
       clearChildren(privateBtn);
       privateBtn.appendChild(isPrivate ? Icons.lock(12) : Icons.globe(12));
       privateBtn.appendChild(h("span", null, isPrivate ? t("composer.private") : t("composer.public")));
+      privateBtn.setAttribute("data-rw-private", isPrivate ? "true" : "false");
     }
     privateBtn.addEventListener("click", function () {
       isPrivate = !isPrivate;
@@ -3064,7 +3078,11 @@
     var updP = loadUpdates().then(function (data) {
       updatesCache = data.tickets || [];
     }).catch(function () { updatesCache = []; });
-    var mineP = config.token
+    // RunHQ-cookie users have config.token === null but ARE authenticated.
+    // Gating on isIdentified (set after the topTickets / identity response)
+    // keeps their "My Submissions" list populated on every refresh; gating
+    // on config.token alone would silently empty it on panel re-open.
+    var mineP = config.isIdentified
       ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
       : Promise.resolve().then(function () { myTicketsCache = []; });
 
@@ -3082,11 +3100,17 @@
   // ===========================================================================
 
   function submitAssign(ticketId, agentId, command, callback) {
-    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', {
+    // Match the api() helper: pass {method: 'POST'} so authHeaders attaches
+    // X-RunHQ-CSRF on the cookie path, and send credentials when the cookie
+    // path is in play. Without these, an admin under cookie auth sees the
+    // triager controls but the POST 401s or CSRF-rejects.
+    var init = {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      headers: authHeaders({ 'Content-Type': 'application/json' }, { method: 'POST' }),
       body: JSON.stringify({ agentId: agentId, command: command }),
-    }).then(function (res) {
+    };
+    if (wantsCookieAuth()) init.credentials = 'include';
+    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', init).then(function (res) {
       return res.json().then(function (body) {
         return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: body };
       }, function () {
@@ -3901,6 +3925,16 @@
         ta.value = intent.draft.description || "";
         ta.dispatchEvent(new Event("input", { bubbles: true }));
         rehydrateFilesIntoComposer(composerRoot, intent.draft.files);
+        // Restore the privacy toggle. The composer renders with isPrivate=false
+        // by default, so we only need to click when the saved draft was private.
+        // The button's data-rw-private attribute reflects its current state,
+        // so we won't double-toggle if applyIntent fires more than once.
+        if (intent.draft.isPrivate) {
+          var privBtn = composerRoot && composerRoot.querySelector(".rw-priv-toggle");
+          if (privBtn && privBtn.getAttribute("data-rw-private") !== "true") {
+            privBtn.click();
+          }
+        }
         showRestoreToast(t("restore.welcomeBack"));
         return;
       }
@@ -4088,6 +4122,12 @@
       config = {
         token: opts.token || null,
         project: opts.project || null,
+        // Explicit opt-in for the RunHQ-member cookie auth path. When true,
+        // widget fetches use `credentials: include` and the server is
+        // expected to have this origin in `widget_projects.allowed_origins`.
+        // When false (default), the widget operates wide-open without
+        // credentials — same envelope as before this feature shipped.
+        useCookieAuth: !!opts.useCookieAuth,
         // Resolved by /api/widget/identity below. Until then, authHeaders()
         // uses the legacy token-or-slug heuristic so the bootstrap probe
         // itself can authenticate.
@@ -4117,7 +4157,12 @@
             currentUser.isTriager = !!(idData && idData.isTriager);
           }
         })
-        .catch(function () { /* identity probe failure → anon path, no log spam */ });
+        .catch(function () {
+          // Credentialed CORS fails hard when an owner copied a cookie-auth
+          // snippet onto a non-allowlisted origin. Drop back to the legacy
+          // non-credentialed envelope before loading public/app-token data.
+          config.useCookieAuth = false;
+        });
 
       identityP.then(function () { return loadTopTickets(); }).then(function (data) {
         topTicketsCache = data.tickets || [];
