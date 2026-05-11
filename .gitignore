@@ -3,6 +3,8 @@ node_modules/
 dist/
 types/
 .env
+.env.*
+!.env.example
 *.local
 do-app-spec.yaml
 
