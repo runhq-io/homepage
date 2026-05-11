@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navbar, Footer } from '../components/chrome';
+import { useT, useLocale } from '../i18n/context';
 
 /**
  * Visual: BEFORE vs AFTER pipelines as a 2D physics simulation.
@@ -79,13 +80,37 @@ export const BEFORE_STATIONS: StationConfig[] = [
 
 export const AFTER_STATIONS: StationConfig[] = [
   { id: 'user',    label: 'USER FEEDBACK',   capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5  }, outputs: ['widget'] },
-  { id: 'widget',  label: 'RUNHQ WIDGET', capacity: 1, processingTime: 500, pos: { x: 0.22, y: 0.5  }, outputs: ['agent_1', 'agent_2', 'agent_3'] },
+  { id: 'widget',  label: 'RUNHQ', capacity: 1, processingTime: 500, pos: { x: 0.22, y: 0.5  }, outputs: ['agent_1', 'agent_2', 'agent_3'] },
   { id: 'agent_1', label: 'CODING AGENT', capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.22 }, outputs: ['review'] },
   { id: 'agent_2', label: 'CODING AGENT', capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.50 }, outputs: ['review'] },
   { id: 'agent_3', label: 'CODING AGENT', capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.78 }, outputs: ['review'] },
   { id: 'review',  label: 'CODE REVIEW + QA', capacity: 1, processingTime: 800, pos: { x: 0.70, y: 0.5 }, outputs: ['deploy'] },
   { id: 'deploy',  label: 'DEPLOY',           capacity: 1, processingTime: 300, pos: { x: 0.94, y: 0.5 }, outputs: [] },
 ];
+
+export const BEFORE_STATIONS_KO: StationConfig[] = [
+  { id: 'user',    label: '사용자 피드백',      capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5 }, outputs: ['support'] },
+  { id: 'support', label: '고객지원',          capacity: 1, processingTime: 1568, pos: { x: 0.22, y: 0.5 }, outputs: ['mgmt'] },
+  { id: 'mgmt',    label: '매니저',            capacity: 1, processingTime: 2400, pos: { x: 0.37, y: 0.5 }, outputs: ['dev'] },
+  { id: 'dev',     label: '개발자 (AI 활용)',  capacity: 1, processingTime: 3000, pos: { x: 0.54, y: 0.5 }, outputs: ['review'] },
+  { id: 'review',  label: '코드 리뷰 + QA',    capacity: 1, processingTime: 800,  pos: { x: 0.74, y: 0.5 }, outputs: ['deploy'] },
+  { id: 'deploy',  label: '배포',              capacity: 1, processingTime: 1000, pos: { x: 0.94, y: 0.5 }, outputs: [] },
+];
+
+export const AFTER_STATIONS_KO: StationConfig[] = [
+  { id: 'user',    label: '사용자 피드백',     capacity: 0, processingTime: 0,    pos: { x: 0.06, y: 0.5  }, outputs: ['widget'] },
+  { id: 'widget',  label: 'RUNHQ',             capacity: 1, processingTime: 500,  pos: { x: 0.22, y: 0.5  }, outputs: ['agent_1', 'agent_2', 'agent_3'] },
+  { id: 'agent_1', label: '코딩 에이전트',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.22 }, outputs: ['review'] },
+  { id: 'agent_2', label: '코딩 에이전트',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.50 }, outputs: ['review'] },
+  { id: 'agent_3', label: '코딩 에이전트',     capacity: 1, processingTime: 3000, pos: { x: 0.45, y: 0.78 }, outputs: ['review'] },
+  { id: 'review',  label: '코드 리뷰 + QA',    capacity: 1, processingTime: 800,  pos: { x: 0.70, y: 0.5  }, outputs: ['deploy'] },
+  { id: 'deploy',  label: '배포',              capacity: 1, processingTime: 300,  pos: { x: 0.94, y: 0.5  }, outputs: [] },
+];
+
+export const STATIONS_BY_LOCALE = {
+  en: { before: BEFORE_STATIONS, after: AFTER_STATIONS },
+  ko: { before: BEFORE_STATIONS_KO, after: AFTER_STATIONS_KO },
+} as const;
 
 class Simulation {
   stations = new Map<string, StationRuntime>();
@@ -363,6 +388,11 @@ class Simulation {
   }
 }
 
+const PIPELINE_T = {
+  en: { shipped: 'shipped' },
+  ko: { shipped: '배포됨' },
+} as const;
+
 export function PipelineCanvas({
   configs,
   label,
@@ -374,6 +404,7 @@ export function PipelineCanvas({
   resetTick: number;
   height: number;
 }) {
+  const t = useT(PIPELINE_T);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [shipped, setShipped] = useState(0);
@@ -427,7 +458,7 @@ export function PipelineCanvas({
         <span className="vp-pipeline-label">{label}</span>
         <span className="vp-stat">
           <span className="vp-stat-num">{shipped}</span>
-          <span className="vp-stat-lbl">shipped</span>
+          <span className="vp-stat-lbl">{t.shipped}</span>
         </span>
       </div>
       <div className="vp-canvas-wrap" ref={wrapRef} style={{ height }}>
@@ -437,7 +468,29 @@ export function PipelineCanvas({
   );
 }
 
+const VISUAL_T = {
+  en: {
+    eyebrow: 'EXPERIMENT · VISUAL',
+    titleLead: 'Same input, different system. ',
+    titleEm: 'Throughput is downstream of structure.',
+    sub: 'Both pipelines receive feedback at the same rate. Each station has a fixed processing time. Watch the bottlenecks emerge.',
+    labelBefore: 'BEFORE',
+    labelAfter: 'WITH RUNHQ',
+  },
+  ko: {
+    eyebrow: '실험 · 비주얼',
+    titleLead: '같은 입력, 다른 시스템. ',
+    titleEm: '처리량은 구조의 결과입니다.',
+    sub: '두 파이프라인 모두 같은 속도로 피드백을 받습니다. 각 스테이션의 처리 시간은 고정되어 있습니다. 병목이 어떻게 드러나는지 지켜보세요.',
+    labelBefore: '기존 방식',
+    labelAfter: 'RUNHQ 도입 후',
+  },
+} as const;
+
 export default function VisualPage() {
+  const t = useT(VISUAL_T);
+  const locale = useLocale();
+  const stations = STATIONS_BY_LOCALE[locale];
   const [resetTick, setResetTick] = useState(0);
 
   useEffect(() => {
@@ -452,20 +505,19 @@ export default function VisualPage() {
 
       <section className="vp-hero">
         <div className="vp-hero-inner">
-          <div className="vp-eyebrow mono">EXPERIMENT · VISUAL</div>
+          <div className="vp-eyebrow mono">{t.eyebrow}</div>
           <h1 className="vp-title">
-            Same input, different system. <em>Throughput is downstream of structure.</em>
+            {t.titleLead}<em>{t.titleEm}</em>
           </h1>
           <p className="vp-sub">
-            Both pipelines receive feedback at the same rate. Each station has a fixed
-            processing time. Watch the bottlenecks emerge.
+            {t.sub}
           </p>
         </div>
       </section>
 
       <section className="vp-section">
-        <PipelineCanvas configs={BEFORE_STATIONS} label="BEFORE" resetTick={resetTick} height={200} />
-        <PipelineCanvas configs={AFTER_STATIONS} label="WITH RUNHQ" resetTick={resetTick} height={360} />
+        <PipelineCanvas configs={stations.before} label={t.labelBefore} resetTick={resetTick} height={200} />
+        <PipelineCanvas configs={stations.after} label={t.labelAfter} resetTick={resetTick} height={360} />
       </section>
 
       <Footer />

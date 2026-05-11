@@ -8,6 +8,7 @@ import VisualPage from './pages/VisualPage';
 import AboutPage from './pages/AboutPage';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
+import { LocaleProvider, BrowserDetector } from './i18n/context';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -20,17 +21,29 @@ function ScrollToTop() {
 function App() {
   return (
     <BrowserRouter>
-      <ScrollToTop />
-      <Routes>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/products" element={<ProductsPage />} />
-        <Route path="/pricing" element={<PricingPage />} />
-        <Route path="/docs/*" element={<DocsPage />} />
-        <Route path="/visual" element={<VisualPage />} />
-        <Route path="/about" element={<AboutPage />} />
-        <Route path="/privacy" element={<PrivacyPage />} />
-        <Route path="/terms" element={<TermsPage />} />
-      </Routes>
+      <LocaleProvider>
+        <BrowserDetector />
+        <ScrollToTop />
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/products" element={<ProductsPage />} />
+          <Route path="/pricing" element={<PricingPage />} />
+          <Route path="/docs/*" element={<DocsPage />} />
+          <Route path="/visual" element={<VisualPage />} />
+          <Route path="/about" element={<AboutPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
+          <Route path="/terms" element={<TermsPage />} />
+
+          <Route path="/ko" element={<HomePage />} />
+          <Route path="/ko/products" element={<ProductsPage />} />
+          <Route path="/ko/pricing" element={<PricingPage />} />
+          <Route path="/ko/docs/*" element={<DocsPage />} />
+          <Route path="/ko/visual" element={<VisualPage />} />
+          <Route path="/ko/about" element={<AboutPage />} />
+          <Route path="/ko/privacy" element={<PrivacyPage />} />
+          <Route path="/ko/terms" element={<TermsPage />} />
+        </Routes>
+      </LocaleProvider>
     </BrowserRouter>
   );
 }

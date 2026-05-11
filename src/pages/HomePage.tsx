@@ -1,103 +1,221 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, SIGNUP_URL, LOGIN_URL } from '../components/chrome';
 import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
+import { useT, useLocalePath } from '../i18n/context';
 import heroScreenshot from '../assets/screenshot.png';
 import heroScreenshotSm from '../assets/smaller_screenshot.png';
 
-const LoopCapture = () => (
-  <div className="rhw-lv">
-    {[
-      { src: 'intercom', who: 'Jen K.', txt: 'Stripe portal drops session on Safari' },
-      { src: 'linear',   who: 'Tomas R.', txt: 'Bulk archive in projects table' },
-      { src: 'widget',   who: 'Andre B.', txt: 'Doc page returns 504 on cold start' },
-    ].map((r, i) => (
-      <div key={i} className="rhw-lv-row">
-        <SourceIcon src={r.src} size={14} />
-        <div className="rhw-lv-row-txt">{r.txt}</div>
-        <div className="rhw-lv-row-who">{r.who}</div>
-      </div>
-    ))}
-  </div>
-);
-
-const HERO_ROLES = ['PM', 'Engineer', 'Design', 'QA', 'Support', 'Sales', 'Founder'];
-
-const HeroRoles = () => (
-  <div className="rhw-hero-roles">
-    <div className="rhw-hero-roles-h">Empower the entire team with agentic automation</div>
-    <div className="rhw-hero-roles-pills">
-      {HERO_ROLES.map((role) => (
-        <span key={role} className="rhw-hero-role-pill">{role}</span>
-      ))}
-    </div>
-  </div>
-);
-
-const LoopAssign = () => (
-  <div className="rhw-lv rhw-lv-assign">
-    {[
-      { task: 'Stripe portal redirect',    status: 'running',  agent: 'claude' as const, name: 'claude-sonnet-4' },
-      { task: 'Bulk archive in projects',  status: 'queued',   agent: 'cursor' as const, name: 'cursor-3' },
-      { task: 'Doc page 504 on cold start', status: 'standby', agent: 'codex'  as const, name: 'codex' },
-    ].map((r, i) => (
-      <div key={i} className="rhw-lv-assign-item">
-        <div className="rhw-lv-assign-task">
-          <span className="rhw-lv-assign-name">{r.task}</span>
-          <span className={`rhw-lv-assign-status rhw-lv-assign-status-${r.status}`}>{r.status}</span>
-        </div>
-        <div className="rhw-lv-assign-agent">
-          <span className="rhw-lv-assign-label">assigned to</span>
-          <AgentIcon agent={r.agent} size={12} />
-          <span className="rhw-lv-assign-aname">{r.name}</span>
-        </div>
-      </div>
-    ))}
-  </div>
-);
-
-const LoopReview = () => (
-  <div className="rhw-lv">
-    <div className="rhw-lv-pr">
-      <div className="rhw-lv-pr-h">PR #4821 · portal: cross-site cookies</div>
-      <div className="rhw-lv-pr-meta">+8 −3 · 1 file · 23 tests passed</div>
-      <div className="rhw-lv-pr-actions">
-        <span className="rhw-lv-pr-btn rhw-lv-pr-btn-on">Approve</span>
-        <span className="rhw-lv-pr-btn">Request edits</span>
-        <span className="rhw-lv-pr-btn">Revert</span>
-      </div>
-    </div>
-  </div>
-);
-
-const LoopDeploy = () => (
-  <div className="rhw-lv rhw-lv-mono">
-    <div><strong>merge:</strong> main ← #4821</div>
-    <div><strong>build:</strong> 142s · 1 file changed</div>
-    <div><strong>deploy:</strong> vercel · production</div>
-    <div><strong>live:</strong> portal.runhq.io · 200 OK</div>
-  </div>
-);
-
-const LOOP_STAGES = [
-  { n: '01', t: 'Collect feedback', s: 'Signals from anywhere',
-    body: 'Ingest from Intercom, Linear, Slack, your widget, an email. Auto-dedup, severity inference, repro context attached.',
-    keys: ['8 sources', '< 100ms ingest', 'PII strip at edge'],
-    Visual: LoopCapture },
-  { n: '02', t: 'Assign coding agents', s: 'Route to the model that fits',
-    body: 'Dispatch to Claude Code, Cursor, Codex, Devin, or your own. RunHQ packages context, sets budgets, watches plateaus and re-routes between models.',
-    keys: ['BYO model', 'Plateau detection', 'Auto-fallback'],
-    Visual: LoopAssign },
-  { n: '03', t: 'Review diff + test', s: 'Humans ship. Agents log.',
-    body: 'Every change lands as a PR with full provenance. Tests run in CI before review. Approve, request edits, or revert — agents never hold merge rights.',
-    keys: ['Tests in CI', 'One-click revert', 'Audit log export'],
-    Visual: LoopReview },
-  { n: '04', t: 'Deploy', s: 'Ship through your pipeline',
-    body: 'Approved PRs flow into the deploy pipeline you already run — Vercel, Render, Fly, AWS. Every release is logged with the chain back to the original ticket.',
-    keys: ['GitHub merge', 'Existing CD', 'Audit log export'],
-    Visual: LoopDeploy },
-];
+const HOME_T = {
+  en: {
+    // Hero
+    heroH1Line1: 'Orchestrate',
+    heroH1Line2: 'AI Coding Agents.',
+    heroLede: 'RunHQ lets anyone on your team assign tickets to coding agents. Each task gets its own branch, scoped and ready for review, eliminating the bottleneck between product and engineering.',
+    ctaStartFree: 'Start free',
+    ctaWatchDemo: 'Watch Demo',
+    heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
+    heroScreenshotSmAlt: 'RunHQ feedback widget and latest updates',
+    // Hero roles
+    heroRolesH: 'Empower the entire team with agentic automation',
+    rolePM: 'PM',
+    roleEngineer: 'Engineer',
+    roleDesign: 'Design',
+    roleQA: 'QA',
+    roleSupport: 'Support',
+    roleSales: 'Sales',
+    roleFounder: 'Founder',
+    // Logos
+    logosH: 'Trusted by engineering teams shipping with agents',
+    // Pipeline section
+    pipelineH2Line1: 'Why teams ship faster',
+    pipelineH2Line2: 'on RunHQ.',
+    pipelineDeck: 'Same feedback rate into both pipelines. The human handoff chain piles up at every step. Parallel coding agents drain the queue as fast as it arrives.',
+    pipelineLabelBefore: 'BEFORE',
+    pipelineLabelAfter: 'WITH RUNHQ',
+    // Loop section
+    loopH2Line1: 'Every release walks',
+    loopH2Line2: 'the same loop.',
+    loopDeck: 'Most coding-agent stacks stop at “the agent finished.” That’s the middle. RunHQ owns the ends — capture before, review after — so the middle can run unattended without scaring anyone.',
+    // Loop stage 01 — Collect feedback
+    loop1Title: 'Collect feedback',
+    loop1Sub: 'One widget, no extra login.',
+    loop1Body: 'Users and teammates send feedback straight from your product through an embedded widget — no separate account, no login wall. Each report lands in RunHQ with the page, the user, and repro context attached.',
+    loop1Key1: 'Embedded widget',
+    loop1Key2: 'No login wall',
+    loop1Key3: 'Auto-context',
+    // Loop stage 02 — Assign coding agents
+    loop2Title: 'Assign coding agents',
+    loop2Sub: 'Run them in parallel.',
+    loop2Body: 'Assign tasks to your custom agents equipped with Claude Code, Cursor, Codex, or your own. RunHQ spawns processes in parallel while logging the important details for full transparency.',
+    loop2Key1: 'BYO agent',
+    loop2Key2: 'Parallel runs',
+    loop2Key3: 'Full audit log',
+    // Loop stage 03 — Review code
+    loop3Title: 'Review code',
+    loop3Sub: 'PRs land ready to read.',
+    loop3Body: 'Every agent run lands as a clean pull request with diff, summary, and provenance attached — so reviewers can scan, comment, and approve in the GitHub flow they already use.',
+    loop3Key1: 'GitHub PRs',
+    loop3Key2: 'Inline diff',
+    loop3Key3: 'One-click revert',
+    // Loop stage 04 — Test + Deploy
+    loop4Title: 'Test + Deploy',
+    loop4Sub: 'Run the app before you ship.',
+    loop4Body: 'RunHQ spins up a fully functioning server for every PR — its own URL, its own environment — so you can actually exercise the change end-to-end before it merges into the deploy pipeline you already run.',
+    loop4Key1: 'Live preview env',
+    loop4Key2: 'Per-PR sandbox',
+    loop4Key3: 'Ships via your CD',
+    // LoopCapture demo rows
+    captureWho1: 'Jen K.',
+    captureTxt1: 'Stripe portal drops session on Safari',
+    captureWho2: 'Tomas R.',
+    captureTxt2: 'Bulk archive in projects table',
+    captureWho3: 'Andre B.',
+    captureTxt3: 'Doc page returns 504 on cold start',
+    // LoopAssign demo rows
+    assignTask1: 'Stripe portal redirect',
+    assignTask2: 'Bulk archive in projects',
+    assignTask3: 'Doc page 504 on cold start',
+    assignStatusRunning: 'running',
+    assignStatusQueued: 'queued',
+    assignStatusStandby: 'standby',
+    assignLabel: 'assigned to',
+    // LoopReview demo
+    reviewPrH: 'PR #4821 · portal: cross-site cookies',
+    reviewPrMeta: '+8 −3 · 1 file changed · ready for review',
+    reviewBtnApprove: 'Approve',
+    reviewBtnRequest: 'Request edits',
+    reviewBtnRevert: 'Revert',
+    // LoopDeploy demo
+    deployPreviewLabel: 'preview:',
+    deployPreviewV: 'pr-4821.runhq.dev · ready',
+    deployTestsLabel: 'tests:',
+    deployTestsV: '23 passed · 142s',
+    deployDeployLabel: 'deploy:',
+    deployDeployV: 'vercel · production',
+    deployLiveLabel: 'live:',
+    deployLiveV: 'portal.runhq.io · 200 OK',
+    // CTA band
+    ctaH1: 'Stop translating feedback by hand.',
+    ctaH2: 'Start shipping it.',
+    ctaBtnPrimary: 'Start free →',
+    ctaBtnSecondary: 'Book a 20-min demo',
+    ctaMeta1Strong: 'Live in 60 minutes.',
+    ctaMeta1: 'Drop the widget, connect a source, ship before lunch.',
+    ctaMeta2Strong: 'Audit log export.',
+    ctaMeta2: 'PII strip at ingest. Every agent action versioned.',
+    ctaMeta3Strong: 'Cancel anytime.',
+    ctaMeta3: 'Take the audit log with you on the way out.',
+    // Modal
+    modalAriaLabel: 'Demo video',
+    modalCloseLabel: 'Close demo video',
+  },
+  ko: {
+    // Hero
+    heroH1Line1: 'AI 코딩 에이전트를',
+    heroH1Line2: '오케스트레이션하세요.',
+    heroLede: 'RunHQ는 팀 누구나 코딩 에이전트에게 티켓을 할당할 수 있게 해줍니다. 모든 작업이 자체 브랜치에서 범위가 정해진 채로 리뷰 준비 상태로 도착해, 프로덕트와 엔지니어링 사이의 병목을 없앱니다.',
+    ctaStartFree: '무료로 시작하기',
+    ctaWatchDemo: '데모 보기',
+    heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
+    heroScreenshotSmAlt: 'RunHQ 피드백 위젯과 최신 업데이트',
+    // Hero roles
+    heroRolesH: '에이전트 자동화로 팀 전체에 힘을 실어주세요',
+    rolePM: 'PM',
+    roleEngineer: '엔지니어',
+    roleDesign: '디자인',
+    roleQA: 'QA',
+    roleSupport: '지원',
+    roleSales: '세일즈',
+    roleFounder: '창업자',
+    // Logos
+    logosH: '에이전트와 함께 배포하는 엔지니어링 팀들이 신뢰합니다',
+    // Pipeline section
+    pipelineH2Line1: 'RunHQ에서 팀이',
+    pipelineH2Line2: '더 빠르게 배포하는 이유.',
+    pipelineDeck: '두 파이프라인에 같은 속도로 피드백이 들어옵니다. 사람 인수인계 방식은 매 단계마다 쌓이고, 병렬로 실행되는 코딩 에이전트는 들어오는 속도만큼 빠르게 큐를 비워냅니다.',
+    pipelineLabelBefore: '이전',
+    pipelineLabelAfter: 'RUNHQ와 함께',
+    // Loop section
+    loopH2Line1: '모든 릴리스는 같은',
+    loopH2Line2: '루프를 따라갑니다.',
+    loopDeck: '대부분의 코딩 에이전트 스택은 “에이전트 완료”에서 멈춥니다. 그건 중간 단계일 뿐입니다. RunHQ는 양쪽 끝 — 앞에서의 수집과 뒤에서의 리뷰 — 을 책임지기 때문에, 중간은 누구도 불안하지 않게 무인으로 돌아갈 수 있습니다.',
+    // Loop stage 01 — Collect feedback
+    loop1Title: '피드백 수집',
+    loop1Sub: '위젯 하나, 추가 로그인 없음.',
+    loop1Body: '사용자와 동료가 임베디드 위젯을 통해 제품에서 바로 피드백을 보냅니다 — 별도의 계정도, 로그인 장벽도 없습니다. 모든 리포트는 페이지, 사용자, 재현 컨텍스트가 함께 RunHQ로 도착합니다.',
+    loop1Key1: '임베디드 위젯',
+    loop1Key2: '로그인 장벽 없음',
+    loop1Key3: '자동 컨텍스트',
+    // Loop stage 02 — Assign coding agents
+    loop2Title: '코딩 에이전트 할당',
+    loop2Sub: '병렬로 실행하세요.',
+    loop2Body: 'Claude Code, Cursor, Codex, 또는 직접 만든 커스텀 에이전트에 작업을 할당하세요. RunHQ는 프로세스를 병렬로 띄우면서 중요한 세부 사항을 모두 기록해 완전한 투명성을 제공합니다.',
+    loop2Key1: '내 에이전트 연결',
+    loop2Key2: '병렬 실행',
+    loop2Key3: '전체 감사 로그',
+    // Loop stage 03 — Review code
+    loop3Title: '코드 리뷰',
+    loop3Sub: 'PR이 바로 읽을 준비된 채로 도착합니다.',
+    loop3Body: '모든 에이전트 실행은 diff, 요약, 출처가 첨부된 깔끔한 풀 리퀘스트로 도착합니다 — 리뷰어는 이미 쓰던 GitHub 플로우 안에서 훑고, 코멘트하고, 승인하면 됩니다.',
+    loop3Key1: 'GitHub PR',
+    loop3Key2: '인라인 diff',
+    loop3Key3: '원클릭 되돌리기',
+    // Loop stage 04 — Test + Deploy
+    loop4Title: '테스트 + 배포',
+    loop4Sub: '배포 전에 앱을 직접 돌려보세요.',
+    loop4Body: 'RunHQ는 모든 PR에 대해 자체 URL과 자체 환경을 갖춘 완전한 서버를 띄워줍니다 — 그래서 이미 사용 중인 배포 파이프라인에 머지되기 전에 변경 사항을 엔드 투 엔드로 실제로 돌려볼 수 있습니다.',
+    loop4Key1: '라이브 프리뷰 환경',
+    loop4Key2: 'PR별 샌드박스',
+    loop4Key3: '기존 CD로 배포',
+    // LoopCapture demo rows
+    captureWho1: 'Jen K.',
+    captureTxt1: 'Safari에서 Stripe 포털 세션이 끊김',
+    captureWho2: 'Tomas R.',
+    captureTxt2: '프로젝트 테이블에서 일괄 아카이브',
+    captureWho3: 'Andre B.',
+    captureTxt3: '콜드 스타트 시 문서 페이지가 504 반환',
+    // LoopAssign demo rows
+    assignTask1: 'Stripe 포털 리다이렉트',
+    assignTask2: '프로젝트 일괄 아카이브',
+    assignTask3: '콜드 스타트 시 문서 페이지 504',
+    assignStatusRunning: '실행 중',
+    assignStatusQueued: '대기 중',
+    assignStatusStandby: '대기',
+    assignLabel: '할당 대상',
+    // LoopReview demo
+    reviewPrH: 'PR #4821 · portal: cross-site cookies',
+    reviewPrMeta: '+8 −3 · 파일 1개 변경 · 리뷰 준비됨',
+    reviewBtnApprove: '승인',
+    reviewBtnRequest: '수정 요청',
+    reviewBtnRevert: '되돌리기',
+    // LoopDeploy demo
+    deployPreviewLabel: '프리뷰:',
+    deployPreviewV: 'pr-4821.runhq.dev · 준비됨',
+    deployTestsLabel: '테스트:',
+    deployTestsV: '23개 통과 · 142s',
+    deployDeployLabel: '배포:',
+    deployDeployV: 'vercel · production',
+    deployLiveLabel: '라이브:',
+    deployLiveV: 'portal.runhq.io · 200 OK',
+    // CTA band
+    ctaH1: '피드백을 손으로 옮기는 건 그만.',
+    ctaH2: '바로 배포하세요.',
+    ctaBtnPrimary: '무료로 시작하기 →',
+    ctaBtnSecondary: '20분 데모 예약하기',
+    ctaMeta1Strong: '60분 안에 라이브.',
+    ctaMeta1: '위젯을 붙이고, 소스를 연결하고, 점심 전에 배포하세요.',
+    ctaMeta2Strong: '감사 로그 내보내기.',
+    ctaMeta2: '수집 단계에서 PII 제거. 모든 에이전트 액션 버전 관리.',
+    ctaMeta3Strong: '언제든 해지.',
+    ctaMeta3: '나갈 때 감사 로그를 그대로 가져가세요.',
+    // Modal
+    modalAriaLabel: '데모 영상',
+    modalCloseLabel: '데모 영상 닫기',
+  },
+} as const;
 
 function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: React.RefObject<HTMLButtonElement | null> }) {
+  const t = useT(HOME_T);
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -118,9 +236,9 @@ function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: R
   }, [onClose, triggerRef]);
 
   return (
-    <div className="rhw-modal" role="dialog" aria-modal="true" aria-label="Demo video" onClick={onClose}>
+    <div className="rhw-modal" role="dialog" aria-modal="true" aria-label={t.modalAriaLabel} onClick={onClose}>
       <div className="rhw-modal-frame" onClick={(e) => e.stopPropagation()}>
-        <button ref={closeRef} className="rhw-modal-close" onClick={onClose} aria-label="Close demo video">✕</button>
+        <button ref={closeRef} className="rhw-modal-close" onClick={onClose} aria-label={t.modalCloseLabel}>✕</button>
         <video className="rhw-modal-video" autoPlay controls playsInline src="/images/demo.mp4" />
       </div>
     </div>
@@ -128,14 +246,111 @@ function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: R
 }
 
 export default function HomePage() {
+  const t = useT(HOME_T);
+  const lp = useLocalePath();
+  // lp is wired up for any future internal links; current CTAs use external auth URLs.
+  void lp;
   const [demoOpen, setDemoOpen] = useState(false);
   const demoBtnRef = useRef<HTMLButtonElement>(null);
   const [pipelineResetTick, setPipelineResetTick] = useState(0);
 
   useEffect(() => {
-    const id = setInterval(() => setPipelineResetTick(t => t + 1), 4 * 60 * 1000);
+    const id = setInterval(() => setPipelineResetTick(tick => tick + 1), 4 * 60 * 1000);
     return () => clearInterval(id);
   }, []);
+
+  const HERO_ROLES = [t.rolePM, t.roleEngineer, t.roleDesign, t.roleQA, t.roleSupport, t.roleSales, t.roleFounder];
+
+  const HeroRoles = () => (
+    <div className="rhw-hero-roles">
+      <div className="rhw-hero-roles-h">{t.heroRolesH}</div>
+      <div className="rhw-hero-roles-pills">
+        {HERO_ROLES.map((role) => (
+          <span key={role} className="rhw-hero-role-pill">{role}</span>
+        ))}
+      </div>
+    </div>
+  );
+
+  const LoopCapture = () => (
+    <div className="rhw-lv">
+      {[
+        { src: 'intercom', who: t.captureWho1, txt: t.captureTxt1 },
+        { src: 'linear',   who: t.captureWho2, txt: t.captureTxt2 },
+        { src: 'widget',   who: t.captureWho3, txt: t.captureTxt3 },
+      ].map((r, i) => (
+        <div key={i} className="rhw-lv-row">
+          <SourceIcon src={r.src} size={14} />
+          <div className="rhw-lv-row-txt">{r.txt}</div>
+          <div className="rhw-lv-row-who">{r.who}</div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const LoopAssign = () => (
+    <div className="rhw-lv rhw-lv-assign">
+      {[
+        { task: t.assignTask1, statusKey: 'running' as const, statusLabel: t.assignStatusRunning, agent: 'claude' as const, name: 'claude-sonnet-4' },
+        { task: t.assignTask2, statusKey: 'queued'  as const, statusLabel: t.assignStatusQueued,  agent: 'cursor' as const, name: 'cursor-3' },
+        { task: t.assignTask3, statusKey: 'standby' as const, statusLabel: t.assignStatusStandby, agent: 'codex'  as const, name: 'codex' },
+      ].map((r, i) => (
+        <div key={i} className="rhw-lv-assign-item">
+          <div className="rhw-lv-assign-task">
+            <span className="rhw-lv-assign-name">{r.task}</span>
+            <span className={`rhw-lv-assign-status rhw-lv-assign-status-${r.statusKey}`}>{r.statusLabel}</span>
+          </div>
+          <div className="rhw-lv-assign-agent">
+            <span className="rhw-lv-assign-label">{t.assignLabel}</span>
+            <AgentIcon agent={r.agent} size={12} />
+            <span className="rhw-lv-assign-aname">{r.name}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const LoopReview = () => (
+    <div className="rhw-lv">
+      <div className="rhw-lv-pr">
+        <div className="rhw-lv-pr-h">{t.reviewPrH}</div>
+        <div className="rhw-lv-pr-meta">{t.reviewPrMeta}</div>
+        <div className="rhw-lv-pr-actions">
+          <span className="rhw-lv-pr-btn rhw-lv-pr-btn-on">{t.reviewBtnApprove}</span>
+          <span className="rhw-lv-pr-btn">{t.reviewBtnRequest}</span>
+          <span className="rhw-lv-pr-btn">{t.reviewBtnRevert}</span>
+        </div>
+      </div>
+    </div>
+  );
+
+  const LoopDeploy = () => (
+    <div className="rhw-lv rhw-lv-mono">
+      <div><strong>{t.deployPreviewLabel}</strong> {t.deployPreviewV}</div>
+      <div><strong>{t.deployTestsLabel}</strong> {t.deployTestsV}</div>
+      <div><strong>{t.deployDeployLabel}</strong> {t.deployDeployV}</div>
+      <div><strong>{t.deployLiveLabel}</strong> {t.deployLiveV}</div>
+    </div>
+  );
+
+  const LOOP_STAGES = [
+    { n: '01', t: t.loop1Title, s: t.loop1Sub,
+      body: t.loop1Body,
+      keys: [t.loop1Key1, t.loop1Key2, t.loop1Key3],
+      Visual: LoopCapture },
+    { n: '02', t: t.loop2Title, s: t.loop2Sub,
+      body: t.loop2Body,
+      keys: [t.loop2Key1, t.loop2Key2, t.loop2Key3],
+      Visual: LoopAssign },
+    { n: '03', t: t.loop3Title, s: t.loop3Sub,
+      body: t.loop3Body,
+      keys: [t.loop3Key1, t.loop3Key2, t.loop3Key3],
+      Visual: LoopReview },
+    { n: '04', t: t.loop4Title, s: t.loop4Sub,
+      body: t.loop4Body,
+      keys: [t.loop4Key1, t.loop4Key2, t.loop4Key3],
+      Visual: LoopDeploy },
+  ];
 
   return (
     <div className="rhw-root">
@@ -148,14 +363,14 @@ export default function HomePage() {
       <section className="rhw-hero">
         <div className="rhw-hero-side">
           <h1 className="rhw-hero-h1">
-            Orchestrate<br />
-            AI&nbsp;Coding Agents.
+            {t.heroH1Line1}<br />
+            {t.heroH1Line2}
           </h1>
           <p className="rhw-hero-lede">
-            RunHQ lets anyone on your team assign tickets to coding agents. Each task gets its own branch, scoped and ready for review, eliminating the bottleneck between product and engineering.
+            {t.heroLede}
           </p>
           <div className="rhw-hero-cta">
-            <a className="rhw-btn-primary" href={SIGNUP_URL}>Start free <span>→</span></a>
+            <a className="rhw-btn-primary" href={SIGNUP_URL}>{t.ctaStartFree} <span>→</span></a>
             <button
               ref={demoBtnRef}
               type="button"
@@ -163,7 +378,7 @@ export default function HomePage() {
               onClick={() => setDemoOpen(true)}
             >
               <span className="rhw-play">▶</span>
-              Watch Demo
+              {t.ctaWatchDemo}
             </button>
           </div>
 
@@ -172,18 +387,18 @@ export default function HomePage() {
 
         <div className="rhw-hero-app">
           <div className="rhw-hero-shot">
-            <img src={heroScreenshot} alt="RunHQ workspace — preview improvement task" />
+            <img src={heroScreenshot} alt={t.heroScreenshotAlt} />
           </div>
 
           <div className="rhw-hero-shot-sm">
-            <img src={heroScreenshotSm} alt="RunHQ feedback widget and latest updates" />
+            <img src={heroScreenshotSm} alt={t.heroScreenshotSmAlt} />
           </div>
         </div>
       </section>
 
       {/* LOGOS */}
       <section className="rhw-logos">
-        <div className="rhw-logos-h">Trusted by engineering teams shipping with agents</div>
+        <div className="rhw-logos-h">{t.logosH}</div>
         <div className="rhw-logos-row">
           {LOGOS.map((name) => (
             <Wordmark key={name} name={name} size={18} color="var(--rhw-ink-mute)" />
@@ -194,23 +409,23 @@ export default function HomePage() {
       {/* BEFORE / AFTER pipeline simulation */}
       <section className="rhw-pipeline">
         <div className="rhw-section-head">
-          <h2 className="rhw-h2">Why teams ship faster<br />on RunHQ.</h2>
+          <h2 className="rhw-h2">{t.pipelineH2Line1}<br />{t.pipelineH2Line2}</h2>
           <p className="rhw-section-deck">
-            Same feedback rate into both pipelines. The human handoff chain piles up at every step. Parallel coding agents drain the queue as fast as it arrives.
+            {t.pipelineDeck}
           </p>
         </div>
         <div className="rhw-pipeline-grid">
-          <PipelineCanvas configs={BEFORE_STATIONS} label="BEFORE" resetTick={pipelineResetTick} height={200} />
-          <PipelineCanvas configs={AFTER_STATIONS} label="WITH RUNHQ" resetTick={pipelineResetTick} height={360} />
+          <PipelineCanvas configs={BEFORE_STATIONS} label={t.pipelineLabelBefore} resetTick={pipelineResetTick} height={200} />
+          <PipelineCanvas configs={AFTER_STATIONS} label={t.pipelineLabelAfter} resetTick={pipelineResetTick} height={360} />
         </div>
       </section>
 
       {/* THE LOOP */}
       <section className="rhw-loop">
         <div className="rhw-section-head">
-          <h2 className="rhw-h2">Every release walks<br />the same loop.</h2>
+          <h2 className="rhw-h2">{t.loopH2Line1}<br />{t.loopH2Line2}</h2>
           <p className="rhw-section-deck">
-            Most coding-agent stacks stop at &ldquo;the agent finished.&rdquo; That&rsquo;s the middle. RunHQ owns the ends — capture before, review after — so the middle can run unattended without scaring anyone.
+            {t.loopDeck}
           </p>
         </div>
 
@@ -238,17 +453,17 @@ export default function HomePage() {
       <section className="rhw-cta-band">
         <div className="rhw-cta-inner">
           <h2 className="rhw-cta-h">
-            Stop translating feedback by hand.<br />
-            Start shipping it.
+            {t.ctaH1}<br />
+            {t.ctaH2}
           </h2>
           <div className="rhw-cta-actions">
-            <a className="rhw-btn-primary rhw-btn-lg" href={SIGNUP_URL}>Start free →</a>
-            <a className="rhw-btn-ghost rhw-btn-lg" href={LOGIN_URL}>Book a 20-min demo</a>
+            <a className="rhw-btn-primary rhw-btn-lg" href={SIGNUP_URL}>{t.ctaBtnPrimary}</a>
+            <a className="rhw-btn-ghost rhw-btn-lg" href={LOGIN_URL}>{t.ctaBtnSecondary}</a>
           </div>
           <div className="rhw-cta-meta">
-            <div><strong>Live in 60 minutes.</strong> Drop the widget, connect a source, ship before lunch.</div>
-            <div><strong>Audit log export.</strong> PII strip at ingest. Every agent action versioned.</div>
-            <div><strong>Cancel anytime.</strong> Take the audit log with you on the way out.</div>
+            <div><strong>{t.ctaMeta1Strong}</strong> {t.ctaMeta1}</div>
+            <div><strong>{t.ctaMeta2Strong}</strong> {t.ctaMeta2}</div>
+            <div><strong>{t.ctaMeta3Strong}</strong> {t.ctaMeta3}</div>
           </div>
         </div>
       </section>

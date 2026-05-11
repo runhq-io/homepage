@@ -1,7 +1,89 @@
 import { Link } from 'react-router-dom';
+import { useT, useLocale, useLocalePath, useLocaleSwitch } from '../i18n/context';
 
 export const SIGNUP_URL = 'https://app.runhq.io/signup';
 export const LOGIN_URL = 'https://app.runhq.io';
+
+const NAV_T = {
+  en: {
+    products: 'Products',
+    pricing: 'Pricing',
+    docs: 'Docs',
+    signIn: 'Sign in',
+    startFree: 'Start free',
+    switchToKorean: '한국어',
+    switchToEnglish: 'EN',
+  },
+  ko: {
+    products: '제품',
+    pricing: '요금제',
+    docs: '문서',
+    signIn: '로그인',
+    startFree: '무료 시작',
+    switchToKorean: '한국어',
+    switchToEnglish: 'EN',
+  },
+} as const;
+
+const FOOTER_T = {
+  en: {
+    blurb: 'The operations layer for AI coding agents. Vancouver, BC.',
+    productsH: 'Products',
+    agentAutomation: 'Agent automation',
+    projectManagement: 'Project management',
+    devEnvironment: 'Dev environment',
+    feedbackWidget: 'Feedback widget',
+    companyH: 'Company',
+    docs: 'Docs',
+    about: 'About',
+    privacy: 'Privacy',
+    terms: 'Terms',
+    copyright: '© 2026 RunHQ Solutions Inc.',
+    tagline: 'Closed-loop product development',
+    builtFor: 'Built for agent-driven product teams',
+  },
+  ko: {
+    blurb: 'AI 코딩 에이전트를 위한 운영 레이어. 캐나다 밴쿠버.',
+    productsH: '제품',
+    agentAutomation: '에이전트 자동화',
+    projectManagement: '프로젝트 관리',
+    devEnvironment: '개발 환경',
+    feedbackWidget: '피드백 위젯',
+    companyH: '회사',
+    docs: '문서',
+    about: '소개',
+    privacy: '개인정보',
+    terms: '약관',
+    copyright: '© 2026 RunHQ Solutions Inc.',
+    tagline: '닫힌 루프 제품 개발',
+    builtFor: '에이전트 중심의 제품 팀을 위해 만들어졌습니다',
+  },
+} as const;
+
+function LangSwitcher() {
+  const locale = useLocale();
+  const switchLocale = useLocaleSwitch();
+  const t = useT(NAV_T);
+  const targetLocale = locale === 'ko' ? 'en' : 'ko';
+  const label = targetLocale === 'ko' ? t.switchToKorean : t.switchToEnglish;
+  const aria = targetLocale === 'ko' ? 'Switch to Korean' : 'Switch to English';
+  return (
+    <button
+      type="button"
+      className="rhc-lang"
+      aria-label={aria}
+      onClick={() => switchLocale(targetLocale)}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18" />
+        <path d="M12 3a14 14 0 0 1 0 18" />
+        <path d="M12 3a14 14 0 0 0 0 18" />
+      </svg>
+      <span>{label}</span>
+    </button>
+  );
+}
 
 export const MercuryMark = ({ size = 24 }: { size?: number }) => (
   <span className="rhc-merc" style={{ width: size, height: size }} aria-hidden="true">
@@ -161,29 +243,34 @@ export const LOGOS = [
 type NavActive = 'products' | 'pricing' | 'docs' | null;
 
 export function Navbar({ active = null }: { active?: NavActive } = {}) {
+  const t = useT(NAV_T);
+  const lp = useLocalePath();
   return (
     <header className="rhc-nav">
       <style>{NAV_STYLES}</style>
       <div className="rhc-nav-l">
-        <Link className="rhc-brand" to="/">
+        <Link className="rhc-brand" to={lp('/')}>
           <span className="rhc-brand-mark"><MercuryMark size={22} /></span>
           <span className="rhc-brand-name">RunHQ</span>
         </Link>
         <nav className="rhc-nav-c">
-          <Link to="/products" className={`rhc-nav-i ${active === 'products' ? 'rhc-nav-on' : ''}`}>Products</Link>
-          <Link to="/pricing" className={`rhc-nav-i ${active === 'pricing' ? 'rhc-nav-on' : ''}`}>Pricing</Link>
-          <Link to="/docs" className={`rhc-nav-i ${active === 'docs' ? 'rhc-nav-on' : ''}`}>Docs</Link>
+          <Link to={lp('/products')} className={`rhc-nav-i ${active === 'products' ? 'rhc-nav-on' : ''}`}>{t.products}</Link>
+          <Link to={lp('/pricing')} className={`rhc-nav-i ${active === 'pricing' ? 'rhc-nav-on' : ''}`}>{t.pricing}</Link>
+          <Link to={lp('/docs')} className={`rhc-nav-i ${active === 'docs' ? 'rhc-nav-on' : ''}`}>{t.docs}</Link>
         </nav>
       </div>
       <div className="rhc-nav-r">
-        <a className="rhc-signin" href={LOGIN_URL}>Sign in</a>
-        <a className="rhc-cta" href={SIGNUP_URL}>Start free</a>
+        <LangSwitcher />
+        <a className="rhc-signin" href={LOGIN_URL}>{t.signIn}</a>
+        <a className="rhc-cta" href={SIGNUP_URL}>{t.startFree}</a>
       </div>
     </header>
   );
 }
 
 export function Footer() {
+  const t = useT(FOOTER_T);
+  const lp = useLocalePath();
   return (
     <footer className="rhc-footer">
       <style>{FOOTER_STYLES}</style>
@@ -193,30 +280,28 @@ export function Footer() {
             <span className="rhc-brand-mark"><MercuryMark size={22} /></span>
             <span>RunHQ</span>
           </div>
-          <p className="rhc-footer-blurb">
-            The operations layer for AI coding agents. Vancouver, BC.
-          </p>
+          <p className="rhc-footer-blurb">{t.blurb}</p>
         </div>
         <div>
-          <div className="rhc-footer-h">Products</div>
-          <Link to="/products">Agent automation</Link>
-          <Link to="/products">Project management</Link>
-          <Link to="/products">Dev environment</Link>
-          <Link to="/products">Feedback widget</Link>
+          <div className="rhc-footer-h">{t.productsH}</div>
+          <Link to={lp('/products')}>{t.agentAutomation}</Link>
+          <Link to={lp('/products')}>{t.projectManagement}</Link>
+          <Link to={lp('/products')}>{t.devEnvironment}</Link>
+          <Link to={lp('/products')}>{t.feedbackWidget}</Link>
         </div>
         <div>
-          <div className="rhc-footer-h">Company</div>
-          <Link to="/docs">Docs</Link>
-          <Link to="/about">About</Link>
-          <Link to="/privacy">Privacy</Link>
-          <Link to="/terms">Terms</Link>
+          <div className="rhc-footer-h">{t.companyH}</div>
+          <Link to={lp('/docs')}>{t.docs}</Link>
+          <Link to={lp('/about')}>{t.about}</Link>
+          <Link to={lp('/privacy')}>{t.privacy}</Link>
+          <Link to={lp('/terms')}>{t.terms}</Link>
         </div>
       </div>
       <div className="rhc-footer-base">
-        <span>© 2026 RunHQ Solutions Inc.</span>
+        <span>{t.copyright}</span>
         <span>·</span>
-        <span>Closed-loop product development</span>
-        <span style={{ marginLeft: 'auto' }}>Built for agent-driven product teams</span>
+        <span>{t.tagline}</span>
+        <span style={{ marginLeft: 'auto' }}>{t.builtFor}</span>
       </div>
     </footer>
   );
@@ -375,6 +460,21 @@ const NAV_STYLES = `
   .rhc-nav-i:hover { background: var(--rhw-bg-2); color: var(--rhw-ink); }
   .rhc-nav-on { background: var(--rhw-bg-2); color: var(--rhw-ink); }
   .rhc-nav-r { display: flex; align-items: center; gap: 10px; justify-self: end; }
+  .rhc-lang {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    background: transparent;
+    border: 1px solid var(--rhw-line);
+    border-radius: 7px;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--rhw-ink-soft);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .rhc-lang svg { opacity: 0.8; }
+  .rhc-lang:hover { background: var(--rhw-bg-2); color: var(--rhw-ink); border-color: var(--rhw-line); }
+  .rhc-lang:focus-visible { outline: 2px solid var(--rhw-accent); outline-offset: 2px; }
   .rhc-signin {
     padding: 7px 12px;
     font-size: 13.5px;

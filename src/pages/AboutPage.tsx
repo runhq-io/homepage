@@ -1,39 +1,79 @@
 import { Navbar, Footer, SIGNUP_URL } from '../components/chrome';
+import { useT } from '../i18n/context';
 
-const VALUES = [
-  {
-    h: 'Loops, not handoffs',
-    p: 'Feedback, code, review, and ship live in one place. The faster a team closes the loop, the faster the product gets better.',
+const ABOUT_T = {
+  en: {
+    eyebrow: 'About · RunHQ',
+    h1: 'A small team building the operations layer for AI coding agents.',
+    lede: 'We started RunHQ because shipping software with agents felt nothing like the rest of our stack. Inboxes for feedback. Boards for tickets. Chat for review. We collapsed it into one loop.',
+    factFounded: 'Founded',
+    factFoundedV: '2025',
+    factHQ: 'Headquartered',
+    factHQV: 'Vancouver, BC',
+    factTeam: 'Team',
+    factTeamV: 'Small, distributed',
+    factBackers: 'Backers',
+    factBackersV: 'Independent',
+    valuesH2: 'What we believe.',
+    v1H: 'Loops, not handoffs',
+    v1P: 'Feedback, code, review, and ship live in one place. The faster a team closes the loop, the faster the product gets better.',
+    v2H: 'Operate the agent',
+    v2P: "Coding agents need a workplace, not a chatbox. We're building the operations layer where humans and agents do real work side by side.",
+    v3H: 'Boring tooling, fast teams',
+    v3P: 'Predictable pricing. Honest defaults. Tools that get out of the way so the team can run.',
+    contactH2: 'Get in touch.',
+    contactPre: 'Press, partnerships, or anything else — ',
+    contactSuffix: '.',
+    startFree: 'Start free →',
   },
-  {
-    h: 'Operate the agent',
-    p: "Coding agents need a workplace, not a chatbox. We're building the operations layer where humans and agents do real work side by side.",
+  ko: {
+    eyebrow: '소개 · RunHQ',
+    h1: 'AI 코딩 에이전트를 위한 운영 레이어를 만드는 작은 팀.',
+    lede: '에이전트로 소프트웨어를 출시하는 일은 우리가 평소 쓰던 다른 어떤 도구와도 달랐기에 RunHQ를 시작했습니다. 피드백은 받은편지함에, 티켓은 보드에, 리뷰는 채팅에 흩어져 있던 흐름을 하나의 루프로 합쳤습니다.',
+    factFounded: '설립',
+    factFoundedV: '2025년',
+    factHQ: '본사',
+    factHQV: '캐나다 밴쿠버',
+    factTeam: '팀',
+    factTeamV: '소규모, 분산 근무',
+    factBackers: '투자자',
+    factBackersV: '독립 운영',
+    valuesH2: '우리가 믿는 것.',
+    v1H: '인수인계가 아닌 루프',
+    v1P: '피드백, 코드, 리뷰, 배포가 한 곳에서 움직입니다. 루프를 빨리 닫는 팀일수록 제품이 더 빠르게 좋아집니다.',
+    v2H: '에이전트를 운영하세요',
+    v2P: '코딩 에이전트에게 필요한 것은 채팅창이 아니라 일터입니다. 사람과 에이전트가 나란히 진짜 일을 하는 운영 레이어를 만들고 있습니다.',
+    v3H: '평범한 도구, 빠른 팀',
+    v3P: '예측 가능한 가격. 정직한 기본값. 팀이 달릴 수 있도록 비켜서 주는 도구.',
+    contactH2: '문의하기.',
+    contactPre: '언론, 파트너십, 그 밖의 무엇이든 — ',
+    contactSuffix: '로 보내주세요.',
+    startFree: '무료로 시작하기 →',
   },
-  {
-    h: 'Boring tooling, fast teams',
-    p: 'Predictable pricing. Honest defaults. Tools that get out of the way so the team can run.',
-  },
-];
-
-const FACTS = [
-  { k: 'Founded', v: '2025' },
-  { k: 'Headquartered', v: 'Vancouver, BC' },
-  { k: 'Team', v: 'Small, distributed' },
-  { k: 'Backers', v: 'Independent' },
-];
+} as const;
 
 export default function AboutPage() {
+  const t = useT(ABOUT_T);
+  const FACTS = [
+    { k: t.factFounded, v: t.factFoundedV },
+    { k: t.factHQ, v: t.factHQV },
+    { k: t.factTeam, v: t.factTeamV },
+    { k: t.factBackers, v: t.factBackersV },
+  ];
+  const VALUES = [
+    { h: t.v1H, p: t.v1P },
+    { h: t.v2H, p: t.v2P },
+    { h: t.v3H, p: t.v3P },
+  ];
   return (
     <div className="rhp-root rha-root">
       <style>{ABOUT_STYLES}</style>
       <Navbar />
 
       <section className="rhp-hero">
-        <div className="rhp-hero-eyebrow">About · RunHQ</div>
-        <h1 className="rhp-hero-h1">A small team building the operations layer for AI coding agents.</h1>
-        <p className="rhp-hero-lede">
-          We started RunHQ because shipping software with agents felt nothing like the rest of our stack. Inboxes for feedback. Boards for tickets. Chat for review. We collapsed it into one loop.
-        </p>
+        <div className="rhp-hero-eyebrow">{t.eyebrow}</div>
+        <h1 className="rhp-hero-h1">{t.h1}</h1>
+        <p className="rhp-hero-lede">{t.lede}</p>
       </section>
 
       <section className="rha-facts">
@@ -46,7 +86,7 @@ export default function AboutPage() {
       </section>
 
       <section className="rha-values">
-        <h2 className="rha-h2">What we believe.</h2>
+        <h2 className="rha-h2">{t.valuesH2}</h2>
         <div className="rha-values-grid">
           {VALUES.map((v) => (
             <div key={v.h} className="rha-value">
@@ -58,12 +98,12 @@ export default function AboutPage() {
       </section>
 
       <section className="rha-contact">
-        <h2 className="rha-h2">Get in touch.</h2>
+        <h2 className="rha-h2">{t.contactH2}</h2>
         <p className="rha-contact-p">
-          Press, partnerships, or anything else — <a className="rha-link" href="mailto:admin@runhq.io">admin@runhq.io</a>.
+          {t.contactPre}<a className="rha-link" href="mailto:admin@runhq.io">admin@runhq.io</a>{t.contactSuffix}
         </p>
         <div className="rha-cta-row">
-          <a className="rhp-btn-primary" href={SIGNUP_URL}>Start free →</a>
+          <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.startFree}</a>
         </div>
       </section>
 

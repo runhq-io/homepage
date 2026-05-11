@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react';
 import { Navbar, Footer, Wordmark, LOGOS, SIGNUP_URL } from '../components/chrome';
+import { useT } from '../i18n/context';
 
 type Plan = {
   key: string;
@@ -16,90 +17,232 @@ type Plan = {
   highlights: string[];
 };
 
-const PLANS: Plan[] = [
-  {
-    key: 'starter', name: 'Starter', tag: 'Best for new teams',
-    monthly: 20, annual: 15, unit: '/mo', seat: 10,
-    pitch: 'Route feedback to any coding agent. Solo dev or a new team.',
-    cta: 'Get started', ghost: false,
-    highlights: [
-      '$15 in agent credit / mo',
-      'All supported coding agents',
-    ],
-  },
-  {
-    key: 'pro', name: 'Pro', tag: 'Best for shipping teams',
-    monthly: 100, annual: 75, unit: '/mo', seat: 15,
-    pitch: 'Internal feedback widget for your team and 5× the agent credit.',
-    cta: 'Get started', ghost: false,
-    highlights: [
-      'Everything in Starter, plus:',
-      '$75 in agent credit / mo',
-      'Internal feedback widget (team members only)',
-    ],
-  },
-  {
-    key: 'scale', name: 'Scale', tag: 'Best for scale-ups',
-    monthly: 250, annual: 200, unit: '/mo', seat: 25,
-    pitch: 'Public user-facing widget, graph-based agent flow, higher credit.',
-    cta: 'Get started', ghost: false, popular: true,
-    highlights: [
-      'Everything in Pro, plus:',
-      '$200 in agent credit / mo',
-      'Public user-facing widget',
-      'Graph-based agent flow',
-      'Higher concurrency limits',
-    ],
-  },
-  {
-    key: 'enterprise', name: 'Enterprise', tag: 'Best for regulated org charts',
-    monthly: null, annual: null, unit: '', seat: null,
-    pitch: 'Single-tenant deployment, custom DPA, dedicated POC.',
-    cta: 'Contact us', ghost: true,
-    highlights: [
-      'Everything in Scale, plus:',
-      'Single-tenant deployment',
-      'Custom DPA + MSA',
-      'Dedicated POC',
-    ],
-  },
-];
-
 type Cell = string | boolean;
-const COMPARE: { sec: string; rows: [string, Cell, Cell, Cell, Cell][] }[] = [
-  { sec: 'Workspace', rows: [
-    ['Projects',                  '3',          'Unlimited',         'Unlimited',         'Unlimited'],
-    ['Reviewers (read-only)',     'Unlimited',  'Unlimited',         'Unlimited',         'Unlimited'],
-    ['Internal widget (team members)', false,    true,                true,                true],
-    ['Public user-facing widget', false,         false,               true,                true],
-  ]},
-  { sec: 'Agents & credit', rows: [
-    ['Monthly agent credit',      '$15',        '$75',               '$200',              'Custom'],
-    ['Claude Code',               true,         true,                true,                true],
-    ['Codex',                     true,         true,                true,                true],
-    ['Browser + terminal execution', true,      true,                true,                true],
-    ['Graph-based agent flow',    false,        false,               true,                true],
-    ['Concurrent runs',           '2',          '5',                 '25',                'Custom'],
-  ]},
-  { sec: 'Governance', rows: [
-    ['Prompt + diff provenance',  true,         true,                true,                true],
-    ['Custom DPA',                false,        false,               false,               true],
-    ['Single-tenant deployment',  false,        false,               false,               true],
-  ]},
-];
 
-const FAQ = [
-  { q: 'How does seat pricing work?',
-    a: 'You pay a flat platform fee per month plus a per-seat charge for every team member with edit access. Read-only reviewers — designers, support, your CEO — are always free, on every plan.' },
-  { q: "What's the difference between a seat and a reviewer?",
-    a: 'Seats dispatch agents and ship work. Reviewers comment, vote, and watch — read-only, unlimited, free on every plan. Most teams have 3-4× more reviewers than seats.' },
-  { q: 'How does the monthly agent credit work?',
-    a: 'Every plan includes a pool of agent credit that resets at the start of each billing cycle — $15 on Starter, $75 on Pro, $200 on Scale. Credit pays for token spend across all supported coding agents. Unused credit does not roll over.' },
-  { q: 'What happens if I run out of credit?',
-    a: "Agent runs pause until the next cycle or until you top up. We never auto-charge overages — you'll see usage in-app long before you hit zero, and you can upgrade or add credit with one click." },
-  { q: 'Which coding agents do you support?',
-    a: 'All of them. Each RunHQ workspace runs on its own VPS, so anything that works on Linux — Claude Code, Codex, Cursor CLI, Aider, custom scripts — runs out of the box. You bring your own Claude or Codex subscription; RunHQ never sits between you and the model provider.' },
-];
+const PRICING_T = {
+  en: {
+    eyebrow: 'Pricing · Predictable platform + seats',
+    h1: 'Predictable pricing that scales with your team.',
+    lede: 'A flat platform fee plus a per-seat charge — no surprises, no usage cliffs. Read-only reviewers are always free.',
+    billingMonthly: 'Monthly',
+    billingAnnual: 'Annual',
+    billingSave: 'Save 25%',
+    mostPopular: 'Most popular',
+    unitMo: '/mo',
+    custom: 'Custom',
+    freeSeat: '1 user · no invites',
+    seatSuffix: '/seat',
+    freeForever: 'free forever',
+    billedAnnually: 'billed annually',
+    billedMonthly: 'billed monthly',
+    pricedToVolume: 'priced to your volume',
+    // Plans
+    planFreeName: 'Free',
+    planFreeTag: 'Kick the tires',
+    planFreePitch: 'One user, lowest-tier machine, $5 credit/mo. Upgrade to invite teammates.',
+    planFreeCta: 'Start free',
+    planFreeH1: '$5 in agent credit / mo',
+    planFreeH2: '1 user · no invites',
+    planFreeH3: 'Lowest-tier machine only',
+    planFreeH4: 'Unlimited concurrent runs',
+    planStarterName: 'Starter',
+    planStarterTag: 'Best for new teams',
+    planStarterPitch: 'Route feedback to any coding agent. Invite the whole team, pick any machine tier.',
+    planStarterCta: 'Get started',
+    planStarterH1: 'Everything in Free, plus:',
+    planStarterH2: '$75 in agent credit / mo',
+    planStarterH3: 'All machine tiers',
+    planStarterH4: 'Internal feedback widget (team members)',
+    planProName: 'Pro',
+    planProTag: 'Best for shipping teams',
+    planProPitch: 'Public user-facing widget, graph-based agent flow, higher credit.',
+    planProCta: 'Get started',
+    planProH1: 'Everything in Starter, plus:',
+    planProH2: '$200 in agent credit / mo',
+    planProH3: 'Public user-facing widget',
+    planProH4: 'Graph-based agent flow',
+    planEnterpriseName: 'Enterprise',
+    planEnterpriseTag: 'Best for regulated org charts',
+    planEnterprisePitch: 'Single-tenant deployment, custom DPA, dedicated POC.',
+    planEnterpriseCta: 'Contact us',
+    planEnterpriseH1: 'Everything in Pro, plus:',
+    planEnterpriseH2: 'Single-tenant deployment',
+    planEnterpriseH3: 'Custom DPA + MSA',
+    planEnterpriseH4: 'Dedicated POC',
+    // Trust
+    trustH: 'Trusted by 1,400+ teams shipping with agents',
+    // Compare
+    compareH: 'Compare every feature.',
+    compareSub: 'Side-by-side, all four plans, every line item.',
+    secWorkspace: 'Workspace',
+    secAgents: 'Agents & credit',
+    secGovernance: 'Governance',
+    rowUsers: 'Users',
+    rowTeamInvites: 'Team invites',
+    rowProjects: 'Projects',
+    rowReviewers: 'Reviewers (read-only)',
+    rowInternalWidget: 'Internal widget (team members)',
+    rowPublicWidget: 'Public user-facing widget',
+    rowMonthlyCredit: 'Monthly agent credit',
+    rowClaudeCode: 'Claude Code',
+    rowCodex: 'Codex',
+    rowBrowserTerm: 'Browser + terminal execution',
+    rowGraphFlow: 'Graph-based agent flow',
+    rowConcurrent: 'Concurrent runs',
+    rowMachineTiers: 'Machine tiers',
+    rowProvenance: 'Prompt + diff provenance',
+    rowCustomDPA: 'Custom DPA',
+    rowSingleTenant: 'Single-tenant deployment',
+    cellOne: '1',
+    cellUnlimited: 'Unlimited',
+    cellNone: 'None',
+    cellLowestOnly: 'Lowest only',
+    cellAllTiers: 'All tiers',
+    cellCustom: 'Custom',
+    // Save callout
+    saveWhy: 'Why teams switch',
+    saveH: 'Replace 3 tools with 1 — save ~$14,000/yr',
+    saveP: 'The average RunHQ Pro customer drops their feedback widget, agent ops dashboard, and ticket triage tool. Same loop, one bill.',
+    saveRow1T: 'Feedback widget',
+    saveRow1V: '$8,400 / yr',
+    saveRow2T: 'Agent dashboard',
+    saveRow2V: '$7,800 / yr',
+    saveRow3T: 'Ticket triage tool',
+    saveRow3V: '$3,000 / yr',
+    saveTotalT: 'RunHQ Pro, annual (8 seats)',
+    saveTotalV: '$4,800 / yr',
+    // FAQ
+    faqH: 'Frequently asked.',
+    faq1Q: 'How does seat pricing work?',
+    faq1A: 'You pay a flat platform fee per month plus a per-seat charge for every team member with edit access. Read-only reviewers — designers, support, your CEO — are always free, on every plan.',
+    faq2Q: "What's the difference between a seat and a reviewer?",
+    faq2A: 'Seats dispatch agents and ship work. Reviewers comment, vote, and watch — read-only, unlimited, free on every plan. Most teams have 3-4× more reviewers than seats.',
+    faq3Q: 'How does the monthly agent credit work?',
+    faq3A: 'Every plan includes a pool of agent credit that resets at the start of each billing cycle — $5 on Free, $75 on Starter, $200 on Pro. Credit pays for token spend across all supported coding agents. Unused credit does not roll over.',
+    faq4Q: 'What can I do on the Free plan?',
+    faq4A: 'Free gives you a single user, $5 of agent credit per month, and access to the lowest-tier machine. Team invites and higher-tier machines are unlocked starting on Starter. Concurrent agent runs are unlimited on every plan, Free included.',
+    faq5Q: 'What happens if I run out of credit?',
+    faq5A: "Agent runs pause until the next cycle or until you top up. We never auto-charge overages — you'll see usage in-app long before you hit zero, and you can upgrade or add credit with one click.",
+    faq6Q: 'Which coding agents do you support?',
+    faq6A: 'All of them. Each RunHQ workspace runs on its own VPS, so anything that works on Linux — Claude Code, Codex, Cursor CLI, Aider, custom scripts — runs out of the box. You bring your own Claude or Codex subscription; RunHQ never sits between you and the model provider.',
+    // CTA
+    ctaH: 'Pick a plan. Get the loop running today.',
+    ctaPrimary: 'Get started →',
+    ctaSecondary: 'Talk to sales',
+    ctaMeta: 'Switch plans anytime · Cancel from Settings',
+  },
+  ko: {
+    eyebrow: '가격 · 예측 가능한 플랫폼 + 사용자당 요금',
+    h1: '팀에 맞춰 확장되는 예측 가능한 가격.',
+    lede: '플랫폼 정액 요금 + 사용자당 요금 — 깜짝 청구도, 사용량 절벽도 없습니다. 읽기 전용 리뷰어는 언제나 무료입니다.',
+    billingMonthly: '월간',
+    billingAnnual: '연간',
+    billingSave: '25% 절약',
+    mostPopular: '가장 인기',
+    unitMo: '/월',
+    custom: '맞춤',
+    freeSeat: '1명 · 초대 불가',
+    seatSuffix: '/사용자',
+    freeForever: '평생 무료',
+    billedAnnually: '연간 결제',
+    billedMonthly: '월간 결제',
+    pricedToVolume: '사용량 기반 가격',
+    // Plans
+    planFreeName: '무료',
+    planFreeTag: '가볍게 시작',
+    planFreePitch: '1명, 최하위 머신, 월 $5 크레딧. 팀원을 초대하려면 업그레이드하세요.',
+    planFreeCta: '무료로 시작',
+    planFreeH1: '월 $5 에이전트 크레딧',
+    planFreeH2: '1명 · 초대 불가',
+    planFreeH3: '최하위 머신만',
+    planFreeH4: '무제한 동시 실행',
+    planStarterName: '스타터',
+    planStarterTag: '새 팀에 적합',
+    planStarterPitch: '어떤 코딩 에이전트로도 피드백을 라우팅. 전체 팀을 초대하고 머신 등급을 자유롭게 선택하세요.',
+    planStarterCta: '시작하기',
+    planStarterH1: '무료 플랜의 모든 기능, 그리고:',
+    planStarterH2: '월 $75 에이전트 크레딧',
+    planStarterH3: '모든 머신 등급',
+    planStarterH4: '내부 피드백 위젯 (팀원용)',
+    planProName: '프로',
+    planProTag: '출시 중인 팀에 적합',
+    planProPitch: '외부 사용자용 위젯, 그래프 기반 에이전트 플로우, 더 많은 크레딧.',
+    planProCta: '시작하기',
+    planProH1: '스타터의 모든 기능, 그리고:',
+    planProH2: '월 $200 에이전트 크레딧',
+    planProH3: '외부 사용자용 위젯',
+    planProH4: '그래프 기반 에이전트 플로우',
+    planEnterpriseName: '엔터프라이즈',
+    planEnterpriseTag: '규제가 있는 조직에 적합',
+    planEnterprisePitch: '싱글 테넌트 배포, 맞춤 DPA, 전담 담당자.',
+    planEnterpriseCta: '문의하기',
+    planEnterpriseH1: '프로의 모든 기능, 그리고:',
+    planEnterpriseH2: '싱글 테넌트 배포',
+    planEnterpriseH3: '맞춤 DPA + MSA',
+    planEnterpriseH4: '전담 담당자',
+    // Trust
+    trustH: '에이전트로 출시 중인 1,400+ 팀이 신뢰합니다',
+    // Compare
+    compareH: '모든 기능을 비교하세요.',
+    compareSub: '네 가지 플랜을 항목별로 나란히.',
+    secWorkspace: '워크스페이스',
+    secAgents: '에이전트 & 크레딧',
+    secGovernance: '거버넌스',
+    rowUsers: '사용자',
+    rowTeamInvites: '팀 초대',
+    rowProjects: '프로젝트',
+    rowReviewers: '리뷰어 (읽기 전용)',
+    rowInternalWidget: '내부 위젯 (팀원용)',
+    rowPublicWidget: '외부 사용자용 위젯',
+    rowMonthlyCredit: '월 에이전트 크레딧',
+    rowClaudeCode: 'Claude Code',
+    rowCodex: 'Codex',
+    rowBrowserTerm: '브라우저 + 터미널 실행',
+    rowGraphFlow: '그래프 기반 에이전트 플로우',
+    rowConcurrent: '동시 실행',
+    rowMachineTiers: '머신 등급',
+    rowProvenance: '프롬프트 + diff 출처 기록',
+    rowCustomDPA: '맞춤 DPA',
+    rowSingleTenant: '싱글 테넌트 배포',
+    cellOne: '1',
+    cellUnlimited: '무제한',
+    cellNone: '없음',
+    cellLowestOnly: '최하위만',
+    cellAllTiers: '전체 등급',
+    cellCustom: '맞춤',
+    // Save callout
+    saveWhy: '팀이 갈아타는 이유',
+    saveH: '3개 도구를 1개로 — 연간 약 $14,000 절약',
+    saveP: '평균적인 RunHQ 프로 고객은 피드백 위젯, 에이전트 운영 대시보드, 티켓 분류 도구를 한꺼번에 정리합니다. 같은 루프, 하나의 청구서.',
+    saveRow1T: '피드백 위젯',
+    saveRow1V: '$8,400 / 년',
+    saveRow2T: '에이전트 대시보드',
+    saveRow2V: '$7,800 / 년',
+    saveRow3T: '티켓 분류 도구',
+    saveRow3V: '$3,000 / 년',
+    saveTotalT: 'RunHQ 프로, 연간 (8 사용자)',
+    saveTotalV: '$4,800 / 년',
+    // FAQ
+    faqH: '자주 묻는 질문.',
+    faq1Q: '사용자당 가격은 어떻게 작동하나요?',
+    faq1A: '매월 플랫폼 정액 요금에 더해, 편집 권한이 있는 팀원 1인당 사용자 요금이 부과됩니다. 디자이너, 지원팀, 대표 등 읽기 전용 리뷰어는 모든 플랜에서 언제나 무료입니다.',
+    faq2Q: '사용자(seat)와 리뷰어는 어떻게 다른가요?',
+    faq2A: '사용자는 에이전트를 띄우고 작업을 출시합니다. 리뷰어는 댓글, 투표, 관전만 하며 — 모든 플랜에서 무제한 무료, 읽기 전용입니다. 대부분의 팀은 사용자 수보다 리뷰어가 3-4배 많습니다.',
+    faq3Q: '월 에이전트 크레딧은 어떻게 작동하나요?',
+    faq3A: '모든 플랜은 청구 주기마다 초기화되는 에이전트 크레딧을 포함합니다 — 무료는 $5, 스타터는 $75, 프로는 $200. 크레딧은 지원되는 모든 코딩 에이전트의 토큰 비용에 사용됩니다. 미사용 크레딧은 이월되지 않습니다.',
+    faq4Q: '무료 플랜에서는 무엇을 할 수 있나요?',
+    faq4A: '무료 플랜은 사용자 1명, 월 $5 에이전트 크레딧, 최하위 머신 접근을 제공합니다. 팀 초대와 상위 머신 등급은 스타터부터 열립니다. 동시 에이전트 실행은 무료 플랜을 포함한 모든 플랜에서 무제한입니다.',
+    faq5Q: '크레딧이 다 떨어지면 어떻게 되나요?',
+    faq5A: '다음 주기가 되거나 크레딧을 충전할 때까지 에이전트 실행이 일시정지됩니다. 초과분을 자동 청구하지 않습니다 — 크레딧이 0이 되기 한참 전부터 앱에서 사용량을 확인할 수 있고, 클릭 한 번으로 업그레이드하거나 충전할 수 있습니다.',
+    faq6Q: '어떤 코딩 에이전트를 지원하나요?',
+    faq6A: '전부 다 지원합니다. 각 RunHQ 워크스페이스는 자체 VPS에서 돌아가므로 Linux에서 동작하는 것은 무엇이든 — Claude Code, Codex, Cursor CLI, Aider, 커스텀 스크립트 — 그대로 실행됩니다. Claude나 Codex 구독은 직접 가져오시면 되고, RunHQ는 사용자와 모델 제공자 사이에 끼어들지 않습니다.',
+    // CTA
+    ctaH: '플랜을 고르세요. 오늘 바로 루프를 돌리세요.',
+    ctaPrimary: '시작하기 →',
+    ctaSecondary: '영업팀과 상담',
+    ctaMeta: '플랜 변경은 언제든 가능 · 설정에서 취소',
+  },
+} as const;
 
 const CompareCell = ({ v }: { v: Cell }) => {
   if (v === true) return <span className="rhpx-yes">✓</span>;
@@ -108,7 +251,99 @@ const CompareCell = ({ v }: { v: Cell }) => {
 };
 
 export default function PricingPage() {
+  const t = useT(PRICING_T);
   const [billing, setBilling] = useState<'monthly' | 'annual'>('annual');
+
+  const PLANS: Plan[] = [
+    {
+      key: 'free', name: t.planFreeName, tag: t.planFreeTag,
+      monthly: 0, annual: 0, unit: t.unitMo, seat: null,
+      pitch: t.planFreePitch,
+      cta: t.planFreeCta, ghost: false,
+      highlights: [
+        t.planFreeH1,
+        t.planFreeH2,
+        t.planFreeH3,
+        t.planFreeH4,
+      ],
+    },
+    {
+      key: 'starter', name: t.planStarterName, tag: t.planStarterTag,
+      monthly: 100, annual: 75, unit: t.unitMo, seat: 15,
+      pitch: t.planStarterPitch,
+      cta: t.planStarterCta, ghost: false,
+      highlights: [
+        t.planStarterH1,
+        t.planStarterH2,
+        t.planStarterH3,
+        t.planStarterH4,
+      ],
+    },
+    {
+      key: 'pro', name: t.planProName, tag: t.planProTag,
+      monthly: 250, annual: 200, unit: t.unitMo, seat: 25,
+      pitch: t.planProPitch,
+      cta: t.planProCta, ghost: false, popular: true,
+      highlights: [
+        t.planProH1,
+        t.planProH2,
+        t.planProH3,
+        t.planProH4,
+      ],
+    },
+    {
+      key: 'enterprise', name: t.planEnterpriseName, tag: t.planEnterpriseTag,
+      monthly: null, annual: null, unit: '', seat: null,
+      pitch: t.planEnterprisePitch,
+      cta: t.planEnterpriseCta, ghost: true,
+      highlights: [
+        t.planEnterpriseH1,
+        t.planEnterpriseH2,
+        t.planEnterpriseH3,
+        t.planEnterpriseH4,
+      ],
+    },
+  ];
+
+  const COMPARE: { sec: string; rows: [string, Cell, Cell, Cell, Cell][] }[] = [
+    { sec: t.secWorkspace, rows: [
+      [t.rowUsers,           t.cellOne,         t.cellUnlimited,    t.cellUnlimited,    t.cellUnlimited],
+      [t.rowTeamInvites,     false,             true,               true,               true],
+      [t.rowProjects,        t.cellOne,         t.cellUnlimited,    t.cellUnlimited,    t.cellUnlimited],
+      [t.rowReviewers,       t.cellNone,        t.cellUnlimited,    t.cellUnlimited,    t.cellUnlimited],
+      [t.rowInternalWidget,  false,             true,               true,               true],
+      [t.rowPublicWidget,    false,             false,              true,               true],
+    ]},
+    { sec: t.secAgents, rows: [
+      [t.rowMonthlyCredit,   '$5',              '$75',              '$200',             t.cellCustom],
+      [t.rowClaudeCode,      true,              true,               true,               true],
+      [t.rowCodex,           true,              true,               true,               true],
+      [t.rowBrowserTerm,     true,              true,               true,               true],
+      [t.rowGraphFlow,       false,             false,              true,               true],
+      [t.rowConcurrent,      t.cellUnlimited,   t.cellUnlimited,    t.cellUnlimited,    t.cellUnlimited],
+      [t.rowMachineTiers,    t.cellLowestOnly,  t.cellAllTiers,     t.cellAllTiers,     t.cellAllTiers],
+    ]},
+    { sec: t.secGovernance, rows: [
+      [t.rowProvenance,      true,              true,               true,               true],
+      [t.rowCustomDPA,       false,             false,              false,              true],
+      [t.rowSingleTenant,    false,             false,              false,              true],
+    ]},
+  ];
+
+  const FAQ = [
+    { q: t.faq1Q, a: t.faq1A },
+    { q: t.faq2Q, a: t.faq2A },
+    { q: t.faq3Q, a: t.faq3A },
+    { q: t.faq4Q, a: t.faq4A },
+    { q: t.faq5Q, a: t.faq5A },
+    { q: t.faq6Q, a: t.faq6A },
+  ];
+
+  const SAVE_ROWS = [
+    { t: t.saveRow1T, v: t.saveRow1V },
+    { t: t.saveRow2T, v: t.saveRow2V },
+    { t: t.saveRow3T, v: t.saveRow3V },
+  ];
 
   return (
     <div className="rhp-root rhpx-root">
@@ -116,10 +351,10 @@ export default function PricingPage() {
       <Navbar active="pricing" />
 
       <section className="rhp-hero">
-        <div className="rhp-hero-eyebrow">Pricing · Predictable platform + seats</div>
-        <h1 className="rhp-hero-h1">Predictable pricing that scales with your team.</h1>
+        <div className="rhp-hero-eyebrow">{t.eyebrow}</div>
+        <h1 className="rhp-hero-h1">{t.h1}</h1>
         <p className="rhp-hero-lede">
-          A flat platform fee plus a per-seat charge — no surprises, no usage cliffs. Read-only reviewers are always free.
+          {t.lede}
         </p>
 
         <div className="rhpx-toggle">
@@ -127,12 +362,12 @@ export default function PricingPage() {
             type="button"
             className={`rhpx-toggle-btn ${billing === 'monthly' ? 'rhpx-toggle-on' : ''}`}
             onClick={() => setBilling('monthly')}
-          >Monthly</button>
+          >{t.billingMonthly}</button>
           <button
             type="button"
             className={`rhpx-toggle-btn ${billing === 'annual' ? 'rhpx-toggle-on' : ''}`}
             onClick={() => setBilling('annual')}
-          >Annual <span className="rhpx-toggle-pill">Save 25%</span></button>
+          >{t.billingAnnual} <span className="rhpx-toggle-pill">{t.billingSave}</span></button>
         </div>
       </section>
 
@@ -143,7 +378,7 @@ export default function PricingPage() {
           const showPrice = price !== null;
           return (
             <div key={p.key} className={`rhpx-plan ${p.popular ? 'rhpx-plan-pop' : ''}`}>
-              {p.popular && <div className="rhpx-plan-flag">Most popular</div>}
+              {p.popular && <div className="rhpx-plan-flag">{t.mostPopular}</div>}
               <div className="rhpx-plan-name">{p.name}</div>
               <div className="rhpx-plan-tag">{p.tag}</div>
 
@@ -155,19 +390,22 @@ export default function PricingPage() {
                     <span className="rhpx-plan-unit">{p.unit}</span>
                   </>
                 ) : (
-                  <span className="rhpx-plan-custom">Custom</span>
+                  <span className="rhpx-plan-custom">{t.custom}</span>
                 )}
               </div>
               <div className="rhpx-plan-seat">
-                {showPrice && p.seat !== null ? `+ $${p.seat}/seat` : ' '}
+                {p.key === 'free'
+                  ? t.freeSeat
+                  : showPrice && p.seat !== null ? `+ $${p.seat}${t.seatSuffix}` : ' '}
               </div>
-              {showPrice && billing === 'annual' && (
-                <div className="rhpx-plan-billed">billed annually</div>
+              {p.key === 'free' && <div className="rhpx-plan-billed">{t.freeForever}</div>}
+              {showPrice && p.key !== 'free' && billing === 'annual' && (
+                <div className="rhpx-plan-billed">{t.billedAnnually}</div>
               )}
-              {showPrice && billing === 'monthly' && (
-                <div className="rhpx-plan-billed">billed monthly</div>
+              {showPrice && p.key !== 'free' && billing === 'monthly' && (
+                <div className="rhpx-plan-billed">{t.billedMonthly}</div>
               )}
-              {!showPrice && <div className="rhpx-plan-billed">priced to your volume</div>}
+              {!showPrice && <div className="rhpx-plan-billed">{t.pricedToVolume}</div>}
 
               <a
                 className={p.ghost ? 'rhpx-plan-cta rhpx-plan-cta-ghost' : 'rhpx-plan-cta rhpx-plan-cta-fill'}
@@ -191,7 +429,7 @@ export default function PricingPage() {
 
       {/* TRUSTED BY */}
       <section className="rhpx-trust">
-        <div className="rhpx-trust-h">Trusted by 1,400+ teams shipping with agents</div>
+        <div className="rhpx-trust-h">{t.trustH}</div>
         <div className="rhpx-trust-row">
           {LOGOS.map((name) => <Wordmark key={name} name={name} size={18} color="var(--rhw-ink-mute)" />)}
         </div>
@@ -199,8 +437,8 @@ export default function PricingPage() {
 
       {/* COMPARE */}
       <section className="rhpx-compare">
-        <h2 className="rhpx-compare-h">Compare every feature.</h2>
-        <p className="rhpx-compare-sub">Side-by-side, all four plans, every line item.</p>
+        <h2 className="rhpx-compare-h">{t.compareH}</h2>
+        <p className="rhpx-compare-sub">{t.compareSub}</p>
 
         <div className="rhpx-compare-wrap">
           <table className="rhpx-table">
@@ -212,8 +450,10 @@ export default function PricingPage() {
                     <div className="rhpx-th-name">{p.name}</div>
                     <div className="rhpx-th-price">
                       {p.monthly === null
-                        ? 'Custom'
-                        : `$${billing === 'annual' ? p.annual : p.monthly}${p.unit} + $${p.seat}/seat`}
+                        ? t.custom
+                        : p.seat === null
+                          ? `$${billing === 'annual' ? p.annual : p.monthly}${p.unit}`
+                          : `$${billing === 'annual' ? p.annual : p.monthly}${p.unit} + $${p.seat}${t.seatSuffix}`}
                     </div>
                     <a
                       className={p.ghost ? 'rhpx-th-cta rhpx-plan-cta-ghost' : 'rhpx-th-cta rhpx-plan-cta-fill'}
@@ -247,26 +487,22 @@ export default function PricingPage() {
       <section className="rhpx-save">
         <div className="rhpx-save-card">
           <div className="rhpx-save-l">
-            <div className="rhpx-save-pill">Why teams switch</div>
-            <h3 className="rhpx-save-h">Replace 3 tools with 1 — save ~$17,000/yr</h3>
+            <div className="rhpx-save-pill">{t.saveWhy}</div>
+            <h3 className="rhpx-save-h">{t.saveH}</h3>
             <p className="rhpx-save-p">
-              The average RunHQ Pro customer drops their feedback widget, agent ops dashboard, and ticket triage tool. Same loop, one bill.
+              {t.saveP}
             </p>
           </div>
           <div className="rhpx-save-r">
-            {[
-              { t: 'Feedback widget',   v: '$8,400 / yr' },
-              { t: 'Agent dashboard',   v: '$7,800 / yr' },
-              { t: 'Ticket triage tool', v: '$3,000 / yr' },
-            ].map((r) => (
+            {SAVE_ROWS.map((r) => (
               <div key={r.t} className="rhpx-save-row">
                 <span className="rhpx-save-strike">{r.t}</span>
                 <span className="rhpx-save-val">{r.v}</span>
               </div>
             ))}
             <div className="rhpx-save-total">
-              <span>RunHQ Pro, annual (8 seats)</span>
-              <span className="rhpx-save-total-v">$2,340 / yr</span>
+              <span>{t.saveTotalT}</span>
+              <span className="rhpx-save-total-v">{t.saveTotalV}</span>
             </div>
           </div>
         </div>
@@ -274,7 +510,7 @@ export default function PricingPage() {
 
       {/* FAQ */}
       <section className="rhpx-faq">
-        <h2 className="rhpx-compare-h">Frequently asked.</h2>
+        <h2 className="rhpx-compare-h">{t.faqH}</h2>
         <div className="rhpx-faq-list">
           {FAQ.map((f, i) => (
             <details key={i} className="rhpx-faq-item">
@@ -290,12 +526,12 @@ export default function PricingPage() {
 
       {/* CTA */}
       <section className="rhpx-cta">
-        <h2 className="rhpx-cta-h">Pick a plan. Get the loop running today.</h2>
+        <h2 className="rhpx-cta-h">{t.ctaH}</h2>
         <div className="rhpx-cta-row">
-          <a className="rhp-btn-primary" href={SIGNUP_URL}>Get started →</a>
-          <a className="rhp-btn-ghost" href={SIGNUP_URL}>Talk to sales</a>
+          <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.ctaPrimary}</a>
+          <a className="rhp-btn-ghost" href={SIGNUP_URL}>{t.ctaSecondary}</a>
         </div>
-        <div className="rhpx-cta-meta">Switch plans anytime · Cancel from Settings</div>
+        <div className="rhpx-cta-meta">{t.ctaMeta}</div>
       </section>
 
       <Footer />
