@@ -16,14 +16,6 @@ const HOME_T = {
     heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
     heroScreenshotSmAlt: 'RunHQ feedback widget and latest updates',
     // Hero roles
-    heroRolesH: 'Empower the entire team with agentic automation',
-    rolePM: 'PM',
-    roleEngineer: 'Engineer',
-    roleDesign: 'Design',
-    roleQA: 'QA',
-    roleSupport: 'Support',
-    roleSales: 'Sales',
-    roleFounder: 'Founder',
     // Logos
     logosH: 'Trusted by engineering teams shipping with agents',
     // Pipeline section
@@ -119,14 +111,6 @@ const HOME_T = {
     heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
     heroScreenshotSmAlt: 'RunHQ 피드백 위젯과 최신 업데이트',
     // Hero roles
-    heroRolesH: '에이전트 자동화로 팀 전체에 힘을 실어주세요',
-    rolePM: 'PM',
-    roleEngineer: '엔지니어',
-    roleDesign: '디자인',
-    roleQA: 'QA',
-    roleSupport: '지원',
-    roleSales: '세일즈',
-    roleFounder: '창업자',
     // Logos
     logosH: '에이전트와 함께 배포하는 엔지니어링 팀들이 신뢰합니다',
     // Pipeline section
@@ -259,19 +243,6 @@ export default function HomePage() {
     return () => clearInterval(id);
   }, []);
 
-  const HERO_ROLES = [t.rolePM, t.roleEngineer, t.roleDesign, t.roleQA, t.roleSupport, t.roleSales, t.roleFounder];
-
-  const HeroRoles = () => (
-    <div className="rhw-hero-roles">
-      <div className="rhw-hero-roles-h">{t.heroRolesH}</div>
-      <div className="rhw-hero-roles-pills">
-        {HERO_ROLES.map((role) => (
-          <span key={role} className="rhw-hero-role-pill">{role}</span>
-        ))}
-      </div>
-    </div>
-  );
-
   const LoopCapture = () => (
     <div className="rhw-lv">
       {[
@@ -382,7 +353,6 @@ export default function HomePage() {
             </button>
           </div>
 
-          <HeroRoles />
         </div>
 
         <div className="rhw-hero-app">
@@ -543,63 +513,6 @@ const HOME_STYLES = `
     font-size: 8px; padding-left: 1px;
   }
   .rhw-btn-lg { padding: 16px 28px; font-size: 15px; }
-
-  .rhw-hero-roles {
-    padding-top: 20px;
-    border-top: 1px solid var(--rhw-line);
-  }
-  .rhw-hero-roles-h {
-    font-size: 11px; letter-spacing: 0.12em;
-    color: var(--rhw-ink-mute);
-    text-transform: uppercase;
-    margin-bottom: 12px;
-  }
-  .rhw-hero-roles-pills {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    margin-bottom: 16px;
-  }
-  .rhw-hero-role-pill {
-    appearance: none;
-    background: transparent;
-    border: 1px solid var(--rhw-line);
-    color: var(--rhw-ink-mute);
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1;
-    padding: 9px 14px;
-    border-radius: 999px;
-    cursor: pointer;
-    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-  }
-  .rhw-hero-role-pill:hover {
-    border-color: var(--rhw-ink);
-    color: var(--rhw-ink);
-  }
-  .rhw-hero-role-pill[aria-pressed="true"] {
-    background: var(--rhw-ink);
-    color: #fff;
-    border-color: var(--rhw-ink);
-  }
-  .rhw-hero-role-pill:focus-visible {
-    outline: 2px solid var(--rhw-accent);
-    outline-offset: 2px;
-  }
-  .rhw-hero-role-copy {
-    font-size: 13.5px;
-    color: var(--rhw-ink);
-    line-height: 1.5;
-    min-height: 4.5em;
-    margin: 0;
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .rhw-hero-role-copy {
-      animation: rhw-hero-role-fade 150ms ease-out;
-    }
-  }
-  @keyframes rhw-hero-role-fade {
-    from { opacity: 0; }
-    to   { opacity: 1; }
-  }
 
   .rhw-hero-app {
     position: relative;
