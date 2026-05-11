@@ -84,6 +84,14 @@ export function isTierAllowedForPlan(planId: PlanId, tier: string): boolean {
   return true;
 }
 
+/**
+ * Mirrors the public pricing page (`homepage/src/pages/PricingPage.tsx`). Two
+ * facts to keep aligned by hand: (1) the monthly `monthlyPriceCents` here is
+ * the headline platform fee; (2) `seatPriceCents` is the per-additional-seat
+ * surcharge described as "+ $X/seat" on the pricing page. Stripe Price IDs
+ * (in env vars) are the source of truth for what's actually charged; these
+ * numbers drive what the Settings page displays.
+ */
 export const PLAN_CONFIG: Record<PlanId, {
   id: PlanId;
   name: string;
@@ -92,6 +100,8 @@ export const PLAN_CONFIG: Record<PlanId, {
   monthlyCreditsCents: number;  // Credits given each month
   maxConcurrentAgents: number;
   maxServers: number;            // Max servers a user can own; -1 = unlimited (see UNLIMITED_SERVERS)
+  /** Per-additional-seat surcharge, in cents. 0 for plans without seat-based pricing. */
+  seatPriceCents: number;
   signupBonusCents: number;     // One-time bonus for first subscription
   features: string[];
   isActive: boolean;
@@ -99,48 +109,73 @@ export const PLAN_CONFIG: Record<PlanId, {
   free: {
     id: 'free',
     name: 'Free',
-    description: 'Get started for free',
+    description: 'Kick the tires',
     monthlyPriceCents: 0,
     monthlyCreditsCents: 500,    // $5 free credits
     maxConcurrentAgents: 1,
     maxServers: 1,
+    seatPriceCents: 0,
     signupBonusCents: 0,
-    features: ['$5 monthly credits', '1 concurrent worker', '1 server'],
+    features: [
+      '$5 monthly agent credit',
+      '1 user · no invites',
+      'Lowest-tier machine only',
+      'Unlimited concurrent runs',
+    ],
     isActive: true,
   },
   starter: {
     id: 'starter',
     name: 'Starter',
-    description: 'For individuals',
-    monthlyPriceCents: 2000,    // $20/month
-    monthlyCreditsCents: 2500,  // $25 in credits
+    description: 'Best for new teams',
+    monthlyPriceCents: 10000,    // $100/month
+    monthlyCreditsCents: 7500,   // $75 in credits
     maxConcurrentAgents: 3,
     maxServers: UNLIMITED_SERVERS,
-    signupBonusCents: 500,      // $5 signup bonus
-    features: ['$25 monthly credits', '3 concurrent workers', 'Unlimited servers', '$5 signup bonus'],
+    seatPriceCents: 1500,        // +$15/seat
+    signupBonusCents: 500,       // $5 signup bonus
+    features: [
+      '$75 monthly agent credit',
+      'All machine tiers',
+      'Unlimited servers',
+      'Internal feedback widget',
+      '$5 signup bonus',
+    ],
     isActive: true,
   },
   pro: {
     id: 'pro',
     name: 'Pro',
-    description: 'For power users',
-    monthlyPriceCents: 10000,   // $100/month
-    monthlyCreditsCents: 12500, // $125 in credits
+    description: 'Best for shipping teams',
+    monthlyPriceCents: 25000,    // $250/month
+    monthlyCreditsCents: 20000,  // $200 in credits
     maxConcurrentAgents: 5,
     maxServers: UNLIMITED_SERVERS,
-    signupBonusCents: 1000,     // $10 signup bonus
-    features: ['$125 monthly credits', '5 concurrent workers', 'Unlimited servers', '$10 signup bonus'],
+    seatPriceCents: 2500,        // +$25/seat
+    signupBonusCents: 1000,      // $10 signup bonus
+    features: [
+      '$200 monthly agent credit',
+      'All machine tiers',
+      'Unlimited servers',
+      'Public user-facing widget',
+      'Graph-based agent flow',
+      '$10 signup bonus',
+    ],
     isActive: true,
   },
+  // 'team' is retained as a DB-level row for historical subscriptions but
+  // hidden from the public plan listing (isActive: false). The pricing page
+  // shows "Enterprise" instead, which is custom-priced and handled out-of-band.
   team: {
     id: 'team',
     name: 'Team',
     description: 'For teams',
-    monthlyPriceCents: 23900,   // $239/month
-    monthlyCreditsCents: 30000, // $300 in credits
+    monthlyPriceCents: 23900,
+    monthlyCreditsCents: 30000,
     maxConcurrentAgents: 10,
     maxServers: UNLIMITED_SERVERS,
-    signupBonusCents: 2500,     // $25 signup bonus
+    seatPriceCents: 0,
+    signupBonusCents: 2500,
     features: ['$300 monthly credits', '10 concurrent workers', 'Unlimited servers', '$25 signup bonus', 'Priority support'],
     isActive: false,
   },
@@ -537,11 +572,21 @@ export async function seedPlans(): Promise<void> {
 }
 
 /**
- * Get all available plans
+ * Get all available plans. Augments each row with `seatPriceCents` from
+ * `PLAN_CONFIG` — the `plans` DB table has no column for it, so the in-code
+ * config is the source of truth. This keeps the API response and the
+ * pricing page in lockstep without a migration.
  */
-export async function getPlans(): Promise<Plan[]> {
-  return db.query.plans.findMany({
+export async function getPlans(): Promise<(Plan & { seatPriceCents: number })[]> {
+  const rows = await db.query.plans.findMany({
     where: eq(plans.isActive, true),
+  });
+  return rows.map((row) => {
+    const config = PLAN_CONFIG[row.id as PlanId];
+    return {
+      ...row,
+      seatPriceCents: config?.seatPriceCents ?? 0,
+    };
   });
 }
 
