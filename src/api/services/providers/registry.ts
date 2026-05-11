@@ -18,6 +18,7 @@
 import type { IProvider } from './IProvider';
 import type { ProviderId, TierId } from './types';
 import { FlyProvider } from './FlyProvider';
+import { DockerProvider } from './DockerProvider';
 
 // ---------------------------------------------------------------------------
 // Registry state
@@ -46,6 +47,21 @@ const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
     'perf-4x-16gb': 29,
     'perf-4x-32gb': 43,
   },
+  docker: {
+    'shared-4x-1gb': 0,
+    'shared-4x-2gb': 0,
+    'shared-4x-4gb': 0,
+    'shared-4x-8gb': 0,
+    'shared-8x-4gb': 0,
+    'shared-8x-8gb': 0,
+    'shared-8x-16gb': 0,
+    'perf-2x-4gb': 0,
+    'perf-2x-8gb': 0,
+    'perf-2x-16gb': 0,
+    'perf-4x-8gb': 0,
+    'perf-4x-16gb': 0,
+    'perf-4x-32gb': 0,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -54,11 +70,11 @@ const HOURLY_RATES: Record<ProviderId, Record<TierId, number>> = {
 
 export function initProviders(): void {
   if (initialized) return;
-  const fly = new FlyProvider();
-  providers.set('fly', fly);
+  providers.set('fly', new FlyProvider());
+  providers.set('docker', new DockerProvider());
   initialized = true;
 
-  const configured = [...providers.values()].filter(p => p.isConfigured()).map(p => p.id);
+  const configured = [...providers.values()].filter((p) => p.isConfigured()).map((p) => p.id);
   console.log(`[Providers] Initialized: ${configured.length ? configured.join(', ') : 'none configured'}`);
 }
 
@@ -86,9 +102,20 @@ export function getAllProviders(): IProvider[] {
 }
 
 /**
- * Get the default provider.
+ * Get the default provider for the current process.
+ *
+ * Selection rules:
+ *   1. LOCAL_PROVIDER=docker → 'docker' (explicit override; useful for local dev)
+ *   2. LOCAL_PROVIDER=fly    → 'fly'    (explicit override; useful for debugging
+ *      Fly-specific bugs from a local backend)
+ *   3. NODE_ENV !== production → 'docker' (dev default — local containers, no
+ *      production Fly machines)
+ *   4. otherwise → 'fly' (production default)
  */
 export function getDefaultProviderId(): ProviderId {
+  const override = process.env.LOCAL_PROVIDER;
+  if (override === 'docker' || override === 'fly') return override;
+  if (process.env.NODE_ENV !== 'production') return 'docker';
   return 'fly';
 }
 

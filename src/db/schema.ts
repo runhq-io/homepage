@@ -722,7 +722,7 @@ export const servers = pgTable('servers', {
   machineName: text('machine_name'), // Machine name
   region: text('region'), // Provider region (e.g., 'iad', 'fsn1')
   volumeId: text('volume_id'), // Provider volume ID for persistent storage
-  provider: text('provider').$type<'fly'>().notNull().default('fly'), // Infrastructure provider
+  provider: text('provider').$type<'fly' | 'docker'>().notNull().default('fly'), // Infrastructure provider
   // Fly app + private network owning this workspace's machine. Per-tenant
   // isolation: each workspace lives in its own Fly app on a dedicated 6PN
   // network so peers cannot reach each other. Null = legacy machine in the
