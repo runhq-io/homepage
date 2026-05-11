@@ -132,7 +132,10 @@
       if (config.project) headers["X-RW-Project"] = config.project;
       return headers;
     }
-    // Pre-bootstrap or unresolved identity: legacy heuristic.
+    // Pre-bootstrap or unresolved identity. Cookie-auth embeds must include
+    // both signals so the server can prefer RunHQ cookie identity while still
+    // falling back to the app token when no qualifying cookie is present.
+    if (wantsCookieAuth() && config.project) headers["X-RW-Project"] = config.project;
     if (config.token) headers["Authorization"] = "Bearer " + config.token;
     else if (config.project) headers["X-RW-Project"] = config.project;
     return headers;
@@ -4154,7 +4157,12 @@
             currentUser.isTriager = !!(idData && idData.isTriager);
           }
         })
-        .catch(function () { /* identity probe failure → anon path, no log spam */ });
+        .catch(function () {
+          // Credentialed CORS fails hard when an owner copied a cookie-auth
+          // snippet onto a non-allowlisted origin. Drop back to the legacy
+          // non-credentialed envelope before loading public/app-token data.
+          config.useCookieAuth = false;
+        });
 
       identityP.then(function () { return loadTopTickets(); }).then(function (data) {
         topTicketsCache = data.tickets || [];
