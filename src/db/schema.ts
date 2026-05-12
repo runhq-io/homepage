@@ -1312,12 +1312,11 @@ export const widgetProjects = pgTable('widget_projects', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [
-  // Partial unique replaces the prior `widget_projects_server_id_unique`.
-  // Enforced only when workspace_project_id is populated so rollout can
-  // ship the schema before every row is backfilled.
-  uniqueIndex('widget_projects_server_workspace_project_unique')
-    .on(t.serverId, t.workspaceProjectId)
-    .where(sql`${t.workspaceProjectId} IS NOT NULL`),
+  // One widget per (server, channel): each task channel owns at most one
+  // widget configuration. channel_id is NOT NULL (enforced by the Phase B
+  // migration), so this unique is non-partial.
+  uniqueIndex('widget_projects_server_channel_unique')
+    .on(t.serverId, t.channelId),
 ]);
 
 export const widgetUsers = pgTable('widget_users', {
@@ -1394,8 +1393,15 @@ export const widgetComments = pgTable('widget_comments', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
-export type WidgetProject = typeof widgetProjects.$inferSelect;
-export type NewWidgetProject = typeof widgetProjects.$inferInsert;
+// Per-channel naming: the widget is now anchored to a single todo channel,
+// so the row type is named `WidgetChannel` (the underlying table keeps the
+// `widget_projects` name to avoid Drizzle / SQL churn).
+export type WidgetChannel = typeof widgetProjects.$inferSelect;
+export type NewWidgetChannel = typeof widgetProjects.$inferInsert;
+/** @deprecated Use `WidgetChannel`. Kept for one release while consumers update. */
+export type WidgetProject = WidgetChannel;
+/** @deprecated Use `NewWidgetChannel`. Kept for one release while consumers update. */
+export type NewWidgetProject = NewWidgetChannel;
 export type WidgetUser = typeof widgetUsers.$inferSelect;
 
 // ============================================================================

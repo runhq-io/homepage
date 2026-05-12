@@ -7,12 +7,15 @@ import * as WidgetService from './WidgetService';
 
 const SERVER_ID = 'srv_settings';
 const SLUG = 'settings-test';
+const CHANNEL_ID = 'ch_settings';
+const LOOKUP = { channelId: CHANNEL_ID };
 let projectId: string;
 
 beforeAll(async () => {
   await db.insert(widgetProjects).values({
     serverId: SERVER_ID, workspaceProjectId: 'wsp_settings', name: 'S', slug: SLUG,
     apiKey: 'rw_settings_key', apiSecretHash: 'settings-secret-32bytes-padding-z',
+    channelId: CHANNEL_ID,
   }).onConflictDoNothing();
   const [r] = await db.select({ id: widgetProjects.id }).from(widgetProjects).where(eq(widgetProjects.slug, SLUG));
   projectId = r.id;
@@ -29,7 +32,7 @@ describe('updateWidgetSettings — policy fields', () => {
       widgetAssignRoles: ['triager', 'pm'],
       widgetRoleClaimName: 'company_roles',
       widgetAssignRateLimitPerHour: 60,
-    }, 'wsp_settings');
+    }, LOOKUP);
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.widgetAgentAssignmentEnabled).toBe(true);
     expect(row.widgetAssignRoles).toEqual(['triager', 'pm']);
@@ -41,14 +44,14 @@ describe('updateWidgetSettings — policy fields', () => {
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       widgetAgentAssignmentEnabled: true,
       widgetAssignRoles: [],
-    }, 'wsp_settings')).rejects.toThrow(/at least one role/i);
+    }, LOOKUP)).rejects.toThrow(/at least one role/i);
   });
 
   it('allows empty roles when assignment is disabled', async () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
       widgetAgentAssignmentEnabled: false,
       widgetAssignRoles: [],
-    }, 'wsp_settings');
+    }, LOOKUP);
     // No throw — pass implies success
   });
 });
@@ -62,7 +65,7 @@ describe('updateWidgetSettings — login URL gating', () => {
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       is_public: true,
-    }, 'wsp_settings')).rejects.toThrow(/login url is required/i);
+    }, LOOKUP)).rejects.toThrow(/login url is required/i);
   });
 
   it('rejects clearing the login URL while is_public stays true', async () => {
@@ -72,11 +75,11 @@ describe('updateWidgetSettings — login URL gating', () => {
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       login_url: null,
-    }, 'wsp_settings')).rejects.toThrow(/login url is required/i);
+    }, LOOKUP)).rejects.toThrow(/login url is required/i);
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       login_url: '',
-    }, 'wsp_settings')).rejects.toThrow(/login url is required/i);
+    }, LOOKUP)).rejects.toThrow(/login url is required/i);
   });
 
   it('rejects javascript: and other non-http schemes', async () => {
@@ -87,12 +90,12 @@ describe('updateWidgetSettings — login URL gating', () => {
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       is_public: true,
       login_url: 'javascript:alert(1)',
-    }, 'wsp_settings')).rejects.toThrow(/valid http/i);
+    }, LOOKUP)).rejects.toThrow(/valid http/i);
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       is_public: true,
       login_url: 'not a url at all',
-    }, 'wsp_settings')).rejects.toThrow(/valid http/i);
+    }, LOOKUP)).rejects.toThrow(/valid http/i);
   });
 
   it('persists a valid http(s) login URL and trims whitespace', async () => {
@@ -103,7 +106,7 @@ describe('updateWidgetSettings — login URL gating', () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
       is_public: true,
       login_url: '  https://acme.test/login  ',
-    }, 'wsp_settings');
+    }, LOOKUP);
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.isPublic).toBe(true);
@@ -118,7 +121,7 @@ describe('updateWidgetSettings — login URL gating', () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
       is_public: false,
       login_url: '',
-    }, 'wsp_settings');
+    }, LOOKUP);
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.isPublic).toBe(false);
@@ -130,7 +133,7 @@ describe('updateWidgetSettings — login URL gating', () => {
       .set({ isPublic: true, widgetLoginUrl: 'https://acme.test/login' })
       .where(eq(widgetProjects.id, projectId));
 
-    const settings = await WidgetService.getWidgetSettings(SERVER_ID, 'wsp_settings');
+    const settings = await WidgetService.getWidgetSettings(SERVER_ID, LOOKUP);
     expect(settings).not.toBeNull();
     expect(settings!.is_public).toBe(true);
     expect(settings!.login_url).toBe('https://acme.test/login');
@@ -145,7 +148,7 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       auto_recognize_runhq_members: true,
-    }, 'wsp_settings')).rejects.toThrow(/at least one allowed origin/i);
+    }, LOOKUP)).rejects.toThrow(/at least one allowed origin/i);
   });
 
   it('rejects clearing allowed_origins while auto_recognize is on', async () => {
@@ -155,7 +158,7 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       allowed_origins: [],
-    }, 'wsp_settings')).rejects.toThrow(/at least one allowed origin/i);
+    }, LOOKUP)).rejects.toThrow(/at least one allowed origin/i);
   });
 
   it('rejects malformed origins', async () => {
@@ -165,11 +168,11 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       allowed_origins: ['not a url'],
-    }, 'wsp_settings')).rejects.toThrow(/Invalid origin/i);
+    }, LOOKUP)).rejects.toThrow(/Invalid origin/i);
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
       allowed_origins: ['javascript:alert(1)'],
-    }, 'wsp_settings')).rejects.toThrow(/Invalid origin/i);
+    }, LOOKUP)).rejects.toThrow(/Invalid origin/i);
   });
 
   it('normalizes and deduplicates origins (lowercase host, drop default ports + paths, dedupe)', async () => {
@@ -180,7 +183,7 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
         'https://acme.test:443',
         'https://acme.test',
       ],
-    }, 'wsp_settings');
+    }, LOOKUP);
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.allowedOrigins).toEqual(['https://acme.test']);
@@ -195,7 +198,7 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
       auto_recognize_runhq_members: false,
       allowed_origins: [],
-    }, 'wsp_settings');
+    }, LOOKUP);
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.autoRecognizeRunhqMembers).toBe(false);
@@ -207,7 +210,7 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
       .set({ autoRecognizeRunhqMembers: true, allowedOrigins: ['https://acme.test', 'https://staging.acme.test'] })
       .where(eq(widgetProjects.id, projectId));
 
-    const settings = await WidgetService.getWidgetSettings(SERVER_ID, 'wsp_settings');
+    const settings = await WidgetService.getWidgetSettings(SERVER_ID, LOOKUP);
     expect(settings).not.toBeNull();
     expect(settings!.auto_recognize_runhq_members).toBe(true);
     expect(settings!.allowed_origins).toEqual(['https://acme.test', 'https://staging.acme.test']);

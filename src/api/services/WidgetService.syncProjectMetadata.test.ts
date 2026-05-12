@@ -17,6 +17,9 @@ const PROJ_1 = `proj_spm_${RUN}_1`;
 const PROJ_2 = `proj_spm_${RUN}_2`;
 const PROJ_3 = `proj_spm_${RUN}_3`;
 const PROJ_ORPHAN = `proj_spm_${RUN}_orphan`;
+const CH_1 = `ch-1-${RUN}`;
+const CH_2 = `ch-2-${RUN}`;
+const CH_3 = `ch-3-${RUN}`;
 
 beforeAll(async () => {
   await db.insert(widgetProjects).values([
@@ -28,7 +31,7 @@ beforeAll(async () => {
       apiKey: `k1-${RUN}`,
       apiSecretHash: `s1-${RUN}`,
       enabled: true,
-      channelId: `ch-1-${RUN}`,
+      channelId: CH_1,
     },
     {
       serverId: SERVER_A,
@@ -38,7 +41,7 @@ beforeAll(async () => {
       apiKey: `k2-${RUN}`,
       apiSecretHash: `s2-${RUN}`,
       enabled: true,
-      channelId: `ch-2-${RUN}`,
+      channelId: CH_2,
     },
     {
       serverId: SERVER_B,
@@ -48,7 +51,7 @@ beforeAll(async () => {
       apiKey: `k3-${RUN}`,
       apiSecretHash: `s3-${RUN}`,
       enabled: true,
-      channelId: `ch-3-${RUN}`,
+      channelId: CH_3,
     },
   ]);
 });
@@ -64,7 +67,7 @@ describe('WidgetService.syncProjectMetadata', () => {
     ]);
 
     expect(result.updated).toBe(1);
-    const row = await getWidgetIntegration(SERVER_A, PROJ_1);
+    const row = await getWidgetIntegration(SERVER_A, { channelId: CH_1 });
     expect(row?.name).toBe('제주닷컴');
   });
 
@@ -89,21 +92,21 @@ describe('WidgetService.syncProjectMetadata', () => {
     ]);
 
     expect(result.updated).toBe(1);
-    const a = await getWidgetIntegration(SERVER_A, PROJ_1);
-    const b = await getWidgetIntegration(SERVER_A, PROJ_2);
+    const a = await getWidgetIntegration(SERVER_A, { channelId: CH_1 });
+    const b = await getWidgetIntegration(SERVER_A, { channelId: CH_2 });
     expect(a?.name).toBe('New 1');
     expect(b?.name).toBe('Reset 2');
   });
 
   it('is scoped per serverId — does not touch rows on other servers', async () => {
-    const before = await getWidgetIntegration(SERVER_B, PROJ_3);
+    const before = await getWidgetIntegration(SERVER_B, { channelId: CH_3 });
     expect(before?.name).toBe('Other Server Project');
 
     // Push a project with the SAME workspaceProjectId-ish name to SERVER_A's
     // namespace; SERVER_B's row must remain untouched.
     await syncProjectMetadata(SERVER_A, [{ id: PROJ_3, name: 'Should Not Apply' }]);
 
-    const after = await getWidgetIntegration(SERVER_B, PROJ_3);
+    const after = await getWidgetIntegration(SERVER_B, { channelId: CH_3 });
     expect(after?.name).toBe('Other Server Project');
   });
 
@@ -139,6 +142,7 @@ describe('WidgetService.syncProjectMetadata — round-trip with enableWidget', (
   const RT_RUN = randomBytes(6).toString('hex');
   const RT_SERVER = `ws_spm_rt_${RT_RUN}`;
   const RT_PROJ = `proj_spm_rt_${RT_RUN}`;
+  const RT_CHAN = `ch-rt-${RT_RUN}`;
 
   beforeEach(async () => {
     await db.delete(widgetProjects).where(eq(widgetProjects.serverId, RT_SERVER));
@@ -151,17 +155,17 @@ describe('WidgetService.syncProjectMetadata — round-trip with enableWidget', (
   it('a rename pushed via syncProjectMetadata is visible to subsequent widget reads', async () => {
     await enableWidget(RT_SERVER, {
       name: 'jeju-legacy',
-      channelId: `ch-rt-${RT_RUN}`,
+      channelId: RT_CHAN,
       workspaceProjectId: RT_PROJ,
     });
 
-    const before = await getWidgetIntegration(RT_SERVER, RT_PROJ);
+    const before = await getWidgetIntegration(RT_SERVER, { channelId: RT_CHAN });
     expect(before?.name).toBe('jeju-legacy');
 
     const result = await syncProjectMetadata(RT_SERVER, [{ id: RT_PROJ, name: '제주닷컴' }]);
     expect(result.updated).toBe(1);
 
-    const after = await getWidgetIntegration(RT_SERVER, RT_PROJ);
+    const after = await getWidgetIntegration(RT_SERVER, { channelId: RT_CHAN });
     expect(after?.name).toBe('제주닷컴');
   });
 });

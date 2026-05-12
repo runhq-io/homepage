@@ -1,15 +1,14 @@
 /**
- * Widget routes — per-channel scoping (additive, backward-compatible)
+ * Widget routes — per-channel scoping (Phase 5: channel-only).
  *
- * Phase 1 of the widget-per-channel migration: widget admin routes accept a
- * new `?channelId=` query param (and the corresponding lookup object passed
- * into WidgetService). The legacy `?projectId=` form must continue to work
- * verbatim — see `HttpServer.widget-per-project.test.ts` for the backward-
- * compat tests.
+ * Phase 5 of the widget-per-channel migration: widget admin routes require
+ * `?channelId=` (or its body equivalent) — the legacy `?projectId=` query
+ * fallback was removed. Routes still read `projectId` from POST/PUT bodies
+ * and DELETE query for the cache-invalidation payload, but never as a
+ * lookup fallback.
  *
- * These tests use the same mock pattern as `widget-per-project.test.ts`:
- * the WidgetService is mocked so we assert the HTTP route correctly forwards
- * the lookup shape to the service layer, not the DB-level behavior.
+ * These tests mock WidgetService so we assert the HTTP route correctly
+ * forwards the lookup shape to the service layer, not the DB-level behavior.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
@@ -36,7 +35,6 @@ vi.mock('./services/WidgetService', () => {
     updateWidgetSettings: vi.fn(),
     regenerateSecret: vi.fn(),
     reconcileWidgetBindings: vi.fn(),
-    reconcileUnbackfilledWidgets: vi.fn(),
     WidgetSettingsValidationError,
   };
 });
@@ -92,7 +90,7 @@ describe('Widget routes — per-channel scoping (additive)', () => {
       );
     });
 
-    it('without channelId or projectId returns 400', async () => {
+    it('without channelId returns 400', async () => {
       const app = createHttpApp();
       const res = await app.request(
         `http://localhost/api/widget/integration?serverId=${SERVER}`,
@@ -118,7 +116,7 @@ describe('Widget routes — per-channel scoping (additive)', () => {
       );
     });
 
-    it('without channelId or projectId returns 400', async () => {
+    it('without channelId returns 400', async () => {
       const app = createHttpApp();
       const res = await app.request(
         `http://localhost/api/widget/settings?serverId=${SERVER}`,
@@ -146,7 +144,7 @@ describe('Widget routes — per-channel scoping (additive)', () => {
       );
     });
 
-    it('without channelId or projectId returns 400', async () => {
+    it('without channelId returns 400', async () => {
       const app = createHttpApp();
       const res = await app.request('http://localhost/api/widget/settings', {
         method: 'PUT',
@@ -159,7 +157,7 @@ describe('Widget routes — per-channel scoping (additive)', () => {
   });
 
   describe('POST /api/widget/enable', () => {
-    it('forwards channelId in the opts payload (workspaceProjectId still required)', async () => {
+    it('forwards channelId and the optional workspaceProjectId in the opts payload', async () => {
       (WidgetService.enableWidget as any).mockResolvedValue({ id: 'wp_new', apiKey: 'k', apiSecretHash: 's' });
       const app = createHttpApp();
       const res = await app.request('http://localhost/api/widget/enable', {
@@ -172,6 +170,32 @@ describe('Widget routes — per-channel scoping (additive)', () => {
         SERVER,
         expect.objectContaining({ name: 'Snek', channelId: CHAN_A, workspaceProjectId: PROJ_A }),
       );
+    });
+
+    it('forwards channelId without workspaceProjectId when projectId is omitted', async () => {
+      (WidgetService.enableWidget as any).mockResolvedValue({ id: 'wp_new', apiKey: 'k', apiSecretHash: 's' });
+      const app = createHttpApp();
+      const res = await app.request('http://localhost/api/widget/enable', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverId: SERVER, channelId: CHAN_A, name: 'Snek' }),
+      });
+      expect(res.status).toBe(200);
+      expect(WidgetService.enableWidget).toHaveBeenCalledTimes(1);
+      const callArg = (WidgetService.enableWidget as any).mock.calls[0][1];
+      expect(callArg).toMatchObject({ name: 'Snek', channelId: CHAN_A });
+      expect(callArg).not.toHaveProperty('workspaceProjectId');
+    });
+
+    it('without channelId returns 400 and does not call enableWidget', async () => {
+      const app = createHttpApp();
+      const res = await app.request('http://localhost/api/widget/enable', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverId: SERVER, projectId: PROJ_A, name: 'Snek' }),
+      });
+      expect(res.status).toBe(400);
+      expect(WidgetService.enableWidget).not.toHaveBeenCalled();
     });
   });
 
@@ -190,7 +214,7 @@ describe('Widget routes — per-channel scoping (additive)', () => {
       );
     });
 
-    it('without channelId or projectId returns 400', async () => {
+    it('without channelId returns 400', async () => {
       const app = createHttpApp();
       const res = await app.request(
         `http://localhost/api/widget/disable?serverId=${SERVER}`,
@@ -217,7 +241,7 @@ describe('Widget routes — per-channel scoping (additive)', () => {
       );
     });
 
-    it('without channelId or projectId returns 400', async () => {
+    it('without channelId returns 400', async () => {
       const app = createHttpApp();
       const res = await app.request('http://localhost/api/widget/secret/regenerate', {
         method: 'POST',
@@ -229,83 +253,62 @@ describe('Widget routes — per-channel scoping (additive)', () => {
     });
   });
 
-  // Backward-compat: every route still accepts ?projectId= and forwards it
-  // as a workspaceProjectId-keyed lookup. The legacy positional-string form
-  // is also acceptable; the route uses the object form when constructing the
-  // lookup so the service-layer signature is consistent across both query
-  // shapes.
-  describe('Backward-compat: ?projectId= still routes through', () => {
-    it('GET /api/widget/integration forwards projectId as workspaceProjectId lookup', async () => {
-      (WidgetService.getWidgetIntegration as any).mockResolvedValue({ id: 'wp', name: 'X' });
+  // Phase 5: routes 400 when channelId is missing, even if projectId is
+  // present in the query/body. The "channelId required" guard is exercised
+  // per-route above; this group covers the only place projectId is still
+  // honored — as a *non-lookup* passthrough into cache-invalidation —
+  // which is verified in HttpServer.widget-cache-invalidate.test.ts.
+  describe('Phase 5: ?projectId= alone is rejected', () => {
+    it('GET /api/widget/integration 400s when only projectId is supplied', async () => {
       const app = createHttpApp();
       const res = await app.request(
         `http://localhost/api/widget/integration?serverId=${SERVER}&projectId=${PROJ_A}`,
         { headers: { Authorization: 'Bearer t' } },
       );
-      expect(res.status).toBe(200);
-      expect(WidgetService.getWidgetIntegration).toHaveBeenCalledWith(
-        SERVER,
-        { workspaceProjectId: PROJ_A },
-      );
+      expect(res.status).toBe(400);
+      expect(WidgetService.getWidgetIntegration).not.toHaveBeenCalled();
     });
 
-    it('GET /api/widget/settings forwards projectId as workspaceProjectId lookup', async () => {
-      (WidgetService.getWidgetSettings as any).mockResolvedValue({});
+    it('GET /api/widget/settings 400s when only projectId is supplied', async () => {
       const app = createHttpApp();
       const res = await app.request(
         `http://localhost/api/widget/settings?serverId=${SERVER}&projectId=${PROJ_A}`,
         { headers: { Authorization: 'Bearer t' } },
       );
-      expect(res.status).toBe(200);
-      expect(WidgetService.getWidgetSettings).toHaveBeenCalledWith(
-        SERVER,
-        { workspaceProjectId: PROJ_A },
-      );
+      expect(res.status).toBe(400);
+      expect(WidgetService.getWidgetSettings).not.toHaveBeenCalled();
     });
 
-    it('DELETE /api/widget/disable forwards projectId as workspaceProjectId lookup', async () => {
-      (WidgetService.disableWidget as any).mockResolvedValue(undefined);
+    it('DELETE /api/widget/disable 400s when only projectId is supplied', async () => {
       const app = createHttpApp();
       const res = await app.request(
         `http://localhost/api/widget/disable?serverId=${SERVER}&projectId=${PROJ_A}`,
         { method: 'DELETE', headers: { Authorization: 'Bearer t' } },
       );
-      expect(res.status).toBe(200);
-      expect(WidgetService.disableWidget).toHaveBeenCalledWith(
-        SERVER,
-        { workspaceProjectId: PROJ_A },
-      );
+      expect(res.status).toBe(400);
+      expect(WidgetService.disableWidget).not.toHaveBeenCalled();
     });
 
-    it('POST /api/widget/secret/regenerate forwards projectId as workspaceProjectId lookup', async () => {
-      (WidgetService.regenerateSecret as any).mockResolvedValue({ apiSecret: 'new' });
+    it('POST /api/widget/secret/regenerate 400s when only projectId is supplied', async () => {
       const app = createHttpApp();
       const res = await app.request('http://localhost/api/widget/secret/regenerate', {
         method: 'POST',
         headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' },
         body: JSON.stringify({ serverId: SERVER, projectId: PROJ_A }),
       });
-      expect(res.status).toBe(200);
-      expect(WidgetService.regenerateSecret).toHaveBeenCalledWith(
-        SERVER,
-        { workspaceProjectId: PROJ_A },
-      );
+      expect(res.status).toBe(400);
+      expect(WidgetService.regenerateSecret).not.toHaveBeenCalled();
     });
 
-    it('PUT /api/widget/settings forwards projectId as workspaceProjectId lookup', async () => {
-      (WidgetService.updateWidgetSettings as any).mockResolvedValue({ autoInjectChanged: false });
+    it('PUT /api/widget/settings 400s when only projectId is supplied', async () => {
       const app = createHttpApp();
       const res = await app.request('http://localhost/api/widget/settings', {
         method: 'PUT',
         headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' },
         body: JSON.stringify({ serverId: SERVER, projectId: PROJ_A, is_public: false }),
       });
-      expect(res.status).toBe(200);
-      expect(WidgetService.updateWidgetSettings).toHaveBeenCalledWith(
-        SERVER,
-        expect.objectContaining({ is_public: false }),
-        { workspaceProjectId: PROJ_A },
-      );
+      expect(res.status).toBe(400);
+      expect(WidgetService.updateWidgetSettings).not.toHaveBeenCalled();
     });
   });
 

@@ -12,14 +12,22 @@ import {
   enableWidget,
   disableWidget,
   updateWidgetSettings,
-  reconcileUnbackfilledWidgets,
   reconcileWidgetBindings,
 } from './WidgetService';
+
+// Phase 5 of the widget-per-channel migration: channelId is the sole lookup
+// key. This file (originally named workspaceProject.test.ts) is kept under its
+// historical name to avoid renaming churn during the cleanup PR, but every
+// test now exercises the channel-keyed write/read paths. The
+// `workspace_project_id` column still exists as a cached parent reference and
+// is asserted alongside the channel where relevant.
 
 const RUN = randomBytes(6).toString('hex');
 const SERVER = `ws_wp_${RUN}`;
 const PROJ_A = `proj_test_${RUN}_a`;
 const PROJ_B = `proj_test_${RUN}_b`;
+const CHAN_A = `ch-moddio-${RUN}`;
+const CHAN_B = `ch-snek-${RUN}`;
 const insertedIds: string[] = [];
 
 beforeAll(async () => {
@@ -33,7 +41,7 @@ beforeAll(async () => {
       apiSecretHash: `s-moddio-${RUN}`,
       enabled: true,
       autoInjectInPreview: false,
-      channelId: `ch-moddio-${RUN}`,
+      channelId: CHAN_A,
     },
     {
       serverId: SERVER,
@@ -44,7 +52,7 @@ beforeAll(async () => {
       apiSecretHash: `s-snek-${RUN}`,
       enabled: true,
       autoInjectInPreview: false,
-      channelId: `ch-snek-${RUN}`,
+      channelId: CHAN_B,
     },
   ]).returning({ id: widgetProjects.id });
   insertedIds.push(...rows.map(r => r.id));
@@ -56,22 +64,24 @@ afterAll(async () => {
   }
 });
 
-describe('WidgetService — per-project isolation (reads)', () => {
-  it('getWidgetIntegration returns the row scoped to the requested workspace project', async () => {
-    const a = await getWidgetIntegration(SERVER, PROJ_A);
-    const b = await getWidgetIntegration(SERVER, PROJ_B);
+describe('WidgetService — per-channel isolation (reads)', () => {
+  it('getWidgetIntegration is scoped to (serverId, channelId)', async () => {
+    const a = await getWidgetIntegration(SERVER, { channelId: CHAN_A });
+    const b = await getWidgetIntegration(SERVER, { channelId: CHAN_B });
     expect(a?.name).toBe('Moddio');
     expect(b?.name).toBe('Snek');
   });
 
-  it('getWidgetSettings is scoped to (serverId, workspaceProjectId)', async () => {
-    const a = await getWidgetSettings(SERVER, PROJ_A);
-    const b = await getWidgetSettings(SERVER, PROJ_B);
+  it('getWidgetSettings is scoped to (serverId, channelId)', async () => {
+    const a = await getWidgetSettings(SERVER, { channelId: CHAN_A });
+    const b = await getWidgetSettings(SERVER, { channelId: CHAN_B });
     expect(a?.slug).toBe(`moddio-${RUN}`);
     expect(b?.slug).toBe(`snek-${RUN}`);
   });
 
-  it('getPreviewWidgetFlag is scoped to (serverId, workspaceProjectId)', async () => {
+  it('getPreviewWidgetFlag (workspace-keyed) is scoped to (serverId, workspaceProjectId)', async () => {
+    // Preview-proxy uses workspaceProjectId (workspace→BE path); the parameter
+    // is intentionally NOT a WidgetLookup — see WidgetService.getPreviewWidgetFlag.
     await db.update(widgetProjects)
       .set({ autoInjectInPreview: true })
       .where(eq(widgetProjects.slug, `moddio-${RUN}`));
@@ -79,21 +89,6 @@ describe('WidgetService — per-project isolation (reads)', () => {
     const b = await getPreviewWidgetFlag(SERVER, PROJ_B);
     expect(a).toEqual({ shouldInject: true, projectSlug: `moddio-${RUN}` });
     expect(b).toEqual({ shouldInject: false });
-  });
-
-  // Phase 1 added `WidgetLookup` (channelId | workspaceProjectId) and a
-  // string-form coercion for backward compat. This pins the equivalence:
-  // the two forms must resolve the same row when both keys point at it.
-  it('getPreviewWidgetFlag accepts { channelId } and bare projectId equivalently', async () => {
-    await db.update(widgetProjects)
-      .set({ autoInjectInPreview: true })
-      .where(eq(widgetProjects.slug, `moddio-${RUN}`));
-    const byProjString = await getPreviewWidgetFlag(SERVER, PROJ_A);
-    const byProjObject = await getPreviewWidgetFlag(SERVER, { workspaceProjectId: PROJ_A });
-    const byChannel    = await getPreviewWidgetFlag(SERVER, { channelId: `ch-moddio-${RUN}` });
-    expect(byProjString).toEqual({ shouldInject: true, projectSlug: `moddio-${RUN}` });
-    expect(byProjObject).toEqual(byProjString);
-    expect(byChannel).toEqual(byProjString);
   });
 
   it('generatePreviewWidgetBootstrap uses the per-project row', async () => {
@@ -104,7 +99,7 @@ describe('WidgetService — per-project isolation (reads)', () => {
     expect(none).toBeNull();
   });
 
-  it('omitting workspaceProjectId falls back to legacy serverId-only behavior (backward compat)', async () => {
+  it('omitting the lookup falls back to serverId-only behavior (admin "any row" path)', async () => {
     const anyOne = await getWidgetIntegration(SERVER);
     expect(['Moddio', 'Snek']).toContain(anyOne?.name);
   });
@@ -114,13 +109,15 @@ describe('WidgetService — per-project isolation (reads)', () => {
 // Write-path tests
 // ============================================================================
 
-describe('WidgetService — per-project writes', () => {
+describe('WidgetService — per-channel writes', () => {
   // Use a separate set of constants so this block is self-contained and
   // doesn't collide with the read-block's beforeAll-seeded data.
   const WRUN = randomBytes(6).toString('hex');
   const WSERVER = `ws_ww_${WRUN}`;
   const WPROJ_A = `proj_w_${WRUN}_a`;
   const WPROJ_B = `proj_w_${WRUN}_b`;
+  const WCHAN_A = `ch-a-${WRUN}`;
+  const WCHAN_B = `ch-b-${WRUN}`;
 
   beforeEach(async () => {
     await db.delete(widgetProjects).where(eq(widgetProjects.serverId, WSERVER));
@@ -130,55 +127,73 @@ describe('WidgetService — per-project writes', () => {
     await db.delete(widgetProjects).where(eq(widgetProjects.serverId, WSERVER));
   });
 
-  it('enableWidget creates one row per (serverId, workspaceProjectId)', async () => {
-    const a = await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
-    const b = await enableWidget(WSERVER, { name: 'Snek',   channelId: `ch-b-${WRUN}`, workspaceProjectId: WPROJ_B });
+  it('enableWidget creates one row per (serverId, channelId)', async () => {
+    const a = await enableWidget(WSERVER, { name: 'Moddio', channelId: WCHAN_A, workspaceProjectId: WPROJ_A });
+    const b = await enableWidget(WSERVER, { name: 'Snek',   channelId: WCHAN_B, workspaceProjectId: WPROJ_B });
     expect(a.id).not.toBe(b.id);
+    expect(a.channelId).toBe(WCHAN_A);
+    expect(b.channelId).toBe(WCHAN_B);
     expect(a.workspaceProjectId).toBe(WPROJ_A);
     expect(b.workspaceProjectId).toBe(WPROJ_B);
   });
 
-  it('enableWidget for an existing (server, project) re-enables and rotates secret without creating a duplicate row', async () => {
-    const first  = await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
-    const second = await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
+  it('enableWidget for an existing (server, channel) re-enables and rotates secret without creating a duplicate row', async () => {
+    const first  = await enableWidget(WSERVER, { name: 'Moddio', channelId: WCHAN_A, workspaceProjectId: WPROJ_A });
+    const second = await enableWidget(WSERVER, { name: 'Moddio', channelId: WCHAN_A, workspaceProjectId: WPROJ_A });
     expect(second.id).toBe(first.id);
+    expect(second.slug).toBe(first.slug);                    // slug preserved
     expect(second.apiSecretHash).not.toBe(first.apiSecretHash); // rotated
     const all = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, WSERVER));
     expect(all).toHaveLength(1);
   });
 
-  it('enableWidget rejects calls without workspaceProjectId', async () => {
-    await expect(
-      enableWidget(WSERVER, { name: 'X', channelId: 'c' } as any),
-    ).rejects.toThrow(/workspaceProjectId/);
+  it('enableWidget works without workspaceProjectId (channel-only path)', async () => {
+    // Phase 5: workspaceProjectId is optional. Re-enable on the same channel
+    // still preserves the slug + finds the existing row.
+    const first  = await enableWidget(WSERVER, { name: 'NoProj', channelId: WCHAN_A });
+    expect(first.workspaceProjectId).toBeNull();
+    const second = await enableWidget(WSERVER, { name: 'NoProj', channelId: WCHAN_A });
+    expect(second.id).toBe(first.id);
+    expect(second.slug).toBe(first.slug);
   });
 
-  it('disableWidget(serverId, workspaceProjectId) does not affect a sibling project on the same server', async () => {
-    await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
-    await enableWidget(WSERVER, { name: 'Snek',   channelId: `ch-b-${WRUN}`, workspaceProjectId: WPROJ_B });
-    await disableWidget(WSERVER, WPROJ_A);
-    const a = await getWidgetIntegration(WSERVER, WPROJ_A);
-    const b = await getWidgetIntegration(WSERVER, WPROJ_B);
+  it('enableWidget rejects calls without channelId', async () => {
+    await expect(
+      enableWidget(WSERVER, { name: 'X' } as any),
+    ).rejects.toThrow(/channelId/);
+  });
+
+  it('disableWidget(serverId, {channelId}) does not affect a sibling channel on the same server', async () => {
+    await enableWidget(WSERVER, { name: 'Moddio', channelId: WCHAN_A, workspaceProjectId: WPROJ_A });
+    await enableWidget(WSERVER, { name: 'Snek',   channelId: WCHAN_B, workspaceProjectId: WPROJ_B });
+    await disableWidget(WSERVER, { channelId: WCHAN_A });
+    const a = await getWidgetIntegration(WSERVER, { channelId: WCHAN_A });
+    const b = await getWidgetIntegration(WSERVER, { channelId: WCHAN_B });
     expect(a).toBeNull();   // disabled = enabled:false; getWidgetIntegration filters enabled=true
     expect(b?.name).toBe('Snek');
   });
 
-  it('updateWidgetSettings only updates the targeted project row', async () => {
-    await enableWidget(WSERVER, { name: 'Moddio', channelId: `ch-a-${WRUN}`, workspaceProjectId: WPROJ_A });
-    await enableWidget(WSERVER, { name: 'Snek',   channelId: `ch-b-${WRUN}`, workspaceProjectId: WPROJ_B });
-    await updateWidgetSettings(WSERVER, { is_public: true }, { workspaceProjectId: WPROJ_A });
-    const a = await getWidgetSettings(WSERVER, WPROJ_A);
-    const b = await getWidgetSettings(WSERVER, WPROJ_B);
+  it('updateWidgetSettings only updates the targeted channel row', async () => {
+    await enableWidget(WSERVER, { name: 'Moddio', channelId: WCHAN_A, workspaceProjectId: WPROJ_A });
+    await enableWidget(WSERVER, { name: 'Snek',   channelId: WCHAN_B, workspaceProjectId: WPROJ_B });
+    // login_url is required when is_public=true (validated by updateWidgetSettings).
+    await updateWidgetSettings(
+      WSERVER,
+      { is_public: true, login_url: 'https://example.com/login' },
+      { channelId: WCHAN_A },
+    );
+    const a = await getWidgetSettings(WSERVER, { channelId: WCHAN_A });
+    const b = await getWidgetSettings(WSERVER, { channelId: WCHAN_B });
     expect(a?.is_public).toBe(true);
     expect(b?.is_public).toBe(false);
   });
 });
 
 // ============================================================================
-// Reconcile tests
+// Reconcile tests (Pass 1 + Pass 2)
 // ============================================================================
 
-describe('reconcileUnbackfilledWidgets', () => {
+describe('reconcileWidgetBindings — Pass 1 (workspace_project_id backfill from channel map)', () => {
   const RRUN = randomBytes(6).toString('hex');
   const RSERVER = `ws_rec_${RRUN}`;
   const RPROJ = `proj_rec_${RRUN}`;
@@ -201,8 +216,9 @@ describe('reconcileUnbackfilledWidgets', () => {
       enabled: true, channelId: KNOWN_CHANNEL,
     });
 
-    const result = await reconcileUnbackfilledWidgets(RSERVER, {
-      [KNOWN_CHANNEL]: RPROJ,
+    const result = await reconcileWidgetBindings(RSERVER, {
+      channelToProject: { [KNOWN_CHANNEL]: RPROJ },
+      projectToPrimaryTodoChannel: {},
     });
     expect(result.updated).toBe(1);
 
@@ -216,8 +232,9 @@ describe('reconcileUnbackfilledWidgets', () => {
       apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`, enabled: true, channelId: ORPHAN_CHANNEL,
     });
 
-    const result = await reconcileUnbackfilledWidgets(RSERVER, {
-      [`ch_other_${RRUN}`]: RPROJ,
+    const result = await reconcileWidgetBindings(RSERVER, {
+      channelToProject: { [`ch_other_${RRUN}`]: RPROJ },
+      projectToPrimaryTodoChannel: {},
     });
     expect(result.updated).toBe(0);
 
@@ -233,8 +250,9 @@ describe('reconcileUnbackfilledWidgets', () => {
       apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`, enabled: true, channelId: KNOWN_CHANNEL,
     });
 
-    const result = await reconcileUnbackfilledWidgets(RSERVER, {
-      [KNOWN_CHANNEL]: `proj_DIFFERENT_${RRUN}`, // ignored, row already populated
+    const result = await reconcileWidgetBindings(RSERVER, {
+      channelToProject: { [KNOWN_CHANNEL]: `proj_DIFFERENT_${RRUN}` }, // ignored, row already populated
+      projectToPrimaryTodoChannel: {},
     });
     expect(result.updated).toBe(0);
 
@@ -248,13 +266,16 @@ describe('reconcileUnbackfilledWidgets', () => {
       apiKey: `k-${RRUN}`, apiSecretHash: `s-${RRUN}`, enabled: true, channelId: null,
     });
 
-    const result = await reconcileUnbackfilledWidgets(RSERVER, { [KNOWN_CHANNEL]: RPROJ });
+    const result = await reconcileWidgetBindings(RSERVER, {
+      channelToProject: { [KNOWN_CHANNEL]: RPROJ },
+      projectToPrimaryTodoChannel: {},
+    });
     expect(result.updated).toBe(0);
   });
 });
 
 // ============================================================================
-// Reconcile Pass 2 + mixed tests (reconcileWidgetBindings)
+// Reconcile Pass 2 + mixed tests
 // ============================================================================
 
 describe('reconcileWidgetBindings — Pass 2 (channel_id backfill from project map)', () => {

@@ -40,30 +40,18 @@ import {
 const attachmentStorage = new TaskAttachmentStorageService();
 
 /**
- * Discriminated lookup key for widget rows.
+ * Lookup key for widget rows.
  *
- * Phase 1 of the widget-per-channel migration: callers may key by either
- * `channelId` (new, per-task-channel) or `workspaceProjectId` (legacy,
- * per-project). Routes accept both query shapes; this type lets the service
- * layer accept either.
- *
- * The `string` form is preserved as a backward-compat coercion to
- * `{ workspaceProjectId }` so existing positional call-sites (tests, internal
- * helpers) keep working unchanged. The string-form will be removed in Phase 5
- * once all call-sites are converted.
+ * Phase 5 of the widget-per-channel migration: channel is the sole key.
+ * The legacy `workspaceProjectId` branch and the positional-string coercion
+ * form have been removed now that all callers (deployed client, workspace
+ * reconciler) send `channelId`.
  */
-export type WidgetLookup = { channelId: string } | { workspaceProjectId: string };
-
-function normalizeWidgetLookup(lookup: WidgetLookup | string | undefined): WidgetLookup | undefined {
-  if (lookup === undefined) return undefined;
-  if (typeof lookup === 'string') return { workspaceProjectId: lookup };
-  return lookup;
-}
+export type WidgetLookup = { channelId: string };
 
 function widgetLookupCondition(lookup: WidgetLookup | undefined) {
   if (!lookup) return undefined;
-  if ('channelId' in lookup) return eq(widgetProjects.channelId, lookup.channelId);
-  return eq(widgetProjects.workspaceProjectId, lookup.workspaceProjectId);
+  return eq(widgetProjects.channelId, lookup.channelId);
 }
 
 /**
@@ -1721,19 +1709,23 @@ function generateSlug(name: string, suffix: string): string {
 
 export async function enableWidget(
   serverId: string,
-  opts: { name: string; channelId?: string; workspaceProjectId: string }
+  opts: { name: string; channelId: string; workspaceProjectId?: string }
 ) {
-  if (!opts.workspaceProjectId) {
-    throw new Error('enableWidget: workspaceProjectId is required');
+  if (!opts.channelId) {
+    throw new Error('enableWidget: channelId is required');
   }
 
-  // Check if a project already exists for this (server, workspaceProject) pair (re-enable case)
+  // Check if a widget already exists for this (server, channel) pair (re-enable case).
+  // Phase 5: keying by channelId preserves the slug+apiKey across re-enables
+  // on the same channel, which matches the per-channel widget model. The
+  // previous `(server, workspaceProjectId)` lookup is gone — channel is the
+  // sole identity now (DB column is NOT NULL per Phase B migration).
   const [existing] = await db
     .select({ slug: widgetProjects.slug })
     .from(widgetProjects)
     .where(and(
       eq(widgetProjects.serverId, serverId),
-      eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId),
+      eq(widgetProjects.channelId, opts.channelId),
     ))
     .limit(1);
 
@@ -1746,7 +1738,10 @@ export async function enableWidget(
     .insert(widgetProjects)
     .values({
       serverId,
-      workspaceProjectId: opts.workspaceProjectId,
+      // workspaceProjectId is a cached parent reference, no longer the lookup
+      // key. Optional on the BE write path; populated when the caller knows
+      // it (deployed admin client still supplies it) and left null otherwise.
+      workspaceProjectId: opts.workspaceProjectId ?? null,
       name: opts.name,
       slug,
       apiKey,
@@ -1762,7 +1757,7 @@ export async function enableWidget(
         apiKey,
         apiSecretHash: apiSecret,
         channelId: opts.channelId,
-        workspaceProjectId: opts.workspaceProjectId,
+        ...(opts.workspaceProjectId !== undefined && { workspaceProjectId: opts.workspaceProjectId }),
         updatedAt: new Date(),
       },
     })
@@ -1771,10 +1766,9 @@ export async function enableWidget(
   return { ...project, apiSecret };
 }
 
-export async function disableWidget(serverId: string, lookup?: WidgetLookup | string) {
-  const key = normalizeWidgetLookup(lookup);
+export async function disableWidget(serverId: string, lookup?: WidgetLookup) {
   const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-  const extra = widgetLookupCondition(key);
+  const extra = widgetLookupCondition(lookup);
   if (extra) conditions.push(extra);
   await db
     .update(widgetProjects)
@@ -1782,12 +1776,11 @@ export async function disableWidget(serverId: string, lookup?: WidgetLookup | st
     .where(and(...conditions));
 }
 
-export async function regenerateSecret(serverId: string, lookup?: WidgetLookup | string) {
-  const key = normalizeWidgetLookup(lookup);
+export async function regenerateSecret(serverId: string, lookup?: WidgetLookup) {
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
   const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-  const extra = widgetLookupCondition(key);
+  const extra = widgetLookupCondition(lookup);
   if (extra) conditions.push(extra);
   const [project] = await db
     .update(widgetProjects)
@@ -1897,13 +1890,12 @@ export async function generateUserTokenBySecret(
   return { token };
 }
 
-export async function getWidgetIntegration(serverId: string, lookup?: WidgetLookup | string) {
-  const key = normalizeWidgetLookup(lookup);
+export async function getWidgetIntegration(serverId: string, lookup?: WidgetLookup) {
   const conditions = [
     eq(widgetProjects.serverId, serverId),
     eq(widgetProjects.enabled, true),
   ];
-  const extra = widgetLookupCondition(key);
+  const extra = widgetLookupCondition(lookup);
   if (extra) conditions.push(extra);
   const [project] = await db
     .select()
@@ -1985,15 +1977,26 @@ export async function generatePreviewWidgetBootstrap(
 /**
  * Report whether a server has auto-inject enabled (used by the preview proxy
  * to decide whether to include the bootstrap script in HTML responses).
+ *
+ * Keying: this is the workspace→BE preview path; the workspace preview proxy
+ * sends `?projectId=` (workspaceProjectId). The parameter mirrors
+ * `generatePreviewWidgetBootstrap` and is intentionally NOT a `WidgetLookup`
+ * — Phase 5 removed channel/project unification from that type, but this
+ * call site still legitimately keys by workspace project. When omitted, the
+ * function returns the server's first matching auto-inject row (legacy
+ * behavior preserved for callers that don't supply a project id).
  */
-export async function getPreviewWidgetFlag(serverId: string, lookup?: WidgetLookup | string): Promise<{
+export async function getPreviewWidgetFlag(
+  serverId: string,
+  workspaceProjectId?: string,
+): Promise<{
   shouldInject: boolean;
   projectSlug?: string;
 }> {
-  const key = normalizeWidgetLookup(lookup);
   const conditions = [eq(widgetProjects.serverId, serverId)];
-  const extra = widgetLookupCondition(key);
-  if (extra) conditions.push(extra);
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -2012,10 +2015,9 @@ export async function getPreviewWidgetFlag(serverId: string, lookup?: WidgetLook
   return { shouldInject: true, projectSlug: project.slug };
 }
 
-export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup | string) {
-  const key = normalizeWidgetLookup(lookup);
+export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup) {
   const conditions = [eq(widgetProjects.serverId, serverId)];
-  const extra = widgetLookupCondition(key);
+  const extra = widgetLookupCondition(lookup);
   if (extra) conditions.push(extra);
   const [project] = await db
     .select({
@@ -2086,17 +2088,12 @@ export async function updateWidgetSettings(
     widgetRoleClaimName?: string;
     widgetAssignRateLimitPerHour?: number;
   },
-  opts?: WidgetLookup | string,
+  opts?: WidgetLookup,
 ): Promise<UpdateWidgetSettingsResult> {
   // Lookup key comes exclusively from `opts` — the second argument.
-  // Accepts either a discriminated `WidgetLookup` (channelId or workspaceProjectId)
-  // OR a bare string (legacy positional form, coerced to `{ workspaceProjectId }`).
-  //
-  // The previous "settings.workspaceProjectId wins over opts" inline branch
-  // was removed: no in-process caller used it, and the precedence would
-  // have silently overridden a more-specific channelId lookup if any future
-  // caller ever combined the two. (PR review Issue #3.)
-  const key = normalizeWidgetLookup(opts);
+  // Phase 5: channelId-only. The legacy positional-string and
+  // `workspaceProjectId` lookup forms have been removed.
+  const key = opts;
 
   // Empty-roles guard: enabling assignment without roles is a configuration error.
   if (settings.widgetAgentAssignmentEnabled === true) {
@@ -2327,18 +2324,6 @@ export async function reconcileWidgetBindings(
   }
 
   return { updated };
-}
-
-/**
- * Backward-compat shim — kept only so existing tests in
- * `WidgetService.workspaceProject.test.ts` continue to pass until Phase 5
- * Task 5.2 renames them. Deleted in Phase 5.
- */
-export async function reconcileUnbackfilledWidgets(
-  serverId: string,
-  channelToProject: Record<string, string>,
-): Promise<{ updated: number }> {
-  return reconcileWidgetBindings(serverId, { channelToProject, projectToPrimaryTodoChannel: {} });
 }
 
 /**

@@ -105,7 +105,9 @@ describe('widget cache invalidation route wiring', () => {
   it('DELETE /api/widget/disable push-invalidates preview widget cache', async () => {
     (WidgetService.disableWidget as any).mockResolvedValue(undefined);
 
-    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1&projectId=proj_1');
+    // Phase 5: channelId is required; projectId is still extracted from the
+    // query so it can be forwarded into the cache-invalidate payload.
+    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1&channelId=ch_1&projectId=proj_1');
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ success: true });
@@ -125,6 +127,7 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('PUT', '/api/widget/settings', {
       serverId: 'srv_1',
+      channelId: 'ch_1',
       projectId: 'proj_1',
       auto_approve: true,
       widget_position: 'bottom-right',
@@ -193,6 +196,7 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('PUT', '/api/widget/settings', {
       serverId: 'srv_1',
+      channelId: 'ch_1',
       projectId: 'proj_1',
       auto_inject_in_preview: true,
     });
