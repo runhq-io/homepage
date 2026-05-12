@@ -15,9 +15,8 @@ const MIGRATION = readFileSync(
 
 // Isolation strategy:
 //   The migration mutates table-level constraints on widget_projects (drops one
-//   unique index, creates another, sets NOT NULL on channel_id). Running it
-//   directly against the dev `public` schema would clobber state shared with
-//   other tests and any local data.
+//   unique index, creates another). Running it directly against the dev `public`
+//   schema would clobber state shared with other tests and any local data.
 //
 //   Instead, each test creates a throwaway schema, recreates a minimal
 //   pre-migration widget_projects table inside it, applies the migration SQL
@@ -64,15 +63,9 @@ describeOrSkip('2026-05-11 widget-per-channel migration', () => {
   });
 
   beforeEach(async () => {
-    // Defensive: if a prior test left the pg connection in an aborted-tx
-    // state (e.g. via RAISE EXCEPTION inside the migration's BEGIN block), a
-    // bare ROLLBACK is a no-op outside a transaction but recovers the
-    // connection if one is in progress.
     await client.query('ROLLBACK').catch(() => {});
 
-    // Reset the schema to pre-migration shape. The minimal table mirrors only
-    // the columns the migration cares about plus the columns NOT NULL on real
-    // widget_projects, so INSERTs in tests succeed.
+    // Reset the schema to pre-migration shape.
     await client.query(`SET search_path TO "${TEST_SCHEMA}"`);
     await client.query(`DROP TABLE IF EXISTS widget_projects CASCADE`);
     await client.query(`
@@ -96,7 +89,7 @@ describeOrSkip('2026-05-11 widget-per-channel migration', () => {
     `);
   });
 
-  it('succeeds when all rows have channel_id', async () => {
+  it('swaps the unique index when all rows already have channel_id', async () => {
     await client.query(`
       INSERT INTO widget_projects (server_id, workspace_project_id, channel_id, name, slug, api_key, api_secret_hash)
       VALUES ('srv-1', 'proj-1', 'chan-1', 'W', 'w-aaaa', 'k1', 'h1')
@@ -104,15 +97,6 @@ describeOrSkip('2026-05-11 widget-per-channel migration', () => {
 
     await expect(client.query(MIGRATION)).resolves.toBeDefined();
 
-    // After migration: NOT NULL enforced.
-    await expect(
-      client.query(`
-        INSERT INTO widget_projects (server_id, workspace_project_id, channel_id, name, slug, api_key, api_secret_hash)
-        VALUES ('srv-1', 'proj-2', NULL, 'W2', 'w-bbbb', 'k2', 'h2')
-      `),
-    ).rejects.toThrow();
-
-    // And the new unique index exists with the expected name.
     const idx = await client.query(
       `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'widget_projects'`,
       [TEST_SCHEMA],
@@ -122,29 +106,34 @@ describeOrSkip('2026-05-11 widget-per-channel migration', () => {
     expect(names).not.toContain('widget_projects_server_workspace_project_unique');
   });
 
-  it('aborts if any row has NULL channel_id', async () => {
+  it('runs safely when channel_id is still NULL (deferred-NOT-NULL phase)', async () => {
+    // This phase of the rollout: the workspace reconciler has not yet
+    // populated channel_id on legacy rows. Postgres treats NULLs as distinct
+    // in unique indexes, so creating the new index over NULL rows is safe.
+    // The NOT NULL constraint is intentionally deferred to a follow-up
+    // migration added to the repo after backfill is verified.
     await client.query(`
       INSERT INTO widget_projects (server_id, workspace_project_id, channel_id, name, slug, api_key, api_secret_hash)
       VALUES ('srv-1', 'proj-1', NULL, 'W', 'w-cccc', 'k3', 'h3')
     `);
+    await client.query(`
+      INSERT INTO widget_projects (server_id, workspace_project_id, channel_id, name, slug, api_key, api_secret_hash)
+      VALUES ('srv-1', 'proj-2', NULL, 'W2', 'w-cccd', 'k3b', 'h3b')
+    `);
 
-    await expect(client.query(MIGRATION)).rejects.toThrow(/NULL channel_id/);
+    await expect(client.query(MIGRATION)).resolves.toBeDefined();
 
-    // The RAISE EXCEPTION inside the migration's BEGIN block leaves the pg
-    // connection in an aborted-transaction state. Issue an explicit ROLLBACK
-    // so subsequent introspection queries can run.
-    await client.query('ROLLBACK');
-    await client.query(`SET search_path TO "${TEST_SCHEMA}"`);
-
-    // Rollback semantics: pre-existing index still present, channel_id still
-    // nullable, no new unique index sneaked in.
     const idx = await client.query(
       `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'widget_projects'`,
       [TEST_SCHEMA],
     );
     const names = idx.rows.map((r: { indexname: string }) => r.indexname);
-    expect(names).toContain('widget_projects_server_workspace_project_unique');
-    expect(names).not.toContain('widget_projects_server_channel_unique');
+    expect(names).toContain('widget_projects_server_channel_unique');
+    expect(names).not.toContain('widget_projects_server_workspace_project_unique');
+
+    // Both NULL rows remain (NULLs are distinct in unique indexes).
+    const { rows } = await client.query(`SELECT COUNT(*)::int AS c FROM widget_projects`);
+    expect(rows[0].c).toBe(2);
   });
 
   it('rejects duplicate (server_id, channel_id) after migration', async () => {
