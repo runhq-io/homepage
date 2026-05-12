@@ -13,6 +13,7 @@ import {
   disableWidget,
   updateWidgetSettings,
   reconcileUnbackfilledWidgets,
+  reconcileWidgetBindings,
 } from './WidgetService';
 
 const RUN = randomBytes(6).toString('hex');
@@ -78,6 +79,21 @@ describe('WidgetService — per-project isolation (reads)', () => {
     const b = await getPreviewWidgetFlag(SERVER, PROJ_B);
     expect(a).toEqual({ shouldInject: true, projectSlug: `moddio-${RUN}` });
     expect(b).toEqual({ shouldInject: false });
+  });
+
+  // Phase 1 added `WidgetLookup` (channelId | workspaceProjectId) and a
+  // string-form coercion for backward compat. This pins the equivalence:
+  // the two forms must resolve the same row when both keys point at it.
+  it('getPreviewWidgetFlag accepts { channelId } and bare projectId equivalently', async () => {
+    await db.update(widgetProjects)
+      .set({ autoInjectInPreview: true })
+      .where(eq(widgetProjects.slug, `moddio-${RUN}`));
+    const byProjString = await getPreviewWidgetFlag(SERVER, PROJ_A);
+    const byProjObject = await getPreviewWidgetFlag(SERVER, { workspaceProjectId: PROJ_A });
+    const byChannel    = await getPreviewWidgetFlag(SERVER, { channelId: `ch-moddio-${RUN}` });
+    expect(byProjString).toEqual({ shouldInject: true, projectSlug: `moddio-${RUN}` });
+    expect(byProjObject).toEqual(byProjString);
+    expect(byChannel).toEqual(byProjString);
   });
 
   it('generatePreviewWidgetBootstrap uses the per-project row', async () => {
@@ -234,5 +250,132 @@ describe('reconcileUnbackfilledWidgets', () => {
 
     const result = await reconcileUnbackfilledWidgets(RSERVER, { [KNOWN_CHANNEL]: RPROJ });
     expect(result.updated).toBe(0);
+  });
+});
+
+// ============================================================================
+// Reconcile Pass 2 + mixed tests (reconcileWidgetBindings)
+// ============================================================================
+
+describe('reconcileWidgetBindings — Pass 2 (channel_id backfill from project map)', () => {
+  const BRUN = randomBytes(6).toString('hex');
+  const BSERVER = `ws_bind_${BRUN}`;
+  const BPROJ_X = `proj_bind_${BRUN}_x`;
+  const BPROJ_Y = `proj_bind_${BRUN}_y`;
+  const BCHAN_X = `ch_bind_${BRUN}_x`;
+
+  beforeEach(async () => {
+    await db.delete(widgetProjects).where(eq(widgetProjects.serverId, BSERVER));
+  });
+
+  afterAll(async () => {
+    await db.delete(widgetProjects).where(eq(widgetProjects.serverId, BSERVER));
+  });
+
+  it('fills channel_id for rows with workspace_project_id set but channel_id NULL', async () => {
+    await db.insert(widgetProjects).values({
+      serverId: BSERVER,
+      workspaceProjectId: BPROJ_X,
+      // channel_id intentionally NULL.
+      name: 'PassTwo', slug: `pass2-${BRUN}`,
+      apiKey: `k-${BRUN}`, apiSecretHash: `s-${BRUN}`,
+      enabled: true, channelId: null,
+    });
+
+    const result = await reconcileWidgetBindings(BSERVER, {
+      channelToProject: {},
+      projectToPrimaryTodoChannel: { [BPROJ_X]: BCHAN_X },
+    });
+    expect(result.updated).toBe(1);
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, BSERVER));
+    expect(row.channelId).toBe(BCHAN_X);
+    expect(row.workspaceProjectId).toBe(BPROJ_X);
+  });
+
+  it('leaves channel_id NULL when no matching primary-todo entry exists', async () => {
+    await db.insert(widgetProjects).values({
+      serverId: BSERVER,
+      workspaceProjectId: BPROJ_Y,
+      name: 'NoMatch', slug: `nomatch-${BRUN}`,
+      apiKey: `k-${BRUN}`, apiSecretHash: `s-${BRUN}`,
+      enabled: true, channelId: null,
+    });
+
+    const result = await reconcileWidgetBindings(BSERVER, {
+      channelToProject: {},
+      projectToPrimaryTodoChannel: {}, // no entry for BPROJ_Y
+    });
+    expect(result.updated).toBe(0);
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, BSERVER));
+    expect(row.channelId).toBeNull();
+    expect(row.workspaceProjectId).toBe(BPROJ_Y);
+  });
+
+  it('leaves orphan rows (both channel_id and workspace_project_id NULL) untouched', async () => {
+    // Phase 4 migration surfaces these for manual triage; the reconciler
+    // intentionally cannot resolve them from either direction.
+    await db.insert(widgetProjects).values({
+      serverId: BSERVER,
+      workspaceProjectId: null,
+      channelId: null,
+      name: 'Orphan', slug: `orphan-${BRUN}`,
+      apiKey: `k-${BRUN}`, apiSecretHash: `s-${BRUN}`,
+      enabled: true,
+    });
+
+    const result = await reconcileWidgetBindings(BSERVER, {
+      channelToProject: { someChan: 'someProj' },
+      projectToPrimaryTodoChannel: { someProj: 'someChan' },
+    });
+    expect(result.updated).toBe(0);
+
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, BSERVER));
+    expect(row.workspaceProjectId).toBeNull();
+    expect(row.channelId).toBeNull();
+  });
+
+  it('Pass 1 and Pass 2 both fire on distinct rows in one reconcile call', async () => {
+    const PROJ_A = `proj_mix_${BRUN}_a`;
+    const CHAN_A = `ch_mix_${BRUN}_a`;
+    const PROJ_B = `proj_mix_${BRUN}_b`;
+    const CHAN_B = `ch_mix_${BRUN}_b`;
+
+    // Row A: project set, channel NULL → Pass 2 should fill channel.
+    // Row B: channel set, project NULL → Pass 1 should fill project.
+    const inserted = await db.insert(widgetProjects).values([
+      {
+        serverId: BSERVER,
+        workspaceProjectId: PROJ_A,
+        channelId: null,
+        name: 'MixA', slug: `mixa-${BRUN}`,
+        apiKey: `kA-${BRUN}`, apiSecretHash: `sA-${BRUN}`, enabled: true,
+      },
+      {
+        serverId: BSERVER,
+        workspaceProjectId: null,
+        channelId: CHAN_B,
+        name: 'MixB', slug: `mixb-${BRUN}`,
+        apiKey: `kB-${BRUN}`, apiSecretHash: `sB-${BRUN}`, enabled: true,
+      },
+    ]).returning({ id: widgetProjects.id, slug: widgetProjects.slug });
+
+    const result = await reconcileWidgetBindings(BSERVER, {
+      channelToProject: { [CHAN_B]: PROJ_B },
+      projectToPrimaryTodoChannel: { [PROJ_A]: CHAN_A },
+    });
+    expect(result.updated).toBe(2);
+
+    const rows = await db.select().from(widgetProjects).where(eq(widgetProjects.serverId, BSERVER));
+    const bySlug = new Map(rows.map(r => [r.slug, r]));
+    const rowA = bySlug.get(`mixa-${BRUN}`)!;
+    const rowB = bySlug.get(`mixb-${BRUN}`)!;
+    expect(rowA.workspaceProjectId).toBe(PROJ_A);
+    expect(rowA.channelId).toBe(CHAN_A);
+    expect(rowB.workspaceProjectId).toBe(PROJ_B);
+    expect(rowB.channelId).toBe(CHAN_B);
+    // Silence unused warning for `inserted`; helps if we want to debug later.
+    expect(inserted).toHaveLength(2);
   });
 });

@@ -25,12 +25,11 @@ afterAll(async () => {
 describe('updateWidgetSettings — policy fields', () => {
   it('persists all four new policy fields together', async () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       widgetAgentAssignmentEnabled: true,
       widgetAssignRoles: ['triager', 'pm'],
       widgetRoleClaimName: 'company_roles',
       widgetAssignRateLimitPerHour: 60,
-    });
+    }, 'wsp_settings');
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.widgetAgentAssignmentEnabled).toBe(true);
     expect(row.widgetAssignRoles).toEqual(['triager', 'pm']);
@@ -40,18 +39,16 @@ describe('updateWidgetSettings — policy fields', () => {
 
   it('rejects empty roles when assignment is enabled', async () => {
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       widgetAgentAssignmentEnabled: true,
       widgetAssignRoles: [],
-    })).rejects.toThrow(/at least one role/i);
+    }, 'wsp_settings')).rejects.toThrow(/at least one role/i);
   });
 
   it('allows empty roles when assignment is disabled', async () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       widgetAgentAssignmentEnabled: false,
       widgetAssignRoles: [],
-    });
+    }, 'wsp_settings');
     // No throw — pass implies success
   });
 });
@@ -64,9 +61,8 @@ describe('updateWidgetSettings — login URL gating', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       is_public: true,
-    })).rejects.toThrow(/login url is required/i);
+    }, 'wsp_settings')).rejects.toThrow(/login url is required/i);
   });
 
   it('rejects clearing the login URL while is_public stays true', async () => {
@@ -75,14 +71,12 @@ describe('updateWidgetSettings — login URL gating', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       login_url: null,
-    })).rejects.toThrow(/login url is required/i);
+    }, 'wsp_settings')).rejects.toThrow(/login url is required/i);
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       login_url: '',
-    })).rejects.toThrow(/login url is required/i);
+    }, 'wsp_settings')).rejects.toThrow(/login url is required/i);
   });
 
   it('rejects javascript: and other non-http schemes', async () => {
@@ -91,16 +85,14 @@ describe('updateWidgetSettings — login URL gating', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       is_public: true,
       login_url: 'javascript:alert(1)',
-    })).rejects.toThrow(/valid http/i);
+    }, 'wsp_settings')).rejects.toThrow(/valid http/i);
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       is_public: true,
       login_url: 'not a url at all',
-    })).rejects.toThrow(/valid http/i);
+    }, 'wsp_settings')).rejects.toThrow(/valid http/i);
   });
 
   it('persists a valid http(s) login URL and trims whitespace', async () => {
@@ -109,10 +101,9 @@ describe('updateWidgetSettings — login URL gating', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       is_public: true,
       login_url: '  https://acme.test/login  ',
-    });
+    }, 'wsp_settings');
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.isPublic).toBe(true);
@@ -125,10 +116,9 @@ describe('updateWidgetSettings — login URL gating', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       is_public: false,
       login_url: '',
-    });
+    }, 'wsp_settings');
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.isPublic).toBe(false);
@@ -154,9 +144,8 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       auto_recognize_runhq_members: true,
-    })).rejects.toThrow(/at least one allowed origin/i);
+    }, 'wsp_settings')).rejects.toThrow(/at least one allowed origin/i);
   });
 
   it('rejects clearing allowed_origins while auto_recognize is on', async () => {
@@ -165,9 +154,8 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       allowed_origins: [],
-    })).rejects.toThrow(/at least one allowed origin/i);
+    }, 'wsp_settings')).rejects.toThrow(/at least one allowed origin/i);
   });
 
   it('rejects malformed origins', async () => {
@@ -176,26 +164,23 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       allowed_origins: ['not a url'],
-    })).rejects.toThrow(/Invalid origin/i);
+    }, 'wsp_settings')).rejects.toThrow(/Invalid origin/i);
 
     await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       allowed_origins: ['javascript:alert(1)'],
-    })).rejects.toThrow(/Invalid origin/i);
+    }, 'wsp_settings')).rejects.toThrow(/Invalid origin/i);
   });
 
   it('normalizes and deduplicates origins (lowercase host, drop default ports + paths, dedupe)', async () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       auto_recognize_runhq_members: true,
       allowed_origins: [
         'https://Acme.Test/login',
         'https://acme.test:443',
         'https://acme.test',
       ],
-    });
+    }, 'wsp_settings');
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.allowedOrigins).toEqual(['https://acme.test']);
@@ -208,10 +193,9 @@ describe('updateWidgetSettings — RunHQ-member auto-recognition', () => {
       .where(eq(widgetProjects.id, projectId));
 
     await WidgetService.updateWidgetSettings(SERVER_ID, {
-      workspaceProjectId: 'wsp_settings',
       auto_recognize_runhq_members: false,
       allowed_origins: [],
-    });
+    }, 'wsp_settings');
 
     const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
     expect(row.autoRecognizeRunhqMembers).toBe(false);

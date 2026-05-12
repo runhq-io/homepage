@@ -146,6 +146,46 @@ describe('widget cache invalidation route wiring', () => {
     );
   });
 
+  // Issue #1 — when the admin route is hit via ?channelId= (no projectId),
+  // the cache-invalidate payload must OMIT the projectId field entirely.
+  // Coercing to `''` silently breaks the downstream cache helper, which
+  // treats `''` as a defined-but-no-match key and clears nothing. The
+  // intended behavior is "absent projectId → clear the whole server's
+  // widget cache" — see preview-proxy.ts:216-229 and preview-internal.ts.
+  it('DELETE /api/widget/disable with only channelId omits projectId from the invalidate body', async () => {
+    (WidgetService.disableWidget as any).mockResolvedValue(undefined);
+
+    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1&channelId=ch_only');
+
+    expect(res.status).toBe(200);
+    await flushMicrotasks();
+
+    expect(ServerService.fetchFromServer).toHaveBeenCalledTimes(1);
+    const [, , , opts] = (ServerService.fetchFromServer as any).mock.calls[0];
+    expect(opts.body).toEqual({ kind: 'widget' });
+    expect(opts.body).not.toHaveProperty('projectId');
+    expect(opts.body).not.toEqual(expect.objectContaining({ projectId: '' }));
+    expect(opts.body.projectId).toBeUndefined();
+  });
+
+  it('PUT /api/widget/settings with only channelId omits projectId from the invalidate body', async () => {
+    (WidgetService.updateWidgetSettings as any).mockResolvedValue({ autoInjectChanged: false });
+
+    const res = await sendJson('PUT', '/api/widget/settings', {
+      serverId: 'srv_1',
+      channelId: 'ch_only',
+      is_public: false,
+    });
+
+    expect(res.status).toBe(200);
+    await flushMicrotasks();
+
+    expect(ServerService.fetchFromServer).toHaveBeenCalledTimes(1);
+    const [, , , opts] = (ServerService.fetchFromServer as any).mock.calls[0];
+    expect(opts.body).toEqual({ kind: 'widget' });
+    expect(opts.body.projectId).toBeUndefined();
+  });
+
   it('does not push-invalidate when widget settings validation fails', async () => {
     (WidgetService.updateWidgetSettings as any).mockRejectedValue(
       new WidgetService.WidgetSettingsValidationError('channel required'),

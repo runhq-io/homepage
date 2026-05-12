@@ -47,8 +47,13 @@ beforeEach(() => {
 
 describe('Widget routes — per-project scoping', () => {
   it('GET /api/widget/integration forwards projectId from query', async () => {
+    // Phase 1: routes pass a `WidgetLookup` object to the service layer,
+    // not a positional string. The service-layer signature still accepts
+    // the positional-string form (see WidgetService.workspaceProject.test.ts)
+    // but routes have moved to the object form uniformly.
     (WidgetService.getWidgetIntegration as any).mockImplementation(
-      async (sid: string, pid: string) => ({ id: 'wp', name: pid === PROJ_A ? 'Moddio' : 'Snek' }),
+      async (_sid: string, lookup: { workspaceProjectId?: string }) =>
+        ({ id: 'wp', name: lookup?.workspaceProjectId === PROJ_A ? 'Moddio' : 'Snek' }),
     );
     const app = createHttpApp();
     const resA = await app.request(
@@ -57,14 +62,20 @@ describe('Widget routes — per-project scoping', () => {
     );
     expect(resA.status).toBe(200);
     expect((await resA.json()).data.name).toBe('Moddio');
-    expect(WidgetService.getWidgetIntegration).toHaveBeenCalledWith(SERVER, PROJ_A);
+    expect(WidgetService.getWidgetIntegration).toHaveBeenCalledWith(
+      SERVER,
+      { workspaceProjectId: PROJ_A },
+    );
 
     const resB = await app.request(
       `http://localhost/api/widget/integration?serverId=${SERVER}&projectId=${PROJ_B}`,
       { headers: { Authorization: 'Bearer t' } },
     );
     expect((await resB.json()).data.name).toBe('Snek');
-    expect(WidgetService.getWidgetIntegration).toHaveBeenLastCalledWith(SERVER, PROJ_B);
+    expect(WidgetService.getWidgetIntegration).toHaveBeenLastCalledWith(
+      SERVER,
+      { workspaceProjectId: PROJ_B },
+    );
   });
 
   it('GET /api/widget/integration without projectId returns 400', async () => {

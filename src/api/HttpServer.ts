@@ -5648,6 +5648,24 @@ export function createHttpApp() {
     return ServerService.checkCloudOpPermission(serverId, userId);
   }
 
+  // Parse `?channelId=` / `?projectId=` (or the body equivalents) into the
+  // discriminated `WidgetLookup` shape forwarded to the service layer.
+  //
+  // Precedence rule (single source of truth): `channelId` wins when both are
+  // supplied — channel-keyed lookup is the forward-looking path and projectId
+  // is retained only for transitional clients.
+  //
+  // Returns `null` when neither is present so callers can emit a uniform
+  // 400 `{ error: 'channelId or projectId required' }` response.
+  function parseWidgetLookup(
+    channelId: string | undefined | null,
+    projectId: string | undefined | null,
+  ): WidgetService.WidgetLookup | null {
+    if (channelId) return { channelId };
+    if (projectId) return { workspaceProjectId: projectId };
+    return null;
+  }
+
   // Fire-and-forget: tell the preview proxy to drop its widget config cache
   // for this server. Called after ANY widget mutation that could change the
   // shouldInject flag or the bootstrap payload — i.e. enable, disable,
@@ -5655,16 +5673,26 @@ export function createHttpApp() {
   // that booted with the widget disabled would keep injecting `false` after
   // a re-enable, because `auto_inject_in_preview` didn't change in the DB.
   //
+  // `projectId` is optional: when the admin route was hit via `?channelId=`
+  // (no projectId known to the BE), we omit the field from the JSON body
+  // entirely. The workspace-side handler (preview-internal.ts) then treats
+  // an absent projectId as "clear the whole server's widget cache", which
+  // is the intended fallback. Coercing to `''` would silently break this —
+  // the downstream cache helper treats `''` as a defined-but-no-match key
+  // and clears nothing. See PR review note on Issue #1.
+  //
   // Failures (machine stopped, network error) are intentionally swallowed:
   // the machine will re-fetch on its next boot anyway.
-  function pushInvalidateWidgetCache(serverId: string, userId: string, projectId: string): void {
+  function pushInvalidateWidgetCache(serverId: string, userId: string, projectId: string | undefined): void {
     (async () => {
       try {
         const server = await ServerService.getServer(serverId);
         if (!server?.serverUrl) return;
+        const body: { kind: 'widget'; projectId?: string } = { kind: 'widget' };
+        if (projectId !== undefined) body.projectId = projectId;
         await ServerService.fetchFromServer(server, userId, '/__preview/config-invalidate', {
           method: 'POST',
-          body: { kind: 'widget', projectId },
+          body,
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -5680,10 +5708,10 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    const projectId = c.req.query('projectId');
-    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('channelId'), c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'channelId or projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const integration = await WidgetService.getWidgetIntegration(serverId, projectId);
+    const integration = await WidgetService.getWidgetIntegration(serverId, lookup);
     return c.json({ success: true, data: integration });
   });
 
@@ -5694,6 +5722,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const { serverId, projectId, name, channelId } = await c.req.json();
     if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
+    // `workspaceProjectId` is still required for now — Phase 4's SQL migration
+    // makes `channel_id` the sole key and removes this requirement.
     if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     const result = await WidgetService.enableWidget(serverId, { name, channelId, workspaceProjectId: projectId });
@@ -5708,12 +5738,19 @@ export function createHttpApp() {
     if (!server) return c.json({ error: 'Invalid server token' }, 401);
 
     const body = await c.req.json().catch(() => null);
-    const channelToProject = body?.channelToProject;
-    if (!channelToProject || typeof channelToProject !== 'object' || Array.isArray(channelToProject)) {
-      return c.json({ error: 'channelToProject required (object of channelId → workspaceProjectId)' }, 400);
+    const channelToProject = (body?.channelToProject ?? {}) as Record<string, string>;
+    const projectToPrimaryTodoChannel = (body?.projectToPrimaryTodoChannel ?? {}) as Record<string, string>;
+    if (typeof channelToProject !== 'object' || Array.isArray(channelToProject)) {
+      return c.json({ error: 'channelToProject must be object' }, 400);
+    }
+    if (typeof projectToPrimaryTodoChannel !== 'object' || Array.isArray(projectToPrimaryTodoChannel)) {
+      return c.json({ error: 'projectToPrimaryTodoChannel must be object' }, 400);
     }
 
-    const result = await WidgetService.reconcileUnbackfilledWidgets(server.id, channelToProject);
+    const result = await WidgetService.reconcileWidgetBindings(server.id, {
+      channelToProject,
+      projectToPrimaryTodoChannel,
+    });
     return c.json({ success: true, data: result });
   });
 
@@ -5725,9 +5762,16 @@ export function createHttpApp() {
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const projectId = c.req.query('projectId');
-    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('channelId'), projectId);
+    if (!lookup) return c.json({ error: 'channelId or projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    await WidgetService.disableWidget(serverId, projectId);
+    await WidgetService.disableWidget(serverId, lookup);
+    // Preview-proxy cache invalidation: pass the projectId when the route
+    // received one. When called via `?channelId=` only, projectId is
+    // `undefined` and the helper omits it from the payload so the
+    // workspace clears the whole server's widget cache (the correct
+    // fallback — there's no way to translate channelId→projectId here
+    // without an extra DB hop).
     pushInvalidateWidgetCache(serverId, userId, projectId);
     return c.json({ success: true });
   });
@@ -5737,12 +5781,13 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId, projectId } = await c.req.json();
+    const { serverId, projectId, channelId } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const lookup = parseWidgetLookup(channelId, projectId);
+    if (!lookup) return c.json({ error: 'channelId or projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     try {
-      const result = await WidgetService.regenerateSecret(serverId, projectId);
+      const result = await WidgetService.regenerateSecret(serverId, lookup);
       return c.json({ success: true, data: result });
     } catch (err) {
       return c.json({ error: String(err) }, 400);
@@ -5773,10 +5818,10 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    const projectId = c.req.query('projectId');
-    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('channelId'), c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'channelId or projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const settings = await WidgetService.getWidgetSettings(serverId, projectId);
+    const settings = await WidgetService.getWidgetSettings(serverId, lookup);
     return c.json({ success: true, data: settings });
   });
 
@@ -5788,6 +5833,7 @@ export function createHttpApp() {
     const {
       serverId,
       projectId,
+      channelId,
       auto_approve,
       widget_position,
       widget_language,
@@ -5804,7 +5850,8 @@ export function createHttpApp() {
       widgetAssignRateLimitPerHour,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const lookup = parseWidgetLookup(channelId, projectId);
+    if (!lookup) return c.json({ error: 'channelId or projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
 
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
@@ -5815,7 +5862,7 @@ export function createHttpApp() {
         widgetAssignRoles,
         widgetRoleClaimName,
         widgetAssignRateLimitPerHour,
-      }, { workspaceProjectId: projectId });
+      }, lookup);
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {
         return c.json({ error: err.message }, 400);
@@ -5828,6 +5875,8 @@ export function createHttpApp() {
     // flow into the widget bootstrap payload, and limiting to the flag alone
     // misses re-enable-after-disable scenarios where the DB value didn't
     // change but the effective shouldInject did.
+    // When the route was hit via `channelId` only, `projectId` is undefined
+    // and the helper omits it — see pushInvalidateWidgetCache for details.
     pushInvalidateWidgetCache(serverId, userId, projectId);
     // `result.autoInjectChanged` is returned for callers that care (telemetry,
     // audit logs); we don't branch on it here.

@@ -40,6 +40,33 @@ import {
 const attachmentStorage = new TaskAttachmentStorageService();
 
 /**
+ * Discriminated lookup key for widget rows.
+ *
+ * Phase 1 of the widget-per-channel migration: callers may key by either
+ * `channelId` (new, per-task-channel) or `workspaceProjectId` (legacy,
+ * per-project). Routes accept both query shapes; this type lets the service
+ * layer accept either.
+ *
+ * The `string` form is preserved as a backward-compat coercion to
+ * `{ workspaceProjectId }` so existing positional call-sites (tests, internal
+ * helpers) keep working unchanged. The string-form will be removed in Phase 5
+ * once all call-sites are converted.
+ */
+export type WidgetLookup = { channelId: string } | { workspaceProjectId: string };
+
+function normalizeWidgetLookup(lookup: WidgetLookup | string | undefined): WidgetLookup | undefined {
+  if (lookup === undefined) return undefined;
+  if (typeof lookup === 'string') return { workspaceProjectId: lookup };
+  return lookup;
+}
+
+function widgetLookupCondition(lookup: WidgetLookup | undefined) {
+  if (!lookup) return undefined;
+  if ('channelId' in lookup) return eq(widgetProjects.channelId, lookup.channelId);
+  return eq(widgetProjects.workspaceProjectId, lookup.workspaceProjectId);
+}
+
+/**
  * Maximum age of a widget_user JWT regardless of the `exp` value the
  * customer's issuer sets. 24h matches what `signWidgetUserJwt` mints
  * server-side; tokens minted by customer backends cannot exceed this even
@@ -1744,24 +1771,24 @@ export async function enableWidget(
   return { ...project, apiSecret };
 }
 
-export async function disableWidget(serverId: string, workspaceProjectId?: string) {
+export async function disableWidget(serverId: string, lookup?: WidgetLookup | string) {
+  const key = normalizeWidgetLookup(lookup);
   const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-  if (workspaceProjectId) {
-    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
-  }
+  const extra = widgetLookupCondition(key);
+  if (extra) conditions.push(extra);
   await db
     .update(widgetProjects)
     .set({ enabled: false, updatedAt: new Date() })
     .where(and(...conditions));
 }
 
-export async function regenerateSecret(serverId: string, workspaceProjectId?: string) {
+export async function regenerateSecret(serverId: string, lookup?: WidgetLookup | string) {
+  const key = normalizeWidgetLookup(lookup);
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
   const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-  if (workspaceProjectId) {
-    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
-  }
+  const extra = widgetLookupCondition(key);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .update(widgetProjects)
     .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
@@ -1870,14 +1897,14 @@ export async function generateUserTokenBySecret(
   return { token };
 }
 
-export async function getWidgetIntegration(serverId: string, workspaceProjectId?: string) {
+export async function getWidgetIntegration(serverId: string, lookup?: WidgetLookup | string) {
+  const key = normalizeWidgetLookup(lookup);
   const conditions = [
     eq(widgetProjects.serverId, serverId),
     eq(widgetProjects.enabled, true),
   ];
-  if (workspaceProjectId) {
-    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
-  }
+  const extra = widgetLookupCondition(key);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .select()
     .from(widgetProjects)
@@ -1959,14 +1986,14 @@ export async function generatePreviewWidgetBootstrap(
  * Report whether a server has auto-inject enabled (used by the preview proxy
  * to decide whether to include the bootstrap script in HTML responses).
  */
-export async function getPreviewWidgetFlag(serverId: string, workspaceProjectId?: string): Promise<{
+export async function getPreviewWidgetFlag(serverId: string, lookup?: WidgetLookup | string): Promise<{
   shouldInject: boolean;
   projectSlug?: string;
 }> {
+  const key = normalizeWidgetLookup(lookup);
   const conditions = [eq(widgetProjects.serverId, serverId)];
-  if (workspaceProjectId) {
-    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
-  }
+  const extra = widgetLookupCondition(key);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1985,11 +2012,11 @@ export async function getPreviewWidgetFlag(serverId: string, workspaceProjectId?
   return { shouldInject: true, projectSlug: project.slug };
 }
 
-export async function getWidgetSettings(serverId: string, workspaceProjectId?: string) {
+export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup | string) {
+  const key = normalizeWidgetLookup(lookup);
   const conditions = [eq(widgetProjects.serverId, serverId)];
-  if (workspaceProjectId) {
-    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
-  }
+  const extra = widgetLookupCondition(key);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .select({
       autoApprove: widgetProjects.autoApprove,
@@ -2053,18 +2080,23 @@ export async function updateWidgetSettings(
     auto_recognize_runhq_members?: boolean;
     auto_inject_in_preview?: boolean;
     slug?: string;
-    // Inline workspaceProjectId — accepted here as an alternative to opts.workspaceProjectId
-    workspaceProjectId?: string;
     // Triager assignment policy fields
     widgetAgentAssignmentEnabled?: boolean;
     widgetAssignRoles?: string[];
     widgetRoleClaimName?: string;
     widgetAssignRateLimitPerHour?: number;
   },
-  opts?: { workspaceProjectId?: string },
+  opts?: WidgetLookup | string,
 ): Promise<UpdateWidgetSettingsResult> {
-  // Resolve workspaceProjectId from either location (settings object takes precedence).
-  const workspaceProjectId = settings.workspaceProjectId ?? opts?.workspaceProjectId;
+  // Lookup key comes exclusively from `opts` — the second argument.
+  // Accepts either a discriminated `WidgetLookup` (channelId or workspaceProjectId)
+  // OR a bare string (legacy positional form, coerced to `{ workspaceProjectId }`).
+  //
+  // The previous "settings.workspaceProjectId wins over opts" inline branch
+  // was removed: no in-process caller used it, and the precedence would
+  // have silently overridden a more-specific channelId lookup if any future
+  // caller ever combined the two. (PR review Issue #3.)
+  const key = normalizeWidgetLookup(opts);
 
   // Empty-roles guard: enabling assignment without roles is a configuration error.
   if (settings.widgetAgentAssignmentEnabled === true) {
@@ -2114,7 +2146,8 @@ export async function updateWidgetSettings(
   // Build a reusable conditions array for all three internal queries.
   const projConds = (): ReturnType<typeof eq>[] => {
     const c: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
-    if (workspaceProjectId) c.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+    const extra = widgetLookupCondition(key);
+    if (extra) c.push(extra);
     return c;
   };
 
@@ -2242,38 +2275,70 @@ export async function updateWidgetSettings(
 // Title Generation
 // ============================================================================
 
+export interface ReconcileMaps {
+  channelToProject: Record<string, string>;
+  projectToPrimaryTodoChannel: Record<string, string>;
+}
+
 /**
- * For widget_projects rows on this server where workspace_project_id is still
- * NULL, accept a channel→project mapping from the running workspace and fill
- * the column in. Idempotent: rows already populated are left alone. Channel
- * IDs not present in the supplied map are skipped (the row stays NULL — the
- * channel might have been deleted on the workspace).
+ * Two-pass idempotent backfill for widget_projects rows missing one of the
+ * two keys. Workspace POSTs both maps on each reconcile tick; we fill rows
+ * in-place. Rows where the relevant map has no entry are left untouched
+ * (e.g. the channel was deleted on the workspace).
  *
- * Returns the count of rows updated for telemetry / logging.
+ * Rows with both `channel_id` and `workspace_project_id` NULL are
+ * intentionally left untouched — they're pre-rollout orphans that the
+ * Phase 4 migration surfaces for manual triage.
  */
-export async function reconcileUnbackfilledWidgets(
+export async function reconcileWidgetBindings(
   serverId: string,
-  channelToProject: Record<string, string>, // channelId -> workspaceProjectId
+  maps: ReconcileMaps,
 ): Promise<{ updated: number }> {
-  const unbackfilled = await db
+  let updated = 0;
+
+  // Pass 1: backfill workspace_project_id where NULL but channel_id is set.
+  const missingProject = await db
     .select({ id: widgetProjects.id, channelId: widgetProjects.channelId })
     .from(widgetProjects)
-    .where(and(
-      eq(widgetProjects.serverId, serverId),
-      isNull(widgetProjects.workspaceProjectId),
-    ));
-
-  let updated = 0;
-  for (const row of unbackfilled) {
+    .where(and(eq(widgetProjects.serverId, serverId), isNull(widgetProjects.workspaceProjectId)));
+  for (const row of missingProject) {
     if (!row.channelId) continue;
-    const projId = channelToProject[row.channelId];
+    const projId = maps.channelToProject[row.channelId];
     if (!projId) continue;
     await db.update(widgetProjects)
       .set({ workspaceProjectId: projId, updatedAt: new Date() })
       .where(eq(widgetProjects.id, row.id));
     updated++;
   }
+
+  // Pass 2: backfill channel_id where NULL but workspace_project_id is set.
+  const missingChannel = await db
+    .select({ id: widgetProjects.id, workspaceProjectId: widgetProjects.workspaceProjectId })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.serverId, serverId), isNull(widgetProjects.channelId)));
+  for (const row of missingChannel) {
+    if (!row.workspaceProjectId) continue;
+    const chanId = maps.projectToPrimaryTodoChannel[row.workspaceProjectId];
+    if (!chanId) continue;
+    await db.update(widgetProjects)
+      .set({ channelId: chanId, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+
   return { updated };
+}
+
+/**
+ * Backward-compat shim — kept only so existing tests in
+ * `WidgetService.workspaceProject.test.ts` continue to pass until Phase 5
+ * Task 5.2 renames them. Deleted in Phase 5.
+ */
+export async function reconcileUnbackfilledWidgets(
+  serverId: string,
+  channelToProject: Record<string, string>,
+): Promise<{ updated: number }> {
+  return reconcileWidgetBindings(serverId, { channelToProject, projectToPrimaryTodoChannel: {} });
 }
 
 /**
@@ -2284,7 +2349,7 @@ export async function reconcileUnbackfilledWidgets(
  *
  * Scoped per `serverId`: rows on other servers are not touched, even if a
  * workspace_project_id collides. Rows that have no `workspace_project_id`
- * are skipped (those are pre-rollout rows; `reconcileUnbackfilledWidgets`
+ * are skipped (those are pre-rollout rows; `reconcileWidgetBindings`
  * handles backfilling them via channel mapping).
  *
  * Idempotent: re-sending the same payload is a no-op. The returned `updated`
