@@ -233,6 +233,106 @@ describe('DockerProvider — port allocation', () => {
   });
 });
 
+describe('DockerProvider — clampTierToHost', () => {
+  let clampTierToHost: (cpus: number, memMb: number, host: { cpus: number; memoryMb: number }) =>
+    { cpus: number; memoryMb: number };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const mod = await import('./DockerProvider');
+    clampTierToHost = mod.__test__.clampTierToHost;
+  });
+
+  it('passes a request through unchanged when the host can fit it', () => {
+    expect(clampTierToHost(2, 4096, { cpus: 8, memoryMb: 16_384 })).toEqual({
+      cpus: 2,
+      memoryMb: 4096,
+    });
+  });
+
+  it('clamps CPUs to host cores when the request exceeds them', () => {
+    expect(clampTierToHost(8, 1024, { cpus: 2, memoryMb: 16_384 })).toEqual({
+      cpus: 2,
+      memoryMb: 1024,
+    });
+  });
+
+  it('clamps memory to host RAM minus a 512 MB reserve', () => {
+    expect(clampTierToHost(2, 32_768, { cpus: 4, memoryMb: 8192 })).toEqual({
+      cpus: 2,
+      memoryMb: 8192 - 512,
+    });
+  });
+
+  it('never returns < 1 cpu even if the host reports 0', () => {
+    // Pathological host (shouldn't happen in practice) — guard against /0 etc.
+    expect(clampTierToHost(4, 4096, { cpus: 0, memoryMb: 4096 }).cpus).toBe(1);
+  });
+
+  it('never returns less than 256 MB of memory even if reserve eats everything', () => {
+    expect(clampTierToHost(2, 4096, { cpus: 2, memoryMb: 256 }).memoryMb).toBeGreaterThanOrEqual(256);
+  });
+});
+
+describe('DockerProvider — container CLOUD_API_URL', () => {
+  let resolveContainerCloudApiUrl: (host: string | undefined) => string;
+  const savedEnv = { ...process.env };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    process.env = { ...savedEnv };
+    delete process.env.RUNHQ_WORKSPACE_CLOUD_API_URL;
+    delete process.env.PORT;
+    const mod = await import('./DockerProvider');
+    resolveContainerCloudApiUrl = mod.__test__.resolveContainerCloudApiUrl;
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+  });
+
+  it('honours RUNHQ_WORKSPACE_CLOUD_API_URL override absolutely', () => {
+    process.env.RUNHQ_WORKSPACE_CLOUD_API_URL = 'https://staging.example.com';
+    // Host URL is ignored entirely when override is set.
+    expect(resolveContainerCloudApiUrl('http://localhost:9000')).toBe(
+      'https://staging.example.com',
+    );
+    expect(resolveContainerCloudApiUrl('https://console.runhq.io')).toBe(
+      'https://staging.example.com',
+    );
+  });
+
+  it('defaults to host.docker.internal:<PORT> regardless of host CLOUD_API_URL', () => {
+    process.env.PORT = '9000';
+    // The local be must be the cloud API for the container so the locally
+    // issued SERVER_TOKEN is recognised. Host CLOUD_API_URL (localhost, prod,
+    // anything) is intentionally ignored.
+    expect(resolveContainerCloudApiUrl('http://localhost:9000')).toBe(
+      'http://host.docker.internal:9000',
+    );
+    expect(resolveContainerCloudApiUrl('https://console.runhq.io')).toBe(
+      'http://host.docker.internal:9000',
+    );
+    expect(resolveContainerCloudApiUrl(undefined)).toBe('http://host.docker.internal:9000');
+    expect(resolveContainerCloudApiUrl('')).toBe('http://host.docker.internal:9000');
+    expect(resolveContainerCloudApiUrl('not a url')).toBe('http://host.docker.internal:9000');
+  });
+
+  it('defaults to port 9000 when PORT is unset', () => {
+    delete process.env.PORT;
+    expect(resolveContainerCloudApiUrl('http://localhost:9000')).toBe(
+      'http://host.docker.internal:9000',
+    );
+  });
+
+  it('honours a custom PORT for the local be', () => {
+    process.env.PORT = '8080';
+    expect(resolveContainerCloudApiUrl('http://localhost:8080')).toBe(
+      'http://host.docker.internal:8080',
+    );
+  });
+});
+
 describe('DockerProvider — image resolution', () => {
   let DockerProvider: typeof import('./DockerProvider').DockerProvider;
 
@@ -304,7 +404,15 @@ describe('DockerProvider — createMachine', () => {
     process.env.RUNHQ_LOCAL_VOLUMES_DIR = baseDir;
     delete process.env.RUNHQ_WORKSPACE_IMAGE;
     delete process.env.RUNHQ_WORKSPACE_DOCKERFILE_DIR;
+    delete process.env.RUNHQ_WORKSPACE_CLOUD_API_URL;
+    delete process.env.RUNHQ_WORKSPACE_PUBLIC_URL_TEMPLATE;
+    delete process.env.FLY_MACHINE_ID;
+    delete process.env.RUNHQ_MACHINE_ID;
+    delete process.env.RUNHQ_PREVIEW_DOMAIN;
+    delete process.env.PREVIEW_DOMAIN;
+    delete process.env.CLIENT_URL;
     process.env.CLOUD_API_URL = 'http://test.cloud';
+    process.env.SERVER_SESSION_PUBLIC_KEY_PEM = '-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----';
 
     mockListImages.mockResolvedValue([{ Id: 'sha256:abc', RepoTags: ['runhq-server:local'] }]);
 
@@ -322,6 +430,14 @@ describe('DockerProvider — createMachine', () => {
     rmSync(baseDir, { recursive: true, force: true });
     delete process.env.RUNHQ_LOCAL_VOLUMES_DIR;
     delete process.env.CLOUD_API_URL;
+    delete process.env.SERVER_SESSION_PUBLIC_KEY_PEM;
+    delete process.env.RUNHQ_WORKSPACE_CLOUD_API_URL;
+    delete process.env.RUNHQ_WORKSPACE_PUBLIC_URL_TEMPLATE;
+    delete process.env.FLY_MACHINE_ID;
+    delete process.env.RUNHQ_MACHINE_ID;
+    delete process.env.RUNHQ_PREVIEW_DOMAIN;
+    delete process.env.PREVIEW_DOMAIN;
+    delete process.env.CLIENT_URL;
   });
 
   it('returns a ProvisionResult with localhost URL, 12-char machine id, and host port stored in appName', async () => {
@@ -372,11 +488,28 @@ describe('DockerProvider — createMachine', () => {
     const spec = mockCreateContainer.mock.calls[0][0];
 
     expect(spec.Image).toBe('runhq-server:local');
+    // Env block must match FlyService injection (minus Fly-only metadata).
+    // The workspace image bakes AUTH_MODE=cloud, so SERVER_SESSION_PUBLIC_KEY_PEM
+    // is mandatory or the runhq server crashes on boot.
     expect(spec.Env).toEqual(expect.arrayContaining([
       'SERVER_TOKEN=session-token',
-      'CLOUD_API_URL=http://test.cloud',
+      'SERVER_ID=srv-123',
+      'SERVER_NAME=ws-srv-123',
+      'AUTH_MODE=cloud',
+      // Container's CLOUD_API_URL is always the local be (so locally-issued
+      // tokens are recognised) — host's CLOUD_API_URL is intentionally
+      // ignored. PORT defaults to 9000.
+      'CLOUD_API_URL=http://host.docker.internal:9000',
+      'SERVER_SESSION_PUBLIC_KEY_PEM=-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----',
+      'PREVIEW_DOMAIN=tank.fish',
+      'CLIENT_URL=https://app.runhq.io',
+      'NODE_ENV=development',
       'PORT=61987',
-      'NODE_ENV=production',
+      'HOST=0.0.0.0',
+      // SERVER_PUBLIC_URL pins the URL the container reports at registration —
+      // must be the host loopback so the client-side SW can rewrite it for
+      // remote browsers. Host port is allocated dynamically; assert via regex.
+      expect.stringMatching(/^SERVER_PUBLIC_URL=http:\/\/localhost:\d+$/),
     ]));
     expect(spec.Labels).toMatchObject({
       'runhq.managed': 'true',
@@ -391,8 +524,14 @@ describe('DockerProvider — createMachine', () => {
     expect(spec.HostConfig.PortBindings['61987/tcp']).toEqual([
       { HostIp: '127.0.0.1', HostPort: expect.any(String) },
     ]);
-    expect(spec.HostConfig.NanoCpus).toBe(4_000_000_000);
-    expect(spec.HostConfig.Memory).toBe(2 * 1024 * 1024 * 1024);
+    expect(spec.HostConfig.ExtraHosts).toEqual(['host.docker.internal:host-gateway']);
+    // NanoCpus / Memory are clamped to host capacity at runtime — see
+    // `clampTierToHost`. We assert "didn't exceed the requested tier" rather
+    // than a fixed number so the test runs on machines of any size.
+    expect(spec.HostConfig.NanoCpus).toBeGreaterThan(0);
+    expect(spec.HostConfig.NanoCpus).toBeLessThanOrEqual(4_000_000_000);
+    expect(spec.HostConfig.Memory).toBeGreaterThan(0);
+    expect(spec.HostConfig.Memory).toBeLessThanOrEqual(2 * 1024 * 1024 * 1024);
     expect(spec.HostConfig.RestartPolicy).toEqual({ Name: 'unless-stopped' });
   });
 
@@ -411,6 +550,22 @@ describe('DockerProvider — createMachine', () => {
 
     const ret = await mockCreateContainer.mock.results[0].value;
     expect(ret.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws when SERVER_SESSION_PUBLIC_KEY_PEM is not set on the backend', async () => {
+    delete process.env.SERVER_SESSION_PUBLIC_KEY_PEM;
+    mockPing.mockResolvedValueOnce('OK');
+    const p = new DockerProvider();
+    const v = await p.createVolume('vol', 'local', 10);
+    await expect(
+      p.createMachine({
+        serverId: 'srv',
+        serverToken: 'tok',
+        region: 'local',
+        tier: 'shared-4x-1gb',
+        existingVolumeId: v.id,
+      }),
+    ).rejects.toThrow(/SERVER_SESSION_PUBLIC_KEY_PEM is not set/);
   });
 
   it('throws when docker.ping() rejects (daemon not responding)', async () => {
@@ -736,7 +891,19 @@ describe('DockerProvider — routing and fleet', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    // Ensure URL templates / fly-preview detection don't leak from process env.
+    delete process.env.RUNHQ_WORKSPACE_PUBLIC_URL_TEMPLATE;
+    delete process.env.FLY_MACHINE_ID;
+    delete process.env.RUNHQ_MACHINE_ID;
+    delete process.env.RUNHQ_PREVIEW_DOMAIN;
     ({ DockerProvider } = await import('./DockerProvider'));
+  });
+
+  afterEach(() => {
+    delete process.env.RUNHQ_WORKSPACE_PUBLIC_URL_TEMPLATE;
+    delete process.env.FLY_MACHINE_ID;
+    delete process.env.RUNHQ_MACHINE_ID;
+    delete process.env.RUNHQ_PREVIEW_DOMAIN;
   });
 
   it('getRoutingInfo reads hostPort from the appName argument', () => {
@@ -748,11 +915,16 @@ describe('DockerProvider — routing and fleet', () => {
     });
   });
 
-  it('getRoutingInfo throws when appName is missing or empty', () => {
+  it('getRoutingInfo returns empty serverUrl when appName is missing or not a numeric port', () => {
+    const empty = { serverUrl: '', routingToken: null, requiresRoutingHeaders: false };
     const p = new DockerProvider();
-    expect(() => p.getRoutingInfo('abc', null)).toThrow(/missing appName.*host port/i);
-    expect(() => p.getRoutingInfo('abc', '')).toThrow(/missing appName.*host port/i);
-    expect(() => p.getRoutingInfo('abc')).toThrow(/missing appName.*host port/i);
+    // Missing / empty — caller should fall back to servers.serverUrl.
+    expect(p.getRoutingInfo('abc', null)).toEqual(empty);
+    expect(p.getRoutingInfo('abc', '')).toEqual(empty);
+    expect(p.getRoutingInfo('abc')).toEqual(empty);
+    // Non-numeric (e.g. the per-tenant Fly app name ServerService stores into
+    // servers.flyAppName) is treated the same as missing.
+    expect(p.getRoutingInfo('abc', 'ws-foo-bar')).toEqual(empty);
   });
 
   it('updateAutoSuspendPolicy is a no-op', async () => {

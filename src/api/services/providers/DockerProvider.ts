@@ -12,6 +12,7 @@ import Docker from 'dockerode';
 import { statSync, existsSync } from 'node:fs';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { cpus, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { IProvider } from './IProvider';
@@ -65,8 +66,125 @@ async function allocateHostPort(): Promise<number> {
   });
 }
 
+/**
+ * Compute the `CLOUD_API_URL` that local docker workspaces should use to phone
+ * home.
+ *
+ * Containers issued by this be MUST talk back to *this* be (the one that
+ * issued their SERVER_TOKEN). They cannot use the host's own
+ * `process.env.CLOUD_API_URL`:
+ *   • If it points at `localhost` / `127.0.0.1`, the container resolves that
+ *     to itself.
+ *   • If it points at the production console (`https://console.runhq.io`,
+ *     common in be/.env so widget URLs and the like compose correctly), the
+ *     prod backend won't recognise the locally-issued token and rejects
+ *     registration / heartbeat with 401.
+ *
+ * Resolution:
+ *   1. `RUNHQ_WORKSPACE_CLOUD_API_URL` — explicit per-deployment override
+ *      (e.g. point a local container at a remote/staging be). Wins absolutely.
+ *   2. Default: `http://host.docker.internal:<be-port>` where `<be-port>`
+ *      comes from `process.env.PORT` (the port the be is listening on; 9000
+ *      by convention). Paired with
+ *      `ExtraHosts: ['host.docker.internal:host-gateway']` in createMachine,
+ *      this resolves to the docker bridge gateway on Linux and works
+ *      natively on Mac/Windows.
+ *
+ * Note: the host's own `CLOUD_API_URL` is intentionally NOT a fallback. It
+ * exists for unrelated host-side concerns (widget URL composition, etc.) and
+ * is wrong for container phone-home in every case.
+ *
+ * Exported for unit testing.
+ */
+/**
+ * Compute bind mounts that overlay the host's compiled `dist/` directories
+ * over the image's baked-in copies, so code changes can be applied without
+ * rebuilding the workspace image.
+ *
+ * Gated by `RUNHQ_DEV_HOT_DEPLOY=true`. When enabled, requires
+ * `RUNHQ_SOURCE_PATH` to point at the host-side runhq checkout. Fails fast
+ * with a clear message if any expected `dist/` is missing — the user must
+ * run `pnpm build` once before the first workspace is created.
+ *
+ * Paired with `ALLOW_HOT_DEPLOY=true` (set on the container) which makes the
+ * server entrypoint run under pm2 instead of `exec node`. That gives us a
+ * supervisor we can poke (`pm2 restart server`) after re-running `pnpm build`
+ * on the host — the bind mount means the freshly-compiled JS is already in
+ * the container by the time pm2 re-execs node.
+ *
+ * Exported for unit testing.
+ */
+export function resolveHotDeployBinds(): string[] {
+  if (process.env.RUNHQ_DEV_HOT_DEPLOY !== 'true') return [];
+  const src = process.env.RUNHQ_SOURCE_PATH;
+  if (!src) {
+    throw new Error(
+      'RUNHQ_DEV_HOT_DEPLOY=true but RUNHQ_SOURCE_PATH is not set. Point it at the host-side runhq checkout (e.g. /app/data/home/runhq).',
+    );
+  }
+  const pairs: Array<[string, string]> = [
+    [`${src}/server/dist`, '/app/server/dist'],
+    [`${src}/packages/protocol/dist`, '/app/packages/protocol/dist'],
+    [`${src}/packages/shared/dist`, '/app/packages/shared/dist'],
+    [`${src}/packages/runtime/dist`, '/app/packages/runtime/dist'],
+  ];
+  for (const [hostPath] of pairs) {
+    if (!existsSync(hostPath)) {
+      throw new Error(
+        `RUNHQ_DEV_HOT_DEPLOY=true but ${hostPath} is missing. Run \`pnpm build\` in ${src} first.`,
+      );
+    }
+  }
+  return pairs.map(([host, container]) => `${host}:${container}`);
+}
+
+export function resolveContainerCloudApiUrl(_hostCloudApiUrl?: string | undefined): string {
+  const override = process.env.RUNHQ_WORKSPACE_CLOUD_API_URL;
+  if (override) return override;
+  const port = process.env.PORT || '9000';
+  return `http://host.docker.internal:${port}`;
+}
+
+/**
+ * Clamp the tier's requested CPU and memory to what the host can actually
+ * allocate to a container.
+ *
+ * Tier specs (`getTierSpecs`) mirror Fly's machine sizes so the API contract
+ * is uniform across providers — but a developer's laptop / dev VM rarely has
+ * 4 or 8 cores or 32 GiB of RAM. The Docker API rejects an explicit
+ * `NanoCpus` greater than host CPUs with HTTP 400
+ * (`range of CPUs is from 0.01 to N.NN`); over-spec'd `Memory` is accepted
+ * but the container is OOM-killable in practice.
+ *
+ * Clamping keeps the workspace identical to its Fly equivalent in every
+ * respect except the resource cap. This is the right tradeoff for local-dev
+ * testing — the alternative (refusing to provision) breaks every developer
+ * whose host is smaller than the smallest Fly tier.
+ *
+ * Exported for unit testing.
+ */
+export function clampTierToHost(
+  requestedCpus: number,
+  requestedMemoryMb: number,
+  host: { cpus: number; memoryMb: number },
+): { cpus: number; memoryMb: number } {
+  // Leave a small safety margin so the host's own be / docker / system
+  // services don't get starved by an aggressively-sized workspace container.
+  const HOST_RESERVE_MEMORY_MB = 512;
+  const usableMemoryMb = Math.max(256, host.memoryMb - HOST_RESERVE_MEMORY_MB);
+  return {
+    cpus: Math.min(requestedCpus, Math.max(1, host.cpus)),
+    memoryMb: Math.min(requestedMemoryMb, usableMemoryMb),
+  };
+}
+
 // Test-only export. Do not import from production code.
-export const __test__ = { mapDockerState, allocateHostPort };
+export const __test__ = {
+  mapDockerState,
+  allocateHostPort,
+  resolveContainerCloudApiUrl,
+  clampTierToHost,
+};
 
 export class DockerProvider implements IProvider {
   readonly id: ProviderId = 'docker';
@@ -212,13 +330,63 @@ export class DockerProvider implements IProvider {
     const tierSpec = this.getTierSpecs().find((t) => t.tierId === options.tier);
     if (!tierSpec) throw new Error(`Unknown tier: ${options.tier}`);
 
+    // Clamp to host capacity. Tier specs mirror Fly machine sizes, which are
+    // usually bigger than a local dev box; without clamping Docker rejects
+    // any container whose `NanoCpus` exceeds host CPUs.
+    const clamped = clampTierToHost(
+      tierSpec.cpus,
+      tierSpec.memoryMb,
+      { cpus: cpus().length, memoryMb: Math.floor(totalmem() / (1024 * 1024)) },
+    );
+    if (clamped.cpus !== tierSpec.cpus || clamped.memoryMb !== tierSpec.memoryMb) {
+      console.log(
+        `[DockerProvider] Clamping tier ${tierSpec.tierId} from ${tierSpec.cpus}cpu/${tierSpec.memoryMb}MB to ${clamped.cpus}cpu/${clamped.memoryMb}MB to fit host.`,
+      );
+    }
+
+    // Match FlyService.createMachine env exactly (minus Fly-only metadata). The
+    // workspace image bakes AUTH_MODE=cloud and the runhq server's config
+    // loader requires SERVER_SESSION_PUBLIC_KEY_PEM in cloud mode — without
+    // it the entrypoint crashes immediately and the container restart-loops.
+    const sessionPublicKeyPem = process.env.SERVER_SESSION_PUBLIC_KEY_PEM;
+    if (!sessionPublicKeyPem) {
+      throw new Error(
+        'SERVER_SESSION_PUBLIC_KEY_PEM is not set on the backend. Refusing to create a local docker workspace that cannot verify session tokens.',
+      );
+    }
+
+    const machineName = `ws-${options.serverId.replace(/_/g, '-')}`;
     const env = [
       `SERVER_TOKEN=${options.serverToken}`,
-      `CLOUD_API_URL=${process.env.CLOUD_API_URL ?? ''}`,
+      `SERVER_ID=${options.serverId}`,
+      `SERVER_NAME=${machineName}`,
+      `AUTH_MODE=cloud`,
+      `CLOUD_API_URL=${resolveContainerCloudApiUrl(process.env.CLOUD_API_URL)}`,
+      `SERVER_SESSION_PUBLIC_KEY_PEM=${sessionPublicKeyPem}`,
+      `PREVIEW_DOMAIN=${process.env.PREVIEW_DOMAIN ?? 'tank.fish'}`,
+      `CLIENT_URL=${process.env.CLIENT_URL ?? 'https://app.runhq.io'}`,
+      `NODE_ENV=development`,
       `PORT=61987`,
-      `NODE_ENV=production`,
+      `HOST=0.0.0.0`,
+      // Pin the URL the container reports back to the be at registration time
+      // to the loopback host-port mapping. Without this, the workspace's
+      // bootstrap (`server.ts`) auto-detects the host's public IP and
+      // registers with that — which the browser then tries to WebSocket to,
+      // and (a) bypasses the preview SW's localhost→tank.fish rewrite, and
+      // (b) is ws:// from an https:// page, which the browser blocks as
+      // mixed content. Reporting localhost lets the SW do its job.
+      `SERVER_PUBLIC_URL=http://localhost:${hostPort}`,
     ];
     if (options.tunnelToken) env.push(`TUNNEL_TOKEN=${options.tunnelToken}`);
+
+    // When RUNHQ_DEV_HOT_DEPLOY=true, bind-mount the host's compiled dist/ over
+    // the image's baked-in copy and run the server under pm2 (via ALLOW_HOT_DEPLOY).
+    // This lets `pnpm build && pm2 restart server` apply code changes inside any
+    // running workspace without rebuilding the image or recreating containers.
+    const hotDeployBinds = resolveHotDeployBinds();
+    if (hotDeployBinds.length > 0) {
+      env.push('ALLOW_HOT_DEPLOY=true');
+    }
 
     const labels: Record<string, string> = {
       'runhq.managed': 'true',
@@ -234,10 +402,15 @@ export class DockerProvider implements IProvider {
       Labels: labels,
       ExposedPorts: { '61987/tcp': {} },
       HostConfig: {
-        Binds: [`${this.volumeDir(volumeId)}:/app/data`],
+        Binds: [`${this.volumeDir(volumeId)}:/app/data`, ...hotDeployBinds],
         PortBindings: { '61987/tcp': [{ HostIp: '127.0.0.1', HostPort: String(hostPort) }] },
-        NanoCpus: tierSpec.cpus * 1_000_000_000,
-        Memory: tierSpec.memoryMb * 1024 * 1024,
+        // host.docker.internal → the docker bridge gateway. Lets the container
+        // reach the be running on the host (e.g. for CLOUD_API_URL). Native on
+        // Mac/Windows; on Linux this `host-gateway` magic is honoured by
+        // moby ≥ 20.10.
+        ExtraHosts: ['host.docker.internal:host-gateway'],
+        NanoCpus: clamped.cpus * 1_000_000_000,
+        Memory: clamped.memoryMb * 1024 * 1024,
         RestartPolicy: { Name: 'unless-stopped' },
       },
     } as Docker.ContainerCreateOptions);
@@ -250,6 +423,9 @@ export class DockerProvider implements IProvider {
     return {
       machineId,
       machineName: machineId,
+      // Always return the loopback URL — the client's service worker rewrites
+      // `http://localhost:<port>` to the appropriate preview-gateway URL when
+      // the browser is remote. On a developer laptop the URL is hit directly.
       serverUrl: `http://localhost:${hostPort}`,
       region: 'local',
       volumeId,
@@ -516,14 +692,27 @@ export class DockerProvider implements IProvider {
     throw new Error(`waitForHealthy timed out after ${timeoutMs}ms (url: ${url})`);
   }
   getRoutingInfo(_machineId: string, appName?: string | null): RoutingInfo {
+    // `appName` is overloaded across providers: for FlyProvider it carries the
+    // per-tenant Fly app name; for DockerProvider the intent was to overload
+    // it for the allocated host port. ServerService writes the Fly-style value
+    // (`workspaceAppName(serverId)` → `ws-…`) into `servers.flyAppName`
+    // regardless of provider, so we rarely see a port here in practice.
+    //
+    // Returning an empty `serverUrl` lets callers fall back to the canonical
+    // `servers.serverUrl` already persisted at provision time
+    // (`http://localhost:<port>`). HttpServer's session response and HealPoller
+    // both handle the fallback. We still honour a numeric `appName` when
+    // explicitly passed (e.g. tests or future caller updates).
     const port = appName?.trim();
-    if (!port) {
-      throw new Error(
-        'DockerProvider.getRoutingInfo: missing appName (expected host port string in servers.flyAppName)',
-      );
+    if (port && /^\d+$/.test(port)) {
+      return {
+        serverUrl: `http://localhost:${port}`,
+        routingToken: null,
+        requiresRoutingHeaders: false,
+      };
     }
     return {
-      serverUrl: `http://localhost:${port}`,
+      serverUrl: '',
       routingToken: null,
       requiresRoutingHeaders: false,
     };

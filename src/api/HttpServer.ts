@@ -4165,7 +4165,13 @@ export function createHttpApp() {
         return c.json({
           success: true,
           serverSessionToken,
-          machineId: server.machineId,
+          // Only advertise machineId to the client when the provider's routing
+          // actually needs it (Fly uses it as `fly_instance_id`). For
+          // DockerProvider the host port already disambiguates and exposing
+          // the container id makes the runhq client append `fly_instance_id`,
+          // which the host machine's WS upgrade router would then reject as
+          // misdirected.
+          machineId: routing.requiresRoutingHeaders ? server.machineId : null,
           serverUrl: routing.serverUrl || server.serverUrl,
           expiresIn: tokenExpirySeconds,
           serverName: server.name,
@@ -4256,6 +4262,12 @@ export function createHttpApp() {
       }
 
       let routingMachineId = latestServer.machineId || null;
+      // Whether this provider needs the machineId surfaced to the client for
+      // routing (Fly → yes, Docker → no). Captured here so the response below
+      // can drop machineId when the provider doesn't need it; without that,
+      // the runhq client appends `fly_instance_id=<value>` to every WS upgrade
+      // and the host runhq's upgrade router rejects mismatched ids with 421.
+      let providerNeedsRoutingId = false;
 
       // Verify machine identity to detect stale routing.
       // If mismatch, return error — the correct fix is reprovisioning, not scanning all machines.
@@ -4264,6 +4276,7 @@ export function createHttpApp() {
         try {
           const provider = getProvider((latestServer.provider || 'fly') as ProviderId);
           const routing = provider.getRoutingInfo(routingMachineId, latestServer.flyAppName);
+          providerNeedsRoutingId = routing.requiresRoutingHeaders;
           const routingHeaders: Record<string, string> = { 'cache-control': 'no-cache' };
           // Only add provider-specific routing headers when required (e.g. Fly's fly-force-instance-id)
           if (routing.requiresRoutingHeaders && routing.routingToken) {
@@ -4313,7 +4326,9 @@ export function createHttpApp() {
       return c.json({
         success: true,
         serverSessionToken,
-        machineId: routingMachineId,
+        // See `providerNeedsRoutingId` above — drop machineId for providers
+        // (DockerProvider) that don't need fly_instance_id-style routing.
+        machineId: providerNeedsRoutingId ? routingMachineId : null,
         serverUrl,
         expiresIn: latestTokenExpiry,
         serverName: latestServer.name,

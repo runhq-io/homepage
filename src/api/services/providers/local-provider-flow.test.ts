@@ -42,6 +42,7 @@ describe('local provider end-to-end flow', () => {
     process.env.LOCAL_PROVIDER = 'docker';
     process.env.RUNHQ_LOCAL_VOLUMES_DIR = baseDir;
     process.env.CLOUD_API_URL = 'http://test.cloud';
+    process.env.SERVER_SESSION_PUBLIC_KEY_PEM = '-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----';
     delete process.env.RUNHQ_WORKSPACE_IMAGE;
 
     mockPing.mockResolvedValue('OK');

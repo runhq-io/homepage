@@ -61,7 +61,11 @@ export function buildMachineHealthRequest(target: HealthCheckTarget): MachineHea
   if (target.machineId) {
     const provider = getProvider((target.provider || 'fly') as ProviderId);
     const routing = provider.getRoutingInfo(target.machineId, target.flyAppName);
-    url = routing.serverUrl;
+    // Providers may return an empty `serverUrl` when they can't reconstruct
+    // routing from the args alone (e.g. DockerProvider when `flyAppName` is
+    // the per-tenant Fly app name instead of a host port). Fall back to the
+    // canonical URL persisted on the server row in that case.
+    if (routing.serverUrl) url = routing.serverUrl;
     if (routing.routingToken && routing.requiresRoutingHeaders) {
       headers['fly-force-instance-id'] = routing.routingToken;
     }
