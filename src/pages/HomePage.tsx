@@ -8,9 +8,9 @@ import heroScreenshotSm from '../assets/smaller_screenshot.png';
 const HOME_T = {
   en: {
     // Hero
-    heroH1Line1: 'Orchestrate',
-    heroH1Line2: 'AI Coding Agents.',
-    heroLede: 'RunHQ lets anyone on your team assign tickets to coding agents. Each task gets its own branch, scoped and ready for review, eliminating the bottleneck between product and engineering.',
+    heroH1Line1: 'Agentic automation for',
+    heroH1Line2: 'founders who move fast.',
+    heroLede: 'RunHQ lets anyone on your team hand off work to agents. Research, ops, code, and beyond. Progress never bottlenecks on one person.',
     ctaStartFree: 'Start free',
     ctaWatchDemo: 'Watch Demo',
     heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
@@ -103,9 +103,9 @@ const HOME_T = {
   },
   ko: {
     // Hero
-    heroH1Line1: 'AI 코딩 에이전트를',
-    heroH1Line2: '지휘하세요.',
-    heroLede: 'RunHQ는 팀 누구나 코딩 에이전트에게 티켓을 할당할 수 있게 해줍니다. 모든 작업이 자체 브랜치에서 범위가 정해진 채로 리뷰 준비 상태로 도착해, 프로덕트와 엔지니어링 사이의 병목을 없앱니다.',
+    heroH1Line1: '빠르게 움직이는 창업자를 위한',
+    heroH1Line2: '에이전트 자동화.',
+    heroLede: 'RunHQ는 팀 누구나 에이전트에게 일을 맡길 수 있게 해줍니다. 리서치, 운영, 코드, 그 외 무엇이든. 더 이상 한 사람이 병목이 되지 않습니다.',
     ctaStartFree: '무료로 시작하기',
     ctaWatchDemo: '데모 보기',
     heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
@@ -470,10 +470,10 @@ const HOME_STYLES = `
       radial-gradient(ellipse 80% 60% at 90% 10%, oklch(0.52 0.20 277 / 0.06), transparent 60%),
       var(--rhw-bg);
   }
-  .rhw-hero-side { padding-top: 24px; max-width: 540px; }
+  .rhw-hero-side { padding-top: 24px; max-width: 600px; }
   .rhw-hero-h1 {
-    font-size: 64px; line-height: 1.02;
-    letter-spacing: -0.034em; font-weight: 600;
+    font-size: clamp(44px, 4.6vw, 56px); line-height: 1.05;
+    letter-spacing: -0.032em; font-weight: 600;
     margin: 0 0 22px;
     color: var(--rhw-ink);
     text-wrap: balance;
