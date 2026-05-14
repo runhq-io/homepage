@@ -647,6 +647,8 @@ describe('DockerProvider — lifecycle ops', () => {
   const mockStop = vi.fn();
   const mockRestart = vi.fn();
   const mockPause = vi.fn();
+  const mockUnpause = vi.fn();
+  const mockInspect = vi.fn();
   const mockRemove = vi.fn();
 
   beforeEach(async () => {
@@ -657,6 +659,8 @@ describe('DockerProvider — lifecycle ops', () => {
       stop: mockStop,
       restart: mockRestart,
       pause: mockPause,
+      unpause: mockUnpause,
+      inspect: mockInspect,
       remove: mockRemove,
     });
     ({ DockerProvider } = await import('./DockerProvider'));
@@ -674,6 +678,29 @@ describe('DockerProvider — lifecycle ops', () => {
     mockStart.mockRejectedValueOnce(err);
     const p = new DockerProvider();
     await expect(p.startMachine('abc')).resolves.toBeUndefined();
+  });
+
+  it('startMachine unpauses paused containers when Docker rejects start with 409', async () => {
+    const err = Object.assign(new Error('cannot start a paused container, try unpause instead'), { statusCode: 409 });
+    mockStart.mockRejectedValueOnce(err);
+    mockInspect.mockResolvedValueOnce({ State: { Status: 'paused' } });
+    mockUnpause.mockResolvedValueOnce(undefined);
+
+    const p = new DockerProvider();
+    await expect(p.startMachine('abc')).resolves.toBeUndefined();
+
+    expect(mockInspect).toHaveBeenCalledTimes(1);
+    expect(mockUnpause).toHaveBeenCalledTimes(1);
+  });
+
+  it('startMachine rethrows 409 conflicts for non-paused containers', async () => {
+    const err = Object.assign(new Error('conflict'), { statusCode: 409 });
+    mockStart.mockRejectedValueOnce(err);
+    mockInspect.mockResolvedValueOnce({ State: { Status: 'running' } });
+
+    const p = new DockerProvider();
+    await expect(p.startMachine('abc')).rejects.toThrow('conflict');
+    expect(mockUnpause).not.toHaveBeenCalled();
   });
 
   it('stopMachine calls container.stop with timeout', async () => {

@@ -460,10 +460,22 @@ export class DockerProvider implements IProvider {
   }
 
   async startMachine(machineId: string, _appName?: string | null): Promise<void> {
+    const container = this.docker.getContainer(machineId);
     try {
-      await this.docker.getContainer(machineId).start();
+      await container.start();
     } catch (err: unknown) {
       if (this.isHttpError(err, 304)) return;
+      if (this.isHttpError(err, 409)) {
+        try {
+          const data = await container.inspect();
+          if (data.State.Status === 'paused') {
+            await container.unpause();
+            return;
+          }
+        } catch {
+          // Preserve the original Docker start conflict below.
+        }
+      }
       throw err;
     }
   }
