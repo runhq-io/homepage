@@ -8,8 +8,8 @@ import heroScreenshotSm from '../assets/smaller_screenshot.png';
 const HOME_T = {
   en: {
     // Hero
-    heroH1Line1: 'Agentic automation for',
-    heroH1Line2: 'founders who move fast.',
+    heroH1Line1: 'Agents for founders',
+    heroH1Line2: 'who ship fast.',
     heroLede: 'RunHQ lets anyone on your team hand off work to agents. Research, ops, code, and beyond. Progress never bottlenecks on one person.',
     ctaStartFree: 'Start free',
     ctaWatchDemo: 'Watch Demo',
@@ -103,8 +103,8 @@ const HOME_T = {
   },
   ko: {
     // Hero
-    heroH1Line1: '빠르게 움직이는 창업자를 위한',
-    heroH1Line2: '에이전트 자동화.',
+    heroH1Line1: '빠르게 출시하는 창업자를 위한',
+    heroH1Line2: '에이전트.',
     heroLede: 'RunHQ는 팀 누구나 에이전트에게 일을 맡길 수 있게 해줍니다. 리서치, 운영, 코드, 그 외 무엇이든. 더 이상 한 사람이 병목이 되지 않습니다.',
     ctaStartFree: '무료로 시작하기',
     ctaWatchDemo: '데모 보기',
