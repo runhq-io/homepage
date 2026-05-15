@@ -537,6 +537,8 @@
         savingDraft: "Redirecting to log in…",
         needSignIn: "You must be signed in to submit a ticket.",
         loginNotConfigured: "This project owner hasn't set up a login URL — submitting isn't available right now.",
+        disabledEmpty: "Write something before you submit.",
+        disabledLocked: "Submitting isn't available on this feedback board — the owner hasn't made it public or set up a sign-in URL.",
         failed: "Failed to submit: {msg}",
         pastedImage: "Pasted image",
       },
@@ -659,6 +661,8 @@
         savingDraft: "로그인 페이지로 이동 중…",
         needSignIn: "티켓을 제출하려면 로그인해야 합니다.",
         loginNotConfigured: "프로젝트 소유자가 로그인 URL을 설정하지 않아 지금은 제출할 수 없습니다.",
+        disabledEmpty: "제출하기 전에 내용을 입력해 주세요.",
+        disabledLocked: "이 피드백 보드에서는 제출할 수 없습니다 — 소유자가 공개로 설정했거나 로그인 URL을 지정하지 않았습니다.",
         failed: "제출 실패: {msg}",
         pastedImage: "붙여넣은 이미지",
       },
@@ -1540,11 +1544,31 @@
       '  cursor: pointer; white-space: nowrap; flex-shrink: 0;',
       '  transition: transform .12s ease, box-shadow .16s ease, opacity .12s ease, filter .12s ease;',
       '}',
-      '.rw-inline-submit:not(:disabled):hover { transform: translateY(-1px); filter: brightness(1.04); box-shadow: 0 8px 18px -10px color-mix(in oklab, var(--rw-accent) 60%, transparent); }',
+      '.rw-inline-submit:not(:disabled):not([aria-disabled="true"]):hover { transform: translateY(-1px); filter: brightness(1.04); box-shadow: 0 8px 18px -10px color-mix(in oklab, var(--rw-accent) 60%, transparent); }',
       /* Disabled state keeps the accent color but fades the whole button —
          hint that submit is real, just not yet armed (vs. swapping to a
-         transparent ghost button which felt like a different control). */
-      '.rw-inline-submit:disabled { cursor: not-allowed; opacity: 0.45; }',
+         transparent ghost button which felt like a different control).
+         `:disabled` = transient in-flight (posting); `[aria-disabled]` =
+         soft-locked (empty / no permission) and still hoverable so its
+         `title` reason shows. */
+      '.rw-inline-submit:disabled, .rw-inline-submit[aria-disabled="true"] { cursor: not-allowed; opacity: 0.45; }',
+      /* Instant reason tooltip for the soft-locked submit buttons. Driven by
+         data-rw-reason (set in setSubmitReason) so it appears the moment the
+         pointer/focus lands — no transition, no delay, unlike the native
+         `title` attribute. Shared by both composer submit buttons. */
+      '.rw-inline-submit[data-rw-reason], .rw-submit-btn[data-rw-reason] { position: relative; }',
+      '.rw-inline-submit[data-rw-reason]:hover::after, .rw-inline-submit[data-rw-reason]:focus-visible::after,',
+      '.rw-submit-btn[data-rw-reason]:hover::after, .rw-submit-btn[data-rw-reason]:focus-visible::after {',
+      '  content: attr(data-rw-reason);',
+      '  position: absolute; bottom: calc(100% + 8px); right: 0;',
+      '  width: max-content; max-width: 240px;',
+      '  padding: 7px 10px; border-radius: 8px;',
+      '  background: var(--rw-fg); color: var(--rw-bg);',
+      '  font: inherit; font-size: 11.5px; font-weight: 500; line-height: 1.4;',
+      '  letter-spacing: 0; white-space: normal; text-align: left;',
+      '  box-shadow: 0 6px 20px -8px rgba(0,0,0,0.45);',
+      '  opacity: 1; pointer-events: none; z-index: 60;',
+      '}',
       '.rw-inline-notice { margin-top: 10px; }',
       /* Privacy hint sits next to the Private toggle and explains the
          consequence of the toggle to first-time users. */
@@ -2073,12 +2097,14 @@
       '  cursor: pointer;',
       '  transition: transform .12s ease, filter .12s ease, opacity .12s ease;',
       '}',
-      '.rw-submit-btn:hover:not(:disabled) { filter: brightness(1.06); }',
-      '.rw-submit-btn:active:not(:disabled) { transform: translateY(1px); }',
+      '.rw-submit-btn:hover:not(:disabled):not([aria-disabled="true"]) { filter: brightness(1.06); }',
+      '.rw-submit-btn:active:not(:disabled):not([aria-disabled="true"]) { transform: translateY(1px); }',
       /* Disabled state keeps the accent fill — just fades it. Matches
          the inline-submit treatment in the new-ticket composer so the
-         two submits read as the same control in different states. */
-      '.rw-submit-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
+         two submits read as the same control in different states.
+         `:disabled` = transient in-flight; `[aria-disabled]` = soft-locked
+         and still hoverable so its `title` reason shows. */
+      '.rw-submit-btn:disabled, .rw-submit-btn[aria-disabled="true"] { cursor: not-allowed; opacity: 0.45; }',
 
       /* detail modal head — head + body share one scroll area
          (.rw-td-scroll), so the head is no longer flex-pinned. */
@@ -2756,22 +2782,48 @@
       }
     });
 
-    var submitBtn = h("button", { className: "rw-inline-submit", type: "button", disabled: true }, [
+    var submitBtn = h("button", { className: "rw-inline-submit", type: "button" }, [
       h("span", null, t("composer.submit")),
     ]);
+    // When submit is unavailable we keep the button focusable/hoverable and use
+    // aria-disabled + a class instead of the native `disabled` attribute.
+    // A natively-disabled <button> suppresses pointer events in Chrome/Safari,
+    // so its `title` tooltip never shows and a click can't surface a reason —
+    // exactly the "dead button, no explanation" the user hit. submitReason
+    // holds the current blocking reason (null = armed); the click handler and
+    // the instant hover tooltip both read it. Native `disabled` is still used for the
+    // transient in-flight states (posting/uploading) below, which need no
+    // explanation.
+    var submitReason = null;
+    function setSubmitReason(reason) {
+      submitReason = reason;
+      if (reason) {
+        submitBtn.setAttribute("aria-disabled", "true");
+        // data-rw-reason (not the native `title`) drives a CSS ::after
+        // tooltip that appears with zero delay — native title tooltips have
+        // a browser-controlled ~0.5s show delay we can't override.
+        submitBtn.setAttribute("data-rw-reason", reason);
+      } else {
+        submitBtn.removeAttribute("aria-disabled");
+        submitBtn.removeAttribute("data-rw-reason");
+      }
+    }
     function updateSubmitEnabled() {
       // Empty composer never submits, regardless of auth state.
-      if (ta.value.trim().length === 0) { submitBtn.disabled = true; return; }
+      if (ta.value.trim().length === 0) { setSubmitReason(t("composer.disabledEmpty")); return; }
       // Authed users can always submit. Anonymous viewers of a public widget
       // can submit too — the click triggers a login redirect that preserves
-      // their draft. Anything else (private widget without auth) stays disabled.
-      submitBtn.disabled = !(config.isIdentified || canAnonInteract());
+      // their draft. Anything else (private widget, or public with no login
+      // URL configured) stays locked, now with a hover/click explanation.
+      if (config.isIdentified || canAnonInteract()) { setSubmitReason(null); return; }
+      setSubmitReason(t("composer.disabledLocked"));
     }
+    updateSubmitEnabled();
     ta.addEventListener("input", updateSubmitEnabled);
     ta.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault();
-        if (!submitBtn.disabled) submitBtn.click();
+        if (!submitReason && !submitBtn.disabled) submitBtn.click();
       }
     });
 
@@ -2806,6 +2858,14 @@
     });
 
     submitBtn.addEventListener("click", function () {
+      // Soft-disabled: the button is still clickable so we can explain why it
+      // won't submit (hover shows the same text via `title`; this surfaces it
+      // inline for touch users and screen readers).
+      if (submitReason) {
+        clearChildren(noticeSlot);
+        noticeSlot.appendChild(renderNotice("error", submitReason));
+        return;
+      }
       var description = ta.value.trim();
       if (!description) return;
 
@@ -3698,7 +3758,7 @@
 
     var ta = h("textarea", { className: "rw-td-composer-ta", placeholder: placeholder, disabled: disabled });
 
-    var submitBtn = h("button", { className: "rw-submit-btn", type: "button", disabled: true }, [
+    var submitBtn = h("button", { className: "rw-submit-btn", type: "button" }, [
       h("span", null, t("reply.submit")), Icons.send(12),
     ]);
     var attachBtn = h("button", { className: "rw-pill-btn", type: "button", disabled: disabled }, [
@@ -3706,12 +3766,32 @@
     ]);
     attachBtn.addEventListener("click", function () { fileInput.click(); });
 
+    // Same soft-disabled pattern as the new-ticket composer: keep the button
+    // hoverable so its `title` (and a click) can explain why posting is
+    // blocked, instead of a dead natively-disabled control. Native `disabled`
+    // is reserved for the transient posting/uploading state.
+    var submitReason = null;
+    function setSubmitReason(reason) {
+      submitReason = reason;
+      if (reason) {
+        submitBtn.setAttribute("aria-disabled", "true");
+        // data-rw-reason (not the native `title`) drives a CSS ::after
+        // tooltip that appears with zero delay — native title tooltips have
+        // a browser-controlled ~0.5s show delay we can't override.
+        submitBtn.setAttribute("data-rw-reason", reason);
+      } else {
+        submitBtn.removeAttribute("aria-disabled");
+        submitBtn.removeAttribute("data-rw-reason");
+      }
+    }
     function updateSubmitEnabled() {
-      if (disabled) { submitBtn.disabled = true; return; }
+      if (ticket.commentsDisabled) { setSubmitReason(t("reply.disabledPrompt")); return; }
+      if (!canPostComment) { setSubmitReason(t("reply.signInPrompt")); return; }
       var hasText = ta.value.trim().length > 0;
       var hasStaged = entries.length > 0;
-      submitBtn.disabled = !hasText && !hasStaged;
+      setSubmitReason(!hasText && !hasStaged ? t("composer.disabledEmpty") : null);
     }
+    updateSubmitEnabled();
     function renderChips() {
       clearChildren(chipsEl);
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
@@ -3753,12 +3833,18 @@
     ta.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault();
-        if (!submitBtn.disabled) submitBtn.click();
+        if (!submitReason && !submitBtn.disabled) submitBtn.click();
       }
     });
 
     submitBtn.addEventListener("click", function () {
-      if (disabled) return;
+      // Soft-disabled: surface why posting is blocked (hover shows the same
+      // text via `title`; this covers touch + screen-reader users).
+      if (submitReason) {
+        clearChildren(noticeSlot);
+        noticeSlot.appendChild(renderNotice("error", submitReason));
+        return;
+      }
       var text = ta.value.trim();
       if (!text && entries.length === 0) return;
 
@@ -3810,10 +3896,14 @@
         entries.length = 0;
         renderChips();
         submitBtn.firstChild.textContent = t("reply.submit");
+        // Clear the transient in-flight `disabled`; updateSubmitEnabled()
+        // now governs only the soft-locked (aria-disabled) state.
+        submitBtn.disabled = false;
         updateSubmitEnabled();
         if (onPosted) onPosted(newComment);
       }).catch(function (err) {
         submitBtn.firstChild.textContent = t("reply.submit");
+        submitBtn.disabled = false;
         updateSubmitEnabled();
         noticeSlot.appendChild(renderNotice("error", t("reply.failed", { msg: err.message || "" })));
       });
