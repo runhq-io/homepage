@@ -247,9 +247,25 @@ export function createHttpApp() {
     // falls back to Latin-1 and renders the bytes as � replacement
     // characters. Next.js's static handler set this automatically; the
     // Hono route has to be explicit.
+    // Strong ETag over the exact bytes we'd send (constants header + widget
+    // source). Combined with `no-cache`, this gives correct propagation:
+    // browsers and the CDN MAY store the response but MUST revalidate with
+    // the origin before each use. When the content is unchanged the
+    // revalidation is a tiny conditional 304 (no body), so steady-state
+    // bandwidth is unchanged; the moment we ship a widget fix every embed
+    // picks it up on its next load instead of being pinned to a stale copy
+    // for up to an hour. `no-cache` does NOT mean "don't store" — it means
+    // "store but always revalidate", which is exactly right for an
+    // embeddable, URL-loaded bootstrap script that must stay current.
+    const etag = '"' + createHash('sha256').update(body).digest('base64url') + '"';
     c.header('Content-Type', 'application/javascript; charset=utf-8');
-    c.header('Cache-Control', 'public, max-age=3600');
+    c.header('Cache-Control', 'no-cache');
+    c.header('ETag', etag);
     c.header('Access-Control-Allow-Origin', '*');
+    const inm = c.req.header('if-none-match');
+    if (inm && inm === etag) {
+      return c.body(null, 304);
+    }
     return c.body(body);
   });
 
