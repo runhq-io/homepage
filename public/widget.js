@@ -871,23 +871,59 @@
   // pill then tucks against the screen edge with only a few pixels showing.
   // The flag is sticky (project-scoped localStorage) and is suppressed when
   // there are unread updates so an actionable badge can never be hidden away.
+  //
+  // The stored value is tri-state: "1" = explicitly collapsed, "0" = explicitly
+  // expanded, absent = no preference yet (use the per-device default). On mobile
+  // viewports the no-preference default is *collapsed* so the pill doesn't eat
+  // scarce screen real estate before the visitor has engaged with it; on desktop
+  // it defaults to expanded. An explicit choice (either direction) always wins
+  // and stays sticky across devices.
   // ===========================================================================
 
+  // Matches the widget's own mobile CSS breakpoint (@media max-width: 640px).
+  function isMobileViewport() {
+    try {
+      return !!(window.matchMedia && window.matchMedia("(max-width: 640px)").matches);
+    } catch (_) {
+      return false;
+    }
+  }
   function collapsedStorageKey() {
     return "rw-collapsed:" + (config.projectId || config.project || "default");
   }
-  function getCollapsed() {
-    try { return localStorage.getItem(collapsedStorageKey()) === "1"; }
-    catch (_) { return false; }
+  // Explicit, user-set preference only: true = explicitly collapsed,
+  // false = explicitly expanded, null = no preference yet (fall back to the
+  // per-device default in shouldRenderCollapsed).
+  function getCollapsedPref() {
+    try {
+      var stored = localStorage.getItem(collapsedStorageKey());
+      if (stored === "1") return true;
+      if (stored === "0") return false;
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
   function setCollapsed(val) {
     try {
-      if (val) localStorage.setItem(collapsedStorageKey(), "1");
-      else localStorage.removeItem(collapsedStorageKey());
+      localStorage.setItem(collapsedStorageKey(), val ? "1" : "0");
     } catch (_) {}
   }
   function shouldRenderCollapsed() {
-    return getCollapsed() && unreadUpdatesCount() === 0;
+    var pref = getCollapsedPref();
+    if (pref === null) {
+      // No explicit choice yet → per-device default. On mobile the pill
+      // stays collapsed unconditionally so it never eats scarce screen
+      // space; an unread badge does NOT pop it open here. (Tapping the
+      // pill records an explicit "expanded" pref, so a visitor who wants
+      // it open still gets a sticky result — see the tab click handler.)
+      return isMobileViewport();
+    }
+    // Explicit preference. An explicit *collapse* is still suppressed while
+    // there are unread updates so an actionable badge is never hidden away
+    // (original desktop hover-to-hide behavior). An explicit *expand* wins
+    // outright.
+    return pref && unreadUpdatesCount() === 0;
   }
   function applyCollapsedState() {
     if (!tabEl) return;
@@ -911,7 +947,6 @@
     // prefers-reduced-motion can freeze it.
     return h("span", { className: "rw-tab-icon", "aria-hidden": "true" },
       h("span", { className: "rw-merc-blob" }, [
-        h("span", { className: "rw-merc-halo" }),
         h("svg", { viewBox: "0 0 80 80", focusable: "false", overflow: "visible" }, [
           h("defs", null, [
             h("filter", { id: "rw-merc-goo", x: "-40%", y: "-40%", width: "180%", height: "180%" }, [
@@ -1149,7 +1184,7 @@
       '  border-radius: ' + (isRight ? "10px 0 0 10px" : "0 10px 10px 0") + ';',
       '  z-index: 2147483646;',
       '  transition: padding .15s ease, box-shadow .2s ease, filter .15s ease, transform .15s ease;',
-      '  box-shadow: 0 14px 28px -10px rgba(108,89,255,0.55), inset 0 0 0 1px rgba(255,255,255,0.08);',
+      '  box-shadow: 0 6px 16px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.08);',
       '  user-select: none; -webkit-user-select: none;',
       '  white-space: nowrap;',
       '}',
@@ -1200,7 +1235,7 @@
       '.rw-tab--collapsed {',
       '  transform: translate(' + (isRight ? "calc(100% - 5px)" : "calc(-100% + 5px)") + ', -50%);',
       /* Subtle inner shadow on the visible sliver hints at the tucked edge. */
-      '  box-shadow: 0 14px 28px -10px rgba(108,89,255,0.55), inset 0 0 0 1px rgba(255,255,255,0.08), inset ' + (isRight ? "6px" : "-6px") + ' 0 12px -8px rgba(0,0,0,0.25);',
+      '  box-shadow: 0 6px 16px -8px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.08), inset ' + (isRight ? "6px" : "-6px") + ' 0 12px -8px rgba(0,0,0,0.25);',
       '}',
       '.rw-tab--top.rw-tab--collapsed,',
       '.rw-tab--bottom.rw-tab--collapsed {',
@@ -1221,11 +1256,11 @@
 
       /* ------------------------------------------------------------------
          Mercury launcher mark — see buildTabIcon() for the SVG composition.
-         The icon container is just a positioning shell; .rw-merc-blob
-         holds the violet drop-shadow + the absolutely-positioned halo
-         layer behind the SVG. The SVG renders 80×80 viewBox into a 26×26
-         box (scale ≈0.325), so all design-space pixel offsets in the
-         keyframes below shrink proportionally on screen. */
+         The icon container is just a positioning shell. The SVG renders an
+         80×80 viewBox into a 26×26 box (scale ≈0.325), so all design-space
+         pixel offsets in the keyframes below shrink proportionally on
+         screen. No glow/halo — the mark sits flat with only a faint neutral
+         contrast shadow so it stays legible on light backgrounds. */
       '.rw-tab-icon {',
       '  width: 26px; height: 26px;',
       '  flex: 0 0 auto;',
@@ -1236,26 +1271,12 @@
       '  width: 26px; height: 26px;',
       '  position: relative;',
       '  border-radius: 50%;',
-      '  filter: drop-shadow(0 2px 5px rgba(80,60,200,0.45));',
+      '  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.28));',
       '}',
       '.rw-merc-blob > svg {',
       '  display: block; width: 100%; height: 100%;',
       '  overflow: visible;',
       '  position: relative; z-index: 1;',
-      '}',
-      /* Outer breathing halo — soft violet bloom expanding outside the
-         silhouette, gives the widget gravity in the surrounding UI. */
-      '.rw-merc-halo {',
-      '  position: absolute; inset: -45%;',
-      '  border-radius: 50%;',
-      '  background: radial-gradient(circle, rgba(180,165,255,0.45) 0%, rgba(180,165,255,0.12) 40%, transparent 65%);',
-      '  animation: rw-merc-halo 4.8s ease-in-out infinite;',
-      '  pointer-events: none;',
-      '  z-index: 0;',
-      '}',
-      '@keyframes rw-merc-halo {',
-      '  0%, 100% { opacity: 0.65; transform: scale(0.95); }',
-      '  50%      { opacity: 1;    transform: scale(1.15); }',
       '}',
       /* Base circle subtly breathes so the silhouette is never static. */
       '.rw-merc-base {',
@@ -1346,7 +1367,7 @@
       /* Reduced motion — freeze the organism. The static silhouette
          (base + violet rim) still reads as a brand mark. */
       '@media (prefers-reduced-motion: reduce) {',
-      '  .rw-merc-halo, .rw-merc-base, .rw-merc-bulge, .rw-merc-tint, .rw-merc-spec {',
+      '  .rw-merc-base, .rw-merc-bulge, .rw-merc-tint, .rw-merc-spec {',
       '    animation: none !important;',
       '  }',
       '}',
@@ -4118,7 +4139,8 @@
       if (isOpen) { closePanel(); return; }
       // If the pill is sitting in its hover-peeked state (collapsed flag
       // set, no badge active), the user is explicitly bringing it back —
-      // clear the preference so it stays visible after this session.
+      // record an explicit "expanded" preference so it stays visible after
+      // this session (including on mobile, where absent = collapsed default).
       // When the badge is overriding the collapsed state we leave the
       // flag intact so the pill re-tucks once updates are read.
       if (shouldRenderCollapsed()) {
@@ -4197,6 +4219,19 @@
     init: function (opts) {
       if (!opts || (!opts.token && !opts.project)) {
         console.warn("RunHQWidget.init: token or project is required.");
+        return;
+      }
+      // Idempotency guard. mountDOM() unconditionally appends a fresh
+      // <runhq-widget-host> to document.body, so a second init() — from a
+      // duplicate <script> tag, RunHQ's preview auto-inject layered on top
+      // of an already-embedded widget, or a SPA re-running init() on
+      // client-side navigation — would stack a second widget behind the
+      // first. The mounted host element is the source of truth (not a JS
+      // flag), so a host page that removes the widget can still re-init.
+      if (document.querySelector("runhq-widget-host")) {
+        console.warn(
+          "RunHQWidget.init: a widget is already mounted on this page; ignoring duplicate init()."
+        );
         return;
       }
       if (opts.server) {
