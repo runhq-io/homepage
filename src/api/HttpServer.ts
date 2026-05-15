@@ -5307,7 +5307,11 @@ export function createHttpApp() {
   app.get('/api/widget/identity', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) {
-      return c.json({ identity: null, csrfToken: null });
+      // Classify *why* a presented Bearer token was rejected so a
+      // misconfigured embed can report the exact defect instead of
+      // silently looking "anonymous". null = genuine anon (no token).
+      const authError = await WidgetService.diagnoseWidgetBearerAuth(c.req);
+      return c.json({ identity: null, csrfToken: null, authError });
     }
     return c.json({
       identity: {

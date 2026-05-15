@@ -2837,6 +2837,12 @@
       // their draft. Anything else (private widget, or public with no login
       // URL configured) stays locked, now with a hover/click explanation.
       if (config.isIdentified || canAnonInteract()) { setSubmitReason(null); return; }
+      // A token was supplied but rejected → show the EXACT misconfiguration
+      // (also logged to console) instead of the generic not-signed-in copy.
+      if (config.authErrorMessage) {
+        setSubmitReason(config.authErrorMessage + " (see browser console for the exact fix.)");
+        return;
+      }
       setSubmitReason(t("composer.disabledLocked"));
     }
     updateSubmitEnabled();
@@ -4212,6 +4218,45 @@
   }
 
   // ===========================================================================
+  // Auth misconfiguration diagnostics
+  //
+  // When init() is given a token but the server rejects it, the widget used
+  // to silently fall back to "anonymous" — indistinguishable from a working
+  // anon embed, and impossible to debug from the page. Instead we classify
+  // the failure (server sends `authError` on /api/widget/identity), log a
+  // precise actionable message to the console, and stash a short human
+  // string the locked submit button surfaces on hover/click.
+  // ===========================================================================
+
+  // code -> { dev: console guidance, user: short visible reason }
+  var WIDGET_AUTH_ERRORS = {
+    malformed_jwt:           { dev: "The Authorization token isn't a valid JWT. Your backend must `RunHQWidget.init({ token })` with the signed widget_user JWT, not a raw key or empty value.", user: "Widget token is malformed — the site is sending an invalid token." },
+    unknown_project:         { dev: "The token's `fp` claim matches no project. Your backend is deriving the fingerprint wrong or signing with the wrong API secret. `fp` must be sha256(API_SECRET) hex, first 32 chars.", user: "Widget token doesn't match this project — backend is using the wrong API secret / fingerprint." },
+    project_disabled:        { dev: "The widget project is disabled in RunHQ settings.", user: "This feedback widget is disabled." },
+    signature_invalid:       { dev: "Token signature failed verification. Your backend signed with the wrong API secret — copy the current secret from the Widget Integration page.", user: "Widget token signature invalid — backend signed with the wrong API secret." },
+    token_expired:           { dev: "Token `exp` is in the past. Mint a fresh token per session (the snippet uses 24h).", user: "Widget token expired — the site must mint a fresh token per session." },
+    token_too_old:           { dev: "Token age exceeds the 24h server cap. Reduce token lifetime / refresh it.", user: "Widget token is too old — the site must refresh it." },
+    missing_exp:             { dev: "Token is missing the required `exp` claim. Add an expiry (e.g. now + 24h).", user: "Widget token missing required expiry — fix the backend token payload." },
+    wrong_type:              { dev: 'Token `type` claim must be exactly "widget_user".', user: "Widget token has the wrong `type` — must be \"widget_user\"." },
+    not_identified:          { dev: "Token verified but has no `sub` claim, so submissions can't be attributed. Set `sub` to the logged-in user's id.", user: "Widget token has no user id (`sub`) — the site must include it so you can submit." },
+    identity_request_failed: { dev: "The /api/widget/identity request failed (network, CORS, or a stripped Authorization header). Check the embed origin, the `server` URL, and that the header is allowed.", user: "Widget couldn't reach the identity endpoint (network/CORS) — check the embed configuration." },
+    no_identity:             { dev: "A token was supplied but the server returned no identity and no reason. Verify the token claims (fp, type, sub, exp) and signing secret.", user: "Widget token was not accepted — the site isn't passing a valid identity." },
+  };
+
+  function reportWidgetAuthError(code, err) {
+    var info = WIDGET_AUTH_ERRORS[code] || WIDGET_AUTH_ERRORS.no_identity;
+    config.authError = code;
+    config.authErrorMessage = info.user;
+    // Loud, actionable, and prefixed so it's greppable in the page console.
+    console.error(
+      "[RunHQ widget] Misconfigured embed — token rejected (" + code + "). " +
+      info.dev +
+      " Docs: open the channel's Widget Integration page in RunHQ." +
+      (err ? " Underlying error: " + (err && err.message ? err.message : String(err)) : "")
+    );
+  }
+
+  // ===========================================================================
   // Public API
   // ===========================================================================
 
@@ -4280,13 +4325,23 @@
             currentUser.permissions = (idData && idData.permissions) || [];
             currentUser.matchedRoles = (idData && idData.matchedRoles) || [];
             currentUser.isTriager = !!(idData && idData.isTriager);
+          } else if (config.token) {
+            // A token WAS supplied to init() but identity didn't resolve —
+            // i.e. the embed is misimplemented. Do NOT silently degrade to
+            // anonymous: capture the server's classification and report it
+            // loudly (console) + visibly (submit reason) so it's debuggable.
+            reportWidgetAuthError((idData && idData.authError) || "no_identity");
           }
         })
-        .catch(function () {
+        .catch(function (err) {
           // Credentialed CORS fails hard when an owner copied a cookie-auth
           // snippet onto a non-allowlisted origin. Drop back to the legacy
           // non-credentialed envelope before loading public/app-token data.
           config.useCookieAuth = false;
+          // The identity probe itself failed (network / CORS / blocked
+          // header). With a token supplied that's a misimplementation, not
+          // anonymous — surface it instead of swallowing.
+          if (config.token) reportWidgetAuthError("identity_request_failed", err);
         });
 
       identityP.then(function () { return loadTopTickets(); }).then(function (data) {

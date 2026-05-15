@@ -723,6 +723,83 @@ export async function authenticateWidget(
   };
 }
 
+/**
+ * Machine-readable reasons a presented widget Bearer JWT failed to
+ * authenticate. Surfaced (only) to the caller that presented the token,
+ * via /api/widget/identity, so a misconfigured embed reports the exact
+ * defect instead of silently degrading to anonymous. Explaining why the
+ * caller's *own* token is invalid is not an info leak (same contract as
+ * OAuth `invalid_token` error_description).
+ */
+export type WidgetAuthDiagnosis =
+  | 'malformed_jwt'      // not a 3-part JWT, undecodable, or missing `fp`
+  | 'unknown_project'    // `fp` matches no widget project (wrong secret/fingerprint)
+  | 'project_disabled'   // project exists but is disabled
+  | 'signature_invalid'  // wrong signing secret
+  | 'token_expired'      // `exp` in the past
+  | 'token_too_old'      // exceeds WIDGET_JWT_MAX_TOKEN_AGE
+  | 'missing_exp'        // required `exp` claim absent
+  | 'wrong_type'         // `type` !== 'widget_user'
+  | 'not_identified';    // verified but no `sub` (can't attribute submissions)
+
+/**
+ * When `authenticateWidget` returned no identity, classify *why* a
+ * presented Bearer JWT was rejected. Returns `null` when there is no
+ * Bearer token (genuine anonymous — nothing to report) or when the token
+ * actually verifies (caller should not have asked). Re-runs the same
+ * pipeline as the Mode 3 branch of `authenticateWidget`; kept separate so
+ * the hot auth path keeps its simple `null` contract.
+ */
+export async function diagnoseWidgetBearerAuth(
+  req: HonoRequest,
+): Promise<WidgetAuthDiagnosis | null> {
+  const authHeader = req.header('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7);
+  // Raw API-key embeds (no dot) are intentionally anonymous, not broken.
+  if (token.indexOf('.') === -1) return null;
+
+  const decoded = decodeJwtPayload(token);
+  if (!decoded || typeof decoded.fp !== 'string') return 'malformed_jwt';
+
+  const [project] = await db
+    .select({
+      enabled: widgetProjects.enabled,
+      apiSecretHash: widgetProjects.apiSecretHash,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.apiKey, decoded.fp))
+    .limit(1);
+
+  if (!project) return 'unknown_project';
+  if (!project.enabled) return 'project_disabled';
+
+  let payload: jose.JWTPayload;
+  try {
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
+      algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
+    });
+    payload = verified;
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (code === 'ERR_JWT_EXPIRED') return 'token_expired';
+    if (code === 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED') return 'signature_invalid';
+    if (code === 'ERR_JWT_CLAIM_VALIDATION_FAILED') {
+      const claim = (err as { claim?: string })?.claim;
+      if (claim === 'iat') return 'token_too_old';
+      return 'missing_exp';
+    }
+    return 'signature_invalid';
+  }
+
+  if (payload.type !== 'widget_user') return 'wrong_type';
+  if (typeof payload.sub !== 'string' || !payload.sub) return 'not_identified';
+  return null; // token is actually valid — nothing to diagnose
+}
+
 // ============================================================================
 // Ticket Operations
 // ============================================================================
