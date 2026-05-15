@@ -1952,6 +1952,16 @@
       '.rw-notice { padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.4; }',
       '.rw-notice-error { background: rgba(220,38,38,0.1); color: #fca5a5; border: 1px solid rgba(220,38,38,0.25); }',
       '.rw-modal-mount[data-theme="light"] .rw-notice-error { color: #b91c1c; }',
+      /* Misconfigured-embed banner: deliberately loud and unmissable, sits
+         at the very top of the composer above the textarea. */
+      '.rw-auth-banner { margin: 0 0 10px 0; padding: 12px 14px; border-radius: 10px;',
+      '  background: rgba(220,38,38,0.14); border: 1px solid rgba(220,38,38,0.45); }',
+      '.rw-auth-banner-hd { font-size: 13px; font-weight: 700; color: #fca5a5; letter-spacing: 0.01em; }',
+      '.rw-modal-mount[data-theme="light"] .rw-auth-banner-hd { color: #b91c1c; }',
+      '.rw-auth-banner-msg { margin-top: 5px; font-size: 12px; line-height: 1.45; color: #fecaca; }',
+      '.rw-modal-mount[data-theme="light"] .rw-auth-banner-msg { color: #7f1d1d; }',
+      '.rw-auth-banner-sub { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #f87171; opacity: 0.85; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }',
+      '.rw-modal-mount[data-theme="light"] .rw-auth-banner-sub { color: #b91c1c; }',
 
       '.rw-login-prompt {',
       '  padding: 10px 12px; border-radius: 8px;',
@@ -2977,6 +2987,17 @@
     });
 
     return h("div", { className: "rw-inline-composer" }, [
+      // Loud, always-visible misconfiguration banner — when the embed
+      // supplied a token the server rejected, the integrator must see the
+      // exact problem the instant the widget opens, not on hover.
+      config.authErrorMessage
+        ? h("div", { className: "rw-auth-banner" }, [
+            h("div", { className: "rw-auth-banner-hd" }, "⚠ Widget not set up correctly"),
+            h("div", { className: "rw-auth-banner-msg" }, config.authErrorMessage),
+            h("div", { className: "rw-auth-banner-sub" },
+              "Error code: " + (config.authError || "no_identity") + " — open the browser console for the exact fix."),
+          ])
+        : null,
       ta,
       chipsEl,
       h("div", { className: "rw-inline-composer-bar" }, [
