@@ -4522,7 +4522,12 @@ export function createHttpApp() {
     'description',
     'status',
     'visibility',
-    'isPublished',
+    // 'isPublished' intentionally EXCLUDED: admin-only. It must flow only via the
+    // trusted server-token route (/api/server/workspace-tasks/:taskId, no allowlist)
+    // where the runhq server enforces the admin (manage_todos) gate upstream in
+    // PATCH /todos/:id. The user-bearer /api/servers/:serverId/... route is only
+    // edit-gated, so allowing isPublished here would let a non-admin editor publish
+    // tasks + force visibility public, bypassing the gate.
     'type',
     'schedule',
     'scheduledAt',
