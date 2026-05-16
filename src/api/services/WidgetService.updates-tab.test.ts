@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import { users, servers, workspaceTasks, widgetProjects } from '../../db/schema';
-import { listDoneTickets } from './WidgetService';
+import { listPublishedTickets } from './WidgetService';
 
 const RUN_HEX = randomBytes(6).toString('hex');
 const SERVER_ID = `ws_ut_test_${RUN_HEX}`;
@@ -29,13 +29,51 @@ beforeAll(async () => {
 
   const now = Date.now();
   await db.insert(workspaceTasks).values([
-    { serverId: SERVER_ID, title: 'Done 1 (oldest)',    status: 'done',        visibility: 'public', completedAt: new Date(now - 3000) },
-    { serverId: SERVER_ID, title: 'Done 2 (newest)',    status: 'done',        visibility: 'public', completedAt: new Date(now - 1000) },
-    { serverId: SERVER_ID, title: 'Done 3 (mid)',       status: 'done',        visibility: 'public', completedAt: new Date(now - 2000) },
-    { serverId: SERVER_ID, title: 'Open',               status: 'in_progress', visibility: 'public' },
-    { serverId: SERVER_ID, title: 'Cancelled',          status: 'cancelled',   visibility: 'public' },
-    { serverId: SERVER_ID, title: 'Private done',       status: 'done',        visibility: 'private', completedAt: new Date(now - 500) },
-    { serverId: SERVER_ID, title: 'Done with null completedAt', status: 'done', visibility: 'public' },
+    // A: published + public + done (oldest) — must appear, proves status doesn't gate
+    {
+      serverId: SERVER_ID,
+      title: 'A-done-oldest',
+      status: 'done',
+      visibility: 'public',
+      isPublished: true,
+      updatedAt: new Date(now - 3000),
+    },
+    // B: published + public + in_progress (newest) — must appear, proves status ignored
+    {
+      serverId: SERVER_ID,
+      title: 'B-inprog-newest',
+      status: 'in_progress',
+      visibility: 'public',
+      isPublished: true,
+      updatedAt: new Date(now - 1000),
+    },
+    // C: published + public + deployed (mid) — must appear
+    {
+      serverId: SERVER_ID,
+      title: 'C-deployed-mid',
+      status: 'deployed',
+      visibility: 'public',
+      isPublished: true,
+      updatedAt: new Date(now - 2000),
+    },
+    // D: NOT published — must be excluded
+    {
+      serverId: SERVER_ID,
+      title: 'D-unpublished',
+      status: 'done',
+      visibility: 'public',
+      isPublished: false,
+      updatedAt: new Date(now - 500),
+    },
+    // E: private visibility — must be excluded
+    {
+      serverId: SERVER_ID,
+      title: 'E-private',
+      status: 'done',
+      visibility: 'private',
+      isPublished: true,
+      updatedAt: new Date(now - 400),
+    },
   ]);
 });
 
@@ -46,29 +84,28 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, USER_ID));
 });
 
-describe('listDoneTickets', () => {
-  it('returns only done + public tickets', async () => {
-    const result = await listDoneTickets(PROJECT_ID);
-    const titles = result.tickets.map(t => t.title);
-    expect(titles).toContain('Done 1 (oldest)');
-    expect(titles).toContain('Done 2 (newest)');
-    expect(titles).toContain('Done 3 (mid)');
-    expect(titles).not.toContain('Open');
-    expect(titles).not.toContain('Cancelled');
-    expect(titles).not.toContain('Private done');
-    expect(titles).not.toContain('Done with null completedAt');
-  });
+describe('listPublishedTickets', () => {
+  it('returns only isPublished + public tickets regardless of status, ordered by updatedAt desc', async () => {
+    const result = await listPublishedTickets(PROJECT_ID);
+    const titles = result.tickets.map((t) => t.title);
 
-  it('sorts by completedAt descending', async () => {
-    const result = await listDoneTickets(PROJECT_ID);
-    const doneTitles = result.tickets.map(t => t.title);
-    expect(doneTitles[0]).toBe('Done 2 (newest)');
-    expect(doneTitles[1]).toBe('Done 3 (mid)');
-    expect(doneTitles[2]).toBe('Done 1 (oldest)');
+    // Exactly three rows pass the gate
+    expect(result.tickets.length).toBe(3);
+
+    // Order: updatedAt DESC — B (newest) → C (mid) → A (oldest)
+    expect(titles[0]).toBe('B-inprog-newest');
+    expect(titles[1]).toBe('C-deployed-mid');
+    expect(titles[2]).toBe('A-done-oldest');
+
+    // D excluded: isPublished=false gate
+    expect(titles.some((t) => t === 'D-unpublished')).toBe(false);
+
+    // E excluded: visibility=private gate
+    expect(titles.some((t) => t === 'E-private')).toBe(false);
   });
 
   it('returns the same envelope shape as listTickets', async () => {
-    const result = await listDoneTickets(PROJECT_ID);
+    const result = await listPublishedTickets(PROJECT_ID);
     expect(result).toHaveProperty('projectName');
     expect(result).toHaveProperty('projectSlug');
     expect(result).toHaveProperty('homepageUrl');
@@ -78,17 +115,7 @@ describe('listDoneTickets', () => {
   });
 
   it('sets isIdentified=true when widgetUserId is provided', async () => {
-    const result = await listDoneTickets(PROJECT_ID, 'fake-widget-user-id');
+    const result = await listPublishedTickets(PROJECT_ID, 'fake-widget-user-id');
     expect(result.isIdentified).toBe(true);
-  });
-
-  it('exposes completedAt on done ticket cards', async () => {
-    const result = await listDoneTickets(PROJECT_ID);
-    // All done tickets in the seed have completedAt set
-    expect(result.tickets.length).toBeGreaterThan(0);
-    for (const t of result.tickets) {
-      expect(t.completedAt).not.toBeNull();
-      expect(t.completedAt).not.toBeUndefined();
-    }
   });
 });

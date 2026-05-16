@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import { users, servers, workspaceTasks, widgetProjects, widgetUsers } from '../../db/schema';
-import { listTickets, listDoneTickets } from './WidgetService';
+import { listTickets, listPublishedTickets } from './WidgetService';
 
 // Verifies that the widget bootstrap response exposes `loginUrl` only to
 // anonymous viewers of public projects — not to authenticated users, and
@@ -95,18 +95,18 @@ describe('listTickets — loginUrl exposure', () => {
   });
 });
 
-describe('listDoneTickets — loginUrl exposure', () => {
+describe('listPublishedTickets — loginUrl exposure', () => {
   it('returns loginUrl to anonymous viewers of a public project', async () => {
-    const result = await listDoneTickets(PUBLIC_PROJECT_ID);
+    const result = await listPublishedTickets(PUBLIC_PROJECT_ID);
     expect(result.isPublic).toBe(true);
     expect(result.loginUrl).toBe(LOGIN_URL);
   });
 
   it('omits loginUrl for authenticated callers and non-public projects', async () => {
-    const authedRes = await listDoneTickets(PUBLIC_PROJECT_ID, WIDGET_USER_ID);
+    const authedRes = await listPublishedTickets(PUBLIC_PROJECT_ID, WIDGET_USER_ID);
     expect(authedRes.loginUrl).toBeNull();
 
-    const privRes = await listDoneTickets(PRIVATE_PROJECT_ID);
+    const privRes = await listPublishedTickets(PRIVATE_PROJECT_ID);
     expect(privRes.loginUrl).toBeNull();
   });
 });

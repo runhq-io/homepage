@@ -24,7 +24,7 @@ import {
   users,
   widgetExposedAgents,
 } from '../../db/schema';
-import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
+import { eq, and, ne, desc, sql, inArray, isNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
@@ -858,7 +858,7 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
   };
 }
 
-export async function listDoneTickets(projectId: string, widgetUserId?: string) {
+export async function listPublishedTickets(projectId: string, widgetUserId?: string) {
   const project = await getWidgetProjectContext(projectId);
 
   const rows = project
@@ -867,11 +867,10 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
         .from(workspaceTasks)
         .where(and(
           buildWidgetVisibleFilter(project),
-          eq(workspaceTasks.visibility, 'public'),
-          sql`${workspaceTasks.status} in ('done', 'deployed')`,
-          isNotNull(workspaceTasks.completedAt),
+          eq(workspaceTasks.visibility, 'public'), // defense-in-depth: publishing auto-promotes visibility=public upstream; still gate here
+          eq(workspaceTasks.isPublished, true),
         ))
-        .orderBy(desc(workspaceTasks.completedAt))
+        .orderBy(desc(workspaceTasks.updatedAt)) // last-activity order: recently voted/commented published tickets surface first (status/completedAt no longer gate the feed)
         .limit(20)
     : [];
 

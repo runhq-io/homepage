@@ -5412,7 +5412,7 @@ export function createHttpApp() {
   app.get('/api/widget/tickets/updates', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const result = await WidgetService.listDoneTickets(auth.projectId, auth.widgetUserId);
+    const result = await WidgetService.listPublishedTickets(auth.projectId, auth.widgetUserId);
     return c.json(result);
   });
 
