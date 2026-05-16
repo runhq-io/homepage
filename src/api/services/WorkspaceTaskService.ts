@@ -48,6 +48,7 @@ type CreateWorkspaceTaskInput = {
   moderationStatus?: 'pending' | 'approved' | 'rejected';
   legacyWorkspaceTodoId?: string | null;
   attachments?: CanonicalTaskAttachmentInput[] | null;
+  isPublished?: boolean;
 };
 
 type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput>;
@@ -131,6 +132,7 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     description: row.description,
     status: row.status as CanonicalTaskStatus,
     visibility: row.visibility as CanonicalTaskVisibility,
+    isPublished: row.isPublished,
     sourceType: row.sourceType as CanonicalTaskSourceType,
     createdByType: row.createdByType as CanonicalTask['createdByType'],
     createdById: row.createdById,
@@ -274,6 +276,13 @@ export async function getTaskById(
   };
 }
 
+export function resolveCreateIsPublished(
+  input: { sourceType?: CanonicalTaskSourceType; isPublished?: boolean },
+): boolean {
+  if (input.isPublished !== undefined) return input.isPublished;
+  return (input.sourceType ?? 'workspace') !== 'widget';
+}
+
 export async function createTask(serverId: string, input: CreateWorkspaceTaskInput): Promise<CanonicalTask> {
   const [row] = await db
     .insert(workspaceTasks)
@@ -285,6 +294,7 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
       description: input.description ?? null,
       status: input.status ?? 'pending',
       visibility: input.visibility ?? 'private',
+      isPublished: resolveCreateIsPublished(input),
       sourceType: input.sourceType ?? 'workspace',
       createdByType: input.createdByType ?? 'member',
       createdById: input.createdById ?? null,
@@ -310,11 +320,31 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
   return toCanonicalTask(row, attachmentGroups?.get(row.id)?.task ?? null);
 }
 
+// When isPublished is being set true, the task must be publicly visible.
+// Returns the visibility to write, or undefined to leave visibility untouched.
+// An explicit visibility in the same payload always wins.
+export function resolvePublishVisibility(
+  input: { isPublished?: boolean; visibility?: 'public' | 'private' },
+  existingVisibility: 'public' | 'private',
+): 'public' | 'private' | undefined {
+  if (input.visibility !== undefined) return input.visibility;
+  if (input.isPublished === true && existingVisibility !== 'public') return 'public';
+  return undefined;
+}
+
 export async function updateTask(
   serverId: string,
   taskId: string,
   input: UpdateWorkspaceTaskInput,
 ): Promise<CanonicalTask | null> {
+  const existingRow = await db
+    .select({ visibility: workspaceTasks.visibility })
+    .from(workspaceTasks)
+    .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
+    .limit(1);
+  if (existingRow.length === 0) return null;
+  const existingVisibility = existingRow[0].visibility as 'public' | 'private';
+
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (input.workspaceProjectId !== undefined) updates.workspaceProjectId = input.workspaceProjectId;
   if (input.workspaceChannelId !== undefined) updates.workspaceChannelId = input.workspaceChannelId;
@@ -322,6 +352,9 @@ export async function updateTask(
   if (input.description !== undefined) updates.description = input.description;
   if (input.status !== undefined) updates.status = input.status;
   if (input.visibility !== undefined) updates.visibility = input.visibility;
+  if (input.isPublished !== undefined) updates.isPublished = input.isPublished;
+  const promotedVisibility = resolvePublishVisibility(input, existingVisibility);
+  if (promotedVisibility !== undefined) updates.visibility = promotedVisibility;
   if (input.sourceType !== undefined) updates.sourceType = input.sourceType;
   if (input.createdByType !== undefined) updates.createdByType = input.createdByType;
   if (input.createdById !== undefined) updates.createdById = input.createdById;

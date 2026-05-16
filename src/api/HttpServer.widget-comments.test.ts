@@ -34,7 +34,7 @@ vi.mock('./services/WidgetService', () => {
   }
   return {
     authenticateWidget: vi.fn(),
-    listDoneTickets: vi.fn(),
+    listPublishedTickets: vi.fn(),
     addWidgetComment: vi.fn(),
     updateWidgetComment: vi.fn(),
     deleteWidgetComment: vi.fn(),
@@ -83,9 +83,9 @@ describe('GET /api/widget/tickets/updates', () => {
     expect(res.status).toBe(401);
   });
 
-  it('200 with result from listDoneTickets', async () => {
+  it('200 with result from listPublishedTickets', async () => {
     (WidgetService.authenticateWidget as any).mockResolvedValue({ projectId: 'p', authenticated: false });
-    (WidgetService.listDoneTickets as any).mockResolvedValue({ tickets: [{ id: 't1' }] });
+    (WidgetService.listPublishedTickets as any).mockResolvedValue({ tickets: [{ id: 't1' }] });
     const app = makeApp();
     const res = await app.request('/api/widget/tickets/updates');
     expect(res.status).toBe(200);

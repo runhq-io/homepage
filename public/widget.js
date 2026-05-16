@@ -572,8 +572,8 @@
         signedInPlaceholder: "Your submissions appear here once you're identified.",
         noMineYet: "You haven't submitted any tickets yet",
         useComposer: "Use the composer on the left to file one.",
-        nothingShipped: "Nothing shipped recently",
-        updatesWillShow: "Updates will show up here as tickets are resolved.",
+        nothingShipped: "No updates yet",
+        updatesWillShow: "Updates will show up here once an admin publishes them.",
       },
       list: { loadFailed: "Could not load tickets: {msg}" },
       detail: {
@@ -695,8 +695,8 @@
         signedInPlaceholder: "로그인하시면 제출한 티켓이 여기에 표시됩니다.",
         noMineYet: "아직 제출한 티켓이 없습니다",
         useComposer: "왼쪽 입력창에서 새 티켓을 작성하세요.",
-        nothingShipped: "최근 배포된 항목이 없습니다",
-        updatesWillShow: "티켓이 해결되면 이곳에 표시됩니다.",
+        nothingShipped: "아직 업데이트가 없습니다",
+        updatesWillShow: "관리자가 게시하면 여기에 표시됩니다.",
       },
       list: { loadFailed: "티켓을 불러올 수 없습니다: {msg}" },
       detail: {

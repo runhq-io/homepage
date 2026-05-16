@@ -1180,6 +1180,7 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   description: text('description'),
   status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled'>().default('pending'),
   visibility: text('visibility').notNull().$type<'public' | 'private'>().default('private'),
+  isPublished: boolean('is_published').notNull().default(false),
   sourceType: text('source_type').notNull().$type<'workspace' | 'widget'>().default('workspace'),
   createdByType: text('created_by_type').notNull().$type<'member' | 'external' | 'system' | 'agent'>().default('member'),
   createdById: text('created_by_id'),

@@ -4530,6 +4530,12 @@ export function createHttpApp() {
     'description',
     'status',
     'visibility',
+    // 'isPublished' intentionally EXCLUDED: admin-only. It must flow only via the
+    // trusted server-token route (/api/server/workspace-tasks/:taskId, no allowlist)
+    // where the runhq server enforces the admin (manage_todos) gate upstream in
+    // PATCH /todos/:id. The user-bearer /api/servers/:serverId/... route is only
+    // edit-gated, so allowing isPublished here would let a non-admin editor publish
+    // tasks + force visibility public, bypassing the gate.
     'type',
     'schedule',
     'scheduledAt',
@@ -5419,7 +5425,7 @@ export function createHttpApp() {
   app.get('/api/widget/tickets/updates', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const result = await WidgetService.listDoneTickets(auth.projectId, auth.widgetUserId);
+    const result = await WidgetService.listPublishedTickets(auth.projectId, auth.widgetUserId);
     return c.json(result);
   });
 
