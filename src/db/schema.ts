@@ -770,20 +770,29 @@ export const serversRelations = relations(servers, ({ one, many }) => ({
   invites: many(serverInvites),
   inviteLinks: many(serverInviteLinks),
   publicPorts: many(publicPorts),
+  provisionEvents: many(serverProvisionEvents),
 }));
 
 export type Server = typeof servers.$inferSelect;
 export type NewServer = typeof servers.$inferInsert;
 
 export const serverProvisionEvents = pgTable('server_provision_events', {
-  id: text('id').primaryKey(),
+  id: uuid('id').primaryKey().defaultRandom(),
   serverId: text('server_id').references(() => servers.id, { onDelete: 'cascade' }).notNull(),
   step: text('step').notNull(),
   message: text('message'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+export const serverProvisionEventsRelations = relations(serverProvisionEvents, ({ one }) => ({
+  server: one(servers, {
+    fields: [serverProvisionEvents.serverId],
+    references: [servers.id],
+  }),
+}));
+
 export type ServerProvisionEvent = typeof serverProvisionEvents.$inferSelect;
+export type NewServerProvisionEvent = typeof serverProvisionEvents.$inferInsert;
 
 // ============================================================================
 // Server Members (team membership with roles)

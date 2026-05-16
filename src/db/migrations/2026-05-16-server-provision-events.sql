@@ -7,12 +7,12 @@
 ALTER TABLE servers ADD COLUMN IF NOT EXISTS provision_step TEXT;
 
 CREATE TABLE IF NOT EXISTS server_provision_events (
-  id TEXT PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   step TEXT NOT NULL,
   message TEXT,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS server_provision_events_server_id_created_at_idx
-  ON server_provision_events (server_id, created_at);
+  ON server_provision_events (server_id, created_at ASC);
