@@ -15,6 +15,7 @@ import {
   serverInviteLinks,
   serverBans,
   serverTemplates,
+  serverProvisionEvents,
   publicPorts,
   workspaceTasks,
   workspaceTaskComments,
@@ -28,6 +29,7 @@ import {
   type ServerStatusType,
   type ServerTier,
 } from '../../db/schema';
+import { PROVISION_ERROR_STEP, isProvisionStep } from './provisionSteps';
 import { eq, and, gt, lte, isNull, isNotNull, inArray, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { nanoid } from 'nanoid';
@@ -114,6 +116,46 @@ async function getOrCreateTunnelCredentials(
     tunnelToken: tunnel.tunnelToken,
     createdTunnelId: tunnel.tunnelId,
   };
+}
+
+/**
+ * Append one provisioning event and advance the coarse marker on the
+ * server row. Append-only on server_provision_events (id is DB-generated);
+ * the single-row provision_step update is the only mutation of the servers
+ * row here and does not touch `status` (heartbeat/register own that).
+ *
+ * Best-effort: a logging failure must never abort provisioning, so this
+ * swallows and logs its own errors.
+ */
+export async function recordProvisionEvent(
+  serverId: string,
+  step: string,
+  message: string,
+): Promise<void> {
+  try {
+    await db.insert(serverProvisionEvents).values({
+      serverId,
+      step,
+      message,
+    });
+    if (isProvisionStep(step) && step !== PROVISION_ERROR_STEP) {
+      await db
+        .update(servers)
+        .set({ provisionStep: step, updatedAt: new Date() })
+        .where(eq(servers.id, serverId));
+    }
+  } catch (err) {
+    console.error(`[ServerService] recordProvisionEvent failed (server=${serverId}, step=${step}):`, err);
+  }
+}
+
+/** Ordered (oldest-first) provisioning events for a server. */
+export async function getProvisionEvents(serverId: string) {
+  return db
+    .select()
+    .from(serverProvisionEvents)
+    .where(eq(serverProvisionEvents.serverId, serverId))
+    .orderBy(serverProvisionEvents.createdAt);
 }
 
 /**
