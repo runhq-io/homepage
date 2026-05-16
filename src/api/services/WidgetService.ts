@@ -1280,6 +1280,7 @@ export async function createTicket(
       title,
       description: opts.description,
       visibility: opts.isPrivate ? 'private' : 'public',
+      isPublished: false, // widget-submitted feedback starts unpublished; explicit (not relying on the schema default) since this insert bypasses resolveCreateIsPublished()
       sourceType: 'widget',
       createdByType: 'external',
       createdById: widgetUserId ?? null,

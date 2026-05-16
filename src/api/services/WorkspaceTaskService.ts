@@ -48,6 +48,7 @@ type CreateWorkspaceTaskInput = {
   moderationStatus?: 'pending' | 'approved' | 'rejected';
   legacyWorkspaceTodoId?: string | null;
   attachments?: CanonicalTaskAttachmentInput[] | null;
+  isPublished?: boolean;
 };
 
 type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput>;
@@ -131,6 +132,7 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     description: row.description,
     status: row.status as CanonicalTaskStatus,
     visibility: row.visibility as CanonicalTaskVisibility,
+    isPublished: row.isPublished,
     sourceType: row.sourceType as CanonicalTaskSourceType,
     createdByType: row.createdByType as CanonicalTask['createdByType'],
     createdById: row.createdById,
@@ -274,6 +276,13 @@ export async function getTaskById(
   };
 }
 
+export function resolveCreateIsPublished(
+  input: { sourceType?: CanonicalTaskSourceType; isPublished?: boolean },
+): boolean {
+  if (input.isPublished !== undefined) return input.isPublished;
+  return (input.sourceType ?? 'workspace') !== 'widget';
+}
+
 export async function createTask(serverId: string, input: CreateWorkspaceTaskInput): Promise<CanonicalTask> {
   const [row] = await db
     .insert(workspaceTasks)
@@ -285,6 +294,7 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
       description: input.description ?? null,
       status: input.status ?? 'pending',
       visibility: input.visibility ?? 'private',
+      isPublished: resolveCreateIsPublished(input),
       sourceType: input.sourceType ?? 'workspace',
       createdByType: input.createdByType ?? 'member',
       createdById: input.createdById ?? null,

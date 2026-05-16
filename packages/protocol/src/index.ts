@@ -356,6 +356,7 @@ export interface CanonicalTask {
   description?: string | null;
   status: CanonicalTaskStatus;
   visibility: CanonicalTaskVisibility;
+  isPublished: boolean;
   sourceType: CanonicalTaskSourceType;
   createdByType: CanonicalTaskActorType;
   createdById?: string | null;
