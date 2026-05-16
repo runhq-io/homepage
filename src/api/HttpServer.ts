@@ -2360,6 +2360,7 @@ export function createHttpApp() {
           } catch { /* ignore - volume info is optional */ }
         }
       }
+      const provisionEvents = await ServerService.getProvisionEvents(serverId);
       return c.json({
         server: {
           id: server.id,
@@ -2368,6 +2369,12 @@ export function createHttpApp() {
           deploymentType: server.deploymentType,
           serverUrl,
           status: server.status,
+          provisionStep: server.provisionStep ?? null,
+          provisionEvents: provisionEvents.map(e => ({
+            step: e.step,
+            message: e.message,
+            createdAt: e.createdAt instanceof Date ? e.createdAt.toISOString() : e.createdAt,
+          })),
           lastSeen: server.lastSeen,
           machineId: server.machineId,
           region: server.region,
