@@ -226,6 +226,7 @@ async function provisionNewMachine(
   let provisionResult;
 
   try {
+    await recordProvisionEvent(serverId, 'creating_machine', 'Creating your machine');
     const tierId = tier ? flyTierToTierId(tier) : ('shared-4x-2gb' as const);
     provisionResult = await provider.createMachine({
       serverId,
@@ -284,6 +285,7 @@ async function provisionNewMachine(
     .set(machineUpdate)
     .where(eq(servers.id, serverId));
 
+  await recordProvisionEvent(serverId, 'configuring_network', 'Configuring network and routing');
   // Public ingress setup. Two paths depending on per-tenant vs legacy:
   //
   //   PER-TENANT (flyAppName set): install a CF DNS CNAME
@@ -342,6 +344,7 @@ async function provisionNewMachine(
   // a longer cap is preferable to failing mid-flight on a transient
   // queue delay. The orphan resources and recovery path handle a
   // genuine boot failure cleanly.
+  await recordProvisionEvent(serverId, 'booting', 'Booting the machine');
   await provider.waitForState(provisionResult.machineId, ['running'], 600_000, flyAppName);
 
   // Wait for health checks. 5 min cap (was 1 min) — same reasoning as
@@ -349,6 +352,7 @@ async function provisionNewMachine(
   // timeout (without throwing), so the migration / provision can
   // complete even if the first health check is slow; this just gives
   // the machine more time to settle in for routing.
+  await recordProvisionEvent(serverId, 'waiting_for_server', 'Waiting for the server to come online');
   await provider.waitForHealthy(provisionResult.machineId, 300_000, flyAppName);
 
   // Update status to online
@@ -356,6 +360,7 @@ async function provisionNewMachine(
     .update(servers)
     .set({ status: 'online', updatedAt: new Date() })
     .where(eq(servers.id, serverId));
+  await recordProvisionEvent(serverId, 'ready', 'Server is ready');
 
   // Start machine billing
   await MachineUsageService.onMachineStarted(serverId);
@@ -451,6 +456,7 @@ export async function createServer(
         .update(servers)
         .set({ status: 'provisioning', updatedAt: new Date() })
         .where(eq(servers.id, server.id));
+      await recordProvisionEvent(server.id, 'queued', 'Queued for provisioning');
       // provisionNewMachine creates the per-tenant Fly app itself (idempotent)
       // when called with non-null flyAppName/flyNetworkName, so we just pass
       // the names persisted at row insert above. If this attempt fails, the
@@ -475,6 +481,11 @@ export async function createServer(
           .update(servers)
           .set({ status: 'error', updatedAt: new Date() })
           .where(eq(servers.id, server.id));
+        await recordProvisionEvent(
+          server.id,
+          'error',
+          error instanceof Error ? error.message : String(error),
+        );
       });
     } else {
       console.log(`[ServerService] Skipping provisioning for ${server.id} — no payment method on file`);
