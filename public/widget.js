@@ -517,6 +517,8 @@
         subEm: "",
         subAfter: "",
         thisProduct: "this product",
+        loggedInAs: "Logged in as {name}",
+        loggedIn: "Logged in",
       },
       composer: {
         // Placeholder picks up the prompt that used to live above the
@@ -647,6 +649,8 @@
         subEm: "",
         subAfter: "",
         thisProduct: "이 제품",
+        loggedInAs: "{name} 님으로 로그인됨",
+        loggedIn: "로그인됨",
       },
       composer: {
         placeholder: "버그, 아이디어, 제안 — 여기에 자유롭게 적어주세요.",
@@ -1504,6 +1508,16 @@
       '  font-size: 10.5px; color: var(--rw-muted);',
       '  white-space: nowrap; flex: 0 0 auto;',
       '  letter-spacing: 0.02em;',
+      '}',
+      /* Identity indicator: pushed to the far right of the eyebrow row.
+         Truncates long names; gives ground first when the row wraps so it
+         never collides with the absolutely-positioned shell actions. */
+      '.rw-logged-in {',
+      '  margin-left: auto; min-width: 0; flex: 0 1 auto;',
+      '  font-size: 10.5px; color: var(--rw-muted); font-weight: 600;',
+      '  letter-spacing: 0.02em; white-space: nowrap;',
+      '  overflow: hidden; text-overflow: ellipsis;',
+      '  padding-right: 64px;',
       '}',
       '.rw-powered-by a {',
       '  color: var(--rw-fg-2); text-decoration: none; font-weight: 600;',
@@ -3142,6 +3156,21 @@
             return eyebrowNodes;
           })()),
           poweredBy,
+          // Right-aligned identity indicator on the same eyebrow row.
+          // Only shown once the widget has resolved an authenticated
+          // viewer (app JWT or RunHQ cookie). margin-left:auto pushes it
+          // to the far right of the flex row.
+          (function () {
+            var identified = config.isIdentified
+              || config.identitySource === "app"
+              || config.identitySource === "runhq";
+            if (!identified) return null;
+            var nm = config.identityName;
+            return h("div", {
+              className: "rw-logged-in",
+              title: nm ? t("header.loggedInAs", { name: nm }) : t("header.loggedIn"),
+            }, nm ? t("header.loggedInAs", { name: nm }) : t("header.loggedIn"));
+          })(),
         ]),
         // Sub-text is the product-value pitch: explains WHY the widget
         // exists. Prose composes as [subBefore]<em>{subEm}</em>[subAfter];
