@@ -21,7 +21,15 @@
 import { isUserActivated } from '../api/services/InviteService';
 
 export function isSignupInviteRequired(): boolean {
-  return true;
+  // EMERGENCY STOPGAP (2026-05-16): a client bug (ActivationGate read
+  // `approved` off the wrong store path) walled EVERY user, locking all
+  // existing customers out of production. Forcing this false makes web-me
+  // report signupInviteRequired=false so even the currently-deployed buggy
+  // client bundle renders the app for everyone (the wall short-circuits on
+  // !signupInviteRequired). Re-enable gating ONLY after the fixed client
+  // bundle is confirmed live (look for the "Signed in as" marker in the
+  // served JS), by restoring `return process.env.REQUIRE_SIGNUP_INVITE === 'true';`.
+  return false;
 }
 
 /**

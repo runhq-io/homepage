@@ -7,11 +7,11 @@ vi.mock('../api/services/InviteService', () => ({
 import * as InviteService from '../api/services/InviteService';
 import { isSignupInviteRequired, assertActivated } from './signupGating';
 
-// NOTE: signup gating is currently TEMPORARILY FORCE-ON for all environments
-// (see the header comment in signupGating.ts). These tests assert that
-// hardcoded behavior. When the env toggle is restored, revert these to the
-// env-driven assertions in git history (commit "signupGating policy module").
-describe('signupGating (force-on)', () => {
+// EMERGENCY STOPGAP: signup gating is force-OFF (see signupGating.ts header) to
+// recover from a client bug that walled every user. These tests assert the
+// stopgap behavior. When gating is re-enabled, restore the env-driven
+// assertions from git history (commit "signupGating policy module").
+describe('signupGating (emergency stopgap: force-off)', () => {
   const ORIG = process.env.REQUIRE_SIGNUP_INVITE;
   beforeEach(() => vi.resetAllMocks());
   afterEach(() => {
@@ -19,25 +19,21 @@ describe('signupGating (force-on)', () => {
     else process.env.REQUIRE_SIGNUP_INVITE = ORIG;
   });
 
-  it('isSignupInviteRequired is true regardless of the env var (unset)', () => {
+  it('isSignupInviteRequired is false regardless of the env var (unset)', () => {
     delete process.env.REQUIRE_SIGNUP_INVITE;
-    expect(isSignupInviteRequired()).toBe(true);
+    expect(isSignupInviteRequired()).toBe(false);
   });
 
-  it('isSignupInviteRequired stays true even when env explicitly says false', () => {
-    process.env.REQUIRE_SIGNUP_INVITE = 'false';
-    expect(isSignupInviteRequired()).toBe(true);
-    process.env.REQUIRE_SIGNUP_INVITE = '0';
-    expect(isSignupInviteRequired()).toBe(true);
+  it('isSignupInviteRequired stays false even when env explicitly says true', () => {
+    process.env.REQUIRE_SIGNUP_INVITE = 'true';
+    expect(isSignupInviteRequired()).toBe(false);
   });
 
-  it('assertActivated always defers to isUserActivated (gating never bypassed)', async () => {
+  it('assertActivated always passes (gating disabled, no activation check)', async () => {
     delete process.env.REQUIRE_SIGNUP_INVITE;
-    (InviteService.isUserActivated as any).mockResolvedValue(false);
-    await expect(assertActivated('user-1')).resolves.toBe(false);
-    (InviteService.isUserActivated as any).mockResolvedValue(true);
+    await expect(assertActivated('user-1')).resolves.toBe(true);
+    process.env.REQUIRE_SIGNUP_INVITE = 'true';
     await expect(assertActivated('user-2')).resolves.toBe(true);
-    expect(InviteService.isUserActivated).toHaveBeenCalledWith('user-1');
-    expect(InviteService.isUserActivated).toHaveBeenCalledWith('user-2');
+    expect(InviteService.isUserActivated).not.toHaveBeenCalled();
   });
 });
