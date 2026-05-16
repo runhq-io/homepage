@@ -18,6 +18,7 @@ import { getSettings } from './services/SettingsService';
 import * as UsageService from './services/UsageService';
 import * as StripeService from './services/StripeService';
 import * as InviteService from './services/InviteService';
+import { assertActivated } from '../lib/signupGating';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
 import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
@@ -2174,6 +2175,13 @@ export function createHttpApp() {
 
       if (!userId) {
         return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      // Invite-gating chokepoint: provisioning is the only costly action an
+      // unactivated user could trigger. assertActivated is a no-op when
+      // REQUIRE_SIGNUP_INVITE is off.
+      if (!(await assertActivated(userId))) {
+        return c.json({ error: 'activation_required' }, 403);
       }
 
       const body = await c.req.json();
