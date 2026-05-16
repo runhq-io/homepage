@@ -3157,14 +3157,14 @@
           })()),
           poweredBy,
           // Right-aligned identity indicator on the same eyebrow row.
-          // Only shown once the widget has resolved an authenticated
-          // viewer (app JWT or RunHQ cookie). margin-left:auto pushes it
-          // to the far right of the flex row.
+          // Gate STRICTLY on config.isIdentified — the exact signal the
+          // submit lock uses. Keying this off identitySource instead let
+          // the header say "Logged in as X" while the composer said "not
+          // signed in" for an authenticated-but-unidentified token
+          // (e.g. a non-string `sub`): a self-contradicting UI. One
+          // source of truth: if you can't act, you're not "logged in".
           (function () {
-            var identified = config.isIdentified
-              || config.identitySource === "app"
-              || config.identitySource === "runhq";
-            if (!identified) return null;
+            if (!config.isIdentified) return null;
             var nm = config.identityName;
             return h("div", {
               className: "rw-logged-in",
