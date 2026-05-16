@@ -716,6 +716,7 @@ export const servers = pgTable('servers', {
   tokenHash: text('token_hash'), // SHA-256 hash of the server token (plaintext shown once at creation)
   serverUrl: text('server_url'), // URL of the registered server
   status: text('status').$type<ServerStatusType>(), // 'online' | 'offline' | 'suspended' | 'provisioning' | 'error'
+  provisionStep: text('provision_step'), // Coarse current provisioning step (see provisionSteps.ts); null once online
   lastSeen: timestamp('last_seen'), // Last heartbeat from server
   // Machine fields (for remote deployments)
   machineId: text('machine_id'), // Provider machine ID
@@ -773,6 +774,16 @@ export const serversRelations = relations(servers, ({ one, many }) => ({
 
 export type Server = typeof servers.$inferSelect;
 export type NewServer = typeof servers.$inferInsert;
+
+export const serverProvisionEvents = pgTable('server_provision_events', {
+  id: text('id').primaryKey(),
+  serverId: text('server_id').references(() => servers.id, { onDelete: 'cascade' }).notNull(),
+  step: text('step').notNull(),
+  message: text('message'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export type ServerProvisionEvent = typeof serverProvisionEvents.$inferSelect;
 
 // ============================================================================
 // Server Members (team membership with roles)
