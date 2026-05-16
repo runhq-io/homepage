@@ -50,6 +50,13 @@
       "when": 1777319520947,
       "tag": "0006_careful_post",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1778891981878,
+      "tag": "0007_grandfather_activated_users",
+      "breakpoints": true
     }
   ]
 }
