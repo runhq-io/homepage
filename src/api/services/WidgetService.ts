@@ -673,7 +673,17 @@ export async function authenticateWidget(
 
   // If sub is provided, upsert a widgetUser for identified submissions
   let widgetUserId: string | undefined;
-  const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
+  // Accept a numeric `sub` too. Integer user ids are ubiquitous (every
+  // PHP/SQL app: `'sub' => $user->id`). Previously a number sub was
+  // silently dropped here → authenticated-but-unidentified → 401 on every
+  // write, with no authError/diagnostic. Coerce to a string so the
+  // widget_users mapping is stable regardless of JSON number-vs-string.
+  const sub =
+    typeof payload.sub === 'string' && payload.sub
+      ? payload.sub
+      : typeof payload.sub === 'number' && Number.isFinite(payload.sub)
+        ? String(payload.sub)
+        : undefined;
   const name = typeof payload.name === 'string' ? payload.name : undefined;
   if (sub) {
     const [existing] = await db
@@ -796,7 +806,12 @@ export async function diagnoseWidgetBearerAuth(
   }
 
   if (payload.type !== 'widget_user') return 'wrong_type';
-  if (typeof payload.sub !== 'string' || !payload.sub) return 'not_identified';
+  // Mirror authenticateWidget: a finite numeric sub is usable (coerced),
+  // so only flag genuinely absent/empty subs as not_identified.
+  const hasUsableSub =
+    (typeof payload.sub === 'string' && !!payload.sub) ||
+    (typeof payload.sub === 'number' && Number.isFinite(payload.sub));
+  if (!hasUsableSub) return 'not_identified';
   return null; // token is actually valid — nothing to diagnose
 }
 
