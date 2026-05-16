@@ -2826,34 +2826,39 @@
     // transient in-flight states (posting/uploading) below, which need no
     // explanation.
     var submitReason = null;
-    function setSubmitReason(reason) {
+    // `reason` gates the click/keydown and applies the disabled styling.
+    // `showTooltip` controls whether it ALSO surfaces as the button's
+    // hover/click ::after bubble. The identity-lock reason is shown once,
+    // by the persistent top-of-composer banner — surfacing it on the
+    // button too (and again via the click handler) was the triple-render
+    // the user (rightly) called redundant. Short hints (empty composer)
+    // keep the tooltip since no banner shows for them.
+    function setSubmitReason(reason, showTooltip) {
       submitReason = reason;
       if (reason) {
         submitBtn.setAttribute("aria-disabled", "true");
-        // data-rw-reason (not the native `title`) drives a CSS ::after
-        // tooltip that appears with zero delay — native title tooltips have
-        // a browser-controlled ~0.5s show delay we can't override.
-        submitBtn.setAttribute("data-rw-reason", reason);
+        if (showTooltip) submitBtn.setAttribute("data-rw-reason", reason);
+        else submitBtn.removeAttribute("data-rw-reason");
       } else {
         submitBtn.removeAttribute("aria-disabled");
         submitBtn.removeAttribute("data-rw-reason");
       }
     }
     function updateSubmitEnabled() {
-      // Empty composer never submits, regardless of auth state.
-      if (ta.value.trim().length === 0) { setSubmitReason(t("composer.disabledEmpty")); return; }
+      // Empty composer never submits, regardless of auth state. Short hint,
+      // no banner for this case → keep it as the button tooltip.
+      if (ta.value.trim().length === 0) { setSubmitReason(t("composer.disabledEmpty"), true); return; }
       // Authed users can always submit. Anonymous viewers of a public widget
       // can submit too — the click triggers a login redirect that preserves
       // their draft. Anything else (private widget, or public with no login
-      // URL configured) stays locked, now with a hover/click explanation.
+      // URL configured) stays locked. The reason is shown ONCE, by the
+      // persistent banner at the top of the composer — not also on the
+      // button and again on click. So gate without a tooltip here.
       if (config.isIdentified || canAnonInteract()) { setSubmitReason(null); return; }
-      // A token was supplied but rejected → show the EXACT misconfiguration
-      // (also logged to console) instead of the generic not-signed-in copy.
-      if (config.authErrorMessage) {
-        setSubmitReason(config.authErrorMessage + " (see browser console for the exact fix.)");
-        return;
-      }
-      setSubmitReason(t("composer.disabledLocked"));
+      setSubmitReason(
+        config.authErrorMessage || t("composer.disabledLocked"),
+        false
+      );
     }
     updateSubmitEnabled();
     ta.addEventListener("input", updateSubmitEnabled);
@@ -2895,14 +2900,11 @@
     });
 
     submitBtn.addEventListener("click", function () {
-      // Soft-disabled: the button is still clickable so we can explain why it
-      // won't submit (hover shows the same text via `title`; this surfaces it
-      // inline for touch users and screen readers).
-      if (submitReason) {
-        clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", submitReason));
-        return;
-      }
+      // Soft-disabled: block the submit. The reason is already shown
+      // persistently (banner for the identity lock; tooltip for the empty
+      // hint) — do NOT also re-render it as a notice here, that was the
+      // redundant duplicate.
+      if (submitReason) return;
       var description = ta.value.trim();
       if (!description) return;
 
@@ -2987,15 +2989,20 @@
     });
 
     return h("div", { className: "rw-inline-composer" }, [
-      // Loud, always-visible misconfiguration banner — when the embed
-      // supplied a token the server rejected, the integrator must see the
-      // exact problem the instant the widget opens, not on hover.
-      config.authErrorMessage
+      // Single, persistent, in-your-face surface for the identity lock.
+      // Shows whenever submit is locked because the viewer isn't recognized
+      // (no token / rejected token). This REPLACES the old button-tooltip +
+      // click-notice duplicates — one message, not three.
+      (!config.isIdentified && !canAnonInteract())
         ? h("div", { className: "rw-auth-banner" }, [
-            h("div", { className: "rw-auth-banner-hd" }, "⚠ Widget not set up correctly"),
-            h("div", { className: "rw-auth-banner-msg" }, config.authErrorMessage),
-            h("div", { className: "rw-auth-banner-sub" },
-              "Error code: " + (config.authError || "no_identity") + " — open the browser console for the exact fix."),
+            h("div", { className: "rw-auth-banner-hd" },
+              config.authError ? "⚠ Widget not set up correctly" : "⚠ Can’t submit — not signed in"),
+            h("div", { className: "rw-auth-banner-msg" },
+              config.authErrorMessage || t("composer.disabledLocked")),
+            config.authError
+              ? h("div", { className: "rw-auth-banner-sub" },
+                  "Error code: " + config.authError + " — open the browser console for the exact fix.")
+              : null,
           ])
         : null,
       ta,
@@ -3819,25 +3826,32 @@
     // blocked, instead of a dead natively-disabled control. Native `disabled`
     // is reserved for the transient posting/uploading state.
     var submitReason = null;
-    function setSubmitReason(reason) {
+    // `reason` gates the click/keydown and applies the disabled styling.
+    // `showTooltip` controls whether it ALSO surfaces as the button's
+    // hover/click ::after bubble. The identity-lock reason is shown once,
+    // by the persistent top-of-composer banner — surfacing it on the
+    // button too (and again via the click handler) was the triple-render
+    // the user (rightly) called redundant. Short hints (empty composer)
+    // keep the tooltip since no banner shows for them.
+    function setSubmitReason(reason, showTooltip) {
       submitReason = reason;
       if (reason) {
         submitBtn.setAttribute("aria-disabled", "true");
-        // data-rw-reason (not the native `title`) drives a CSS ::after
-        // tooltip that appears with zero delay — native title tooltips have
-        // a browser-controlled ~0.5s show delay we can't override.
-        submitBtn.setAttribute("data-rw-reason", reason);
+        if (showTooltip) submitBtn.setAttribute("data-rw-reason", reason);
+        else submitBtn.removeAttribute("data-rw-reason");
       } else {
         submitBtn.removeAttribute("aria-disabled");
         submitBtn.removeAttribute("data-rw-reason");
       }
     }
     function updateSubmitEnabled() {
-      if (ticket.commentsDisabled) { setSubmitReason(t("reply.disabledPrompt")); return; }
-      if (!canPostComment) { setSubmitReason(t("reply.signInPrompt")); return; }
+      // Reply composer has no banner; the button tooltip is its single
+      // surface (short messages), so keep showTooltip on.
+      if (ticket.commentsDisabled) { setSubmitReason(t("reply.disabledPrompt"), true); return; }
+      if (!canPostComment) { setSubmitReason(t("reply.signInPrompt"), true); return; }
       var hasText = ta.value.trim().length > 0;
       var hasStaged = entries.length > 0;
-      setSubmitReason(!hasText && !hasStaged ? t("composer.disabledEmpty") : null);
+      setSubmitReason(!hasText && !hasStaged ? t("composer.disabledEmpty") : null, true);
     }
     updateSubmitEnabled();
     function renderChips() {
@@ -3886,13 +3900,9 @@
     });
 
     submitBtn.addEventListener("click", function () {
-      // Soft-disabled: surface why posting is blocked (hover shows the same
-      // text via `title`; this covers touch + screen-reader users).
-      if (submitReason) {
-        clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", submitReason));
-        return;
-      }
+      // Soft-disabled: block. Reason already shown via the button tooltip;
+      // don't also re-render it as a notice (that was the redundant copy).
+      if (submitReason) return;
       var text = ta.value.trim();
       if (!text && entries.length === 0) return;
 
