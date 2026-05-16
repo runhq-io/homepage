@@ -4522,6 +4522,7 @@ export function createHttpApp() {
     'description',
     'status',
     'visibility',
+    'isPublished',
     'type',
     'schedule',
     'scheduledAt',
