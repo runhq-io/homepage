@@ -529,6 +529,20 @@ export async function getServer(serverId: string): Promise<Server | null> {
 }
 
 /**
+ * Lightweight existence check for a server row. Used by the access gate to
+ * distinguish "server was deleted / never existed" (404) from "server exists
+ * but caller is not a member" (403) without pulling the full row.
+ */
+export async function serverExists(serverId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: servers.id })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  return !!row;
+}
+
+/**
  * Get server by Fly machine ID
  */
 export async function getServerByMachineId(machineId: string): Promise<Server | null> {
@@ -1461,12 +1475,29 @@ export async function canEditServer(serverId: string, userId: string): Promise<b
 export type ServerAccessGate =
   | { ok: true }
   | { ok: false; status: 403; body: { error: 'Forbidden' } }
+  | { ok: false; status: 404; body: { error: 'Server not found' } }
   | { ok: false; status: 403; body: {
       error: 'MFA_REQUIRED';
       serverId?: string;
       serverName?: string;
       deadline?: string;
     } };
+
+/**
+ * When membership/ownership check fails, decide whether this is a genuine
+ * authorization denial (server exists, caller is not a member -> 403) or the
+ * server row no longer exists (deleted / never existed -> 404). Server
+ * deletion hard-deletes both the `servers` row and all `server_members` rows
+ * in one transaction, so a deleted server is otherwise indistinguishable from
+ * an unauthorized one. Returning 404 lets clients recover (navigate away from
+ * a stale URL) instead of looping a futile retry on a "Forbidden" screen.
+ */
+async function denyGate(serverId: string): Promise<ServerAccessGate> {
+  const exists = await serverExists(serverId);
+  return exists
+    ? { ok: false, status: 403, body: { error: 'Forbidden' } }
+    : { ok: false, status: 404, body: { error: 'Server not found' } };
+}
 
 /**
  * Workspace authorization gate for read access. Combines MFA-enforcement
@@ -1495,7 +1526,7 @@ export async function gateServerAccess(serverId: string, userId: string): Promis
     };
   }
   const allowed = await canAccessServer(serverId, userId);
-  return allowed ? { ok: true } : { ok: false, status: 403, body: { error: 'Forbidden' } };
+  return allowed ? { ok: true } : denyGate(serverId);
 }
 
 /**
@@ -1517,7 +1548,7 @@ export async function gateServerEdit(serverId: string, userId: string): Promise<
     };
   }
   const allowed = await canEditServer(serverId, userId);
-  return allowed ? { ok: true } : { ok: false, status: 403, body: { error: 'Forbidden' } };
+  return allowed ? { ok: true } : denyGate(serverId);
 }
 
 /**
@@ -2227,9 +2258,17 @@ export async function restartRemoteServer(
 
     await provider.updateMachineImage(server.machineId, server.flyAppName);
 
-    // Wait for it to be ready and healthy
-    await provider.waitForState(server.machineId, ['running'], 30000, server.flyAppName);
-    await provider.waitForHealthy(server.machineId, 45000, server.flyAppName);
+    // Wait for it to be ready and healthy. updateMachineImage commits a NEW
+    // image to the machine config, so Fly must pull a fresh image layer from
+    // the registry and reboot — this is image-pull-class work, the same as
+    // provisioning, and strictly slower than a cached-image wake/restart.
+    // Budget it like provisionNewMachine (600 000 / 300 000), NOT like a
+    // plain restart: the previous 30 000 ms cap routinely expired mid-pull,
+    // so waitForState threw a timeout and the operation reported "Failed to
+    // restart server" even though the image update had already been
+    // committed and the machine came up healthy moments later.
+    await provider.waitForState(server.machineId, ['running'], 600_000, server.flyAppName);
+    await provider.waitForHealthy(server.machineId, 300_000, server.flyAppName);
 
     // Update status
     await db
