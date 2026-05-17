@@ -2128,6 +2128,66 @@ export function createHttpApp() {
     }
   });
 
+  // Create a global agent template (admin only). Used by the in-server
+  // "Save as agent template" action to promote an existing agent into the
+  // shared blueprint library shown in the Create Agent modal.
+  app.post('/api/agent-templates', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const isAdminUser = await UsageService.isAdmin(userId);
+      if (!isAdminUser) {
+        return c.json({ error: 'Unauthorized - admin access required' }, 403);
+      }
+
+      const body = await c.req.json() as {
+        name?: string;
+        description?: string | null;
+        systemPrompt?: string | null;
+        character?: string | null;
+        model?: string | null;
+        enabledTools?: string[] | null;
+        startingCommand?: string | null;
+        jobStartCommand?: string | null;
+        autoStartTasks?: boolean | null;
+      };
+
+      const name = body.name?.trim();
+      if (!name) {
+        return c.json({ error: 'Name is required' }, 400);
+      }
+
+      const [template] = await db
+        .insert(agentTemplates)
+        .values({
+          name,
+          description: body.description || null,
+          systemPrompt: body.systemPrompt || null,
+          character: body.character || null,
+          model: body.model || null,
+          enabledTools: body.enabledTools ?? ['terminal', 'files'],
+          startingCommand: body.startingCommand || null,
+          jobStartCommand: body.jobStartCommand || null,
+          autoStartTasks: body.autoStartTasks ?? true,
+        })
+        .returning();
+
+      return c.json({ success: true, template });
+    } catch (error) {
+      console.error('[HttpServer] Create agent template error:', error);
+      return c.json({ error: 'Failed to create agent template' }, 500);
+    }
+  });
+
   // Create a new server
   app.post('/api/servers', async (c) => {
     try {
