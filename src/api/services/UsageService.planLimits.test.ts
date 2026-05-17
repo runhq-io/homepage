@@ -35,9 +35,9 @@ describe('plan server-limit helpers', () => {
 
 describe('isTierAllowedForPlan', () => {
   it('restricts free users to the lowest tier', () => {
-    expect(FREE_PLAN_TIER).toBe('shared-4x-1gb');
+    expect(FREE_PLAN_TIER).toBe('shared-4x-4gb');
     expect(isTierAllowedForPlan('free', FREE_PLAN_TIER)).toBe(true);
-    expect(isTierAllowedForPlan('free', 'shared-4x-4gb')).toBe(false);
+    expect(isTierAllowedForPlan('free', 'shared-8x-8gb')).toBe(false);
     expect(isTierAllowedForPlan('free', 'perf-2x-8gb')).toBe(false);
   });
 

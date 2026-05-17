@@ -76,9 +76,11 @@ export function hasReachedServerLimit(currentCount: number, maxServers: number):
 /**
  * The single machine tier available to free-plan users. Matches the
  * "Lowest-tier machine only" promise on the Free plan in the pricing page.
+ * The legacy 1 GB / 2 GB tiers were retired — `shared-4x-4gb` is now the
+ * lowest tier we offer, so the free plan maps to it.
  * Paid plans can pick any tier from `FlyService.TIER_CONFIGS`.
  */
-export const FREE_PLAN_TIER = 'shared-4x-1gb';
+export const FREE_PLAN_TIER = 'shared-4x-4gb';
 
 export function isTierAllowedForPlan(planId: PlanId, tier: string): boolean {
   if (planId === 'free') return tier === FREE_PLAN_TIER;
