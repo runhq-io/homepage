@@ -9,6 +9,7 @@ import {
   type WorkspaceTask,
 } from '../../db/schema';
 import { emitTaskNotification, type NotificationActor } from '../../notifications/emitTaskNotification';
+import { dispatchNotification } from '../../notifications/dispatch';
 import type {
   ActivityType,
   CanonicalTaskAttachment,
@@ -343,6 +344,8 @@ export async function updateTask(
   actor: NotificationActor = { type: 'system' },
 ): Promise<CanonicalTask | null> {
   let resultTask: CanonicalTask | null = null;
+  // Accumulates post-commit work so dispatch runs after the transaction commits.
+  const afterCommitWork: Array<() => Promise<void>> = [];
 
   await db.transaction(async (tx) => {
     // Fetch the existing row for visibility comparison and status-transition detection.
@@ -414,7 +417,10 @@ export async function updateTask(
         createdById: row.createdById,
         lastInteractorUserId: row.lastInteractorUserId,
       };
-      await emitTaskNotification(tx, rowShape, prevShape, input.status as 'needs_review' | 'done', actor);
+      const notificationId = await emitTaskNotification(tx, rowShape, prevShape, input.status as 'needs_review' | 'done', actor);
+      if (notificationId) {
+        afterCommitWork.push(() => dispatchNotification(notificationId));
+      }
     }
 
     if (input.attachments !== undefined) {
@@ -423,6 +429,13 @@ export async function updateTask(
     const attachmentGroups = await loadTaskAttachmentGroups([row.id]);
     resultTask = toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
   });
+
+  // Run post-commit work after the transaction has fully committed.
+  for (const work of afterCommitWork) {
+    void work().catch((err) =>
+      console.warn('[WorkspaceTaskService] post-commit dispatch failed', err),
+    );
+  }
 
   return resultTask;
 }

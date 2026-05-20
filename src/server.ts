@@ -31,6 +31,9 @@ import * as ServerService from './api/services/ServerService';
 import { registerCronSyncRoute } from './api/internal/cron-sync';
 import { WorkflowCronScheduler } from './api/services/WorkflowCronScheduler';
 import { ServerRegistry } from './api/services/ServerRegistry';
+import { startPgBoss, stopPgBoss } from './notifications/pgBoss';
+import { setWsServer } from './notifications/wsRegistry';
+import { DeliveryPoller } from './notifications/workers/poller';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -95,9 +98,24 @@ async function main() {
   await nextApp.prepare();
   const nextHandler = nextApp.getRequestHandler();
 
+  // ── pg-boss (notification queue) ─────────────────────────────────────
+  try {
+    await startPgBoss();
+    console.log('[be] pg-boss started');
+  } catch (err) {
+    console.error('[be] pg-boss failed to start (notifications will use poller fallback):', err);
+  }
+
+  // ── Delivery poller (fallback / catch-all) ────────────────────────────
+  const deliveryPoller = new DeliveryPoller();
+  deliveryPoller.start();
+
   // ── WebSocket server (noServer mode) ─────────────────────────────────
   const wsServer = new RunHQWebSocketServer({ noServer: true });
   registerWsHandlers(wsServer);
+
+  // Register WS server in the notification registry so channel workers can push.
+  setWsServer(wsServer);
 
   // ── HTTP server with routing ─────────────────────────────────────────
   const server = http.createServer(async (req, res) => {
@@ -223,6 +241,8 @@ async function main() {
   const shutdown = () => {
     console.log('\n[be] Shutting down...');
     cronScheduler?.stop();
+    deliveryPoller.stop().catch(console.error);
+    stopPgBoss().catch(console.error);
     server.close();
     wsServer.close();
     process.exit(0);

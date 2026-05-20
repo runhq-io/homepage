@@ -45,8 +45,12 @@ import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases } from '../db/schema';
-import { eq, lt, sql, and, isNotNull, like, asc } from 'drizzle-orm';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions } from '../db/schema';
+import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
+import { serializeNotification } from '../notifications/serialize';
+import { getOrCreatePreferences } from '../notifications/gates';
+import { broadcastToUser } from '../notifications/wsBroadcast';
+import { wsServer as getWsServer } from '../notifications/wsRegistry';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -6022,6 +6026,254 @@ export function createHttpApp() {
 
   // Legacy sync endpoints (unsynced, mark-synced, status) removed —
   // workspace_tasks is now the single source of truth.
+
+  // ============================================================================
+  // Notification REST endpoints
+  // ============================================================================
+  //
+  // Auth pattern: reuse the established harnessRequireUser / harnessRequireAdmin
+  // helpers defined earlier in createHttpApp(). These closures are available
+  // because the routes are registered inside the same function body.
+
+  // GET /api/notifications?limit=200
+  app.get('/api/notifications', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const limit = Math.min(Number(c.req.query('limit') ?? 200), 500);
+    const rows = await db.query.notifications.findMany({
+      where: and(eq(notifications.userId, userId), isNull(notifications.archivedAt)),
+      orderBy: [desc(notifications.createdAt)],
+      limit,
+    });
+    return c.json({ notifications: rows.map(serializeNotification) });
+  });
+
+  // PATCH /api/notifications/:id  { read?: boolean, archived?: boolean }
+  app.patch('/api/notifications/:id', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const id = c.req.param('id');
+    const body = await c.req.json() as Record<string, unknown>;
+    const patch: Record<string, unknown> = {};
+    if (body.read === true)      patch.readAt = new Date();
+    if (body.read === false)     patch.readAt = null;
+    if (body.archived === true)  patch.archivedAt = new Date();
+    if (body.archived === false) patch.archivedAt = null;
+    if (!Object.keys(patch).length) return c.json({ error: 'no_fields' }, 400);
+    await db
+      .update(notifications)
+      .set(patch)
+      .where(and(eq(notifications.id, id), eq(notifications.userId, userId)));
+    return c.json({ ok: true });
+  });
+
+  // POST /api/notifications/mark-all-read
+  app.post('/api/notifications/mark-all-read', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    await db
+      .update(notifications)
+      .set({ readAt: new Date() })
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+    return c.json({ ok: true });
+  });
+
+  // GET /api/notifications/preferences
+  app.get('/api/notifications/preferences', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const prefs = await getOrCreatePreferences(userId);
+    return c.json({
+      preferences: {
+        in_app_enabled:  prefs.inAppEnabled,
+        browser_enabled: prefs.browserEnabled,
+        push_enabled:    prefs.pushEnabled,
+        email_enabled:   prefs.emailEnabled,
+      },
+    });
+  });
+
+  // PATCH /api/notifications/preferences
+  app.patch('/api/notifications/preferences', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const body = await c.req.json() as Record<string, unknown>;
+    const patch: Record<string, unknown> = { updatedAt: new Date() };
+    if (typeof body.in_app_enabled === 'boolean')  patch.inAppEnabled = body.in_app_enabled;
+    if (typeof body.browser_enabled === 'boolean') patch.browserEnabled = body.browser_enabled;
+    if (typeof body.push_enabled === 'boolean')    patch.pushEnabled = body.push_enabled;
+    if (typeof body.email_enabled === 'boolean')   patch.emailEnabled = body.email_enabled;
+    await db
+      .insert(userNotificationPreferences)
+      .values({ userId, ...(patch as any) })
+      .onConflictDoUpdate({ target: userNotificationPreferences.userId, set: patch as any });
+    const fresh = await getOrCreatePreferences(userId);
+    try {
+      broadcastToUser(getWsServer(), userId, {
+        type: 'notification:preferences-updated',
+        preferences: {
+          in_app_enabled:  fresh.inAppEnabled,
+          browser_enabled: fresh.browserEnabled,
+          push_enabled:    fresh.pushEnabled,
+          email_enabled:   fresh.emailEnabled,
+        },
+      });
+    } catch { /* WS not registered — API response suffices */ }
+    return c.json({ ok: true });
+  });
+
+  // GET /api/notifications/mutes
+  app.get('/api/notifications/mutes', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const rows = await db.query.notificationMutes.findMany({
+      where: eq(notificationMutes.userId, userId),
+    });
+    return c.json({
+      mutes: rows.map((r) => ({
+        scope_type: r.scopeType,
+        scope_id:   r.scopeId,
+        expires_at: r.expiresAt?.toISOString() ?? null,
+      })),
+    });
+  });
+
+  // POST /api/notifications/mutes
+  app.post('/api/notifications/mutes', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const body = await c.req.json() as { scope_type: 'server' | 'project'; scope_id: string; duration_ms: number | null };
+    const expiresAt = body.duration_ms === null ? null : new Date(Date.now() + Number(body.duration_ms));
+    await db
+      .insert(notificationMutes)
+      .values({ userId, scopeType: body.scope_type, scopeId: body.scope_id, expiresAt })
+      .onConflictDoUpdate({
+        target: [notificationMutes.userId, notificationMutes.scopeType, notificationMutes.scopeId],
+        set: { expiresAt },
+      });
+    try {
+      broadcastToUser(getWsServer(), userId, {
+        type: 'notification:mute-updated',
+        scope_type: body.scope_type,
+        scope_id:   body.scope_id,
+        expires_at: expiresAt?.toISOString() ?? null,
+      });
+    } catch { /* WS not registered */ }
+    return c.json({ ok: true });
+  });
+
+  // DELETE /api/notifications/mutes/:scope_type/:scope_id
+  app.delete('/api/notifications/mutes/:scope_type/:scope_id', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const scopeType = c.req.param('scope_type') as 'server' | 'project';
+    const scopeId   = c.req.param('scope_id');
+    await db
+      .delete(notificationMutes)
+      .where(
+        and(
+          eq(notificationMutes.userId, userId),
+          eq(notificationMutes.scopeType, scopeType),
+          eq(notificationMutes.scopeId, scopeId),
+        ),
+      );
+    try {
+      broadcastToUser(getWsServer(), userId, {
+        type: 'notification:mute-updated',
+        scope_type: scopeType,
+        scope_id:   scopeId,
+        expires_at: 'unmute',
+      });
+    } catch { /* WS not registered */ }
+    return c.json({ ok: true });
+  });
+
+  // POST /api/notifications/push-subscriptions
+  app.post('/api/notifications/push-subscriptions', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const body = await c.req.json() as {
+      platform: 'web_push' | 'apns' | 'fcm';
+      endpoint: string;
+      keys: unknown;
+      user_agent?: string;
+    };
+    await db
+      .insert(pushSubscriptions)
+      .values({
+        userId,
+        platform:  body.platform,
+        endpoint:  body.endpoint,
+        keys:      body.keys as any,
+        userAgent: body.user_agent ?? null,
+      })
+      .onConflictDoNothing();
+    return c.json({ ok: true });
+  });
+
+  // GET /api/notifications/push-subscriptions
+  app.get('/api/notifications/push-subscriptions', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const rows = await db.query.pushSubscriptions.findMany({
+      where: eq(pushSubscriptions.userId, userId),
+    });
+    return c.json({
+      subscriptions: rows.map((r) => ({
+        id:           r.id,
+        platform:     r.platform,
+        user_agent:   r.userAgent,
+        created_at:   r.createdAt.toISOString(),
+        last_used_at: r.lastUsedAt?.toISOString() ?? null,
+      })),
+    });
+  });
+
+  // DELETE /api/notifications/push-subscriptions/:endpoint
+  app.delete('/api/notifications/push-subscriptions/:endpoint', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const endpoint = decodeURIComponent(c.req.param('endpoint'));
+    await db
+      .delete(pushSubscriptions)
+      .where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.endpoint, endpoint)));
+    return c.json({ ok: true });
+  });
+
+  // GET /admin/notifications/dead  (admin only)
+  app.get('/admin/notifications/dead', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const rows = await db.query.notificationDeliveries.findMany({
+      where: eq(notificationDeliveries.status, 'dead'),
+      orderBy: [desc(notificationDeliveries.createdAt)],
+      limit: 200,
+    });
+    return c.json({ rows });
+  });
+
+  // POST /admin/notifications/dead/:id/requeue  (admin only)
+  app.post('/admin/notifications/dead/:id/requeue', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const id = c.req.param('id');
+    await db
+      .update(notificationDeliveries)
+      .set({ status: 'pending', attempts: 0, nextAttemptAt: new Date(), lastError: null })
+      .where(eq(notificationDeliveries.id, id));
+    return c.json({ ok: true });
+  });
 
   // Mount OAuth routes
   app.route('/oauth', oauth);

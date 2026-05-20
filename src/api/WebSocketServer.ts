@@ -385,6 +385,20 @@ export class RunHQWebSocketServer {
     return client?.subscribedTasks.has(taskId) ?? false;
   }
 
+  /**
+   * Returns all open, authenticated WebSocket connections for the given userId.
+   * Used by the notification delivery layer to push in-app messages.
+   */
+  getSocketsForUser(userId: string): WebSocket[] {
+    const result: WebSocket[] = [];
+    for (const client of this.clients.values()) {
+      if (client.authenticated && client.userId === userId && client.ws.readyState === WebSocket.OPEN) {
+        result.push(client.ws);
+      }
+    }
+    return result;
+  }
+
   close(): void {
     this.wss.close();
   }
