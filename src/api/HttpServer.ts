@@ -4749,11 +4749,13 @@ export function createHttpApp() {
     if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
-    const safe = pickFields(body, TASK_UPDATE_MEMBER_FIELDS);
+    const MEMBER_FIELDS_WITH_INTERACTOR = [...TASK_UPDATE_MEMBER_FIELDS, 'lastInteractorUserId'] as const;
+    const safe = pickFields(body, MEMBER_FIELDS_WITH_INTERACTOR);
     const task = await WorkspaceTaskService.updateTask(
       serverId,
       c.req.param('taskId'),
       safe as Parameters<typeof WorkspaceTaskService.updateTask>[2],
+      { type: 'user', userId },
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
     return c.json({ success: true, data: task });
@@ -5057,7 +5059,14 @@ export function createHttpApp() {
     if (!server) return c.json({ error: 'Invalid server token' }, 401);
 
     const body = await c.req.json();
-    const task = await WorkspaceTaskService.updateTask(server.id, c.req.param('taskId'), body);
+    // This route is authenticated by server token (used by the agent loop).
+    // There is no user identity on this path, so actor = { type: 'agent' }.
+    const task = await WorkspaceTaskService.updateTask(
+      server.id,
+      c.req.param('taskId'),
+      body,
+      { type: 'agent' },
+    );
     if (!task) return c.json({ error: 'Task not found' }, 404);
     return c.json({ success: true, data: task });
   });
