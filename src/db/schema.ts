@@ -1220,6 +1220,8 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   votingEndsAt: timestamp('voting_ends_at'),
   legacyWorkspaceTodoId: text('legacy_workspace_todo_id'),
   lastMigratedAt: timestamp('last_migrated_at'),
+  lastInteractorUserId: text('last_interactor_user_id'),
+  lastInteractorAt: timestamp('last_interactor_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [
