@@ -1519,9 +1519,13 @@ export const notifications = pgTable('notifications', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   eventId: text('event_id').notNull().unique(),
-  serverId: uuid('server_id').notNull(),
+  // server_id is text — workspace servers use a ws_<base36>_<random> format,
+  // not UUID. Corrected from uuid in migration 008.
+  serverId: text('server_id').notNull(),
   serverName: text('server_name').notNull(),
-  projectId: uuid('project_id').notNull(),
+  // project_id is text — workspaceProjectId is a free-form string, not UUID.
+  // Corrected from uuid in migration 008.
+  projectId: text('project_id').notNull(),
   projectName: text('project_name').notNull(),
   taskId: uuid('task_id').notNull(),
   taskTitle: text('task_title').notNull(),
