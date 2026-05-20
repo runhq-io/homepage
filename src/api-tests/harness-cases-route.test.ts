@@ -27,8 +27,8 @@ vi.mock('@/db', () => ({
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { isAdmin } from '@/lib/adminPolicy';
 import { getDb } from '@/db';
-import { GET, POST } from './route';
-import { PUT, DELETE } from './[id]/route';
+import { GET, POST } from '@/app/api/harness-cases/route';
+import { PUT, DELETE } from '@/app/api/harness-cases/[id]/route';
 
 const USER_ROW = { id: 'u1', email: 'u@runhq.io' };
 
