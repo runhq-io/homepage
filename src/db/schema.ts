@@ -1467,3 +1467,91 @@ export const harnessCases = pgTable('harness_cases', {
 });
 
 export type HarnessCaseRow = typeof harnessCases.$inferSelect;
+
+// ============================================================================
+// Notification Platform
+// ============================================================================
+
+export const userNotificationPreferences = pgTable('user_notification_preferences', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  inAppEnabled: boolean('in_app_enabled').notNull().default(true),
+  browserEnabled: boolean('browser_enabled').notNull().default(true),
+  pushEnabled: boolean('push_enabled').notNull().default(true),
+  emailEnabled: boolean('email_enabled').notNull().default(false),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type UserNotificationPreferences = typeof userNotificationPreferences.$inferSelect;
+
+export const notificationMutes = pgTable('notification_mutes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  scopeType: text('scope_type', { enum: ['server', 'project'] }).notNull(),
+  scopeId: uuid('scope_id').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  uniqUserScope: uniqueIndex('notification_mutes_user_scope_unique').on(t.userId, t.scopeType, t.scopeId),
+  userExpires: index('notification_mutes_user_expires').on(t.userId, t.expiresAt),
+}));
+
+export type NotificationMute = typeof notificationMutes.$inferSelect;
+
+export const pushSubscriptions = pgTable('push_subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  platform: text('platform', { enum: ['web_push', 'apns', 'fcm'] }).notNull(),
+  endpoint: text('endpoint').notNull(),
+  keys: jsonb('keys'),
+  userAgent: text('user_agent'),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  uniqEndpoint: uniqueIndex('push_subscriptions_user_platform_endpoint_unique').on(t.userId, t.platform, t.endpoint),
+  userPlatform: index('push_subscriptions_user_platform').on(t.userId, t.platform),
+}));
+
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+
+export const notifications = pgTable('notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  eventId: text('event_id').notNull().unique(),
+  serverId: uuid('server_id').notNull(),
+  serverName: text('server_name').notNull(),
+  projectId: uuid('project_id').notNull(),
+  projectName: text('project_name').notNull(),
+  taskId: uuid('task_id').notNull(),
+  taskTitle: text('task_title').notNull(),
+  eventType: text('event_type', { enum: ['need_help', 'completed'] }).notNull(),
+  readAt: timestamp('read_at', { withTimezone: true }),
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type NotificationRow = typeof notifications.$inferSelect;
+
+export const notificationDeliveries = pgTable('notification_deliveries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  notificationId: uuid('notification_id').notNull().references(() => notifications.id, { onDelete: 'cascade' }),
+  channel: text('channel', { enum: ['in_app', 'browser_api', 'web_push', 'apns', 'fcm', 'email'] }).notNull(),
+  status: text('status', { enum: ['pending', 'sent', 'skipped', 'failed', 'dead'] }).notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+  deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type NotificationDelivery = typeof notificationDeliveries.$inferSelect;
+
+export const serverRateCounters = pgTable('server_rate_counters', {
+  serverId: uuid('server_id').notNull(),
+  bucketStart: timestamp('bucket_start', { withTimezone: true }).notNull(),
+  count: integer('count').notNull().default(0),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.serverId, t.bucketStart] }),
+  byTime: index('server_rate_counters_bucket').on(t.bucketStart),
+}));
+
+export type ServerRateCounter = typeof serverRateCounters.$inferSelect;
