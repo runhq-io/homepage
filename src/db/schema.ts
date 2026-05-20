@@ -1448,3 +1448,22 @@ export const workflowCronSchedules = pgTable('workflow_cron_schedules', {
 }));
 
 export type WorkflowCronScheduleRow = typeof workflowCronSchedules.$inferSelect;
+
+// ============================================================================
+// /tests harness cases — shared editable test suite
+// ============================================================================
+// The /tests harness's case definitions (prompt + AI-judge expectedOutcome).
+// One canonical suite, shared across every workspace. Reads are open to any
+// authenticated session; writes are gated by users.is_admin.
+
+export const harnessCases = pgTable('harness_cases', {
+  id: text('id').primaryKey(),
+  label: text('label').notNull(),
+  prompt: text('prompt').notNull(),
+  expectedOutcome: text('expected_outcome').notNull(),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type HarnessCaseRow = typeof harnessCases.$inferSelect;
