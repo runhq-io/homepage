@@ -8,6 +8,7 @@ import {
   workspaceTaskVotes,
   type WorkspaceTask,
 } from '../../db/schema';
+import { emitTaskNotification, type NotificationActor } from '../../notifications/emitTaskNotification';
 import type {
   ActivityType,
   CanonicalTaskAttachment,
@@ -51,7 +52,10 @@ type CreateWorkspaceTaskInput = {
   isPublished?: boolean;
 };
 
-type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput>;
+type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput> & {
+  /** When provided, stamps last_interactor_user_id + last_interactor_at on the row. null clears both. */
+  lastInteractorUserId?: string | null;
+};
 
 const attachmentStorage = new TaskAttachmentStorageService();
 
@@ -336,51 +340,91 @@ export async function updateTask(
   serverId: string,
   taskId: string,
   input: UpdateWorkspaceTaskInput,
+  actor: NotificationActor = { type: 'system' },
 ): Promise<CanonicalTask | null> {
-  const existingRow = await db
-    .select({ visibility: workspaceTasks.visibility })
-    .from(workspaceTasks)
-    .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
-    .limit(1);
-  if (existingRow.length === 0) return null;
-  const existingVisibility = existingRow[0].visibility as 'public' | 'private';
+  let resultTask: CanonicalTask | null = null;
 
-  const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (input.workspaceProjectId !== undefined) updates.workspaceProjectId = input.workspaceProjectId;
-  if (input.workspaceChannelId !== undefined) updates.workspaceChannelId = input.workspaceChannelId;
-  if (input.title !== undefined) updates.title = input.title;
-  if (input.description !== undefined) updates.description = input.description;
-  if (input.status !== undefined) updates.status = input.status;
-  if (input.visibility !== undefined) updates.visibility = input.visibility;
-  if (input.isPublished !== undefined) updates.isPublished = input.isPublished;
-  const promotedVisibility = resolvePublishVisibility(input, existingVisibility);
-  if (promotedVisibility !== undefined) updates.visibility = promotedVisibility;
-  if (input.sourceType !== undefined) updates.sourceType = input.sourceType;
-  if (input.createdByType !== undefined) updates.createdByType = input.createdByType;
-  if (input.createdById !== undefined) updates.createdById = input.createdById;
-  if (input.createdByName !== undefined) updates.createdByName = input.createdByName;
-  if (input.commentsDisabled !== undefined) updates.commentsDisabled = input.commentsDisabled;
-  if (input.type !== undefined) updates.taskType = input.type;
-  if (input.schedule !== undefined) updates.schedule = input.schedule;
-  if (input.scheduledAt !== undefined) updates.scheduledAt = input.scheduledAt;
-  if (input.timezone !== undefined) updates.timezone = input.timezone;
-  if (input.completedAt !== undefined) updates.completedAt = input.completedAt ? new Date(input.completedAt) : null;
-  if (input.archivedAt !== undefined) updates.archivedAt = input.archivedAt ? new Date(input.archivedAt) : null;
-  if (input.deletedAt !== undefined) updates.deletedAt = input.deletedAt ? new Date(input.deletedAt) : null;
-  if (input.upvoteCount !== undefined) updates.upvoteCount = input.upvoteCount;
-  if (input.moderationStatus !== undefined) updates.moderationStatus = input.moderationStatus;
+  await db.transaction(async (tx) => {
+    // Fetch the existing row for visibility comparison and status-transition detection.
+    const existingRows = await tx
+      .select()
+      .from(workspaceTasks)
+      .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
+      .limit(1);
+    if (existingRows.length === 0) return; // task not found — resultTask stays null
+    const existing = existingRows[0];
+    const existingVisibility = existing.visibility as 'public' | 'private';
 
-  const [row] = await db
-    .update(workspaceTasks)
-    .set(updates)
-    .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
-    .returning();
-  if (!row) return null;
-  if (input.attachments !== undefined) {
-    await replaceTaskAttachments(serverId, row.id, input.attachments ?? []);
-  }
-  const attachmentGroups = await loadTaskAttachmentGroups([row.id]);
-  return toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
+    // Detect whether this update will transition the task to a notification-worthy status.
+    const willTransition =
+      (input.status === 'needs_review' || input.status === 'done') &&
+      input.status !== existing.status;
+
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (input.workspaceProjectId !== undefined) updates.workspaceProjectId = input.workspaceProjectId;
+    if (input.workspaceChannelId !== undefined) updates.workspaceChannelId = input.workspaceChannelId;
+    if (input.title !== undefined) updates.title = input.title;
+    if (input.description !== undefined) updates.description = input.description;
+    if (input.status !== undefined) updates.status = input.status;
+    if (input.visibility !== undefined) updates.visibility = input.visibility;
+    if (input.isPublished !== undefined) updates.isPublished = input.isPublished;
+    const promotedVisibility = resolvePublishVisibility(input, existingVisibility);
+    if (promotedVisibility !== undefined) updates.visibility = promotedVisibility;
+    if (input.sourceType !== undefined) updates.sourceType = input.sourceType;
+    if (input.createdByType !== undefined) updates.createdByType = input.createdByType;
+    if (input.createdById !== undefined) updates.createdById = input.createdById;
+    if (input.createdByName !== undefined) updates.createdByName = input.createdByName;
+    if (input.commentsDisabled !== undefined) updates.commentsDisabled = input.commentsDisabled;
+    if (input.type !== undefined) updates.taskType = input.type;
+    if (input.schedule !== undefined) updates.schedule = input.schedule;
+    if (input.scheduledAt !== undefined) updates.scheduledAt = input.scheduledAt;
+    if (input.timezone !== undefined) updates.timezone = input.timezone;
+    if (input.completedAt !== undefined) updates.completedAt = input.completedAt ? new Date(input.completedAt) : null;
+    if (input.archivedAt !== undefined) updates.archivedAt = input.archivedAt ? new Date(input.archivedAt) : null;
+    if (input.deletedAt !== undefined) updates.deletedAt = input.deletedAt ? new Date(input.deletedAt) : null;
+    if (input.upvoteCount !== undefined) updates.upvoteCount = input.upvoteCount;
+    if (input.moderationStatus !== undefined) updates.moderationStatus = input.moderationStatus;
+    if (input.lastInteractorUserId !== undefined) {
+      updates.lastInteractorUserId = input.lastInteractorUserId;
+      updates.lastInteractorAt = input.lastInteractorUserId !== null ? new Date() : null;
+    }
+
+    const [row] = await tx
+      .update(workspaceTasks)
+      .set(updates)
+      .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
+      .returning();
+    if (!row) return;
+
+    // Emit notification inside the same transaction (outbox pattern).
+    if (willTransition) {
+      const prevShape = {
+        id: existing.id,
+        serverId: existing.serverId,
+        workspaceProjectId: existing.workspaceProjectId,
+        title: existing.title,
+        createdById: existing.createdById,
+        lastInteractorUserId: existing.lastInteractorUserId,
+      };
+      const rowShape = {
+        id: row.id,
+        serverId: row.serverId,
+        workspaceProjectId: row.workspaceProjectId,
+        title: row.title,
+        createdById: row.createdById,
+        lastInteractorUserId: row.lastInteractorUserId,
+      };
+      await emitTaskNotification(tx, rowShape, prevShape, input.status as 'needs_review' | 'done', actor);
+    }
+
+    if (input.attachments !== undefined) {
+      await replaceTaskAttachments(serverId, row.id, input.attachments ?? []);
+    }
+    const attachmentGroups = await loadTaskAttachmentGroups([row.id]);
+    resultTask = toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
+  });
+
+  return resultTask;
 }
 
 export async function listComments(taskId: string): Promise<CanonicalTaskComment[]> {
