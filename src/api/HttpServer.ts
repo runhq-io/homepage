@@ -7,7 +7,7 @@
  * - Usage tracking
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { serve } from '@hono/node-server';
 import Anthropic from '@anthropic-ai/sdk';
 import oauth from './oauth/index';
@@ -45,8 +45,8 @@ import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions } from '../db/schema';
-import { eq, lt, sql, and, isNotNull, like } from 'drizzle-orm';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases } from '../db/schema';
+import { eq, lt, sql, and, isNotNull, like, asc } from 'drizzle-orm';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -1524,6 +1524,144 @@ export function createHttpApp() {
       console.error('[HttpServer] Admin check error:', error);
       return c.json({ error: 'Failed to check admin status' }, 500);
     }
+  });
+
+  // ============================================================================
+  // /tests Harness Cases — shared editable test suite
+  // ============================================================================
+  // GET is open to any authenticated user. Writes (POST/PUT/DELETE) are gated
+  // by the global `adminUsers` flag (same as /api/admin/*) so a per-workspace
+  // admin can't mutate the global suite from a workspace they're admin in.
+
+  const HARNESS_LIMITS = { label: 200, prompt: 8 * 1024, expectedOutcome: 16 * 1024 } as const;
+
+  const parseHarnessBody = async (
+    c: Context,
+  ): Promise<
+    | { ok: true; value: { label: string; prompt: string; expectedOutcome: string } }
+    | { ok: false; error: string }
+  > => {
+    let raw: any;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return { ok: false, error: 'Invalid JSON body' };
+    }
+    const labelRaw = typeof raw?.label === 'string' ? raw.label.trim() : '';
+    const promptRaw = typeof raw?.prompt === 'string' ? raw.prompt.trim() : '';
+    const expectedRaw =
+      typeof raw?.expectedOutcome === 'string' ? raw.expectedOutcome.trim() : '';
+    if (!labelRaw) return { ok: false, error: 'label is required' };
+    if (!promptRaw) return { ok: false, error: 'prompt is required' };
+    if (!expectedRaw) return { ok: false, error: 'expectedOutcome is required' };
+    if (labelRaw.length > HARNESS_LIMITS.label)
+      return { ok: false, error: `label exceeds ${HARNESS_LIMITS.label} chars` };
+    if (promptRaw.length > HARNESS_LIMITS.prompt)
+      return { ok: false, error: `prompt exceeds ${HARNESS_LIMITS.prompt} chars` };
+    if (expectedRaw.length > HARNESS_LIMITS.expectedOutcome)
+      return { ok: false, error: `expectedOutcome exceeds ${HARNESS_LIMITS.expectedOutcome} chars` };
+    return { ok: true, value: { label: labelRaw, prompt: promptRaw, expectedOutcome: expectedRaw } };
+  };
+
+  const harnessToDTO = (row: {
+    id: string;
+    label: string;
+    prompt: string;
+    expectedOutcome: string;
+    createdBy: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }) => ({
+    id: row.id,
+    label: row.label,
+    prompt: row.prompt,
+    expectedOutcome: row.expectedOutcome,
+    createdBy: row.createdBy ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
+
+  /** Returns the user id of an authenticated caller, or a Response 401. */
+  const harnessRequireUser = async (c: Context): Promise<string | Response> => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      return c.json({ error: 'Authentication required' }, 401);
+    }
+    const userId = await extractUserIdFromToken(authHeader.slice(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    return userId;
+  };
+
+  /** Like harnessRequireUser but also enforces global admin. */
+  const harnessRequireAdmin = async (c: Context): Promise<string | Response> => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    if (!(await UsageService.isAdmin(userIdOrRes))) {
+      return c.json({ error: 'Admin only' }, 403);
+    }
+    return userIdOrRes;
+  };
+
+  app.get('/api/harness-cases', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const rows = await db.select().from(harnessCases).orderBy(asc(harnessCases.createdAt));
+    return c.json({ data: rows.map(harnessToDTO) });
+  });
+
+  app.post('/api/harness-cases', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const parsed = await parseHarnessBody(c);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const now = new Date();
+    const [row] = await db
+      .insert(harnessCases)
+      .values({
+        id: crypto.randomUUID(),
+        label: parsed.value.label,
+        prompt: parsed.value.prompt,
+        expectedOutcome: parsed.value.expectedOutcome,
+        createdBy: userIdOrRes,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return c.json({ data: harnessToDTO(row) }, 201);
+  });
+
+  app.put('/api/harness-cases/:id', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const id = c.req.param('id');
+    if (!id) return c.json({ error: 'id is required' }, 400);
+    const parsed = await parseHarnessBody(c);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const rows = await db
+      .update(harnessCases)
+      .set({
+        label: parsed.value.label,
+        prompt: parsed.value.prompt,
+        expectedOutcome: parsed.value.expectedOutcome,
+        updatedAt: new Date(),
+      })
+      .where(eq(harnessCases.id, id))
+      .returning();
+    if (rows.length === 0) return c.json({ error: 'Case not found' }, 404);
+    return c.json({ data: harnessToDTO(rows[0]) });
+  });
+
+  app.delete('/api/harness-cases/:id', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const id = c.req.param('id');
+    if (!id) return c.json({ error: 'id is required' }, 400);
+    const rows = await db
+      .delete(harnessCases)
+      .where(eq(harnessCases.id, id))
+      .returning({ id: harnessCases.id });
+    if (rows.length === 0) return c.json({ error: 'Case not found' }, 404);
+    return c.json({ ok: true });
   });
 
   // ============================================================================
