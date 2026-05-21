@@ -22,12 +22,9 @@ const { parseExpression } = cronParser;
 import { signPayload } from '../../lib/hmac.js';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../../db/schema.js';
+import type { CronOwner } from '../internal/cronOwner.js';
 
 export type Database = NodePgDatabase<typeof schema>;
-
-type Owner =
-  | { kind: 'agent'; agentId: string }
-  | { kind: 'job'; jobId: string };
 
 export interface ServerRegistry {
   getServerUrl(serverId: string): Promise<string | null>;
@@ -54,7 +51,7 @@ export interface SchedulerConfig {
 interface ClaimedRow {
   id: string;
   serverId: string;
-  owner: Owner;
+  owner: CronOwner;
   triggerNodeId: string;
   schedule: string;
   timezone: string | null;
@@ -162,7 +159,7 @@ export class WorkflowCronScheduler {
            WHERE id = ${r.id}
         `);
 
-        const owner: Owner = r.agent_id
+        const owner: CronOwner = r.agent_id
           ? { kind: 'agent', agentId: r.agent_id as string }
           : { kind: 'job', jobId: r.job_id as string };
 

@@ -8,6 +8,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../../db/schema.js';
 import { workflowCronSchedules } from '../../db/schema.js';
 import { verifySignature, isWithinReplayWindow } from '../../lib/hmac.js';
+import { cronOwnerSchema } from './cronOwner.js';
 
 export type Database = NodePgDatabase<typeof schema>;
 
@@ -17,14 +18,9 @@ const scheduleItemSchema = z.object({
   timezone: z.string().optional(),
 });
 
-const ownerSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('agent'), agentId: z.string().min(1) }),
-  z.object({ kind: z.literal('job'),   jobId:   z.string().min(1) }),
-]);
-
 const payloadSchema = z.object({
   serverId: z.string().min(1),
-  owner: ownerSchema,
+  owner: cronOwnerSchema,
   workflowVersion: z.number().int().nonnegative(),
   schedules: z.array(scheduleItemSchema),
 });
