@@ -72,10 +72,25 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
       }
     }
 
-    const isAgentOwner = body.owner.kind === 'agent';
-    const ownerCol = isAgentOwner ? workflowCronSchedules.agentId : workflowCronSchedules.jobId;
-    const ownerVal = isAgentOwner ? body.owner.agentId : body.owner.jobId;
-    const ownerKeyPart = isAgentOwner ? `agent_${body.owner.agentId}` : `job_${body.owner.jobId}`;
+    let ownerCol: typeof workflowCronSchedules.agentId | typeof workflowCronSchedules.jobId;
+    let ownerVal: string;
+    let ownerKeyPart: string;
+    let insertAgentId: string | null;
+    let insertJobId: string | null;
+
+    if (body.owner.kind === 'agent') {
+      ownerCol = workflowCronSchedules.agentId;
+      ownerVal = body.owner.agentId;
+      ownerKeyPart = `agent_${body.owner.agentId}`;
+      insertAgentId = body.owner.agentId;
+      insertJobId = null;
+    } else {
+      ownerCol = workflowCronSchedules.jobId;
+      ownerVal = body.owner.jobId;
+      ownerKeyPart = `job_${body.owner.jobId}`;
+      insertAgentId = null;
+      insertJobId = body.owner.jobId;
+    }
 
     // Atomically replace all schedules for this (serverId, owner).
     await deps.db.transaction(async (tx: any) => {
@@ -92,8 +107,8 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
         await tx.insert(workflowCronSchedules).values({
           id: `wcron_${body.serverId}_${ownerKeyPart}_${s.triggerNodeId}`,
           serverId: body.serverId,
-          agentId: isAgentOwner ? body.owner.agentId : null,
-          jobId: isAgentOwner ? null : body.owner.jobId,
+          agentId: insertAgentId,
+          jobId: insertJobId,
           workflowVersion: body.workflowVersion,
           triggerNodeId: s.triggerNodeId,
           schedule: s.schedule,
