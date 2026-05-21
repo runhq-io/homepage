@@ -2,9 +2,6 @@ import type { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { eq, and } from 'drizzle-orm';
-// cron-parser@4 is CJS-only; Node ESM's cjs-module-lexer doesn't always
-// detect `parseExpression` as a named export, so we default-import the
-// module object and destructure. Same pattern in WorkflowCronScheduler.ts.
 import cronParser from 'cron-parser';
 const { parseExpression } = cronParser;
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -20,9 +17,14 @@ const scheduleItemSchema = z.object({
   timezone: z.string().optional(),
 });
 
+const ownerSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('agent'), agentId: z.string().min(1) }),
+  z.object({ kind: z.literal('job'),   jobId:   z.string().min(1) }),
+]);
+
 const payloadSchema = z.object({
   serverId: z.string().min(1),
-  agentId: z.string().min(1),
+  owner: ownerSchema,
   workflowVersion: z.number().int().nonnegative(),
   schedules: z.array(scheduleItemSchema),
 });
@@ -41,18 +43,12 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
     if (!isWithinReplayWindow(ts)) throw new HTTPException(401, { message: 'timestamp out of window' });
 
     const raw = await c.req.text();
-
     let jsonBody: unknown;
-    try {
-      jsonBody = JSON.parse(raw);
-    } catch {
-      throw new HTTPException(400, { message: 'invalid JSON body' });
-    }
+    try { jsonBody = JSON.parse(raw); }
+    catch { throw new HTTPException(400, { message: 'invalid JSON body' }); }
 
     const parsed = payloadSchema.safeParse(jsonBody);
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: parsed.error.message });
-    }
+    if (!parsed.success) throw new HTTPException(400, { message: parsed.error.message });
     const body = parsed.data;
 
     const serverToken = await deps.getServerToken(body.serverId);
@@ -62,14 +58,13 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
     }
 
     // Validate all cron expressions before touching the DB.
-    const nextFireAtMap: Map<string, Date> = new Map();
+    const nextFireAtMap = new Map<string, Date>();
     for (const s of body.schedules) {
       try {
-        const it = parseExpression(s.schedule, {
-          tz: s.timezone,
-          currentDate: new Date(),
-        });
-        nextFireAtMap.set(s.triggerNodeId, it.next().toDate());
+        nextFireAtMap.set(
+          s.triggerNodeId,
+          parseExpression(s.schedule, { tz: s.timezone, currentDate: new Date() }).next().toDate(),
+        );
       } catch (err) {
         throw new HTTPException(400, {
           message: `invalid cron "${s.schedule}": ${(err as Error).message}`,
@@ -77,28 +72,33 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
       }
     }
 
-    // Atomically replace all schedules for this (serverId, agentId).
+    const isAgentOwner = body.owner.kind === 'agent';
+    const ownerCol = isAgentOwner ? workflowCronSchedules.agentId : workflowCronSchedules.jobId;
+    const ownerVal = isAgentOwner ? body.owner.agentId : body.owner.jobId;
+    const ownerKeyPart = isAgentOwner ? `agent_${body.owner.agentId}` : `job_${body.owner.jobId}`;
+
+    // Atomically replace all schedules for this (serverId, owner).
     await deps.db.transaction(async (tx: any) => {
       await tx
         .delete(workflowCronSchedules)
         .where(
           and(
             eq(workflowCronSchedules.serverId, body.serverId),
-            eq(workflowCronSchedules.agentId, body.agentId),
+            eq(ownerCol, ownerVal),
           ),
         );
 
       for (const s of body.schedules) {
-        const nextFireAt = nextFireAtMap.get(s.triggerNodeId)!;
         await tx.insert(workflowCronSchedules).values({
-          id: `wcron_${body.serverId}_${body.agentId}_${s.triggerNodeId}`,
+          id: `wcron_${body.serverId}_${ownerKeyPart}_${s.triggerNodeId}`,
           serverId: body.serverId,
-          agentId: body.agentId,
+          agentId: isAgentOwner ? body.owner.agentId : null,
+          jobId: isAgentOwner ? null : body.owner.jobId,
           workflowVersion: body.workflowVersion,
           triggerNodeId: s.triggerNodeId,
           schedule: s.schedule,
           timezone: s.timezone ?? null,
-          nextFireAt,
+          nextFireAt: nextFireAtMap.get(s.triggerNodeId)!,
           enabled: true,
         });
       }
