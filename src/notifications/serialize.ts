@@ -1,8 +1,28 @@
 import type { NotificationRow } from '../db/schema'
 
-export function serializeNotification(n: NotificationRow) {
+/** The wire shape returned by /api/notifications and pushed over WS. */
+export interface SerializedNotification {
+  id: string;
+  /** Recipient user id. Used by the per-server WS push path to target the
+   *  right socket; harmless on the client because /api/notifications already
+   *  scopes by auth. */
+  user_id: string;
+  server_id: string;
+  server_name: string;
+  project_id: string;
+  project_name: string;
+  task_id: string;
+  task_title: string;
+  event_type: 'need_help' | 'completed';
+  read_at: string | null;
+  archived_at: string | null;
+  created_at: string;
+}
+
+export function serializeNotification(n: NotificationRow): SerializedNotification {
   return {
     id:           n.id,
+    user_id:      n.userId,
     server_id:    n.serverId,
     server_name:  n.serverName,
     project_id:   n.projectId,

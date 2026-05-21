@@ -4755,14 +4755,17 @@ export function createHttpApp() {
     const body = await c.req.json();
     const MEMBER_FIELDS_WITH_INTERACTOR = [...TASK_UPDATE_MEMBER_FIELDS, 'lastInteractorUserId'] as const;
     const safe = pickFields(body, MEMBER_FIELDS_WITH_INTERACTOR);
-    const task = await WorkspaceTaskService.updateTask(
+    const { task, notification } = await WorkspaceTaskService.updateTask(
       serverId,
       c.req.param('taskId'),
       safe as Parameters<typeof WorkspaceTaskService.updateTask>[2],
       { type: 'user', userId },
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    return c.json({ success: true, data: task });
+    // `notification` (when present) is shipped to the calling per-server so it
+    // can push to its connected WS clients — sub-second in-app delivery
+    // without a separate browser-to-BE WebSocket connection.
+    return c.json({ success: true, data: task, notification });
   });
 
   app.post('/api/servers/:serverId/workspace-tasks/:taskId/upvote', async (c) => {
@@ -5065,14 +5068,16 @@ export function createHttpApp() {
     const body = await c.req.json();
     // This route is authenticated by server token (used by the agent loop).
     // There is no user identity on this path, so actor = { type: 'agent' }.
-    const task = await WorkspaceTaskService.updateTask(
+    const { task, notification } = await WorkspaceTaskService.updateTask(
       server.id,
       c.req.param('taskId'),
       body,
       { type: 'agent' },
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    return c.json({ success: true, data: task });
+    // Ship the emitted notification (if any) back to the calling per-server
+    // so it can push to its connected WS clients.
+    return c.json({ success: true, data: task, notification });
   });
 
   app.post('/api/server/workspace-tasks/:taskId/upvote', async (c) => {

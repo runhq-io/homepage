@@ -25,7 +25,7 @@ async function main() {
     { status: 'done' as any },
     { type: 'agent' },
   )
-  console.log('Update result:', result?.status, result?.id)
+  console.log('Update result:', result.task?.status, result.task?.id, '| notification:', result.notification?.id ?? '(none)')
 
   // Read what landed
   const notifs = await db.query.notifications.findMany({ where: eq(notifications.userId, RECIPIENT) })

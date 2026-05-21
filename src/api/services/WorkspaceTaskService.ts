@@ -342,8 +342,9 @@ export async function updateTask(
   taskId: string,
   input: UpdateWorkspaceTaskInput,
   actor: NotificationActor = { type: 'system' },
-): Promise<CanonicalTask | null> {
+): Promise<{ task: CanonicalTask | null; notification: import('../../notifications/serialize').SerializedNotification | null }> {
   let resultTask: CanonicalTask | null = null;
+  let emittedNotificationId: string | null = null;
   // Accumulates post-commit work so dispatch runs after the transaction commits.
   const afterCommitWork: Array<() => Promise<void>> = [];
 
@@ -419,6 +420,7 @@ export async function updateTask(
       };
       const notificationId = await emitTaskNotification(tx, rowShape, prevShape, input.status as 'needs_review' | 'done', actor);
       if (notificationId) {
+        emittedNotificationId = notificationId;
         afterCommitWork.push(() => dispatchNotification(notificationId));
       }
     }
@@ -437,7 +439,18 @@ export async function updateTask(
     );
   }
 
-  return resultTask;
+  // If a notification was emitted, fetch the full row so the caller can ship
+  // it down to clients (via the existing per-server WS) for sub-second push
+  // without a separate browser-to-BE WebSocket connection.
+  let emittedNotification: import('../../notifications/serialize').SerializedNotification | null = null;
+  if (emittedNotificationId) {
+    const { serializeNotification } = await import('../../notifications/serialize');
+    const { notifications } = await import('../../db/schema');
+    const found = await db.query.notifications.findFirst({ where: eq(notifications.id, emittedNotificationId) });
+    if (found) emittedNotification = serializeNotification(found);
+  }
+
+  return { task: resultTask, notification: emittedNotification };
 }
 
 export async function listComments(taskId: string): Promise<CanonicalTaskComment[]> {
