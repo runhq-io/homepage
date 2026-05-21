@@ -1,5 +1,16 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import { WorkflowCronScheduler, type SchedulerConfig, type ServerRegistry } from './WorkflowCronScheduler.js';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+import { eq } from 'drizzle-orm';
+import * as schema from '../../db/schema.js';
+import { workflowCronSchedules } from '../../db/schema.js';
+
+// ---------------------------------------------------------------------------
+// Real Postgres db (used only by the job-owner integration test)
+// ---------------------------------------------------------------------------
+const pool = new Pool({ connectionString: 'postgresql://postgres:postgres@localhost:5432/runhq' });
+const db = drizzle(pool, { schema });
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -100,7 +111,7 @@ describe('WorkflowCronScheduler', () => {
       expect(calledUrl).toBe(`${SERVER_URL}/api/internal/cron-fire`);
     });
 
-    it('sends the correct agentId and triggerNodeId in the body', async () => {
+    it('sends the correct owner and triggerNodeId in the body', async () => {
       const row = makeRow({ agent_id: 'agent_Z', trigger_node_id: 'node_X' });
       const { db } = makeMockDb([row]);
       const fetchImpl = makeFetchOk();
@@ -112,7 +123,7 @@ describe('WorkflowCronScheduler', () => {
 
       const [, init] = (fetchImpl as any).mock.calls[0] as [string, RequestInit];
       const body = JSON.parse(init.body as string);
-      expect(body.agentId).toBe('agent_Z');
+      expect(body.owner).toEqual({ kind: 'agent', agentId: 'agent_Z' });
       expect(body.triggerNodeId).toBe('node_X');
       expect(body.fireTime).toBe(fireTime.toISOString());
     });
@@ -358,6 +369,52 @@ describe('WorkflowCronScheduler', () => {
 
       expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
       clearIntervalSpy.mockRestore();
+    });
+  });
+
+  describe('tick() — job-owner integration (real Postgres)', () => {
+    beforeEach(async () => {
+      await db.delete(workflowCronSchedules).where(eq(workflowCronSchedules.serverId, 'srv_test'));
+    });
+
+    afterAll(async () => {
+      await pool.end();
+    });
+
+    it('dispatches job-owner schedules with kind:job body', async () => {
+      await db.insert(workflowCronSchedules).values({
+        id: 'wcron_test_job_one',
+        serverId: 'srv_test',
+        agentId: null,
+        jobId: 'job_test_one',
+        workflowVersion: 1,
+        triggerNodeId: 'trig_a',
+        schedule: '* * * * *',
+        timezone: null,
+        nextFireAt: new Date(Date.now() - 60_000),
+        enabled: true,
+      });
+
+      const calls: { url: string; body: any }[] = [];
+      const fetchImpl = (async (url: string, init: any) => {
+        calls.push({ url, body: JSON.parse(init.body) });
+        return new Response('{"ok":true,"accepted":true}', { status: 202 });
+      }) as any;
+
+      const sched = new WorkflowCronScheduler({
+        db,
+        serverRegistry: {
+          getServerUrl: async () => 'http://test.local',
+          getServerToken: async () => 'tok',
+        },
+        fetchImpl,
+      });
+
+      await sched.tick(new Date());
+
+      expect(calls.length).toBe(1);
+      expect(calls[0].body.owner).toEqual({ kind: 'job', jobId: 'job_test_one' });
+      expect(calls[0].body.triggerNodeId).toBe('trig_a');
     });
   });
 });

@@ -25,6 +25,10 @@ import type * as schema from '../../db/schema.js';
 
 export type Database = NodePgDatabase<typeof schema>;
 
+type Owner =
+  | { kind: 'agent'; agentId: string }
+  | { kind: 'job'; jobId: string };
+
 export interface ServerRegistry {
   getServerUrl(serverId: string): Promise<string | null>;
   getServerToken(serverId: string): Promise<string | null>;
@@ -50,7 +54,7 @@ export interface SchedulerConfig {
 interface ClaimedRow {
   id: string;
   serverId: string;
-  agentId: string;
+  owner: Owner;
   triggerNodeId: string;
   schedule: string;
   timezone: string | null;
@@ -116,7 +120,7 @@ export class WorkflowCronScheduler {
   private async claimDueRows(now: Date): Promise<ClaimedRow[]> {
     return this.cfg.db.transaction(async (tx: any) => {
       const result = await tx.execute(sql`
-        SELECT id, server_id, agent_id, trigger_node_id, schedule, timezone
+        SELECT id, server_id, agent_id, job_id, trigger_node_id, schedule, timezone
           FROM workflow_cron_schedules
          WHERE enabled = true AND next_fire_at <= ${now}
          ORDER BY next_fire_at ASC
@@ -158,10 +162,14 @@ export class WorkflowCronScheduler {
            WHERE id = ${r.id}
         `);
 
+        const owner: Owner = r.agent_id
+          ? { kind: 'agent', agentId: r.agent_id as string }
+          : { kind: 'job', jobId: r.job_id as string };
+
         claimed.push({
           id: r.id,
           serverId: r.server_id,
-          agentId: r.agent_id,
+          owner,
           triggerNodeId: r.trigger_node_id,
           schedule: r.schedule,
           timezone: r.timezone as string | null,
@@ -182,7 +190,7 @@ export class WorkflowCronScheduler {
 
     const ts = new Date().toISOString();
     const body = JSON.stringify({
-      agentId: row.agentId,
+      owner: row.owner,
       triggerNodeId: row.triggerNodeId,
       fireTime: fireTime.toISOString(),
     });
