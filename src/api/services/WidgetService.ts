@@ -885,7 +885,11 @@ export async function listPublishedTickets(projectId: string, widgetUserId?: str
           eq(workspaceTasks.visibility, 'public'), // defense-in-depth: publishing auto-promotes visibility=public upstream; still gate here
           eq(workspaceTasks.isPublished, true),
         ))
-        .orderBy(desc(workspaceTasks.updatedAt)) // last-activity order: recently voted/commented published tickets surface first (status/completedAt no longer gate the feed)
+        // "Latest Updates" = recently shipped work. Sort by completedAt (when marked done),
+        // not updatedAt — otherwise flipping isPublished or any later edit/vote/comment
+        // would re-surface an old task to the top. Non-done published tickets keep
+        // appearing (status no longer gates the feed) but sink to the bottom.
+        .orderBy(sql`${workspaceTasks.completedAt} desc nulls last`)
         .limit(20)
     : [];
 
