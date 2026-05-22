@@ -2,15 +2,13 @@ import type { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { eq, and } from 'drizzle-orm';
-// cron-parser@4 is CJS-only; Node ESM's cjs-module-lexer doesn't always
-// detect `parseExpression` as a named export, so we default-import the
-// module object and destructure. Same pattern in WorkflowCronScheduler.ts.
 import cronParser from 'cron-parser';
 const { parseExpression } = cronParser;
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../../db/schema.js';
 import { workflowCronSchedules } from '../../db/schema.js';
 import { verifySignature, isWithinReplayWindow } from '../../lib/hmac.js';
+import { cronOwnerSchema } from './cronOwner.js';
 
 export type Database = NodePgDatabase<typeof schema>;
 
@@ -22,7 +20,7 @@ const scheduleItemSchema = z.object({
 
 const payloadSchema = z.object({
   serverId: z.string().min(1),
-  agentId: z.string().min(1),
+  owner: cronOwnerSchema,
   workflowVersion: z.number().int().nonnegative(),
   schedules: z.array(scheduleItemSchema),
 });
@@ -41,18 +39,12 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
     if (!isWithinReplayWindow(ts)) throw new HTTPException(401, { message: 'timestamp out of window' });
 
     const raw = await c.req.text();
-
     let jsonBody: unknown;
-    try {
-      jsonBody = JSON.parse(raw);
-    } catch {
-      throw new HTTPException(400, { message: 'invalid JSON body' });
-    }
+    try { jsonBody = JSON.parse(raw); }
+    catch { throw new HTTPException(400, { message: 'invalid JSON body' }); }
 
     const parsed = payloadSchema.safeParse(jsonBody);
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: parsed.error.message });
-    }
+    if (!parsed.success) throw new HTTPException(400, { message: parsed.error.message });
     const body = parsed.data;
 
     const serverToken = await deps.getServerToken(body.serverId);
@@ -62,14 +54,13 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
     }
 
     // Validate all cron expressions before touching the DB.
-    const nextFireAtMap: Map<string, Date> = new Map();
+    const nextFireAtMap = new Map<string, Date>();
     for (const s of body.schedules) {
       try {
-        const it = parseExpression(s.schedule, {
-          tz: s.timezone,
-          currentDate: new Date(),
-        });
-        nextFireAtMap.set(s.triggerNodeId, it.next().toDate());
+        nextFireAtMap.set(
+          s.triggerNodeId,
+          parseExpression(s.schedule, { tz: s.timezone, currentDate: new Date() }).next().toDate(),
+        );
       } catch (err) {
         throw new HTTPException(400, {
           message: `invalid cron "${s.schedule}": ${(err as Error).message}`,
@@ -77,28 +68,48 @@ export function registerCronSyncRoute(app: Hono, deps: CronSyncDeps): void {
       }
     }
 
-    // Atomically replace all schedules for this (serverId, agentId).
+    let ownerCol: typeof workflowCronSchedules.agentId | typeof workflowCronSchedules.jobId;
+    let ownerVal: string;
+    let ownerKeyPart: string;
+    let insertAgentId: string | null;
+    let insertJobId: string | null;
+
+    if (body.owner.kind === 'agent') {
+      ownerCol = workflowCronSchedules.agentId;
+      ownerVal = body.owner.agentId;
+      ownerKeyPart = `agent_${body.owner.agentId}`;
+      insertAgentId = body.owner.agentId;
+      insertJobId = null;
+    } else {
+      ownerCol = workflowCronSchedules.jobId;
+      ownerVal = body.owner.jobId;
+      ownerKeyPart = `job_${body.owner.jobId}`;
+      insertAgentId = null;
+      insertJobId = body.owner.jobId;
+    }
+
+    // Atomically replace all schedules for this (serverId, owner).
     await deps.db.transaction(async (tx: any) => {
       await tx
         .delete(workflowCronSchedules)
         .where(
           and(
             eq(workflowCronSchedules.serverId, body.serverId),
-            eq(workflowCronSchedules.agentId, body.agentId),
+            eq(ownerCol, ownerVal),
           ),
         );
 
       for (const s of body.schedules) {
-        const nextFireAt = nextFireAtMap.get(s.triggerNodeId)!;
         await tx.insert(workflowCronSchedules).values({
-          id: `wcron_${body.serverId}_${body.agentId}_${s.triggerNodeId}`,
+          id: `wcron_${body.serverId}_${ownerKeyPart}_${s.triggerNodeId}`,
           serverId: body.serverId,
-          agentId: body.agentId,
+          agentId: insertAgentId,
+          jobId: insertJobId,
           workflowVersion: body.workflowVersion,
           triggerNodeId: s.triggerNodeId,
           schedule: s.schedule,
           timezone: s.timezone ?? null,
-          nextFireAt,
+          nextFireAt: nextFireAtMap.get(s.triggerNodeId)!,
           enabled: true,
         });
       }

@@ -66,7 +66,7 @@ async function postCronSync(
 
 const VALID_PAYLOAD = {
   serverId: SERVER_ID,
-  agentId: AGENT_ID,
+  owner: { kind: 'agent', agentId: AGENT_ID },
   workflowVersion: 1,
   schedules: [
     { triggerNodeId: 'node_1', schedule: '*/5 * * * *' },
@@ -133,8 +133,8 @@ describe('POST /api/internal/cron-sync', () => {
       const app = makeApp(customDeps);
       await postCronSync(app, VALID_PAYLOAD);
 
-      expect(capturedValues[0].id).toBe(`wcron_${SERVER_ID}_${AGENT_ID}_node_1`);
-      expect(capturedValues[1].id).toBe(`wcron_${SERVER_ID}_${AGENT_ID}_node_2`);
+      expect(capturedValues[0].id).toBe(`wcron_${SERVER_ID}_agent_${AGENT_ID}_node_1`);
+      expect(capturedValues[1].id).toBe(`wcron_${SERVER_ID}_agent_${AGENT_ID}_node_2`);
     });
 
     it('accepts a payload with zero schedules (clears all)', async () => {
