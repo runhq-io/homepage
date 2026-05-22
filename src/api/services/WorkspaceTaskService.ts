@@ -345,8 +345,15 @@ export async function updateTask(
 ): Promise<{ task: CanonicalTask | null; notification: import('../../notifications/serialize').SerializedNotification | null }> {
   let resultTask: CanonicalTask | null = null;
   let emittedNotificationId: string | null = null;
-  // Accumulates post-commit work so dispatch runs after the transaction commits.
-  const afterCommitWork: Array<() => Promise<void>> = [];
+  // Captured inside the task-update transaction, consumed AFTER it commits so
+  // that notification emission can never roll back a status change (and a
+  // missing-table / notification error never blocks the core task update).
+  type PendingEmit = {
+    rowShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
+    prevShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
+    status: 'needs_review' | 'done';
+  };
+  let pendingEmit: PendingEmit | null = null;
 
   await db.transaction(async (tx) => {
     // Fetch the existing row for visibility comparison and status-transition detection.
@@ -400,29 +407,30 @@ export async function updateTask(
       .returning();
     if (!row) return;
 
-    // Emit notification inside the same transaction (outbox pattern).
+    // Capture the data needed to emit a notification. We do NOT emit inside
+    // this transaction: notification delivery is best-effort and must never
+    // roll back the authoritative task-status update (e.g. if the notification
+    // tables are missing mid-migration, or any emit error occurs).
     if (willTransition) {
-      const prevShape = {
-        id: existing.id,
-        serverId: existing.serverId,
-        workspaceProjectId: existing.workspaceProjectId,
-        title: existing.title,
-        createdById: existing.createdById,
-        lastInteractorUserId: existing.lastInteractorUserId,
+      pendingEmit = {
+        prevShape: {
+          id: existing.id,
+          serverId: existing.serverId,
+          workspaceProjectId: existing.workspaceProjectId,
+          title: existing.title,
+          createdById: existing.createdById,
+          lastInteractorUserId: existing.lastInteractorUserId,
+        },
+        rowShape: {
+          id: row.id,
+          serverId: row.serverId,
+          workspaceProjectId: row.workspaceProjectId,
+          title: row.title,
+          createdById: row.createdById,
+          lastInteractorUserId: row.lastInteractorUserId,
+        },
+        status: input.status as 'needs_review' | 'done',
       };
-      const rowShape = {
-        id: row.id,
-        serverId: row.serverId,
-        workspaceProjectId: row.workspaceProjectId,
-        title: row.title,
-        createdById: row.createdById,
-        lastInteractorUserId: row.lastInteractorUserId,
-      };
-      const notificationId = await emitTaskNotification(tx, rowShape, prevShape, input.status as 'needs_review' | 'done', actor);
-      if (notificationId) {
-        emittedNotificationId = notificationId;
-        afterCommitWork.push(() => dispatchNotification(notificationId));
-      }
     }
 
     if (input.attachments !== undefined) {
@@ -432,11 +440,25 @@ export async function updateTask(
     resultTask = toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
   });
 
-  // Run post-commit work after the transaction has fully committed.
-  for (const work of afterCommitWork) {
-    void work().catch((err) =>
-      console.warn('[WorkspaceTaskService] post-commit dispatch failed', err),
-    );
+  // Emit + dispatch the notification AFTER the task-update transaction has
+  // committed, in its own transaction, fully wrapped in try/catch. A failure
+  // here (missing table, DB blip, etc.) is logged and swallowed — the task
+  // update has already succeeded and must not be undone.
+  if (pendingEmit) {
+    const emit: PendingEmit = pendingEmit;
+    try {
+      await db.transaction(async (tx) => {
+        const notificationId = await emitTaskNotification(tx, emit.rowShape, emit.prevShape, emit.status, actor);
+        if (notificationId) emittedNotificationId = notificationId;
+      });
+      if (emittedNotificationId) {
+        void dispatchNotification(emittedNotificationId).catch((err) =>
+          console.warn('[WorkspaceTaskService] post-commit dispatch failed', err),
+        );
+      }
+    } catch (err) {
+      console.error('[WorkspaceTaskService] notification emit failed (task update preserved)', err);
+    }
   }
 
   // If a notification was emitted, fetch the full row so the caller can ship
