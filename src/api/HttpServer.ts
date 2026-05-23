@@ -1394,10 +1394,14 @@ export function createHttpApp() {
       // synthetic 'pre-cutover-rollup' migration row, which is not per-user data.
       const filter = { start, end, userIds: [userId], excludePreCutover: true };
 
-      const [byJob, byServer, byDay] = await Promise.all([
+      const [byJob, byServer, byDay, series] = await Promise.all([
         UsageReportService.getBreakdownByTask(filter),
         UsageReportService.getBreakdownByServer(filter),
         UsageReportService.getBreakdownByDay(filter),
+        // Zero-filled daily series (every day in the period, $0 on idle days) to
+        // drive the usage graph — distinct from byDay, which lists only active
+        // days for the table.
+        UsageReportService.getDailyTotals(filter, 'day'),
       ]);
 
       return c.json({
@@ -1406,6 +1410,7 @@ export function createHttpApp() {
         byJob,
         byServer,
         byDay,
+        series,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
