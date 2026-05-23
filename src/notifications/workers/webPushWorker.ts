@@ -44,6 +44,7 @@ export async function deliverWebPush(delivery: NotificationDelivery, notificatio
       serverId:       notification.serverId,
       projectId:      notification.projectId,
       taskId:         notification.taskId,
+      channelId:      notification.channelId ?? null,
     },
   })
 
