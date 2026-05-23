@@ -16,6 +16,7 @@ export type TaskRowForNotification = {
   id: string
   serverId: string
   workspaceProjectId: string | null
+  workspaceChannelId: string | null
   title: string
   createdById: string | null
   lastInteractorUserId: string | null
@@ -29,6 +30,8 @@ export type NotificationContent = {
   projectName: string
   taskId: string
   taskTitle: string
+  /** Workspace channel for deep-linking; null when there is no target. */
+  channelId: string | null
   eventType: 'completed' | 'need_help'
 }
 
@@ -66,6 +69,7 @@ export async function insertNotificationWithDeliveries(
       projectName: content.projectName,
       taskId: content.taskId,
       taskTitle: content.taskTitle,
+      channelId: content.channelId,
       eventType: content.eventType,
     })
     .onConflictDoNothing({ target: notifications.eventId })
@@ -157,6 +161,7 @@ export async function emitTaskNotification(
     projectName,
     taskId: row.id,
     taskTitle: row.title,
+    channelId: row.workspaceChannelId,
     eventType: newStatus === 'done' ? 'completed' : 'need_help',
   })
 }

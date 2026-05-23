@@ -1540,6 +1540,10 @@ export const notifications = pgTable('notifications', {
   projectName: text('project_name').notNull(),
   taskId: uuid('task_id').notNull(),
   taskTitle: text('task_title').notNull(),
+  // Workspace channel the task/job lives in, snapshot at emit time. Lets the
+  // client deep-link a notification to the job's chat. Nullable: tasks with no
+  // channel (and test notifications) have no deep-link target.
+  channelId: text('channel_id'),
   eventType: text('event_type', { enum: ['need_help', 'completed'] }).notNull(),
   readAt: timestamp('read_at', { withTimezone: true }),
   archivedAt: timestamp('archived_at', { withTimezone: true }),

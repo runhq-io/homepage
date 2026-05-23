@@ -19,6 +19,7 @@ const TEST_USER_1    = '00000000-0000-0000-0000-aaaabbbb0001'; // "last interact
 const TEST_USER_2    = '00000000-0000-0000-0000-aaaabbbb0002'; // "actor / other user"
 const TEST_SERVER_ID = 'ws_test_notify_001';                    // text server id
 const TEST_PROJECT   = 'proj_test_notify_001';                  // free-form project id
+const TEST_CHANNEL   = 'ch_test_notify_001';                    // free-form channel id
 const TEST_TASK_ID   = '00000000-0000-0000-0000-cccc00000001'; // must be uuid
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -29,6 +30,7 @@ function makeRow(overrides?: Partial<TaskRowForNotification>): TaskRowForNotific
     id: TEST_TASK_ID,
     serverId: TEST_SERVER_ID,
     workspaceProjectId: TEST_PROJECT,
+    workspaceChannelId: TEST_CHANNEL,
     title: 'Fix the login bug',
     createdById: TEST_USER_1,
     lastInteractorUserId: null,
@@ -330,6 +332,7 @@ describe('emitTaskNotification', () => {
         projectName: '',
         taskId: '00000000-0000-0000-0000-cccc00000099',
         taskTitle: 'This is a test notification 🔔',
+        channelId: TEST_CHANNEL,
         eventType: 'completed',
       });
     });
@@ -339,6 +342,7 @@ describe('emitTaskNotification', () => {
     expect(notif.serverId).toBe('test');
     expect(notif.projectId).toBe('');
     expect(notif.taskTitle).toBe('This is a test notification 🔔');
+    expect(notif.channelId).toBe(TEST_CHANNEL);
 
     // No push subscription for TEST_USER_1 → exactly in_app + browser_api + email.
     const dels = await db.select().from(notificationDeliveries)
@@ -367,6 +371,7 @@ describe('emitTaskNotification', () => {
         projectName: '',
         taskId: '00000000-0000-0000-0000-cccc00000099',
         taskTitle: 'Push test 🔔',
+        channelId: null,
         eventType: 'completed',
       });
     });

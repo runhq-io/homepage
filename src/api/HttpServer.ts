@@ -6181,6 +6181,7 @@ export function createHttpApp() {
           projectName: '',
           taskId: crypto.randomUUID(),
           taskTitle: 'This is a test notification 🔔',
+          channelId: null,
           eventType: 'completed',
         });
       });
