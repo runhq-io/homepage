@@ -6101,7 +6101,11 @@ export function createHttpApp() {
   });
 
   // PATCH /api/notifications/:id  { read?: boolean, archived?: boolean }
-  app.patch('/api/notifications/:id', async (c) => {
+  // NOTE: constrain :id to a UUID. Without this, the param route shadows the
+  // static sibling routes registered after it (e.g. PATCH
+  // /api/notifications/preferences would match here with id="preferences",
+  // hit the no-read/archived-field branch, and 400 with "no_fields").
+  app.patch('/api/notifications/:id{[0-9a-fA-F-]{36}}', async (c) => {
     const userIdOrRes = await harnessRequireUser(c);
     if (typeof userIdOrRes !== 'string') return userIdOrRes;
     const userId = userIdOrRes;
