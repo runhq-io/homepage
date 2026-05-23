@@ -567,7 +567,7 @@ export function createHttpApp() {
       }
 
       // Check credit balance before proceeding
-      const creditCheck = await UsageService.checkCreditBalance(token);
+      const creditCheck = await UsageService.checkCreditBalanceForServer(token, readContextHeaders(c).serverId);
       if (!creditCheck.allowed) {
         const code =
           creditCheck.reason === 'past_due' ? 'PAYMENT_PAST_DUE' :
@@ -862,7 +862,7 @@ export function createHttpApp() {
         }
 
         // Check credit balance before proceeding
-        const creditCheck = await UsageService.checkCreditBalance(token);
+        const creditCheck = await UsageService.checkCreditBalanceForServer(token, readContextHeaders(c).serverId);
         if (!creditCheck.allowed) {
           const code =
             creditCheck.reason === 'past_due' ? 'PAYMENT_PAST_DUE' :
@@ -1042,22 +1042,27 @@ export function createHttpApp() {
       let newBalanceCents = 0;
       if (userId) {
         const anthropicRequestId = (response as any)?.id ?? null;
+        // Under owner-pays the cost lands on the server owner, not necessarily
+        // `userId` (the actor). trackUsage resolves and returns the billed user
+        // so we report the balance that actually changed.
+        let billedUserId = userId;
         try {
-          await trackUsage({
+          const r = await trackUsage({
             userId, model, tokens, costCents, context, anthropicRequestId,
           });
+          billedUserId = r.billedUserId;
         } catch (err) {
           // Log but do NOT fail the response — the user already got their Claude answer.
           console.error('[HttpServer] trackUsage failed', err);
         }
 
-        // Fetch the post-deduct balance for the response. trackUsage returns void
-        // now, so we query subscriptions directly (primary-key lookup, trivially fast).
+        // Fetch the post-deduct balance (of the billed user) for the response —
+        // primary-key lookup, trivially fast.
         try {
           const [sub] = await db
             .select({ b: subscriptions.creditBalanceCents })
             .from(subscriptions)
-            .where(eq(subscriptions.userId, userId))
+            .where(eq(subscriptions.userId, billedUserId))
             .limit(1);
           // creditBalanceCents is numeric(12,4) — Drizzle returns it as a string.
           newBalanceCents = sub?.b !== undefined ? Number(sub.b) : 0;

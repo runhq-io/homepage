@@ -15,6 +15,7 @@ import {
   usageAdjustments,
   plans,
   adminUsers,
+  servers,
   type PlanId,
   type Subscription,
   type Plan,
@@ -356,13 +357,45 @@ export interface TrackUsageInput {
 }
 
 /**
- * Persist one Claude-call event and deduct the cost from the user's balance.
- * Both operations happen in one DB transaction — either both succeed or neither.
+ * Look up a server's owner. Returns null when serverId is null, a sentinel
+ * ('local'), or has no matching `servers` row (legacy events that stored a Fly
+ * machine id instead of a ws_ id).
+ */
+export async function getServerOwnerId(serverId: string | null): Promise<string | null> {
+  if (!serverId) return null;
+  const [row] = await db
+    .select({ ownerId: servers.ownerId })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  return row?.ownerId ?? null;
+}
+
+/**
+ * Owner-pays billing: AI usage on a server is billed to that server's OWNER,
+ * not the user who happened to run the agent. Resolve the billed user from the
+ * serverId; fall back to the acting user when the server/owner can't be
+ * resolved (no serverId, sentinel, or unknown server).
+ */
+export async function resolveBilledUserId(serverId: string | null, actorUserId: string): Promise<string> {
+  return (await getServerOwnerId(serverId)) ?? actorUserId;
+}
+
+/**
+ * Persist one Claude-call event and deduct the cost from the BILLED user's
+ * balance. Both operations happen in one DB transaction — either both succeed
+ * or neither.
+ *
+ * `input.userId` is the ACTING user (request bearer). Under owner-pays we bill
+ * the server's owner instead, resolved from `context.serverId`; when the owner
+ * can't be resolved we fall back to the actor. Returns the billed user id so
+ * callers can report the correct post-deduct balance.
  *
  * Balance is clamped at 0 (existing behavior; debt is not tracked).
  */
-export async function trackUsage(input: TrackUsageInput): Promise<void> {
-  const { userId, model, tokens, costCents, context, anthropicRequestId } = input;
+export async function trackUsage(input: TrackUsageInput): Promise<{ billedUserId: string }> {
+  const { userId: actorUserId, model, tokens, costCents, context, anthropicRequestId } = input;
+  const billedUserId = await resolveBilledUserId(context.serverId, actorUserId);
 
   await db.transaction(async (tx) => {
     // Deduct balance atomically using SQL GREATEST(0, balance - cost).
@@ -373,11 +406,11 @@ export async function trackUsage(input: TrackUsageInput): Promise<void> {
         creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${costCents.toFixed(4)}::numeric)`,
         updatedAt: new Date(),
       })
-      .where(eq(subscriptions.userId, userId));
+      .where(eq(subscriptions.userId, billedUserId));
 
-    // Insert the event with full precision cost.
+    // Insert the event with full precision cost. userId = the billed (owner) user.
     await tx.insert(usageEvents).values({
-      userId,
+      userId: billedUserId,
       serverId: context.serverId,
       ts: new Date(),
       model,
@@ -397,6 +430,8 @@ export async function trackUsage(input: TrackUsageInput): Promise<void> {
       anthropicRequestId,
     });
   });
+
+  return { billedUserId };
 }
 
 
@@ -450,23 +485,46 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
 }
 
 
+/** CreditCheckResult for an unresolvable user (no/invalid token). */
+function noSubscriptionResult(): CreditCheckResult {
+  const { end } = getBillingPeriod();
+  return {
+    allowed: false,
+    reason: 'no_subscription',
+    balanceCents: 0,
+    plan: 'free',
+    hasPaymentMethod: false,
+    periodEnd: end,
+  };
+}
+
 /**
- * Check if user has enough credits
+ * Check if the request is allowed to incur cost, billing the SERVER OWNER under
+ * owner-pays. The gate must check the owner's balance (whoever actually pays),
+ * not the acting user's — otherwise a funded collaborator could drain a broke
+ * owner, or a broke collaborator could be blocked on a funded owner's server.
+ * Falls back to the actor when the server/owner can't be resolved.
+ */
+export async function checkCreditBalanceForServer(userToken: string, serverId: string | null): Promise<CreditCheckResult> {
+  const actorUserId = extractUserIdFromToken(userToken);
+  if (!actorUserId) return noSubscriptionResult();
+  const billedUserId = await resolveBilledUserId(serverId, actorUserId);
+  return checkCreditBalanceByUserId(billedUserId);
+}
+
+/**
+ * Check if user has enough credits (token-based; checks the token's own user).
  */
 export async function checkCreditBalance(userToken: string): Promise<CreditCheckResult> {
   const userId = extractUserIdFromToken(userToken);
-  if (!userId) {
-    const { end } = getBillingPeriod();
-    return {
-      allowed: false,
-      reason: 'no_subscription',
-      balanceCents: 0,
-      plan: 'free',
-      hasPaymentMethod: false,
-      periodEnd: end,
-    };
-  }
+  if (!userId) return noSubscriptionResult();
+  return checkCreditBalanceByUserId(userId);
+}
 
+/**
+ * Core credit check for a resolved userId.
+ */
+export async function checkCreditBalanceByUserId(userId: string): Promise<CreditCheckResult> {
   const subscription = await getOrCreateSubscription(userId);
   const hasPaymentMethod = !!subscription.stripeCustomerId;
   const periodEnd = subscription.currentPeriodEnd;
