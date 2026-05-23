@@ -1494,7 +1494,13 @@ export const notificationMutes = pgTable('notification_mutes', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   scopeType: text('scope_type', { enum: ['server', 'project'] }).notNull(),
-  scopeId: uuid('scope_id').notNull(),
+  // scope_id holds heterogeneous, non-UUID identifiers: workspace server IDs
+  // (ws_<base36>_<random>) and free-form project IDs — the same kind of values
+  // stored in notifications.server_id / project_id. It must be text, not uuid,
+  // or the mute gate query (applyGates) coerces a serverId to uuid and Postgres
+  // throws, stalling every notification delivery. See migration 008 (same fix
+  // for the notifications table) and 2026-05-23-001 (this column).
+  scopeId: text('scope_id').notNull(),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
