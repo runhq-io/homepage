@@ -78,6 +78,15 @@ export interface JobRow {
   totalCostCents: number;
 }
 
+export interface DayRow {
+  // Calendar day, 'YYYY-MM-DD' (truncated in the DB's timezone).
+  day: string;
+  requestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalCostCents: number;
+}
+
 function buildWhere(f: UsageFilter) {
   const parts: ReturnType<typeof gte>[] = [
     gte(usageEvents.ts, f.start),
@@ -231,6 +240,27 @@ export async function getBreakdownByJob(f: UsageFilter): Promise<JobRow[]> {
     .where(buildWhere(f))
     .groupBy(usageEvents.jobId)
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
+}
+
+/**
+ * Per-calendar-day usage, including token counts. Unlike getDailyTotals (which
+ * zero-fills every bucket in the range to drive a continuous chart), this only
+ * returns days that actually had activity and adds input/output token sums —
+ * the right shape for a tabular per-day usage list. Ordered newest-first.
+ */
+export async function getBreakdownByDay(f: UsageFilter): Promise<DayRow[]> {
+  return db
+    .select({
+      day:            sql<string>`to_char(date_trunc('day', ${usageEvents.ts}), 'YYYY-MM-DD')`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+      inputTokens:    sql<number>`COALESCE(SUM(${usageEvents.inputTokens}), 0)::int`,
+      outputTokens:   sql<number>`COALESCE(SUM(${usageEvents.outputTokens}), 0)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+    })
+    .from(usageEvents)
+    .where(buildWhere(f))
+    .groupBy(sql`date_trunc('day', ${usageEvents.ts})`)
+    .orderBy(desc(sql`date_trunc('day', ${usageEvents.ts})`));
 }
 
 export interface UsageEventCsvRow {

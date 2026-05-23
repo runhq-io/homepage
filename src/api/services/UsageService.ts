@@ -202,7 +202,7 @@ export const PLAN_CONFIG: Record<PlanId, {
 // Helper Functions
 // ============================================================================
 
-function getBillingPeriod(date: Date = new Date()): { start: Date; end: Date } {
+export function getBillingPeriod(date: Date = new Date()): { start: Date; end: Date } {
   const start = new Date(date.getFullYear(), date.getMonth(), 1);
   const end = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
   return { start, end };
