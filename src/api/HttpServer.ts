@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import { createToken, verifyToken, extractUserIdFromToken } from './auth/jwt';
 import { getSettings } from './services/SettingsService';
 import * as UsageService from './services/UsageService';
+import * as UsageReportService from './services/UsageReportService';
 import * as StripeService from './services/StripeService';
 import * as InviteService from './services/InviteService';
 import { assertActivated } from '../lib/signupGating';
@@ -1364,6 +1365,51 @@ export function createHttpApp() {
       return c.json({
         error: error instanceof Error ? error.message : 'Failed to sync billing'
       }, 500);
+    }
+  });
+
+  // Comprehensive usage breakdown for the authenticated user, scoped to the
+  // current billing period. Powers the "Usage" tables on the Settings page.
+  // Reuses the same getBillingPeriod() window as /api/billing/subscription so
+  // the totals reconcile with the "Spent This Period" figure shown there.
+  app.get('/api/billing/usage-breakdown', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const { start, end } = UsageService.getBillingPeriod();
+      // Scope strictly to this user's own events. excludePreCutover drops the
+      // synthetic 'pre-cutover-rollup' migration row, which is not per-user data.
+      const filter = { start, end, userIds: [userId], excludePreCutover: true };
+
+      const [byJob, byServer, byDay] = await Promise.all([
+        UsageReportService.getBreakdownByTask(filter),
+        UsageReportService.getBreakdownByServer(filter),
+        UsageReportService.getBreakdownByDay(filter),
+      ]);
+
+      return c.json({
+        periodStart: start.toISOString(),
+        periodEnd: end.toISOString(),
+        byJob,
+        byServer,
+        byDay,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`[HttpServer] /api/billing/usage-breakdown FAILED | Error: ${message}`);
+      if (message === 'Invalid token') {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+      return c.json({ error: 'Failed to get usage breakdown' }, 500);
     }
   });
 
