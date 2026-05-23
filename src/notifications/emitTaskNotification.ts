@@ -55,9 +55,12 @@ export async function emitTaskNotification(
   // Self-suppression: if the acting user IS the intended recipient, no ping.
   if (actor.type === 'user' && actor.userId === recipient) return null
 
-  // workspaceProjectId is required for the notification record.
-  const projectId = row.workspaceProjectId
-  if (!projectId) return null
+  // Project is contextual, not required. Many tasks (todos created directly in
+  // a channel) have no project — workspaceProjectId is then null OR an empty
+  // string. Do NOT bail in that case: the notification (server + task + status)
+  // is still meaningful. Fall back to an empty project id/name; the client
+  // renders the project segment only when present.
+  const projectId = row.workspaceProjectId || ''
 
   // --- Server name snapshot ---
   // servers.id is a text field (ws_<base36>_<random>); findFirst by text eq.
