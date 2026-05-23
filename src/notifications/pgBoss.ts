@@ -13,6 +13,20 @@ export async function startPgBoss(): Promise<Boss> {
   boss.on('error', (err: unknown) => console.error('[pg-boss]', err))
   await boss.start()
 
+  // pg-boss v12 requires queues to exist before work()/send()/schedule().
+  // createQueue is idempotent (no-op if the queue already exists), so it's
+  // safe to call on every boot. Without this, workers log
+  // "Queue <name> does not exist" on a loop and never consume.
+  const QUEUES = ['notification.deliver', 'mute-sweep'] as const
+  for (const q of QUEUES) {
+    try {
+      await boss.createQueue(q)
+    } catch (err) {
+      // Tolerate the create-race when multiple instances boot together.
+      console.warn(`[notifications] createQueue(${q}) — ${(err as Error)?.message ?? err}`)
+    }
+  }
+
   // Register the delivery worker — dynamically import dispatch to avoid
   // circular-reference issues at module load time. pg-boss v12 batches jobs;
   // we process them one at a time inside the callback.
