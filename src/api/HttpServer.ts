@@ -6153,29 +6153,40 @@ export function createHttpApp() {
     const userIdOrRes = await harnessRequireUser(c);
     if (typeof userIdOrRes !== 'string') return userIdOrRes;
     const userId = userIdOrRes;
-    const body = await c.req.json() as Record<string, unknown>;
-    const patch: Record<string, unknown> = { updatedAt: new Date() };
-    if (typeof body.in_app_enabled === 'boolean')  patch.inAppEnabled = body.in_app_enabled;
-    if (typeof body.browser_enabled === 'boolean') patch.browserEnabled = body.browser_enabled;
-    if (typeof body.push_enabled === 'boolean')    patch.pushEnabled = body.push_enabled;
-    if (typeof body.email_enabled === 'boolean')   patch.emailEnabled = body.email_enabled;
-    await db
-      .insert(userNotificationPreferences)
-      .values({ userId, ...(patch as any) })
-      .onConflictDoUpdate({ target: userNotificationPreferences.userId, set: patch as any });
-    const fresh = await getOrCreatePreferences(userId);
+    let body: Record<string, unknown>;
     try {
-      broadcastToUser(getWsServer(), userId, {
-        type: 'notification:preferences-updated',
-        preferences: {
-          in_app_enabled:  fresh.inAppEnabled,
-          browser_enabled: fresh.browserEnabled,
-          push_enabled:    fresh.pushEnabled,
-          email_enabled:   fresh.emailEnabled,
-        },
-      });
-    } catch { /* WS not registered — API response suffices */ }
-    return c.json({ ok: true });
+      body = await c.req.json() as Record<string, unknown>;
+    } catch (err) {
+      console.error('[notif:prefs] bad JSON body', err);
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+    try {
+      const patch: Record<string, unknown> = { updatedAt: new Date() };
+      if (typeof body.in_app_enabled === 'boolean')  patch.inAppEnabled = body.in_app_enabled;
+      if (typeof body.browser_enabled === 'boolean') patch.browserEnabled = body.browser_enabled;
+      if (typeof body.push_enabled === 'boolean')    patch.pushEnabled = body.push_enabled;
+      if (typeof body.email_enabled === 'boolean')   patch.emailEnabled = body.email_enabled;
+      await db
+        .insert(userNotificationPreferences)
+        .values({ userId, ...(patch as any) })
+        .onConflictDoUpdate({ target: userNotificationPreferences.userId, set: patch as any });
+      const fresh = await getOrCreatePreferences(userId);
+      try {
+        broadcastToUser(getWsServer(), userId, {
+          type: 'notification:preferences-updated',
+          preferences: {
+            in_app_enabled:  fresh.inAppEnabled,
+            browser_enabled: fresh.browserEnabled,
+            push_enabled:    fresh.pushEnabled,
+            email_enabled:   fresh.emailEnabled,
+          },
+        });
+      } catch { /* WS not registered — API response suffices */ }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error('[notif:prefs] PATCH failed', { userId, body }, err);
+      return c.json({ error: 'internal_error' }, 500);
+    }
   });
 
   // GET /api/notifications/mutes
