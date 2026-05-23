@@ -21,6 +21,80 @@ export type TaskRowForNotification = {
   lastInteractorUserId: string | null
 }
 
+export type NotificationContent = {
+  userId: string
+  serverId: string
+  serverName: string
+  projectId: string
+  projectName: string
+  taskId: string
+  taskTitle: string
+  eventType: 'completed' | 'need_help'
+}
+
+/**
+ * Writes one `notifications` row + one `notification_deliveries` row per
+ * applicable channel for an already-resolved recipient and content.
+ *
+ * Shared core used by both real task-transition notifications
+ * (emitTaskNotification) and the user-triggered test notification
+ * (POST /api/notifications/test) so both exercise the identical delivery
+ * pipeline: in_app/browser_api/email always; web_push/apns/fcm only when the
+ * recipient has a matching push subscription.
+ *
+ * Returns the new notification id, or null on a no-op (duplicate eventId).
+ */
+export async function insertNotificationWithDeliveries(
+  tx: any,
+  content: NotificationContent,
+): Promise<string | null> {
+  const subs = await tx.query.pushSubscriptions.findMany({
+    where: eq(pushSubscriptions.userId, content.userId),
+  })
+  const hasWebPush = subs.some((s: typeof pushSubscriptions.$inferSelect) => s.platform === 'web_push')
+  const hasAPNS    = subs.some((s: typeof pushSubscriptions.$inferSelect) => s.platform === 'apns')
+  const hasFCM     = subs.some((s: typeof pushSubscriptions.$inferSelect) => s.platform === 'fcm')
+
+  const inserted = await tx
+    .insert(notifications)
+    .values({
+      userId: content.userId,
+      eventId: randomUUID(),
+      serverId: content.serverId,
+      serverName: content.serverName,
+      projectId: content.projectId,
+      projectName: content.projectName,
+      taskId: content.taskId,
+      taskTitle: content.taskTitle,
+      eventType: content.eventType,
+    })
+    .onConflictDoNothing({ target: notifications.eventId })
+    .returning({ id: notifications.id })
+
+  if (inserted.length === 0) return null
+  const notificationId = inserted[0].id
+
+  const channels: Array<'in_app' | 'browser_api' | 'web_push' | 'apns' | 'fcm' | 'email'> = [
+    'in_app',
+    'browser_api',
+    'email',
+  ]
+  if (hasWebPush) channels.push('web_push')
+  if (hasAPNS)    channels.push('apns')
+  if (hasFCM)     channels.push('fcm')
+
+  await tx.insert(notificationDeliveries).values(
+    channels.map((channel) => ({
+      notificationId,
+      channel,
+      status: 'pending' as const,
+      nextAttemptAt: new Date(),
+    })),
+  )
+
+  return notificationId
+}
+
 /**
  * Writes a `notifications` row + one `notification_deliveries` row per
  * applicable channel inside an existing DB transaction.
@@ -75,58 +149,14 @@ export async function emitTaskNotification(
   // a future phase provides a name-sync mechanism.
   const projectName = projectId
 
-  // --- Push subscription check ---
-  const subs = await tx.query.pushSubscriptions.findMany({
-    where: eq(pushSubscriptions.userId, recipient),
+  return insertNotificationWithDeliveries(tx, {
+    userId: recipient,
+    serverId: row.serverId,
+    serverName: server.name ?? row.serverId,
+    projectId,
+    projectName,
+    taskId: row.id,
+    taskTitle: row.title,
+    eventType: newStatus === 'done' ? 'completed' : 'need_help',
   })
-  const hasWebPush = subs.some((s: typeof pushSubscriptions.$inferSelect) => s.platform === 'web_push')
-  const hasAPNS    = subs.some((s: typeof pushSubscriptions.$inferSelect) => s.platform === 'apns')
-  const hasFCM     = subs.some((s: typeof pushSubscriptions.$inferSelect) => s.platform === 'fcm')
-
-  const eventId   = randomUUID()
-  const eventType = newStatus === 'done' ? 'completed' : 'need_help'
-
-  // --- Insert notification row ---
-  const inserted = await tx
-    .insert(notifications)
-    .values({
-      userId: recipient,
-      eventId,
-      serverId: row.serverId,
-      serverName: server.name ?? row.serverId,
-      projectId,
-      projectName,
-      taskId: row.id,
-      taskTitle: row.title,
-      eventType,
-    })
-    .onConflictDoNothing({ target: notifications.eventId })
-    .returning({ id: notifications.id })
-
-  // onConflictDoNothing returns [] on a duplicate — shouldn't happen with a
-  // fresh randomUUID() but handled defensively.
-  if (inserted.length === 0) return null
-
-  const notificationId = inserted[0].id
-
-  // --- Insert delivery rows ---
-  const channels: Array<'in_app' | 'browser_api' | 'web_push' | 'apns' | 'fcm' | 'email'> = [
-    'in_app',
-    'browser_api',
-    'email',
-  ]
-  if (hasWebPush) channels.push('web_push')
-  if (hasAPNS)    channels.push('apns')
-  if (hasFCM)     channels.push('fcm')
-
-  await tx.insert(notificationDeliveries).values(
-    channels.map((channel) => ({
-      notificationId,
-      channel,
-      status: 'pending' as const,
-      nextAttemptAt: new Date(),
-    })),
-  )
-
-  return notificationId
 }

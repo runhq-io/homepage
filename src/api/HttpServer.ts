@@ -50,6 +50,8 @@ import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSet
 import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
 import { serializeNotification } from '../notifications/serialize';
 import { getOrCreatePreferences } from '../notifications/gates';
+import { insertNotificationWithDeliveries } from '../notifications/emitTaskNotification';
+import { dispatchNotification } from '../notifications/dispatch';
 import { broadcastToUser } from '../notifications/wsBroadcast';
 import { wsServer as getWsServer } from '../notifications/wsRegistry';
 import { getUserByUsername } from '../db/services';
@@ -6139,6 +6141,62 @@ export function createHttpApp() {
       .set({ readAt: new Date() })
       .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
     return c.json({ ok: true });
+  });
+
+  // POST /api/notifications/test
+  // Fires a real notification to the calling user through the full delivery
+  // pipeline (in_app toast via WS + web_push OS notification if a device is
+  // registered). Lets users self-verify their setup without orchestrating a
+  // real job transition — and unlike task notifications, it is intentionally
+  // NOT self-suppressed (you are deliberately notifying yourself).
+  app.post('/api/notifications/test', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+
+    // Reflect the user's real channel config so the test result is honest:
+    // a disabled channel is gated out exactly as it would be for a real ping.
+    const prefs = await getOrCreatePreferences(userId);
+    const subs = await db.query.pushSubscriptions.findMany({
+      where: eq(pushSubscriptions.userId, userId),
+    });
+    const hasWebPushDevice = subs.some((s) => s.platform === 'web_push');
+
+    let notificationId: string | null = null;
+    try {
+      await db.transaction(async (tx) => {
+        notificationId = await insertNotificationWithDeliveries(tx, {
+          userId,
+          // Synthetic server/project ids that match no mute and no real
+          // workspace. serverId/projectId are free-form text; taskId is a uuid
+          // column, so it must be a valid UUID even though no such task exists.
+          serverId: 'test',
+          serverName: 'Test',
+          projectId: '',
+          projectName: '',
+          taskId: crypto.randomUUID(),
+          taskTitle: 'This is a test notification 🔔',
+          eventType: 'completed',
+        });
+      });
+    } catch (err) {
+      console.error('[notif:test] insert failed', { userId }, err);
+      return c.json({ error: 'internal_error' }, 500);
+    }
+
+    if (!notificationId) return c.json({ error: 'not_created' }, 500);
+    void dispatchNotification(notificationId).catch((err) =>
+      console.warn('[notif:test] dispatch failed', err),
+    );
+
+    return c.json({
+      ok: true,
+      notification_id: notificationId,
+      // Tell the client what to expect so the UI can guide the user.
+      in_app: prefs.inAppEnabled,
+      web_push: prefs.pushEnabled && hasWebPushDevice,
+      web_push_no_device: prefs.pushEnabled && !hasWebPushDevice,
+    });
   });
 
   // GET /api/notifications/preferences

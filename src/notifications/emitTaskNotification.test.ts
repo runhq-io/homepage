@@ -10,7 +10,7 @@ import {
   pushSubscriptions,
   workspaceTasks,
 } from '@/db';
-import { emitTaskNotification, type NotificationActor, type TaskRowForNotification } from './emitTaskNotification';
+import { emitTaskNotification, insertNotificationWithDeliveries, type NotificationActor, type TaskRowForNotification } from './emitTaskNotification';
 
 // ─── Stable test fixture IDs ─────────────────────────────────────────────────
 // Using deterministic UUIDs so cleanup is straightforward.
@@ -177,13 +177,18 @@ describe('emitTaskNotification', () => {
     expect(notif.userId).toBe(TEST_USER_1);
   });
 
-  // 7. No projectId → no notification
-  it('returns null when workspaceProjectId is null', async () => {
+  // 7. Project is contextual, not required: a task with no project (e.g. a
+  // todo created directly in a channel) STILL emits. The notification falls
+  // back to an empty project id/name and the client omits the project segment.
+  it('still emits when workspaceProjectId is null (project is contextual)', async () => {
     const row = makeRow({ workspaceProjectId: null });
     const prev = makeRow({ workspaceProjectId: null });
     const id = await emit(row, prev, 'done', { type: 'agent' });
 
-    expect(id).toBeNull();
+    expect(id).not.toBeNull();
+    const [notif] = await db.select().from(notifications).where(eq(notifications.id, id!));
+    expect(notif.projectId).toBe('');
+    expect(notif.projectName).toBe('');
   });
 
   // 8. agent actor → self-suppression does not apply
@@ -302,5 +307,75 @@ describe('emitTaskNotification', () => {
     const id = await emit(row, prev, 'done', { type: 'agent' });
 
     expect(id).toBeNull();
+  });
+
+  // ─── Test-notification path (POST /api/notifications/test) ────────────────
+  // The test endpoint reuses the exact same delivery core via
+  // insertNotificationWithDeliveries with synthetic 'test' content (no server
+  // existence check, empty project), then dispatches through processDelivery.
+
+  it('test-notification content inserts a notification + delivery rows for the caller', async () => {
+    // Clean any prior synthetic test rows for this user (serverId 'test').
+    const prior = await db.select({ id: notifications.id }).from(notifications)
+      .where(and(eq(notifications.userId, TEST_USER_1), eq(notifications.serverId, 'test')));
+    if (prior.length) await db.delete(notifications).where(inArray(notifications.id, prior.map(r => r.id)));
+
+    let id: string | null = null;
+    await db.transaction(async (tx) => {
+      id = await insertNotificationWithDeliveries(tx, {
+        userId: TEST_USER_1,
+        serverId: 'test',
+        serverName: 'Test',
+        projectId: '',
+        projectName: '',
+        taskId: '00000000-0000-0000-0000-cccc00000099',
+        taskTitle: 'This is a test notification 🔔',
+        eventType: 'completed',
+      });
+    });
+
+    expect(id).not.toBeNull();
+    const [notif] = await db.select().from(notifications).where(eq(notifications.id, id!));
+    expect(notif.serverId).toBe('test');
+    expect(notif.projectId).toBe('');
+    expect(notif.taskTitle).toBe('This is a test notification 🔔');
+
+    // No push subscription for TEST_USER_1 → exactly in_app + browser_api + email.
+    const dels = await db.select().from(notificationDeliveries)
+      .where(eq(notificationDeliveries.notificationId, id!));
+    expect(dels.map(d => d.channel).sort()).toEqual(['browser_api', 'email', 'in_app']);
+    expect(dels.every(d => d.status === 'pending')).toBe(true);
+
+    await db.delete(notifications).where(eq(notifications.id, id!));
+  });
+
+  it('test-notification includes a web_push delivery when the caller has a web_push device', async () => {
+    await db.insert(pushSubscriptions).values({
+      userId: TEST_USER_1,
+      platform: 'web_push',
+      endpoint: 'https://example.com/ep-test-notify',
+      keys: { p256dh: 'k', auth: 'a' },
+    }).onConflictDoNothing();
+
+    let id: string | null = null;
+    await db.transaction(async (tx) => {
+      id = await insertNotificationWithDeliveries(tx, {
+        userId: TEST_USER_1,
+        serverId: 'test',
+        serverName: 'Test',
+        projectId: '',
+        projectName: '',
+        taskId: '00000000-0000-0000-0000-cccc00000099',
+        taskTitle: 'Push test 🔔',
+        eventType: 'completed',
+      });
+    });
+
+    const dels = await db.select().from(notificationDeliveries)
+      .where(eq(notificationDeliveries.notificationId, id!));
+    expect(dels.map(d => d.channel).sort()).toEqual(['browser_api', 'email', 'in_app', 'web_push']);
+
+    await db.delete(notifications).where(eq(notifications.id, id!));
+    await db.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, TEST_USER_1));
   });
 });
