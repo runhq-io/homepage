@@ -61,6 +61,11 @@ type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput> & {
    *  table and may move between jobs over time. Snapshot at emit time onto
    *  the notification so a click can deep-link to the running session. */
   workspaceJobId?: string | null;
+  /** Human-readable project name resolved on the workspace server. Not
+   *  persisted on the canonical task; snapshotted at emit time onto the
+   *  notification so the bell shows "MiniCal · Mobile" instead of
+   *  "MiniCal · tank_abc123". */
+  workspaceProjectName?: string | null;
 };
 
 const attachmentStorage = new TaskAttachmentStorageService();
@@ -424,6 +429,7 @@ export async function updateTask(
           workspaceProjectId: existing.workspaceProjectId,
           workspaceChannelId: existing.workspaceChannelId,
           workspaceJobId: input.workspaceJobId ?? null,
+          workspaceProjectName: input.workspaceProjectName ?? null,
           title: existing.title,
           createdById: existing.createdById,
           lastInteractorUserId: existing.lastInteractorUserId,
@@ -434,6 +440,7 @@ export async function updateTask(
           workspaceProjectId: row.workspaceProjectId,
           workspaceChannelId: row.workspaceChannelId,
           workspaceJobId: input.workspaceJobId ?? null,
+          workspaceProjectName: input.workspaceProjectName ?? null,
           title: row.title,
           createdById: row.createdById,
           lastInteractorUserId: row.lastInteractorUserId,

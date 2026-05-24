@@ -37,6 +37,10 @@ export type TaskRowForNotification = {
   workspaceChannelId: string | null
   /** Workspace job/session bound to this task, if any. */
   workspaceJobId: string | null
+  /** Human-readable project name resolved on the workspace server. The BE
+   *  has no project-name table for canonical tasks; without this the
+   *  notification falls back to the bare project id. */
+  workspaceProjectName: string | null
   title: string
   createdById: string | null
   lastInteractorUserId: string | null
@@ -171,10 +175,12 @@ export async function emitTaskNotification(
   if (!server) return null // server vanished or ID mismatch — defensive
 
   // --- Project name snapshot ---
-  // No workspaceProjects table exists in the BE schema. The projectId is a
-  // free-form string from the workspace SQLite. Store the id as the name until
-  // a future phase provides a name-sync mechanism.
-  const projectName = projectId
+  // The BE has no project-name table for canonical tasks. The workspace
+  // server resolves the human-readable name from its projectService and
+  // ships it via input.workspaceProjectName; we snapshot that onto the
+  // notification. Falls back to the bare project id when unresolved (e.g.
+  // an old caller that hasn't been updated yet).
+  const projectName = row.workspaceProjectName || projectId
 
   return insertNotificationWithDeliveries(tx, {
     userId: recipient,

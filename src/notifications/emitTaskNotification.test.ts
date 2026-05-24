@@ -33,6 +33,7 @@ function makeRow(overrides?: Partial<TaskRowForNotification>): TaskRowForNotific
     workspaceProjectId: TEST_PROJECT,
     workspaceChannelId: TEST_CHANNEL,
     workspaceJobId: TEST_JOB,
+    workspaceProjectName: null,
     title: 'Fix the login bug',
     createdById: TEST_USER_1,
     lastInteractorUserId: null,

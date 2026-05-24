@@ -86,6 +86,41 @@ describe('updateTask → notification snapshot', () => {
     expect(row.jobId).toBe(JOB_ID);
   });
 
+  it('uses workspaceProjectName for the notification project_name (not the raw projectId)', async () => {
+    // Reset.
+    await db.update(workspaceTasks)
+      .set({ status: 'in_progress', lastInteractorUserId: CREATOR_ID, workspaceProjectId: 'tank_abc123' })
+      .where(eq(workspaceTasks.id, TASK_ID));
+
+    const { notification } = await updateTask(
+      SERVER_ID,
+      TASK_ID,
+      { status: 'needs_review', workspaceJobId: JOB_ID, workspaceProjectName: 'Mobile' },
+      { type: 'agent' },
+    );
+
+    expect(notification).not.toBeNull();
+    expect(notification!.project_id).toBe('tank_abc123');
+    expect(notification!.project_name).toBe('Mobile');
+  });
+
+  it('falls back to project id for project_name when workspaceProjectName is omitted (back-compat)', async () => {
+    await db.update(workspaceTasks)
+      .set({ status: 'in_progress', lastInteractorUserId: CREATOR_ID, workspaceProjectId: 'tank_xyz' })
+      .where(eq(workspaceTasks.id, TASK_ID));
+
+    const { notification } = await updateTask(
+      SERVER_ID,
+      TASK_ID,
+      { status: 'needs_review', workspaceJobId: JOB_ID },
+      { type: 'agent' },
+    );
+
+    expect(notification).not.toBeNull();
+    expect(notification!.project_id).toBe('tank_xyz');
+    expect(notification!.project_name).toBe('tank_xyz'); // fallback
+  });
+
   it('suppresses self-notification when a user marks their own task done (server-token route w/ actingUserId)', async () => {
     // Reset the task to in_progress so the next transition is real.
     await db.update(workspaceTasks)
