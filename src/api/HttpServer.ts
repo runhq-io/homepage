@@ -50,7 +50,7 @@ import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSet
 import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
 import { serializeNotification } from '../notifications/serialize';
 import { getOrCreatePreferences } from '../notifications/gates';
-import { insertNotificationWithDeliveries } from '../notifications/emitTaskNotification';
+import { insertNotificationWithDeliveries, deriveServerTokenActor } from '../notifications/emitTaskNotification';
 import { dispatchNotification } from '../notifications/dispatch';
 import { broadcastToUser } from '../notifications/wsBroadcast';
 import { wsServer as getWsServer } from '../notifications/wsRegistry';
@@ -5124,13 +5124,20 @@ export function createHttpApp() {
     if (!server) return c.json({ error: 'Invalid server token' }, 401);
 
     const body = await c.req.json();
-    // This route is authenticated by server token (used by the agent loop).
-    // There is no user identity on this path, so actor = { type: 'agent' }.
+    // The workspace server proxies user-initiated updates via this route (it's
+    // the broker between the browser and the BE). When the user triggers the
+    // change it includes `actingUserId` so we can build a user actor and
+    // self-suppression fires — without this the user gets a notification for
+    // their own action. Without `actingUserId` the call is autonomous (agent
+    // loop / job archival sweeper / etc.) and actor = agent.
+    const actor = deriveServerTokenActor(body);
+    // Strip the wire-only field so it doesn't leak into the service input.
+    if (body && typeof body === 'object') delete (body as Record<string, unknown>).actingUserId;
     const { task, notification } = await WorkspaceTaskService.updateTask(
       server.id,
       c.req.param('taskId'),
       body,
-      { type: 'agent' },
+      actor,
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
     // Ship the emitted notification (if any) back to the calling per-server

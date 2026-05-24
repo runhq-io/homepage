@@ -12,6 +12,7 @@ import {
   userNotificationPreferences,
 } from '../../db/schema';
 import { updateTask } from './WorkspaceTaskService';
+import { deriveServerTokenActor } from '../../notifications/emitTaskNotification';
 
 /**
  * Real-path integration test for the channel_id + job_id snapshot on
@@ -83,5 +84,49 @@ describe('updateTask → notification snapshot', () => {
     const [row] = await db.select().from(notifications).where(eq(notifications.id, notification!.id));
     expect(row.channelId).toBe(CHANNEL_ID);
     expect(row.jobId).toBe(JOB_ID);
+  });
+
+  it('suppresses self-notification when a user marks their own task done (server-token route w/ actingUserId)', async () => {
+    // Reset the task to in_progress so the next transition is real.
+    await db.update(workspaceTasks)
+      .set({ status: 'in_progress', lastInteractorUserId: CREATOR_ID })
+      .where(eq(workspaceTasks.id, TASK_ID));
+
+    // Simulate what the server-token route does after the fix: derive the
+    // actor from the body (workspace server proxies the user's action via
+    // actingUserId) and pass it to the service.
+    const body = {
+      status: 'done',
+      lastInteractorUserId: CREATOR_ID,
+      workspaceJobId: JOB_ID,
+      actingUserId: CREATOR_ID,
+    };
+    const actor = deriveServerTokenActor(body);
+
+    const { notification } = await updateTask(SERVER_ID, TASK_ID, body as any, actor);
+
+    // The user marking their own task done MUST NOT receive a notification
+    // for their own action — that's the bug being fixed.
+    expect(notification).toBeNull();
+  });
+
+  it('still notifies when the agent autonomously marks the task done (no actingUserId)', async () => {
+    // Reset.
+    await db.update(workspaceTasks)
+      .set({ status: 'in_progress', lastInteractorUserId: CREATOR_ID })
+      .where(eq(workspaceTasks.id, TASK_ID));
+
+    // No actingUserId → autonomous agent flow → actor=agent → not suppressed.
+    const body = {
+      status: 'done',
+      lastInteractorUserId: CREATOR_ID,
+      workspaceJobId: JOB_ID,
+    };
+    const actor = deriveServerTokenActor(body);
+
+    const { notification } = await updateTask(SERVER_ID, TASK_ID, body as any, actor);
+
+    expect(notification).not.toBeNull();
+    expect(notification!.user_id).toBe(CREATOR_ID);
   });
 });

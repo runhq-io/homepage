@@ -12,6 +12,24 @@ export type NotificationActor =
   | { type: 'agent' }
   | { type: 'system' }
 
+/**
+ * Derive the notification actor from a server-token PATCH body. The workspace
+ * server proxies user-initiated updates through the server-token route (it's
+ * the broker between the browser and the BE). When the user triggers the
+ * change, the workspace server includes `actingUserId` so self-suppression
+ * applies — without this, the BE assumes the agent loop did it and notifies
+ * the user about their own action.
+ */
+export function deriveServerTokenActor(body: unknown): NotificationActor {
+  if (body && typeof body === 'object') {
+    const actingUserId = (body as { actingUserId?: unknown }).actingUserId;
+    if (typeof actingUserId === 'string' && actingUserId.length > 0) {
+      return { type: 'user', userId: actingUserId };
+    }
+  }
+  return { type: 'agent' };
+}
+
 export type TaskRowForNotification = {
   id: string
   serverId: string
