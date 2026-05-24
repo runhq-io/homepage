@@ -1544,6 +1544,11 @@ export const notifications = pgTable('notifications', {
   // client deep-link a notification to the job's chat. Nullable: tasks with no
   // channel (and test notifications) have no deep-link target.
   channelId: text('channel_id'),
+  // Workspace job/session the task is bound to (canonical_task_execution_states.
+  // job_id on the workspace server). Snapshot at emit time. When present the
+  // client deep-links to /session/:jobId (the running session, not the todo's
+  // channel). Nullable; the client falls back to channelId.
+  jobId: text('job_id'),
   eventType: text('event_type', { enum: ['need_help', 'completed'] }).notNull(),
   readAt: timestamp('read_at', { withTimezone: true }),
   archivedAt: timestamp('archived_at', { withTimezone: true }),

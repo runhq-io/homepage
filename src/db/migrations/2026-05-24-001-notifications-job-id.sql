@@ -1,0 +1,12 @@
+-- Add job_id to notifications so a notification can deep-link to the running
+-- job/session (workspace `jobs.id`), not just the channel its todo lives in.
+--
+-- The canonical task <-> job mapping lives on the workspace server only
+-- (canonical_task_execution_states.job_id). The workspace server resolves it
+-- and passes it on every PATCH /workspace-tasks/:id as workspace_job_id; the
+-- BE snapshots it onto the notification at emit time.
+--
+-- Nullable: tasks that aren't linked to a job (todos without an active
+-- session) and test notifications simply have no session deep-link target;
+-- the client falls back to channel_id, then to the server home.
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS job_id text;

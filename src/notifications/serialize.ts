@@ -13,9 +13,13 @@ export interface SerializedNotification {
   project_name: string;
   task_id: string;
   task_title: string;
-  /** Workspace channel the task/job lives in; null when there is no deep-link
-   *  target (task has no channel, or a test notification). */
+  /** Workspace channel the task/job lives in. Used as a deep-link fallback
+   *  when there is no running job/session. Null on test notifications. */
   channel_id: string | null;
+  /** Workspace job/session the task is bound to. When present the client
+   *  deep-links to /server/:server_id/session/:job_id (the actual job), not
+   *  the todo's channel. Null when no session exists yet. */
+  job_id: string | null;
   event_type: 'need_help' | 'completed';
   read_at: string | null;
   archived_at: string | null;
@@ -33,6 +37,7 @@ export function serializeNotification(n: NotificationRow): SerializedNotificatio
     task_id:      n.taskId,
     task_title:   n.taskTitle,
     channel_id:   n.channelId ?? null,
+    job_id:       n.jobId ?? null,
     event_type:   n.eventType,
     read_at:      n.readAt ? n.readAt.toISOString() : null,
     archived_at:  n.archivedAt ? n.archivedAt.toISOString() : null,

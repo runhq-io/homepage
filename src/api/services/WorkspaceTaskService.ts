@@ -56,6 +56,11 @@ type CreateWorkspaceTaskInput = {
 type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput> & {
   /** When provided, stamps last_interactor_user_id + last_interactor_at on the row. null clears both. */
   lastInteractorUserId?: string | null;
+  /** Workspace job/session bound to this task right now. Not persisted on the
+   *  task row — the binding lives on the workspace server's execution-state
+   *  table and may move between jobs over time. Snapshot at emit time onto
+   *  the notification so a click can deep-link to the running session. */
+  workspaceJobId?: string | null;
 };
 
 const attachmentStorage = new TaskAttachmentStorageService();
@@ -418,6 +423,7 @@ export async function updateTask(
           serverId: existing.serverId,
           workspaceProjectId: existing.workspaceProjectId,
           workspaceChannelId: existing.workspaceChannelId,
+          workspaceJobId: input.workspaceJobId ?? null,
           title: existing.title,
           createdById: existing.createdById,
           lastInteractorUserId: existing.lastInteractorUserId,
@@ -427,6 +433,7 @@ export async function updateTask(
           serverId: row.serverId,
           workspaceProjectId: row.workspaceProjectId,
           workspaceChannelId: row.workspaceChannelId,
+          workspaceJobId: input.workspaceJobId ?? null,
           title: row.title,
           createdById: row.createdById,
           lastInteractorUserId: row.lastInteractorUserId,
