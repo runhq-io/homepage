@@ -5856,18 +5856,14 @@ export function createHttpApp() {
     return ServerService.checkCloudOpPermission(serverId, userId);
   }
 
-  // Build the channel-keyed `WidgetLookup` from a request-supplied channelId,
-  // or return null when none was provided so the caller can emit a uniform
-  // 400 `{ error: 'channelId required' }`.
-  //
-  // Phase 5: `?projectId=` is no longer a fallback for the lookup. Routes
-  // still read `projectId` from the request when present, but only to forward
-  // it into the cache-invalidation payload (where the workspace preview proxy
-  // keys its cache by workspaceProjectId).
+  // Build the project-keyed `WidgetLookup` from a request-supplied projectId
+  // (the workspaceProjectId), or return null so the caller can emit a uniform
+  // 400 `{ error: 'projectId required' }`. The widget is one-per-project;
+  // channelId is now the target list, carried separately in enable/settings bodies.
   function parseWidgetLookup(
-    channelId: string | undefined | null,
+    projectId: string | undefined | null,
   ): WidgetService.WidgetLookup | null {
-    if (channelId) return { channelId };
+    if (projectId) return { workspaceProjectId: projectId };
     return null;
   }
 
@@ -5913,8 +5909,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    const lookup = parseWidgetLookup(c.req.query('channelId'));
-    if (!lookup) return c.json({ error: 'channelId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     const integration = await WidgetService.getWidgetIntegration(serverId, lookup);
     return c.json({ success: true, data: integration });
@@ -5927,14 +5923,14 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const { serverId, projectId, name, channelId } = await c.req.json();
     if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
-    // Phase 5: channelId is the sole identity; projectId is optional and
-    // forwarded as `workspaceProjectId` only as a cached parent reference.
+    // Widget is one-per-project: projectId is the identity, channelId the target list.
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
     if (!channelId) return c.json({ error: 'channelId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     const result = await WidgetService.enableWidget(serverId, {
       name,
       channelId,
-      ...(projectId ? { workspaceProjectId: projectId } : {}),
+      workspaceProjectId: projectId,
     });
     pushInvalidateWidgetCache(serverId, userId, projectId);
     return c.json({ success: true, data: result });
@@ -5971,8 +5967,8 @@ export function createHttpApp() {
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const projectId = c.req.query('projectId') ?? undefined;
-    const lookup = parseWidgetLookup(c.req.query('channelId'));
-    if (!lookup) return c.json({ error: 'channelId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     await WidgetService.disableWidget(serverId, lookup);
     // Preview-proxy cache invalidation: pass the projectId when the route
@@ -5990,10 +5986,10 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId, channelId } = await c.req.json();
+    const { serverId, projectId } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    const lookup = parseWidgetLookup(channelId);
-    if (!lookup) return c.json({ error: 'channelId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     try {
       const result = await WidgetService.regenerateSecret(serverId, lookup);
@@ -6027,8 +6023,8 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    const lookup = parseWidgetLookup(c.req.query('channelId'));
-    if (!lookup) return c.json({ error: 'channelId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     const settings = await WidgetService.getWidgetSettings(serverId, lookup);
     return c.json({ success: true, data: settings });
@@ -6059,14 +6055,15 @@ export function createHttpApp() {
       widgetAssignRateLimitPerHour,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    const lookup = parseWidgetLookup(channelId);
-    if (!lookup) return c.json({ error: 'channelId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
 
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
         auto_approve, widget_position, widget_language, voting_period_hours, is_public, login_url, allowed_origins, auto_recognize_runhq_members, auto_inject_in_preview, slug,
+        channelId,
         widgetAgentAssignmentEnabled,
         widgetAssignRoles,
         widgetRoleClaimName,
