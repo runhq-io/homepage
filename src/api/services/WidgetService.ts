@@ -24,7 +24,7 @@ import {
   users,
   widgetExposedAgents,
 } from '../../db/schema';
-import { eq, and, ne, desc, sql, inArray, isNull, or } from 'drizzle-orm';
+import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
@@ -42,16 +42,15 @@ const attachmentStorage = new TaskAttachmentStorageService();
 /**
  * Lookup key for widget rows.
  *
- * Phase 5 of the widget-per-channel migration: channel is the sole key.
- * The legacy `workspaceProjectId` branch and the positional-string coercion
- * form have been removed now that all callers (deployed client, workspace
- * reconciler) send `channelId`.
+ * Widget identity is the project: admin routes resolve the row by
+ * (serverId, workspaceProjectId). `channelId` is the mutable target todo
+ * channel the widget feeds, not the lookup key.
  */
-export type WidgetLookup = { channelId: string };
+export type WidgetLookup = { workspaceProjectId: string };
 
 function widgetLookupCondition(lookup: WidgetLookup | undefined) {
   if (!lookup) return undefined;
-  return eq(widgetProjects.channelId, lookup.channelId);
+  return eq(widgetProjects.workspaceProjectId, lookup.workspaceProjectId);
 }
 
 /**
@@ -1805,23 +1804,23 @@ function generateSlug(name: string, suffix: string): string {
 
 export async function enableWidget(
   serverId: string,
-  opts: { name: string; channelId: string; workspaceProjectId?: string }
+  opts: { name: string; channelId: string; workspaceProjectId: string }
 ) {
+  if (!opts.workspaceProjectId) {
+    throw new Error('enableWidget: workspaceProjectId is required');
+  }
   if (!opts.channelId) {
     throw new Error('enableWidget: channelId is required');
   }
 
-  // Check if a widget already exists for this (server, channel) pair (re-enable case).
-  // Phase 5: keying by channelId preserves the slug+apiKey across re-enables
-  // on the same channel, which matches the per-channel widget model. The
-  // previous `(server, workspaceProjectId)` lookup is gone — channel is the
-  // sole identity now (DB column is NOT NULL per Phase B migration).
+  // Re-enable case: a widget already exists for this (server, project) pair.
+  // Reusing the slug preserves the public project-page URL across re-enables.
   const [existing] = await db
     .select({ slug: widgetProjects.slug })
     .from(widgetProjects)
     .where(and(
       eq(widgetProjects.serverId, serverId),
-      eq(widgetProjects.channelId, opts.channelId),
+      eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId),
     ))
     .limit(1);
 
@@ -1834,10 +1833,7 @@ export async function enableWidget(
     .insert(widgetProjects)
     .values({
       serverId,
-      // workspaceProjectId is a cached parent reference, no longer the lookup
-      // key. Optional on the BE write path; populated when the caller knows
-      // it (deployed admin client still supplies it) and left null otherwise.
-      workspaceProjectId: opts.workspaceProjectId ?? null,
+      workspaceProjectId: opts.workspaceProjectId,
       name: opts.name,
       slug,
       apiKey,
@@ -1846,14 +1842,15 @@ export async function enableWidget(
       channelId: opts.channelId,
     })
     .onConflictDoUpdate({
-      target: widgetProjects.slug,
+      // Matches the partial unique index widget_projects_server_workspace_project_unique.
+      target: [widgetProjects.serverId, widgetProjects.workspaceProjectId],
+      targetWhere: isNotNull(widgetProjects.workspaceProjectId),
       set: {
         enabled: true,
         name: opts.name,
         apiKey,
         apiSecretHash: apiSecret,
         channelId: opts.channelId,
-        ...(opts.workspaceProjectId !== undefined && { workspaceProjectId: opts.workspaceProjectId }),
         updatedAt: new Date(),
       },
     })
@@ -2178,6 +2175,8 @@ export async function updateWidgetSettings(
     auto_recognize_runhq_members?: boolean;
     auto_inject_in_preview?: boolean;
     slug?: string;
+    /** Target todo channel the widget feeds. Re-targets the widget when changed. */
+    channelId?: string;
     // Triager assignment policy fields
     widgetAgentAssignmentEnabled?: boolean;
     widgetAssignRoles?: string[];
@@ -2352,6 +2351,9 @@ export async function updateWidgetSettings(
       }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
+      // Re-target: only set when a non-empty channel is supplied (channel_id is
+      // NOT NULL in the DB, so never write an empty/null target).
+      ...(settings.channelId !== undefined && settings.channelId !== '' && { channelId: settings.channelId }),
       // Triager assignment policy — only set when caller explicitly provides the field
       ...(settings.widgetAgentAssignmentEnabled !== undefined && { widgetAgentAssignmentEnabled: settings.widgetAgentAssignmentEnabled }),
       ...(settings.widgetAssignRoles !== undefined && { widgetAssignRoles: settings.widgetAssignRoles }),
