@@ -1335,11 +1335,14 @@ export const widgetProjects = pgTable('widget_projects', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [
-  // One widget per (server, channel): each task channel owns at most one
-  // widget configuration. channel_id is NOT NULL (enforced by the Phase B
-  // migration), so this unique is non-partial.
-  uniqueIndex('widget_projects_server_channel_unique')
-    .on(t.serverId, t.channelId),
+  // One widget per (server, PROJECT): a project owns at most one widget.
+  // channel_id is now the mutable "target todo channel" the widget feeds,
+  // not the identity. Partial because the per-project migration orphans
+  // duplicate rows by setting workspace_project_id = NULL (Postgres treats
+  // NULLs as distinct, so orphans coexist under this index).
+  uniqueIndex('widget_projects_server_workspace_project_unique')
+    .on(t.serverId, t.workspaceProjectId)
+    .where(sql`${t.workspaceProjectId} IS NOT NULL`),
 ]);
 
 export const widgetUsers = pgTable('widget_users', {
