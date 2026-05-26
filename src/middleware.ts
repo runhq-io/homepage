@@ -12,6 +12,9 @@ function corsHeaders(origin: string | null) {
     'http://localhost:5173', // vite default
     'http://127.0.0.1:5180',
     'http://127.0.0.1:5173',
+    'tauri://localhost', // desktop app webview (macOS/iOS)
+    'http://tauri.localhost', // desktop app webview (Windows/Linux)
+    'https://tauri.localhost', // desktop app webview (Windows WebView2)
   ];
 
   // In production, you'd check against actual allowed origins
