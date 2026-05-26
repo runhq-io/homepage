@@ -295,7 +295,13 @@ export function resolveCreateIsPublished(
   input: { sourceType?: CanonicalTaskSourceType; isPublished?: boolean },
 ): boolean {
   if (input.isPublished !== undefined) return input.isPublished;
-  return (input.sourceType ?? 'workspace') !== 'widget';
+  // All tasks default to published. Visibility (public/private) is the gate
+  // for who can see them — the published feed always also requires
+  // visibility='public', so a private+published task never leaks. Widget
+  // submissions used to default unpublished, which made tickets vanish once
+  // their status left the pending set (they never entered the "Latest
+  // Updates" feed). Published-by-default keeps them visible through 'done'.
+  return true;
 }
 
 export async function createTask(serverId: string, input: CreateWorkspaceTaskInput): Promise<CanonicalTask> {

@@ -1297,7 +1297,11 @@ export async function createTicket(
       title,
       description: opts.description,
       visibility: opts.isPrivate ? 'private' : 'public',
-      isPublished: false, // widget-submitted feedback starts unpublished; explicit (not relying on the schema default) since this insert bypasses resolveCreateIsPublished()
+      // Published by default (single source of truth: resolveCreateIsPublished).
+      // The published "Latest Updates" feed also gates on visibility='public',
+      // so a ticket submitted as private stays hidden from others. Admins can
+      // still unpublish later via PATCH /todos/:id.
+      isPublished: WorkspaceTaskService.resolveCreateIsPublished({ sourceType: 'widget' }),
       sourceType: 'widget',
       createdByType: 'external',
       createdById: widgetUserId ?? null,
