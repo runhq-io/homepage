@@ -30,7 +30,9 @@ export default async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
   const isLoginPage = pathname === '/login';
   const isResetPasswordPage = pathname === '/reset-password';
-  const isPublicPage = isLoginPage || isResetPasswordPage;
+  // Public brand-asset page: shows the animated Mercury mark at 512×512.
+  const isLogoPage = pathname === '/logo' || pathname === '/logo/';
+  const isPublicPage = isLoginPage || isResetPasswordPage || isLogoPage;
   const isApiRoute = pathname.startsWith('/api/');
   const isAuthRoute = pathname.startsWith('/auth/'); // All auth routes (device auth, etc.)
   const isAdminRoute = pathname.startsWith('/admin');
