@@ -76,15 +76,36 @@ export default async function middleware(req: NextRequest) {
   }
   const isLoggedIn = !!userId;
 
-  // /login is now a public landing page (no login form) — always allow it
-  // Redirect logged-in users on /login to dashboard
+  // /login hosts the real sign-in form. Always allow access to it.
+  // If a logged-in user lands on it (e.g. /oauth/authorize bounced them
+  // here in the SSO scenario where their cookie is still valid), honor
+  // their `returnTo` so the OAuth flow can resume — otherwise dashboard.
+  // `returnTo` is validated to same-origin to block open-redirect; any
+  // other-origin value falls back to `/`.
   if (isLoginPage && isLoggedIn) {
+    const rawReturnTo = req.nextUrl.searchParams.get('returnTo');
+    if (rawReturnTo) {
+      try {
+        const resolved = new URL(rawReturnTo, req.nextUrl.origin);
+        if (resolved.origin === req.nextUrl.origin) {
+          return NextResponse.redirect(resolved);
+        }
+      } catch {
+        // fall through to dashboard
+      }
+    }
     return NextResponse.redirect(new URL('/', req.url));
   }
 
-  // Redirect unauthenticated users to /login (shows "go to app.runhq.io" page)
+  // Redirect unauthenticated users to /login. Pass `returnTo` so the
+  // login form can send them back where they were headed after sign-in.
   if (!isPublicPage && !isLoggedIn) {
-    return NextResponse.redirect(new URL('/login', req.url));
+    const loginUrl = new URL('/login', req.url);
+    // Encode the FULL original URL so /oauth/authorize-style redirects
+    // round-trip cleanly. Same-origin enforcement happens in the page +
+    // in this middleware on the logged-in branch above.
+    loginUrl.searchParams.set('returnTo', req.nextUrl.pathname + req.nextUrl.search);
+    return NextResponse.redirect(loginUrl);
   }
 
   // Redirect non-admin users away from /admin.
