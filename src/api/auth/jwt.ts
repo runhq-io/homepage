@@ -9,6 +9,9 @@
  *                       setup flow (10 min)
  */
 import * as jose from 'jose';
+import { eq, and, isNull } from 'drizzle-orm';
+import { getDb, oauthTokens } from '@/db';
+import { hashToken } from '@/lib/oauth';
 
 let _jwtSecret: Uint8Array | null = null;
 
@@ -48,8 +51,58 @@ export async function verifyToken(token: string): Promise<string | null> {
   }
 }
 
+/**
+ * Resolve a Bearer token to a userId, accepting either token format:
+ *
+ *   1. **JWT session token** — created by `createToken()`, used by the web
+ *      client (cookie or Authorization header) and the desktop app. Verified
+ *      cryptographically against `JWT_SECRET`. No DB hit.
+ *
+ *   2. **Opaque OAuth access token** — created by `/oauth/token` after the
+ *      authorization-code + PKCE exchange completes; used by the mobile
+ *      app (and any future first-party OAuth client). Stored hashed in the
+ *      `oauth_tokens` table. Verified by hashing the bearer and looking
+ *      up an unrevoked, unexpired row of type 'access'.
+ *
+ * This helper is the single bridge between the two formats. Every API route
+ * that resolves a Bearer to a userId calls it (web-me, profile, mfa/*,
+ * passkeys/*, etc.), so any of them automatically work for OAuth-authenticated
+ * mobile clients too. `verifyToken` stays JWT-only and is used where the caller
+ * knows it has a cookie (middleware, WebSocket auth, /oauth/authorize).
+ *
+ * **Scope check note**: this returns a userId without consulting the token's
+ * OAuth scope. That's safe today because `/oauth/authorize` only mints codes
+ * for clients in `FIRST_PARTY_CLIENT_IDS` (see `lib/oauth.ts::isFirstPartyClient`),
+ * which are trusted to act on the user's behalf without per-endpoint scope
+ * gating. If third-party OAuth clients are ever enabled, per-endpoint scope
+ * checks must be added here or at the call sites.
+ */
 export async function extractUserIdFromToken(token: string): Promise<string | null> {
-  return verifyToken(token);
+  // JWT first — cryptographic verify, no DB roundtrip.
+  const jwtUserId = await verifyToken(token);
+  if (jwtUserId) return jwtUserId;
+
+  // Fall through to OAuth access token lookup.
+  try {
+    const db = getDb();
+    const [row] = await db
+      .select({ userId: oauthTokens.userId, expiresAt: oauthTokens.expiresAt })
+      .from(oauthTokens)
+      .where(
+        and(
+          eq(oauthTokens.tokenHash, hashToken(token)),
+          eq(oauthTokens.type, 'access'),
+          isNull(oauthTokens.revokedAt),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    if (row.expiresAt <= new Date()) return null;
+    return row.userId;
+  } catch {
+    // DB unreachable or schema mismatch — fail closed.
+    return null;
+  }
 }
 
 export interface MfaPendingClaims {
