@@ -1397,9 +1397,20 @@ export function createHttpApp() {
       }
 
       const { start, end } = UsageService.getBillingPeriod();
-      // Scope strictly to this user's own events. excludePreCutover drops the
-      // synthetic 'pre-cutover-rollup' migration row, which is not per-user data.
-      const filter = { start, end, userIds: [userId], excludePreCutover: true };
+      // Scope strictly to this user's own events on servers THIS user owns.
+      //  - userIds: events billed to this user (under owner-pays, userId == owner)
+      //  - ownedBy: only servers currently owned by this user — this is what
+      //    guarantees the report never shows a server you don't own. It drops
+      //    legacy pre-cutover events that were actor-billed onto someone else's
+      //    server (e.g. a collaborator's workspace before owner-pays went live).
+      //  - excludePreCutover: drops the synthetic 'pre-cutover-rollup' summary row.
+      const filter = {
+        start,
+        end,
+        userIds: [userId],
+        ownedBy: userId,
+        excludePreCutover: true,
+      };
 
       const [byJob, byServer, byDay, series] = await Promise.all([
         UsageReportService.getBreakdownByTask(filter),
