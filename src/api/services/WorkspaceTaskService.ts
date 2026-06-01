@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import {
   workspaceTasks,
@@ -262,6 +262,137 @@ export async function listTasksByServer(
   return rows.map((row) => ({
     ...toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null),
     upvotedByMe: voteMap.get(row.id) ?? false,
+  }));
+}
+
+// ============================================================================
+// Task share-link resolution
+// ============================================================================
+//
+// A task share-link is minted client-side as `app.runhq.io/task/<shortId>`,
+// where `<shortId>` is the first 8 hex chars of the task UUID (git-style short
+// id). Old links use `/?todo=<full-uuid>`. Neither form carries server context,
+// so the web app asks the cloud — which mirrors every task in `workspace_tasks`
+// — to resolve the id to its owning server + channel before routing.
+//
+// The id in a link may be the canonical cloud id (newer tasks) or the original
+// per-workspace todo id (`legacyWorkspaceTodoId`, for tasks migrated from the
+// legacy todos table), so we match on either column.
+
+/** A classified, validated task share-link id. */
+export type TaskShareIdQuery =
+  | { kind: 'exact'; value: string }
+  | { kind: 'prefix'; value: string };
+
+/** A task row that matched a share-link id, before access filtering. */
+export interface TaskCandidate {
+  serverId: string;
+  channelId: string | null;
+  taskId: string;
+  title: string;
+  legacyWorkspaceTodoId: string | null;
+  /** Epoch ms — used only for a deterministic tiebreak on prefix collisions. */
+  createdAt: number;
+}
+
+/** The routing tuple returned to the client once a task is resolved. */
+export interface ResolvedTask {
+  serverId: string;
+  channelId: string | null;
+  taskId: string;
+  title: string;
+}
+
+const FULL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const HEX_PREFIX_RE = /^[0-9a-f]{4,32}$/;
+
+/**
+ * Classify a raw share-link id into a DB query, or null if it isn't a plausible
+ * task id (rejects garbage / path-traversal before it ever reaches SQL). A full
+ * UUID resolves exactly; a 4–32 char hex string is treated as an id prefix.
+ */
+export function parseTaskShareId(input: string): TaskShareIdQuery | null {
+  const v = input.trim().toLowerCase();
+  if (FULL_UUID_RE.test(v)) return { kind: 'exact', value: v };
+  if (HEX_PREFIX_RE.test(v)) return { kind: 'prefix', value: v };
+  return null;
+}
+
+/**
+ * Given the candidate rows that matched a share-link id and the set of servers
+ * the caller can reach, pick the one task to route to.
+ *
+ * - Filters to reachable servers first (a task on a server the user can't see is
+ *   invisible — the endpoint returns 404, never leaking its existence).
+ * - Exactly one reachable match → resolve it.
+ * - Multiple reachable matches (an 8-char prefix collision among the user's own
+ *   tasks — astronomically rare): prefer an exact id/legacy-id match when the
+ *   input was a full id, else the deterministically-oldest task. `ambiguous` is
+ *   surfaced so the caller can log it.
+ */
+export function selectResolvedTask(
+  candidates: TaskCandidate[],
+  accessibleServerIds: Set<string>,
+  query: TaskShareIdQuery,
+): { resolved: ResolvedTask | null; ambiguous: boolean } {
+  const toResolved = (c: TaskCandidate): ResolvedTask => ({
+    serverId: c.serverId,
+    channelId: c.channelId,
+    taskId: c.taskId,
+    title: c.title,
+  });
+
+  const reachable = candidates.filter((c) => accessibleServerIds.has(c.serverId));
+  if (reachable.length === 0) return { resolved: null, ambiguous: false };
+  if (reachable.length === 1) return { resolved: toResolved(reachable[0]), ambiguous: false };
+
+  if (query.kind === 'exact') {
+    const exact = reachable.find(
+      (c) => c.taskId === query.value || c.legacyWorkspaceTodoId === query.value,
+    );
+    if (exact) return { resolved: toResolved(exact), ambiguous: true };
+  }
+
+  const oldest = [...reachable].sort(
+    (a, b) => a.createdAt - b.createdAt || a.taskId.localeCompare(b.taskId),
+  )[0];
+  return { resolved: toResolved(oldest), ambiguous: true };
+}
+
+/**
+ * Fetch the non-deleted task rows matching a share-link id query. No access
+ * control — the caller filters by reachable servers via {@link selectResolvedTask}.
+ * Capped at 16 rows; a real prefix never collides beyond a handful.
+ */
+export async function resolveTaskCandidates(query: TaskShareIdQuery): Promise<TaskCandidate[]> {
+  const match =
+    query.kind === 'exact'
+      ? or(eq(workspaceTasks.id, query.value), eq(workspaceTasks.legacyWorkspaceTodoId, query.value))
+      : or(
+          sql`${workspaceTasks.id}::text LIKE ${query.value + '%'}`,
+          sql`${workspaceTasks.legacyWorkspaceTodoId} LIKE ${query.value + '%'}`,
+        );
+
+  const rows = await db
+    .select({
+      serverId: workspaceTasks.serverId,
+      channelId: workspaceTasks.workspaceChannelId,
+      taskId: workspaceTasks.id,
+      title: workspaceTasks.title,
+      legacyWorkspaceTodoId: workspaceTasks.legacyWorkspaceTodoId,
+      createdAt: workspaceTasks.createdAt,
+    })
+    .from(workspaceTasks)
+    .where(and(match, isNull(workspaceTasks.deletedAt)))
+    .limit(16);
+
+  return rows.map((r) => ({
+    serverId: r.serverId,
+    channelId: r.channelId ?? null,
+    taskId: r.taskId,
+    title: r.title,
+    legacyWorkspaceTodoId: r.legacyWorkspaceTodoId ?? null,
+    createdAt: r.createdAt instanceof Date ? r.createdAt.getTime() : Number(r.createdAt),
   }));
 }
 

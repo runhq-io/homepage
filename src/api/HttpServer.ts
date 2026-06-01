@@ -2129,6 +2129,61 @@ export function createHttpApp() {
   // Server Management (authenticated)
   // ==========================================================================
 
+  // Resolve a task share-link id to the server + channel + task that owns it.
+  //
+  // Links are minted client-side as `app.runhq.io/task/<shortId>` (the first 8
+  // hex of the task UUID); old links use `/?todo=<full-uuid>`. Neither carries
+  // server context, so the web app asks the cloud — which mirrors every task in
+  // workspace_tasks — to resolve the id before routing. Access is gated to
+  // servers the user can actually reach (the same set as GET /api/servers); a
+  // task on a server the user can't see returns 404 (not 403) so we never leak
+  // which server a task lives on. Returning channelId lets the client route
+  // straight to the owning channel, avoiding the store-hydration race in the
+  // `/server/:id/todo/:id` path.
+  app.get('/api/tasks/:shortId/resolve', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      let userId: string | null = null;
+      if (authHeader?.startsWith('Bearer ')) {
+        userId = await extractUserIdFromToken(authHeader.substring(7));
+      }
+      if (!userId && process.env.NODE_ENV !== 'production') {
+        const [firstUser] = await db.select({ id: users.id }).from(users).limit(1);
+        userId = firstUser?.id || null;
+      }
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const query = WorkspaceTaskService.parseTaskShareId(c.req.param('shortId'));
+      if (!query) {
+        return c.json({ error: 'Invalid task id' }, 400);
+      }
+
+      const candidates = await WorkspaceTaskService.resolveTaskCandidates(query);
+      const userServers = await ServerService.getUserServers(userId);
+      const accessible = new Set(userServers.map((s) => s.id));
+      const { resolved, ambiguous } = WorkspaceTaskService.selectResolvedTask(
+        candidates,
+        accessible,
+        query,
+      );
+      if (ambiguous) {
+        console.warn(
+          `[HttpServer] Ambiguous task share id "${c.req.param('shortId')}" → ${resolved?.taskId}`,
+        );
+      }
+      if (!resolved) {
+        return c.json({ error: 'Task not found' }, 404);
+      }
+
+      return c.json({ data: resolved });
+    } catch (error) {
+      console.error('[HttpServer] Resolve task error:', error);
+      return c.json({ error: 'Failed to resolve task' }, 500);
+    }
+  });
+
   // List user's servers (with server status)
   app.get('/api/servers', async (c) => {
     try {
