@@ -1,45 +1,39 @@
 import type { Hono } from 'hono';
 import { verifyGithubWebhook } from './verifyWebhook.js';
-import { signInstallState, verifyInstallState } from './installState.js';
+import { verifyInstallState } from './installState.js';
 import type { GithubAppConfig } from './config.js';
 
 export interface GithubRoutesDeps {
   config: GithubAppConfig;
   appUrl: string;
-  resolveUserId: (authHeader: string | undefined) => Promise<string | null>;
-  serverBelongsToUser: (serverId: string, userId: string) => Promise<boolean>;
   getServerByToken: (token: string) => Promise<{ id: string } | null>;
   upsertInstallation: (input: {
-    installationId: number; serverId: string; accountLogin: string;
+    installationId: number; connectedByUserId: string | null; accountLogin: string;
     accountType: 'User' | 'Organization'; repositorySelection?: 'all' | 'selected' | null;
   }) => Promise<void>;
   removeInstallation: (installationId: number) => Promise<void>;
-  getInstallation: (installationId: number) => Promise<{ installationId: number; serverId: string } | null>;
+  getInstallation: (installationId: number) => Promise<{ installationId: number; connectedByUserId: string | null } | null>;
+  /** Associate an installation with a workspace (idempotent). */
+  associateWithWorkspace: (installationId: number, serverId: string, addedByUserId: string | null) => Promise<void>;
+  /** Whether an installation is available in (associated with) a workspace. */
+  isAssociatedWithWorkspace: (installationId: number, serverId: string) => Promise<boolean>;
   mintInstallationToken: (installationId: number) => Promise<{ token: string; expiresAt: string }>;
 }
 
 export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
-  app.get('/api/github/install-start', async (c) => {
-    const userId = await deps.resolveUserId(c.req.header('Authorization'));
-    if (!userId) return c.json({ error: 'Unauthorized' }, 401);
-    const serverId = c.req.query('serverId');
-    if (!serverId) return c.json({ error: 'serverId required' }, 400);
-    if (!(await deps.serverBelongsToUser(serverId, userId))) return c.json({ error: 'Forbidden' }, 403);
-    const state = signInstallState(serverId, deps.config.stateSecret);
-    const url = `https://github.com/apps/${deps.config.appSlug}/installations/new?state=${encodeURIComponent(state)}`;
-    return c.json({ url });
-  });
-
   app.get('/api/github/setup', async (c) => {
     const installationId = Number(c.req.query('installation_id'));
     const state = c.req.query('state');
-    const serverId = state ? verifyInstallState(state, deps.config.stateSecret) : null;
-    if (!installationId || !serverId) {
+    const decoded = state ? verifyInstallState(state, deps.config.stateSecret) : null;
+    if (!installationId || !decoded) {
       return c.redirect(`${deps.appUrl}/settings?github=error`, 302);
     }
+    // (a) record the installation (connector = whoever completed the GitHub flow)
     await deps.upsertInstallation({
-      installationId, serverId, accountLogin: '', accountType: 'User', repositorySelection: null,
+      installationId, connectedByUserId: decoded.userId, accountLogin: '', accountType: 'User', repositorySelection: null,
     });
+    // (b) make it available in the originating workspace — never overwrite a 1:1 binding.
+    await deps.associateWithWorkspace(installationId, decoded.serverId, decoded.userId);
     return c.redirect(`${deps.appUrl}/settings?github=installed`, 302);
   });
 
@@ -61,7 +55,7 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
         if (existing) {
           await deps.upsertInstallation({
             installationId: id,
-            serverId: existing.serverId,
+            connectedByUserId: existing.connectedByUserId,
             accountLogin: payload.installation?.account?.login ?? '',
             accountType: payload.installation?.account?.type === 'Organization' ? 'Organization' : 'User',
             repositorySelection: payload.installation?.repository_selection ?? null,
@@ -83,8 +77,11 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
     const installationId = Number(body.installationId);
     if (!installationId) return c.json({ error: 'installationId required' }, 400);
 
-    const install = await deps.getInstallation(installationId);
-    if (!install || install.serverId !== serverId) return c.json({ error: 'Forbidden' }, 403);
+    // Workspace-shared: any workspace the installation is associated with may mint
+    // a token. Membership + manage_project is enforced at the runhq layer.
+    if (!(await deps.isAssociatedWithWorkspace(installationId, serverId))) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
 
     const minted = await deps.mintInstallationToken(installationId);
     return c.json(minted);

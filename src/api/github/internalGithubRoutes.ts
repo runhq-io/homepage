@@ -5,10 +5,17 @@ export interface InternalGithubDeps {
   stateSecret: string;
   appSlug: string;
   getServerByToken: (token: string) => Promise<{ id: string } | null>;
+  /** Installations associated with (available in) the workspace. */
   listInstallationsForServer: (serverId: string) => Promise<Array<{
     installationId: number; accountLogin: string; accountType: string; repositorySelection: string | null;
   }>>;
-  getInstallation: (installationId: number) => Promise<{ installationId: number; serverId: string } | null>;
+  /** Installations the given user connected (across all their workspaces). */
+  listInstallationsForUser: (userId: string) => Promise<Array<{
+    installationId: number; accountLogin: string; accountType: string; repositorySelection: string | null;
+  }>>;
+  getInstallation: (installationId: number) => Promise<{ installationId: number; connectedByUserId: string | null } | null>;
+  isAssociatedWithWorkspace: (installationId: number, serverId: string) => Promise<boolean>;
+  associateWithWorkspace: (installationId: number, serverId: string, addedByUserId: string | null) => Promise<void>;
   listInstallationRepos: (installationId: number) => Promise<Array<{
     name: string; full_name: string; owner: string; clone_url: string; default_branch: string; private: boolean;
   }>>;
@@ -29,7 +36,9 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
   app.post('/api/internal/servers/:serverId/github/install-url', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    const state = signInstallState(server.id, deps.stateSecret);
+    const body = await c.req.json().catch(() => ({}));
+    const userId = typeof body.userId === 'string' ? body.userId : null;
+    const state = signInstallState(server.id, userId, deps.stateSecret);
     return c.json({ url: `https://github.com/apps/${deps.appSlug}/installations/new?state=${encodeURIComponent(state)}` });
   });
 
@@ -39,26 +48,58 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     return c.json({ installations: await deps.listInstallationsForServer(server.id) });
   });
 
-  app.get('/api/internal/servers/:serverId/github/installations/:installationId/repos', async (c) => {
+  // Accounts the current user has connected but that are NOT yet available in
+  // this workspace — lets a second workspace self-serve without a GitHub round-trip.
+  app.get('/api/internal/servers/:serverId/github/user-installations', async (c) => {
+    const server = await authServer(c);
+    if (server instanceof Response) return server;
+    const userId = c.req.query('userId');
+    if (!userId) return c.json({ error: 'userId required' }, 400);
+    const [connected, associated] = await Promise.all([
+      deps.listInstallationsForUser(userId),
+      deps.listInstallationsForServer(server.id),
+    ]);
+    const associatedIds = new Set(associated.map((i) => i.installationId));
+    return c.json({ installations: connected.filter((i) => !associatedIds.has(i.installationId)) });
+  });
+
+  // Make a user-connected installation available in this workspace. Idempotent;
+  // requires the actor to have connected it on GitHub (proof of control).
+  app.post('/api/internal/servers/:serverId/github/installations/:installationId/associate', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
     const installationId = Number(c.req.param('installationId'));
+    const body = await c.req.json().catch(() => ({}));
+    const userId = typeof body.userId === 'string' ? body.userId : null;
+    if (await deps.isAssociatedWithWorkspace(installationId, server.id)) {
+      return c.json({ ok: true });
+    }
     const install = await deps.getInstallation(installationId);
-    if (!install || install.serverId !== server.id) return c.json({ error: 'Forbidden' }, 403);
-    return c.json({ repos: await deps.listInstallationRepos(installationId) });
+    if (!install) return c.json({ error: 'Installation not found' }, 404);
+    if (!userId || install.connectedByUserId !== userId) return c.json({ error: 'Forbidden' }, 403);
+    await deps.associateWithWorkspace(installationId, server.id, userId);
+    return c.json({ ok: true });
   });
 
-  const ownedInstall = async (c: any, server: { id: string }) => {
+  // Installation must be available in (associated with) the workspace.
+  const associatedInstall = async (c: any, server: { id: string }) => {
     const installationId = Number(c.req.param('installationId'));
-    const install = await deps.getInstallation(installationId);
-    if (!install || install.serverId !== server.id) return null;
+    if (!(await deps.isAssociatedWithWorkspace(installationId, server.id))) return null;
     return installationId;
   };
+
+  app.get('/api/internal/servers/:serverId/github/installations/:installationId/repos', async (c) => {
+    const server = await authServer(c);
+    if (server instanceof Response) return server;
+    const installationId = await associatedInstall(c, server);
+    if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
+    return c.json({ repos: await deps.listInstallationRepos(installationId) });
+  });
 
   app.get('/api/internal/servers/:serverId/github/installations/:installationId/pulls', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    const installationId = await ownedInstall(c, server);
+    const installationId = await associatedInstall(c, server);
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
     const owner = c.req.query('owner') ?? '';
     const repo = c.req.query('repo') ?? '';
@@ -69,7 +110,7 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
   app.get('/api/internal/servers/:serverId/github/installations/:installationId/pulls/:number/diff', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    const installationId = await ownedInstall(c, server);
+    const installationId = await associatedInstall(c, server);
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
     const owner = c.req.query('owner') ?? '';
     const repo = c.req.query('repo') ?? '';
@@ -79,7 +120,7 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
   app.post('/api/internal/servers/:serverId/github/installations/:installationId/pulls/:number/merge', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    const installationId = await ownedInstall(c, server);
+    const installationId = await associatedInstall(c, server);
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json().catch(() => ({}));
     const result = await deps.mergePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')), (body.method as any) || 'merge');

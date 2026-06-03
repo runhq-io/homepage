@@ -10,12 +10,12 @@ function makeApp(overrides: Partial<GithubRoutesDeps> = {}) {
   const deps: GithubRoutesDeps = {
     config: cfg,
     appUrl: 'https://app.runhq.io',
-    resolveUserId: async () => 'user_1',
-    serverBelongsToUser: async () => true,
     getServerByToken: async (t: string) => (t === 'wst_good' ? ({ id: 'ws_a' } as any) : null),
     upsertInstallation: vi.fn(async () => {}),
     removeInstallation: vi.fn(async () => {}),
-    getInstallation: async (id: number) => (id === 5 ? ({ installationId: 5, serverId: 'ws_a' } as any) : null),
+    getInstallation: async (id: number) => (id === 5 ? ({ installationId: 5, connectedByUserId: 'user_1' } as any) : null),
+    associateWithWorkspace: vi.fn(async () => {}),
+    isAssociatedWithWorkspace: async (id: number, sid: string) => id === 5 && sid === 'ws_a',
     mintInstallationToken: async (id: number) => ({ token: `tok_${id}`, expiresAt: 'soon' }),
     ...overrides,
   };
@@ -25,21 +25,22 @@ function makeApp(overrides: Partial<GithubRoutesDeps> = {}) {
 }
 
 describe('github routes', () => {
-  it('install-start returns a github install URL with signed state', async () => {
-    const { app } = makeApp();
-    const res = await app.request('/api/github/install-start?serverId=ws_a', { headers: { Authorization: 'Bearer x' } });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.url).toContain('https://github.com/apps/runhq/installations/new');
-    expect(body.url).toContain('state=');
-  });
-
-  it('setup callback records the installation and redirects', async () => {
+  it('setup callback records the installation, associates it with the workspace, and redirects', async () => {
     const { app, deps } = makeApp();
-    const state = signInstallState('ws_a', cfg.stateSecret);
+    const state = signInstallState('ws_a', 'user_1', cfg.stateSecret);
     const res = await app.request(`/api/github/setup?installation_id=5&setup_action=install&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
     expect(res.status).toBe(302);
-    expect(deps.upsertInstallation).toHaveBeenCalled();
+    expect(deps.upsertInstallation).toHaveBeenCalledWith(expect.objectContaining({ installationId: 5, connectedByUserId: 'user_1' }));
+    expect(deps.associateWithWorkspace).toHaveBeenCalledWith(5, 'ws_a', 'user_1');
+  });
+
+  it('setup callback with an invalid state redirects to an error and does not record', async () => {
+    const { app, deps } = makeApp();
+    const res = await app.request('/api/github/setup?installation_id=5&state=bogus', { redirect: 'manual' });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain('github=error');
+    expect(deps.upsertInstallation).not.toHaveBeenCalled();
+    expect(deps.associateWithWorkspace).not.toHaveBeenCalled();
   });
 
   it('webhook rejects a bad signature', async () => {
@@ -65,7 +66,7 @@ describe('github routes', () => {
     expect(deps.removeInstallation).toHaveBeenCalledWith(5);
   });
 
-  it('internal token endpoint returns a token for a matching server', async () => {
+  it('internal token endpoint returns a token for a workspace the installation is associated with', async () => {
     const { app } = makeApp();
     const res = await app.request('/api/internal/servers/ws_a/github/token', {
       method: 'POST',
@@ -76,8 +77,8 @@ describe('github routes', () => {
     expect((await res.json()).token).toBe('tok_5');
   });
 
-  it('internal token endpoint rejects an installation owned by another server', async () => {
-    const { app } = makeApp({ getInstallation: async () => ({ installationId: 5, serverId: 'ws_OTHER' } as any) });
+  it('internal token endpoint rejects an installation not associated with the workspace', async () => {
+    const { app } = makeApp({ isAssociatedWithWorkspace: async () => false });
     const res = await app.request('/api/internal/servers/ws_a/github/token', {
       method: 'POST',
       headers: { 'X-Server-Token': 'wst_good', 'content-type': 'application/json' },

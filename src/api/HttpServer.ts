@@ -6493,18 +6493,12 @@ export function createHttpApp() {
     registerGithubRoutes(app, {
       config: getGithubAppConfig(),
       appUrl: process.env.APP_URL ?? 'https://app.runhq.io',
-      resolveUserId: (authHeader) =>
-        authHeader?.startsWith('Bearer ')
-          ? extractUserIdFromToken(authHeader.slice(7))
-          : Promise.resolve(null),
-      serverBelongsToUser: async (serverId, userId) => {
-        const server = await ServerService.getServer(serverId);
-        return !!server && server.ownerId === userId;
-      },
       getServerByToken: (t) => ServerService.getServerByToken(t),
       upsertInstallation: GithubInstallationsService.upsertInstallation,
       removeInstallation: GithubInstallationsService.removeInstallation,
       getInstallation: GithubInstallationsService.getInstallation,
+      associateWithWorkspace: GithubInstallationsService.associateWithWorkspace,
+      isAssociatedWithWorkspace: GithubInstallationsService.isAssociatedWithWorkspace,
       mintInstallationToken: (id) => getGitHubAppService().mintInstallationToken(id),
     });
     registerInternalGithubRoutes(app, {
@@ -6512,7 +6506,10 @@ export function createHttpApp() {
       appSlug: getGithubAppConfig().appSlug,
       getServerByToken: (t) => ServerService.getServerByToken(t),
       listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
+      listInstallationsForUser: GithubInstallationsService.listInstallationsForUser,
       getInstallation: GithubInstallationsService.getInstallation,
+      isAssociatedWithWorkspace: GithubInstallationsService.isAssociatedWithWorkspace,
+      associateWithWorkspace: GithubInstallationsService.associateWithWorkspace,
       listInstallationRepos: (id) => getGitHubAppService().listInstallationRepos(id),
       listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
       getPullRequestDiff: (id, owner, repo, n) => getGitHubAppService().getPullRequestDiff(id, owner, repo, n),

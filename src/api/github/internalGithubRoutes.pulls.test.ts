@@ -7,7 +7,10 @@ function makeApp(over: Partial<InternalGithubDeps> = {}) {
     stateSecret: 'st', appSlug: 'runhq',
     getServerByToken: async (t) => (t === 'wst_good' ? ({ id: 'ws_a' } as any) : null),
     listInstallationsForServer: async () => [],
-    getInstallation: async (id) => (id === 5 ? ({ installationId: 5, serverId: 'ws_a' } as any) : null),
+    listInstallationsForUser: async () => [],
+    getInstallation: async (id) => (id === 5 ? ({ installationId: 5, connectedByUserId: 'user_1' } as any) : null),
+    isAssociatedWithWorkspace: async (id, sid) => sid === 'ws_a' && id === 5,
+    associateWithWorkspace: vi.fn(async () => {}),
     listInstallationRepos: async () => [],
     listPullRequests: vi.fn(async () => [{ number: 7, title: 'PR' }]),
     getPullRequestDiff: vi.fn(async () => ({ sha: '7', files: [], patch: '' })),
@@ -43,8 +46,8 @@ describe('internal github PR routes', () => {
     expect((await res.json()).merged).toBe(true);
     expect(deps.mergePullRequest).toHaveBeenCalledWith(5, 'octo', 'app', 7, 'squash');
   });
-  it('rejects an installation owned by another server', async () => {
-    const { app } = makeApp({ getInstallation: async () => ({ installationId: 5, serverId: 'ws_OTHER' } as any) });
+  it('rejects an installation not associated with the workspace', async () => {
+    const { app } = makeApp({ isAssociatedWithWorkspace: async () => false });
     const res = await app.request('/api/internal/servers/ws_a/github/installations/5/pulls?owner=octo&repo=app', { headers: auth });
     expect(res.status).toBe(403);
   });
