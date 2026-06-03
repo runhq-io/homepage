@@ -30,6 +30,7 @@ describe('github routes', () => {
     const state = signInstallState('ws_a', 'user_1', cfg.stateSecret);
     const res = await app.request(`/api/github/setup?installation_id=5&setup_action=install&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
     expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain('/github/installed');
     expect(deps.upsertInstallation).toHaveBeenCalledWith(expect.objectContaining({ installationId: 5, connectedByUserId: 'user_1' }));
     expect(deps.associateWithWorkspace).toHaveBeenCalledWith(5, 'ws_a', 'user_1');
   });
@@ -38,7 +39,7 @@ describe('github routes', () => {
     const { app, deps } = makeApp();
     const res = await app.request('/api/github/setup?installation_id=5&state=bogus', { redirect: 'manual' });
     expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toContain('github=error');
+    expect(res.headers.get('location')).toContain('/github/installed?error=1');
     expect(deps.upsertInstallation).not.toHaveBeenCalled();
     expect(deps.associateWithWorkspace).not.toHaveBeenCalled();
   });

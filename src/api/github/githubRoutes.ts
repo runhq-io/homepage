@@ -26,7 +26,7 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
     const state = c.req.query('state');
     const decoded = state ? verifyInstallState(state, deps.config.stateSecret) : null;
     if (!installationId || !decoded) {
-      return c.redirect(`${deps.appUrl}/settings?github=error`, 302);
+      return c.redirect(`${deps.appUrl}/github/installed?error=1`, 302);
     }
     // (a) record the installation (connector = whoever completed the GitHub flow)
     await deps.upsertInstallation({
@@ -34,7 +34,7 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
     });
     // (b) make it available in the originating workspace — never overwrite a 1:1 binding.
     await deps.associateWithWorkspace(installationId, decoded.serverId, decoded.userId);
-    return c.redirect(`${deps.appUrl}/settings?github=installed`, 302);
+    return c.redirect(`${deps.appUrl}/github/installed`, 302);
   });
 
   app.post('/api/github/webhooks', async (c) => {
