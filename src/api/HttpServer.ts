@@ -6514,6 +6514,9 @@ export function createHttpApp() {
       listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
       getInstallation: GithubInstallationsService.getInstallation,
       listInstallationRepos: (id) => getGitHubAppService().listInstallationRepos(id),
+      listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
+      getPullRequestDiff: (id, owner, repo, n) => getGitHubAppService().getPullRequestDiff(id, owner, repo, n),
+      mergePullRequest: (id, owner, repo, n, method) => getGitHubAppService().mergePullRequest(id, owner, repo, n, method),
     });
   }
 

@@ -10,6 +10,9 @@ function makeApp(overrides: Partial<InternalGithubDeps> = {}) {
     listInstallationsForServer: async (sid) => (sid === 'ws_a' ? [{ installationId: 5, accountLogin: 'octo', accountType: 'Organization', repositorySelection: 'all' } as any] : []),
     getInstallation: async (id) => (id === 5 ? ({ installationId: 5, serverId: 'ws_a' } as any) : null),
     listInstallationRepos: async () => [{ name: 'app', full_name: 'octo/app', owner: 'octo', clone_url: 'https://github.com/octo/app.git', default_branch: 'main', private: true }],
+    listPullRequests: vi.fn(async () => []),
+    getPullRequestDiff: vi.fn(async () => ({ sha: '', files: [], patch: '' })),
+    mergePullRequest: vi.fn(async () => ({ merged: false, message: '' })),
     ...overrides,
   };
   const app = new Hono();

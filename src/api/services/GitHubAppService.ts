@@ -64,6 +64,37 @@ export class GitHubAppService {
     }));
   }
 
+  async listPullRequests(installationId: number, owner: string, repo: string, state: 'open' | 'closed' | 'all' = 'open') {
+    const okit = await this.octokitFor(installationId);
+    const prs = await okit.paginate('GET /repos/{owner}/{repo}/pulls', { owner, repo, state, per_page: 50 });
+    return prs.map((p: any) => ({
+      number: p.number,
+      title: p.title,
+      state: (p.merged_at ? 'merged' : p.state) as 'open' | 'closed' | 'merged',
+      isDraft: !!p.draft,
+      author: p.user?.login ?? '',
+      headRef: p.head?.ref ?? '',
+      baseRef: p.base?.ref ?? '',
+      url: p.html_url,
+    }));
+  }
+
+  async getPullRequestDiff(installationId: number, owner: string, repo: string, pull_number: number) {
+    const okit = await this.octokitFor(installationId);
+    const files = await okit.paginate('GET /repos/{owner}/{repo}/pulls/{pull_number}/files', { owner, repo, pull_number, per_page: 100 });
+    return {
+      sha: String(pull_number),
+      files: files.map((f: any) => ({ path: f.filename, added: f.additions ?? null, deleted: f.deletions ?? null })),
+      patch: files.map((f: any) => `diff --git a/${f.filename} b/${f.filename}\n${f.patch ?? ''}`).join('\n\n'),
+    };
+  }
+
+  async mergePullRequest(installationId: number, owner: string, repo: string, pull_number: number, merge_method: 'merge' | 'squash' | 'rebase' = 'merge') {
+    const okit = await this.octokitFor(installationId);
+    const { data } = await okit.request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge', { owner, repo, pull_number, merge_method });
+    return { merged: !!data.merged, message: data.message ?? '' };
+  }
+
   async createOrgRepo(installationId: number, org: string, name: string, isPrivate: boolean): Promise<InstallationRepo> {
     const okit = await this.octokitFor(installationId);
     const { data } = await okit.request('POST /orgs/{org}/repos', { org, name, private: isPrivate });
