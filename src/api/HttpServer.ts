@@ -6492,7 +6492,10 @@ export function createHttpApp() {
   if (isGithubAppConfigured()) {
     registerGithubRoutes(app, {
       config: getGithubAppConfig(),
-      appUrl: process.env.APP_URL ?? 'https://app.runhq.io',
+      // The /github/installed page is a CLIENT SPA route (app.runhq.io), not a
+      // BE-hosted one — must use CLIENT_URL. APP_URL is the BE's own origin
+      // (console.runhq.io in prod), which has no such route and bounces to login.
+      clientUrl: process.env.CLIENT_URL ?? 'https://app.runhq.io',
       getServerByToken: (t) => ServerService.getServerByToken(t),
       upsertInstallation: GithubInstallationsService.upsertInstallation,
       removeInstallation: GithubInstallationsService.removeInstallation,

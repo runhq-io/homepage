@@ -9,7 +9,7 @@ const cfg = { appId: '1', appSlug: 'runhq', privateKey: 'k', webhookSecret: 'whs
 function makeApp(overrides: Partial<GithubRoutesDeps> = {}) {
   const deps: GithubRoutesDeps = {
     config: cfg,
-    appUrl: 'https://app.runhq.io',
+    clientUrl: 'https://app.runhq.io',
     getServerByToken: async (t: string) => (t === 'wst_good' ? ({ id: 'ws_a' } as any) : null),
     upsertInstallation: vi.fn(async () => {}),
     removeInstallation: vi.fn(async () => {}),
@@ -30,7 +30,9 @@ describe('github routes', () => {
     const state = signInstallState('ws_a', 'user_1', cfg.stateSecret);
     const res = await app.request(`/api/github/setup?installation_id=5&setup_action=install&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
     expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toContain('/github/installed');
+    // Must redirect to the CLIENT SPA origin (app.runhq.io), not the BE origin —
+    // the /github/installed page only exists on the client.
+    expect(res.headers.get('location')).toBe('https://app.runhq.io/github/installed');
     expect(deps.upsertInstallation).toHaveBeenCalledWith(expect.objectContaining({ installationId: 5, connectedByUserId: 'user_1' }));
     expect(deps.associateWithWorkspace).toHaveBeenCalledWith(5, 'ws_a', 'user_1');
   });

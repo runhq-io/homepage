@@ -5,7 +5,8 @@ import type { GithubAppConfig } from './config.js';
 
 export interface GithubRoutesDeps {
   config: GithubAppConfig;
-  appUrl: string;
+  /** Client SPA origin (e.g. https://app.runhq.io) — where the /github/installed page lives. */
+  clientUrl: string;
   getServerByToken: (token: string) => Promise<{ id: string } | null>;
   upsertInstallation: (input: {
     installationId: number; connectedByUserId: string | null; accountLogin: string;
@@ -26,7 +27,7 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
     const state = c.req.query('state');
     const decoded = state ? verifyInstallState(state, deps.config.stateSecret) : null;
     if (!installationId || !decoded) {
-      return c.redirect(`${deps.appUrl}/github/installed?error=1`, 302);
+      return c.redirect(`${deps.clientUrl}/github/installed?error=1`, 302);
     }
     // (a) record the installation (connector = whoever completed the GitHub flow)
     await deps.upsertInstallation({
@@ -34,7 +35,7 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
     });
     // (b) make it available in the originating workspace — never overwrite a 1:1 binding.
     await deps.associateWithWorkspace(installationId, decoded.serverId, decoded.userId);
-    return c.redirect(`${deps.appUrl}/github/installed`, 302);
+    return c.redirect(`${deps.clientUrl}/github/installed`, 302);
   });
 
   app.post('/api/github/webhooks', async (c) => {
