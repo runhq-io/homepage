@@ -1082,7 +1082,8 @@
       var stored = localStorage.getItem(themeStorageKey());
       if (stored === "dark" || stored === "light") return stored;
     } catch (_) {}
-    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    // Default to light regardless of the visitor's OS dark-mode preference;
+    // dark only takes hold via explicit config or a saved user toggle.
     return "light";
   }
   function applyTheme(next) {
@@ -1173,7 +1174,10 @@
       '  ' + (isRight ? "right" : "left") + ': 0;',
       '  transform: translateY(-50%);',
       '  height: 38px; min-width: 72px;',
-      '  padding: ' + (isRight ? "0 6px 0 12px" : "0 12px 0 6px") + ';',
+      /* Asymmetric padding: more on the interior side (where icon + label
+         live), tight on the protruding side so the chevron handle sits
+         close to the screen edge with minimal visual breathing room. */
+      '  padding: ' + (isRight ? "0 4px 0 12px" : "0 12px 0 4px") + ';',
       '  background:',
       '    radial-gradient(120% 180% at 30% -30%, rgba(255,255,255,0.18), rgba(255,255,255,0) 60%),',
       '    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),',
@@ -1208,24 +1212,31 @@
          grows to reveal the affordance; collapses back when the pointer
          leaves. Visible on hover in BOTH the expanded and peeked states:
          in the expanded state it collapses; in the peeked state it pins
-         the pill open. No divider line — the icon is light enough that
-         the section reads as a slim handle, not a separate panel. */
+         the pill open. Box-sizing is overridden to content-box so the
+         animated `width` applies to the icon only — the static padding
+         and 1px hairline divider that visually separates it from the
+         HQ/badge cluster sit on top. The divider only materializes on
+         hover so the resting pill stays clean; the parent's `gap: 6px`
+         keeps it from butting against the badge. */
       '.rw-tab-hide-btn {',
       '  display: inline-flex; align-items: center; justify-content: center;',
       '  flex: 0 0 auto;',
-      '  width: 0; height: 16px;',
-      '  ' + (isRight ? "margin-right" : "margin-left") + ': 0;',
+      '  box-sizing: content-box;',
+      '  width: 0; height: 22px;',
       '  color: rgba(255,255,255,0.78);',
       '  padding: 0;',
+      '  border-' + (isRight ? "right" : "left") + ': 0 solid rgba(255,255,255,0);',
       '  overflow: hidden;',
       '  opacity: 0; pointer-events: none;',
       '  cursor: pointer;',
-      '  transition: width .15s ease, opacity .12s ease 0s, color .12s ease, margin .15s ease;',
+      '  transition: width .15s ease, opacity .12s ease 0s, color .12s ease, padding .15s ease, border-color .15s ease;',
       '}',
       '.rw-tab:hover .rw-tab-hide-btn {',
       '  width: 9px;',
       '  opacity: 1; pointer-events: auto;',
-      '  ' + (isRight ? "margin-right" : "margin-left") + ': 2px;',
+      '  padding-' + (isRight ? "right" : "left") + ': 5px;',
+      '  border-' + (isRight ? "right" : "left") + '-width: 1px;',
+      '  border-' + (isRight ? "right" : "left") + '-color: rgba(255,255,255,0.20);',
       '}',
       '.rw-tab-hide-btn:hover { color: #ffffff; }',
       '.rw-tab-hide-btn > svg { display: block; flex: 0 0 auto; }',
