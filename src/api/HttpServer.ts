@@ -23,6 +23,7 @@ import { assertActivated } from '../lib/signupGating';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
 import { registerGithubRoutes } from './github/githubRoutes';
+import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
 import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
 import * as GithubInstallationsService from './services/GithubInstallationsService';
 import { getGitHubAppService } from './services/GitHubAppService';
@@ -6505,6 +6506,14 @@ export function createHttpApp() {
       removeInstallation: GithubInstallationsService.removeInstallation,
       getInstallation: GithubInstallationsService.getInstallation,
       mintInstallationToken: (id) => getGitHubAppService().mintInstallationToken(id),
+    });
+    registerInternalGithubRoutes(app, {
+      stateSecret: getGithubAppConfig().stateSecret,
+      appSlug: getGithubAppConfig().appSlug,
+      getServerByToken: (t) => ServerService.getServerByToken(t),
+      listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
+      getInstallation: GithubInstallationsService.getInstallation,
+      listInstallationRepos: (id) => getGitHubAppService().listInstallationRepos(id),
     });
   }
 
