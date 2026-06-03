@@ -816,6 +816,68 @@ describe('DockerProvider — recreate ops', () => {
     expect(mockStart).toHaveBeenCalled();
   });
 
+  it('re-applies the host.docker.internal host-gateway mapping on recreate even when the source container lacks it', async () => {
+    // Regression: a container recreated from one created without ExtraHosts (or
+    // by an older recreate that dropped it) must still get the mapping, or it
+    // can't resolve host.docker.internal → can't reach the be on Linux.
+    mockInspect.mockResolvedValueOnce({
+      Id: 'a'.repeat(64),
+      Config: {
+        Image: 'runhq-server:local',
+        Env: ['SERVER_TOKEN=t', 'PORT=61987'],
+        Labels: { 'runhq.managed': 'true', 'runhq.serverId': 'srv-1', 'runhq.volumeId': 'v-1' },
+        ExposedPorts: { '61987/tcp': {} },
+      },
+      HostConfig: {
+        Binds: ['/tmp/runhq-vols/v-1:/app/data'],
+        PortBindings: { '61987/tcp': [{ HostIp: '127.0.0.1', HostPort: '12345' }] },
+        // no ExtraHosts on the source container
+        RestartPolicy: { Name: 'unless-stopped' },
+      },
+    });
+    mockStop.mockResolvedValueOnce(undefined);
+    mockRemove.mockResolvedValueOnce(undefined);
+    process.env.RUNHQ_WORKSPACE_IMAGE = 'runhq-server:v2';
+    mockListImages.mockResolvedValue([{ Id: 'sha256:def', RepoTags: ['runhq-server:v2'] }]);
+
+    const p = new DockerProvider();
+    await p.updateMachineImage('abc');
+
+    const spec = mockCreateContainer.mock.calls[0][0];
+    expect(spec.HostConfig.ExtraHosts).toEqual(['host.docker.internal:host-gateway']);
+  });
+
+  it('preserves existing ExtraHosts without duplicating the host-gateway mapping on recreate', async () => {
+    mockInspect.mockResolvedValueOnce({
+      Id: 'a'.repeat(64),
+      Config: {
+        Image: 'runhq-server:local',
+        Env: ['SERVER_TOKEN=t', 'PORT=61987'],
+        Labels: { 'runhq.managed': 'true', 'runhq.serverId': 'srv-1', 'runhq.volumeId': 'v-1' },
+        ExposedPorts: { '61987/tcp': {} },
+      },
+      HostConfig: {
+        Binds: ['/tmp/runhq-vols/v-1:/app/data'],
+        PortBindings: { '61987/tcp': [{ HostIp: '127.0.0.1', HostPort: '12345' }] },
+        ExtraHosts: ['host.docker.internal:host-gateway', 'extra.example:10.0.0.5'],
+        RestartPolicy: { Name: 'unless-stopped' },
+      },
+    });
+    mockStop.mockResolvedValueOnce(undefined);
+    mockRemove.mockResolvedValueOnce(undefined);
+    process.env.RUNHQ_WORKSPACE_IMAGE = 'runhq-server:v2';
+    mockListImages.mockResolvedValue([{ Id: 'sha256:def', RepoTags: ['runhq-server:v2'] }]);
+
+    const p = new DockerProvider();
+    await p.updateMachineImage('abc');
+
+    const spec = mockCreateContainer.mock.calls[0][0];
+    expect(spec.HostConfig.ExtraHosts).toEqual([
+      'host.docker.internal:host-gateway',
+      'extra.example:10.0.0.5',
+    ]);
+  });
+
   it('updateMachineEnv recreates with merged env', async () => {
     mockInspect.mockResolvedValueOnce({
       Id: 'a'.repeat(64),

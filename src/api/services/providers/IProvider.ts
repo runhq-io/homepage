@@ -82,7 +82,15 @@ export interface IProvider {
   ): Promise<void>;
   suspendMachine(machineId: string, appName?: string | null): Promise<void>;
   restartMachine(machineId: string, appName?: string | null): Promise<void>;
-  updateMachineImage(machineId: string, appName?: string | null): Promise<void>;
+  /**
+   * Update a machine to the latest image and return the machine id that is now
+   * current. Most providers (e.g. Fly) update the image in place and return the
+   * SAME id. Providers that cannot mutate a running container's image must
+   * recreate it (e.g. Docker), which yields a NEW id — that new id is returned
+   * so the caller can persist it and continue operating on the live machine
+   * instead of the removed one.
+   */
+  updateMachineImage(machineId: string, appName?: string | null): Promise<string>;
   deleteMachine(machineId: string, appName?: string | null): Promise<void>;
 
   // ---------------------------------------------------------------------------
@@ -123,7 +131,13 @@ export interface IProvider {
   // ---------------------------------------------------------------------------
 
   updateAutoSuspendPolicy(machineId: string, autoSuspendEnabled: boolean, appName?: string | null): Promise<void>;
-  updateMachineEnv(machineId: string, env: Record<string, string>, appName?: string | null): Promise<void>;
+  /**
+   * Apply env updates to a machine and return the machine id that is now
+   * current. Same contract as {@link updateMachineImage}: in-place providers
+   * return the SAME id; providers that must recreate the container to change
+   * its env (e.g. Docker) return the NEW id.
+   */
+  updateMachineEnv(machineId: string, env: Record<string, string>, appName?: string | null): Promise<string>;
 
   // ---------------------------------------------------------------------------
   // Fleet

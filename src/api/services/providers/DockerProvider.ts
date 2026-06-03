@@ -501,10 +501,17 @@ export class DockerProvider implements IProvider {
     await this.docker.getContainer(machineId).pause();
   }
 
+  /**
+   * Stop+remove the container and create a fresh one with transformed
+   * env/image, preserving every other facet of its config (labels, binds,
+   * port bindings, resources). Docker assigns the replacement a NEW container
+   * id, so this returns the new short id — the machine's identity from the
+   * caller's perspective. Callers MUST persist it; the old id now 404s.
+   */
   private async recreateContainer(
     machineId: string,
     transform: (currentEnv: string[], currentImage: string) => { env: string[]; image: string },
-  ): Promise<void> {
+  ): Promise<string> {
     const container = this.docker.getContainer(machineId);
     const data = await container.inspect();
     const labels = data.Config.Labels ?? {};
@@ -516,6 +523,17 @@ export class DockerProvider implements IProvider {
     const restartPolicy = data.HostConfig.RestartPolicy;
     const currentEnv = data.Config.Env ?? [];
     const currentImage = data.Config.Image;
+
+    // Preserve the host.docker.internal → host-gateway mapping that
+    // createContainer establishes (line ~411). Without it, the recreated
+    // container can't resolve host.docker.internal on Linux and every call to
+    // the be (CLOUD_API_URL, e.g. GitHub token minting) fails with ENOTFOUND.
+    // Re-apply the canonical mapping so a chain of recreates self-heals even if
+    // an ancestor was created without it.
+    const REQUIRED_EXTRA_HOST = 'host.docker.internal:host-gateway';
+    const extraHosts = Array.from(
+      new Set([...(data.HostConfig.ExtraHosts ?? []), REQUIRED_EXTRA_HOST]),
+    );
 
     const { env: newEnv, image: newImage } = transform(currentEnv, currentImage);
 
@@ -535,17 +553,19 @@ export class DockerProvider implements IProvider {
       HostConfig: {
         Binds: binds,
         PortBindings: portBindings,
+        ExtraHosts: extraHosts,
         NanoCpus: nanoCpus,
         Memory: memory,
         RestartPolicy: restartPolicy,
       },
     } as Docker.ContainerCreateOptions);
     await fresh.start();
+    return fresh.id.slice(0, 12);
   }
 
-  async updateMachineImage(machineId: string, _appName?: string | null): Promise<void> {
+  async updateMachineImage(machineId: string, _appName?: string | null): Promise<string> {
     const newImage = this.resolveImageRef();
-    await this.recreateContainer(machineId, (env) => ({ env, image: newImage }));
+    return this.recreateContainer(machineId, (env) => ({ env, image: newImage }));
   }
 
   async deleteMachine(machineId: string, _appName?: string | null): Promise<void> {
@@ -741,8 +761,8 @@ export class DockerProvider implements IProvider {
     machineId: string,
     envUpdates: Record<string, string>,
     _appName?: string | null,
-  ): Promise<void> {
-    await this.recreateContainer(machineId, (currentEnv, currentImage) => {
+  ): Promise<string> {
+    return this.recreateContainer(machineId, (currentEnv, currentImage) => {
       const map = new Map<string, string>();
       for (const line of currentEnv) {
         const eq = line.indexOf('=');

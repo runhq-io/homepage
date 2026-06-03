@@ -251,8 +251,10 @@ export class FlyProvider implements IProvider {
     await FlyService.restartMachine(machineId, appName);
   }
 
-  async updateMachineImage(machineId: string, appName?: string | null): Promise<void> {
+  async updateMachineImage(machineId: string, appName?: string | null): Promise<string> {
+    // Fly updates the image on the same machine in place — the id is stable.
     await FlyService.updateMachineImage(machineId, appName);
+    return machineId;
   }
 
   async deleteMachine(machineId: string, appName?: string | null): Promise<void> {
@@ -332,11 +334,13 @@ export class FlyProvider implements IProvider {
     await FlyService.updateMachineAutoSuspend(machineId, autoSuspendEnabled, appName);
   }
 
-  async updateMachineEnv(machineId: string, env: Record<string, string>, appName?: string | null): Promise<void> {
+  async updateMachineEnv(machineId: string, env: Record<string, string>, appName?: string | null): Promise<string> {
     // Use ensureMachineTunnelToken for TUNNEL_TOKEN, or updateMachineConfig for generic env
     if (env.TUNNEL_TOKEN) {
       await FlyService.ensureMachineTunnelToken(machineId, env.TUNNEL_TOKEN, appName);
     }
+    // Fly applies env to the same machine in place — the id is stable.
+    return machineId;
   }
 
   // ---- Fleet ----

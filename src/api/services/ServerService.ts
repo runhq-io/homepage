@@ -562,7 +562,7 @@ export async function getServerByMachineId(machineId: string): Promise<Server | 
 export async function ensureServerTunnelConnector(
   serverId: string,
   options: { requireMachineUpdate?: boolean } = {},
-): Promise<{ tunnelId: string; warnings: string[] } | null> {
+): Promise<{ tunnelId: string; warnings: string[]; machineId: string | null } | null> {
   const server = await getServer(serverId);
   if (!server || server.deploymentType !== 'remote') {
     return null;
@@ -591,15 +591,33 @@ export async function ensureServerTunnelConnector(
       .where(eq(servers.id, serverId));
   }
 
-  if (server.machineId) {
+  // Identity that survives a provider recreate. Some providers (Docker) cannot
+  // mutate a running container's env in place: updateMachineEnv recreates the
+  // container, yielding a NEW id. We persist and carry that forward so the DB,
+  // the ingress rule below, and our callers all operate on the live machine
+  // rather than the removed one.
+  let currentMachineId = server.machineId;
+
+  if (currentMachineId) {
     try {
       const provider = getProvider((server.provider || 'fly') as ProviderId);
-      await provider.updateMachineEnv(server.machineId, { TUNNEL_TOKEN: tunnelToken }, server.flyAppName);
+      const updatedMachineId = await provider.updateMachineEnv(
+        currentMachineId,
+        { TUNNEL_TOKEN: tunnelToken },
+        server.flyAppName,
+      );
+      if (updatedMachineId && updatedMachineId !== currentMachineId) {
+        await db
+          .update(servers)
+          .set({ machineId: updatedMachineId, updatedAt: new Date() })
+          .where(eq(servers.id, serverId));
+        currentMachineId = updatedMachineId;
+      }
     } catch (error) {
       if (options.requireMachineUpdate) {
         throw error;
       }
-      const msg = `Failed to ensure tunnel token on machine ${server.machineId}: ${error instanceof Error ? error.message : String(error)}`;
+      const msg = `Failed to ensure tunnel token on machine ${currentMachineId}: ${error instanceof Error ? error.message : String(error)}`;
       console.warn(`[ServerService] ${msg}`);
       warnings.push(msg);
     }
@@ -618,7 +636,7 @@ export async function ensureServerTunnelConnector(
     // calls below — allocateIPs (idempotent), CNAME (overrides wildcard),
     // certificate (idempotent).
     try {
-      const serverSubdomain = `srv-${server.machineId}`;
+      const serverSubdomain = `srv-${currentMachineId}`;
       await CloudflareTunnelService.addIngressRule(tunnelId, serverSubdomain, 61987);
 
       if (server.flyAppName) {
@@ -652,13 +670,13 @@ export async function ensureServerTunnelConnector(
         await CloudflareTunnelService.createDnsRecord(serverSubdomain, tunnelId);
       }
     } catch (error) {
-      const msg = `Failed to add server ingress rule for ${server.machineId}: ${error instanceof Error ? error.message : String(error)}`;
+      const msg = `Failed to add server ingress rule for ${currentMachineId}: ${error instanceof Error ? error.message : String(error)}`;
       console.warn(`[ServerService] ${msg}`);
       warnings.push(msg);
     }
   }
 
-  return { tunnelId, warnings };
+  return { tunnelId, warnings, machineId: currentMachineId };
 }
 
 
@@ -2251,12 +2269,30 @@ export async function restartRemoteServer(
   }
 
   try {
-    await ensureServerTunnelConnector(serverId, { requireMachineUpdate: true });
+    const tunnelResult = await ensureServerTunnelConnector(serverId, { requireMachineUpdate: true });
 
     const provider = getProvider((server.provider || 'fly') as ProviderId);
-    console.log(`[ServerService] Restarting machine ${server.machineId} for server ${serverId} (with image update)`);
 
-    await provider.updateMachineImage(server.machineId, server.flyAppName);
+    // ensureServerTunnelConnector may have recreated the machine (the Docker
+    // provider recreates the container to apply the tunnel token), changing
+    // its id. Operate on the current id, not the one loaded before the recreate
+    // — the pre-recreate container has already been removed.
+    let machineId = tunnelResult?.machineId ?? server.machineId;
+    console.log(`[ServerService] Restarting machine ${machineId} for server ${serverId} (with image update)`);
+
+    // updateMachineImage returns the machine id that is now current. In-place
+    // providers (Fly) return the same id; providers that must recreate the
+    // container to swap its image (Docker) return a NEW id — persist it so the
+    // readiness waits below, and every later lifecycle op, target the live
+    // machine instead of the removed one.
+    const updatedMachineId = await provider.updateMachineImage(machineId, server.flyAppName);
+    if (updatedMachineId && updatedMachineId !== machineId) {
+      await db
+        .update(servers)
+        .set({ machineId: updatedMachineId, updatedAt: new Date() })
+        .where(eq(servers.id, serverId));
+      machineId = updatedMachineId;
+    }
 
     // Wait for it to be ready and healthy. updateMachineImage commits a NEW
     // image to the machine config, so Fly must pull a fresh image layer from
@@ -2267,8 +2303,8 @@ export async function restartRemoteServer(
     // so waitForState threw a timeout and the operation reported "Failed to
     // restart server" even though the image update had already been
     // committed and the machine came up healthy moments later.
-    await provider.waitForState(server.machineId, ['running'], 600_000, server.flyAppName);
-    await provider.waitForHealthy(server.machineId, 300_000, server.flyAppName);
+    await provider.waitForState(machineId, ['running'], 600_000, server.flyAppName);
+    await provider.waitForHealthy(machineId, 300_000, server.flyAppName);
 
     // Update status
     await db
