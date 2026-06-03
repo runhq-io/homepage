@@ -1299,6 +1299,20 @@ export type NewWorkspaceTaskAttachment = typeof workspaceTaskAttachments.$inferI
 export type WorkspaceTaskVote = typeof workspaceTaskVotes.$inferSelect;
 export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 
+export const githubAppInstallations = pgTable('github_app_installations', {
+  installationId: bigint('installation_id', { mode: 'number' }).primaryKey(),
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  accountLogin: text('account_login').notNull(),
+  accountType: text('account_type').notNull().$type<'User' | 'Organization'>(),
+  repositorySelection: text('repository_selection').$type<'all' | 'selected' | null>(),
+  suspendedAt: timestamp('suspended_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export type GithubAppInstallation = typeof githubAppInstallations.$inferSelect;
+export type NewGithubAppInstallation = typeof githubAppInstallations.$inferInsert;
+
 // ============================================================================
 // Widget — Embeddable voting/feedback widget
 // ============================================================================
