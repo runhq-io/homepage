@@ -1299,9 +1299,13 @@ export type NewWorkspaceTaskAttachment = typeof workspaceTaskAttachments.$inferI
 export type WorkspaceTaskVote = typeof workspaceTaskVotes.$inferSelect;
 export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 
+// A GitHub App installation is a connection to a GitHub account/org (one per
+// (app, account), keyed by GitHub's numeric installation_id). It is NOT owned
+// by a single workspace — it is workspace-SHARED via github_installation_workspaces.
+// connected_by_user_id records the RunHQ user who authorized it (audit only).
 export const githubAppInstallations = pgTable('github_app_installations', {
   installationId: bigint('installation_id', { mode: 'number' }).primaryKey(),
-  serverId: text('server_id').references(() => servers.id).notNull(),
+  connectedByUserId: uuid('connected_by_user_id').references(() => users.id),
   accountLogin: text('account_login').notNull(),
   accountType: text('account_type').notNull().$type<'User' | 'Organization'>(),
   repositorySelection: text('repository_selection').$type<'all' | 'selected' | null>(),
@@ -1312,6 +1316,26 @@ export const githubAppInstallations = pgTable('github_app_installations', {
 
 export type GithubAppInstallation = typeof githubAppInstallations.$inferSelect;
 export type NewGithubAppInstallation = typeof githubAppInstallations.$inferInsert;
+
+// Many-to-many: which workspaces an installation is "available in". An
+// installation can be associated with multiple workspaces; usage is gated by
+// workspace membership + manage_project, not by who connected it. ON DELETE
+// CASCADE removes associations when the installation or the server is deleted.
+export const githubInstallationWorkspaces = pgTable('github_installation_workspaces', {
+  installationId: bigint('installation_id', { mode: 'number' })
+    .notNull()
+    .references(() => githubAppInstallations.installationId, { onDelete: 'cascade' }),
+  serverId: text('server_id')
+    .notNull()
+    .references(() => servers.id, { onDelete: 'cascade' }),
+  addedByUserId: uuid('added_by_user_id').references(() => users.id),
+  addedAt: timestamp('added_at').defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.installationId, t.serverId] }),
+}));
+
+export type GithubInstallationWorkspace = typeof githubInstallationWorkspaces.$inferSelect;
+export type NewGithubInstallationWorkspace = typeof githubInstallationWorkspaces.$inferInsert;
 
 // ============================================================================
 // Widget — Embeddable voting/feedback widget
