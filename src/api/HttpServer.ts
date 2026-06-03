@@ -22,6 +22,10 @@ import * as InviteService from './services/InviteService';
 import { assertActivated } from '../lib/signupGating';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
+import { registerGithubRoutes } from './github/githubRoutes';
+import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
+import * as GithubInstallationsService from './services/GithubInstallationsService';
+import { getGitHubAppService } from './services/GitHubAppService';
 import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
 import * as AutoHealService from './services/AutoHealService';
 import * as ServerSessionService from './services/ServerSessionService';
@@ -6483,6 +6487,26 @@ export function createHttpApp() {
 
   // Mount OAuth routes
   app.route('/oauth', oauth);
+
+  if (isGithubAppConfigured()) {
+    registerGithubRoutes(app, {
+      config: getGithubAppConfig(),
+      appUrl: process.env.APP_URL ?? 'https://app.runhq.io',
+      resolveUserId: (authHeader) =>
+        authHeader?.startsWith('Bearer ')
+          ? extractUserIdFromToken(authHeader.slice(7))
+          : Promise.resolve(null),
+      serverBelongsToUser: async (serverId, userId) => {
+        const server = await ServerService.getServer(serverId);
+        return !!server && server.ownerId === userId;
+      },
+      getServerByToken: (t) => ServerService.getServerByToken(t),
+      upsertInstallation: GithubInstallationsService.upsertInstallation,
+      removeInstallation: GithubInstallationsService.removeInstallation,
+      getInstallation: GithubInstallationsService.getInstallation,
+      mintInstallationToken: (id) => getGitHubAppService().mintInstallationToken(id),
+    });
+  }
 
   return app;
 }
