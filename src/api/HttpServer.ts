@@ -26,6 +26,8 @@ import { registerGithubRoutes } from './github/githubRoutes';
 import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
 import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
 import * as GithubInstallationsService from './services/GithubInstallationsService';
+import * as GithubProjectReposService from './services/GithubProjectReposService';
+import { aggregateForUser } from './services/GithubAggregationService';
 import { getGitHubAppService } from './services/GitHubAppService';
 import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
 import * as AutoHealService from './services/AutoHealService';
@@ -6517,6 +6519,19 @@ export function createHttpApp() {
       listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
       getPullRequestDiff: (id, owner, repo, n) => getGitHubAppService().getPullRequestDiff(id, owner, repo, n),
       mergePullRequest: (id, owner, repo, n, method) => getGitHubAppService().mergePullRequest(id, owner, repo, n, method),
+      upsertProjectRepo: GithubProjectReposService.upsertProjectRepo,
+      removeProjectRepo: GithubProjectReposService.removeProjectRepo,
+    });
+
+    // User-scoped cross-server PR aggregate (Home hub "Pull Requests" page).
+    app.get('/api/github/pulls', async (c) => {
+      const userId = await requireAuthenticatedUser(c);
+      if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+      const pulls = await aggregateForUser(userId, {
+        listForUser: GithubProjectReposService.listForUser,
+        listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
+      });
+      return c.json({ data: pulls });
     });
   }
 

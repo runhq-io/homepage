@@ -15,6 +15,8 @@ function makeApp(over: Partial<InternalGithubDeps> = {}) {
     listPullRequests: vi.fn(async () => [{ number: 7, title: 'PR' }]),
     getPullRequestDiff: vi.fn(async () => ({ sha: '7', files: [], patch: '' })),
     mergePullRequest: vi.fn(async () => ({ merged: true, message: 'ok' })),
+    upsertProjectRepo: vi.fn(async () => {}),
+    removeProjectRepo: vi.fn(async () => {}),
     ...over,
   };
   const app = new Hono();

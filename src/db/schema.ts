@@ -1337,6 +1337,34 @@ export const githubInstallationWorkspaces = pgTable('github_installation_workspa
 export type GithubInstallationWorkspace = typeof githubInstallationWorkspaces.$inferSelect;
 export type NewGithubInstallationWorkspace = typeof githubInstallationWorkspaces.$inferInsert;
 
+// Central mirror of "project X (on server S) is linked to GitHub repo owner/repo
+// via installation I". The authoritative link lives in each server machine's
+// local DB; servers sync it up here (on link/unlink + boot backfill) so the
+// cloud BE can aggregate open PRs across every server a user belongs to without
+// contacting individual machines. Treated as a CACHE: cascade-deletes with the
+// server or installation, and self-heals via the backfill. One repo per project
+// (PK = server+project).
+export const githubProjectRepos = pgTable('github_project_repos', {
+  serverId: text('server_id')
+    .notNull()
+    .references(() => servers.id, { onDelete: 'cascade' }),
+  projectId: text('project_id').notNull(),
+  installationId: bigint('installation_id', { mode: 'number' })
+    .notNull()
+    .references(() => githubAppInstallations.installationId, { onDelete: 'cascade' }),
+  owner: text('owner').notNull(),
+  repo: text('repo').notNull(),
+  projectName: text('project_name'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.serverId, t.projectId] }),
+  installIdx: index('github_project_repos_installation_idx').on(t.installationId),
+}));
+
+export type GithubProjectRepo = typeof githubProjectRepos.$inferSelect;
+export type NewGithubProjectRepo = typeof githubProjectRepos.$inferInsert;
+
 // ============================================================================
 // Widget — Embeddable voting/feedback widget
 // ============================================================================

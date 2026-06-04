@@ -22,6 +22,11 @@ export interface InternalGithubDeps {
   listPullRequests: (installationId: number, owner: string, repo: string, state: 'open' | 'closed' | 'all') => Promise<unknown[]>;
   getPullRequestDiff: (installationId: number, owner: string, repo: string, number: number) => Promise<unknown>;
   mergePullRequest: (installationId: number, owner: string, repo: string, number: number, method: 'merge' | 'squash' | 'rebase') => Promise<{ merged: boolean; message: string }>;
+  /** Mirror a project -> repo link up from the server machine (for cross-server PR aggregation). */
+  upsertProjectRepo: (input: {
+    serverId: string; projectId: string; installationId: number; owner: string; repo: string; projectName?: string | null;
+  }) => Promise<void>;
+  removeProjectRepo: (serverId: string, projectId: string) => Promise<void>;
 }
 
 export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps): void {
@@ -125,5 +130,39 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     const body = await c.req.json().catch(() => ({}));
     const result = await deps.mergePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')), (body.method as any) || 'merge');
     return c.json(result);
+  });
+
+  // Sync a project's repo link into the central mirror. The installation must be
+  // available in this workspace (proof the server may reference it).
+  app.put('/api/internal/servers/:serverId/github/project-repos', async (c) => {
+    const server = await authServer(c);
+    if (server instanceof Response) return server;
+    const body = await c.req.json().catch(() => ({}));
+    const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+    const installationId = Number(body.installationId);
+    const owner = typeof body.owner === 'string' ? body.owner : '';
+    const repo = typeof body.repo === 'string' ? body.repo : '';
+    if (!projectId || !installationId || !owner || !repo) {
+      return c.json({ error: 'projectId, installationId, owner, repo are required' }, 400);
+    }
+    if (!(await deps.isAssociatedWithWorkspace(installationId, server.id))) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
+    await deps.upsertProjectRepo({
+      serverId: server.id,
+      projectId,
+      installationId,
+      owner,
+      repo,
+      projectName: typeof body.projectName === 'string' ? body.projectName : null,
+    });
+    return c.json({ ok: true });
+  });
+
+  app.delete('/api/internal/servers/:serverId/github/project-repos/:projectId', async (c) => {
+    const server = await authServer(c);
+    if (server instanceof Response) return server;
+    await deps.removeProjectRepo(server.id, c.req.param('projectId'));
+    return c.json({ ok: true });
   });
 }
