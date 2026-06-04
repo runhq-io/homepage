@@ -1485,6 +1485,41 @@ export const widgetComments = pgTable('widget_comments', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+// Clarification loop: one session per ticket, tracks the back-and-forth
+// between the widget user and the agent before the task is started.
+export const widgetClarifications = pgTable('widget_clarifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  serverId: text('server_id').notNull().references(() => servers.id),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id),
+  status: text('status').notNull().$type<'asking' | 'ready' | 'skipped' | 'duplicate' | 'started'>().default('asking'),
+  round: integer('round').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_clarifications_task_id_idx').on(t.taskId),
+]);
+
+export const widgetClarificationQuestions = pgTable('widget_clarification_questions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  clarificationId: uuid('clarification_id').notNull().references(() => widgetClarifications.id, { onDelete: 'cascade' }),
+  prompt: text('prompt').notNull(),
+  options: jsonb('options').$type<string[] | null>(),
+  multiselect: boolean('multiselect').notNull().default(false),
+  status: text('status').notNull().$type<'pending' | 'answered'>().default('pending'),
+  answer: jsonb('answer').$type<string | string[] | null>(),
+  round: integer('round').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  answeredAt: timestamp('answered_at'),
+}, (t) => [
+  index('widget_clarification_questions_clarification_id_idx').on(t.clarificationId),
+]);
+
+export type WidgetClarificationRow = typeof widgetClarifications.$inferSelect;
+export type NewWidgetClarification = typeof widgetClarifications.$inferInsert;
+export type WidgetClarificationQuestionRow = typeof widgetClarificationQuestions.$inferSelect;
+export type NewWidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferInsert;
+
 // Per-channel naming: the widget is now anchored to a single todo channel,
 // so the row type is named `WidgetChannel` (the underlying table keeps the
 // `widget_projects` name to avoid Drizzle / SQL churn).
