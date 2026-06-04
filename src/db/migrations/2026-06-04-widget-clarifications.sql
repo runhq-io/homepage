@@ -7,8 +7,8 @@ CREATE TABLE IF NOT EXISTS widget_clarifications (
   widget_user_id   UUID        NOT NULL REFERENCES widget_users(id),
   status           TEXT        NOT NULL DEFAULT 'asking',
   round            INTEGER     NOT NULL DEFAULT 0,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at       TIMESTAMP   NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMP   NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS widget_clarifications_task_id_idx
@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS widget_clarification_questions (
   status            TEXT        NOT NULL DEFAULT 'pending',
   answer            JSONB,
   round             INTEGER     NOT NULL DEFAULT 0,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  answered_at       TIMESTAMPTZ
+  created_at        TIMESTAMP   NOT NULL DEFAULT now(),
+  answered_at       TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS widget_clarification_questions_clarification_id_idx
