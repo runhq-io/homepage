@@ -1490,8 +1490,8 @@ export const widgetComments = pgTable('widget_comments', {
 export const widgetClarifications = pgTable('widget_clarifications', {
   id: uuid('id').primaryKey().defaultRandom(),
   taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
-  serverId: text('server_id').notNull().references(() => servers.id),
-  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id),
+  serverId: text('server_id').notNull().references(() => servers.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
   status: text('status').notNull().$type<'asking' | 'ready' | 'skipped' | 'duplicate' | 'started'>().default('asking'),
   round: integer('round').notNull().default(0),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -1515,9 +1515,9 @@ export const widgetClarificationQuestions = pgTable('widget_clarification_questi
   index('widget_clarification_questions_clarification_id_idx').on(t.clarificationId),
 ]);
 
-export type WidgetClarificationRow = typeof widgetClarifications.$inferSelect;
+export type WidgetClarification = typeof widgetClarifications.$inferSelect;
 export type NewWidgetClarification = typeof widgetClarifications.$inferInsert;
-export type WidgetClarificationQuestionRow = typeof widgetClarificationQuestions.$inferSelect;
+export type WidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferSelect;
 export type NewWidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferInsert;
 
 // Per-channel naming: the widget is now anchored to a single todo channel,
