@@ -65,6 +65,34 @@ describe('parseVerdict', () => {
       parseVerdict('{"ready": false, "questions": [{"prompt": ""}]}'),
     ).toThrow(ClarifierParseError);
   });
+
+  it('throws ClarifierParseError when options contains non-string elements (numbers)', () => {
+    expect(() =>
+      parseVerdict('{"ready": false, "questions": [{"prompt":"P","options":[1,2]}]}'),
+    ).toThrow(ClarifierParseError);
+  });
+
+  it('throws ClarifierParseError when options contains non-string elements (null)', () => {
+    expect(() =>
+      parseVerdict('{"ready": false, "questions": [{"prompt":"P","options":["a",null]}]}'),
+    ).toThrow(ClarifierParseError);
+  });
+
+  it('throws ClarifierParseError when multiselect:true is set without options', () => {
+    expect(() =>
+      parseVerdict('{"ready": false, "questions": [{"prompt":"P","multiselect":true}]}'),
+    ).toThrow(ClarifierParseError);
+  });
+
+  it('parses successfully when multiselect:true is paired with options', () => {
+    const result = parseVerdict(
+      '{"ready": false, "questions": [{"prompt":"P","options":["a","b"],"multiselect":true}]}',
+    );
+    expect(result).toEqual({
+      ready: false,
+      questions: [{ prompt: 'P', options: ['a', 'b'], multiselect: true }],
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

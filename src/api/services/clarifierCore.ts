@@ -59,7 +59,9 @@ export class ClarifierParseError extends Error {
  * Throws ClarifierParseError on any malformed or invalid input.
  */
 export function parseVerdict(text: string): ClarifierVerdict {
-  // Extract the first {...} block from the text (handles prose wrapping).
+  // Greedy match from first `{` to last `}` in the text (handles prose wrapping).
+  // NOTE: trailing prose that itself contains `}` would extend the match and
+  // cause a parse failure — acceptable because the system prompt forbids prose.
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     throw new ClarifierParseError(
@@ -125,7 +127,14 @@ export function parseVerdict(text: string): ClarifierVerdict {
       if (!Array.isArray(qObj['options'])) {
         throw new ClarifierParseError(`questions[${idx}].options must be an array if present.`);
       }
+      if (!(qObj['options'] as unknown[]).every((el) => typeof el === 'string')) {
+        throw new ClarifierParseError(`questions[${idx}].options must be an array of strings.`);
+      }
       question.options = qObj['options'] as string[];
+    }
+
+    if ('multiselect' in qObj && qObj['multiselect'] === true && !('options' in qObj)) {
+      throw new ClarifierParseError(`questions[${idx}].multiselect requires options.`);
     }
 
     if ('multiselect' in qObj) {
@@ -148,7 +157,7 @@ export function parseVerdict(text: string): ClarifierVerdict {
 /**
  * Decide whether to ask another round of questions or proceed to assignment.
  *
- * @param round  Number of clarification rounds already completed (0-based).
+ * @param round  0-based index of the current round (0 = first round, no prior Q&A).
  *               At round === MAX_CLARIFICATION_ROUNDS we force-proceed even if
  *               the model still wants to ask more.
  * @param verdict The verdict returned by parseVerdict() for this round.
