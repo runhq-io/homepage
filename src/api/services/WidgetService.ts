@@ -2642,6 +2642,35 @@ export async function getWidgetUserAuditInfo(
   return wu ?? null;
 }
 
+/**
+ * Resolve the serverId + ticket title/description for an assign or clarification request.
+ * Returns null if the project or ticket cannot be found (caller should treat as 404).
+ */
+export async function getTicketForAssign(
+  widgetProjectId: string,
+  ticketId: string,
+): Promise<{ serverId: string; title: string; description: string | null } | null> {
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  if (!proj) return null;
+
+  const [task] = await db
+    .select({ title: workspaceTasks.title, description: workspaceTasks.description })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, proj.serverId),
+    ))
+    .limit(1);
+  if (!task) return null;
+
+  return { serverId: proj.serverId, title: task.title, description: task.description ?? null };
+}
+
 export async function assignAgent(
   widgetProjectId: string,
   ticketId: string,

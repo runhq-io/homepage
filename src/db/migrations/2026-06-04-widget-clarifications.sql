@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS widget_clarifications (
   task_id          UUID        NOT NULL REFERENCES workspace_tasks(id) ON DELETE CASCADE,
   server_id        TEXT        NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
   widget_user_id   UUID        NOT NULL REFERENCES widget_users(id) ON DELETE CASCADE,
+  agent_id         TEXT        NOT NULL,
+  command          TEXT        NOT NULL,
   status           TEXT        NOT NULL DEFAULT 'asking',
   round            INTEGER     NOT NULL DEFAULT 0,
   created_at       TIMESTAMP   NOT NULL DEFAULT now(),

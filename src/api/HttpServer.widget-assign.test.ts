@@ -15,6 +15,7 @@ vi.mock('./services/WidgetService', () => ({
   listExposedAgents: vi.fn(),
   getWidgetProjectRateLimit: vi.fn(),
   getWidgetUserAuditInfo: vi.fn(),
+  getTicketForAssign: vi.fn(),
   assignAgent: vi.fn(),
   WidgetAssignError: class WidgetAssignError extends Error {
     code: string;
@@ -41,6 +42,10 @@ vi.mock('./services/WidgetService', () => ({
   listPublicProjects: vi.fn(),
 }));
 
+vi.mock('./services/ClarifierService', () => ({
+  startClarification: vi.fn(),
+}));
+
 vi.mock('./services/WidgetRateLimiter', () => ({
   widgetRateLimiter: {
     check: vi.fn(),
@@ -54,6 +59,7 @@ vi.mock('./services/TaskAttachmentStorageService', () => ({
 
 import { createHttpApp } from './HttpServer';
 import * as WidgetService from './services/WidgetService';
+import * as ClarifierService from './services/ClarifierService';
 import { widgetRateLimiter } from './services/WidgetRateLimiter';
 
 const makeApp = () => createHttpApp();
@@ -68,6 +74,12 @@ const AUTHED_WITH_ASSIGN = {
 };
 
 const VALID_BODY = JSON.stringify({ agentId: 'agent-99', command: 'Fix this issue' });
+
+const TICKET_INFO = {
+  serverId: 'srv-1',
+  title: 'Fix login bug',
+  description: 'Users cannot log in with SSO',
+};
 
 const postAssign = (
   app: ReturnType<typeof makeApp>,
@@ -89,6 +101,9 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     (WidgetService.getWidgetProjectRateLimit as any).mockResolvedValue(30);
     (widgetRateLimiter.check as any).mockReturnValue({ allowed: true, retryAfterSec: 0 });
     (WidgetService.getWidgetUserAuditInfo as any).mockResolvedValue({ externalUserId: 'ext-user-1', name: 'Alice' });
+    (WidgetService.getTicketForAssign as any).mockResolvedValue(TICKET_INFO);
+    // Default clarifier returns 'ready' so the job starts (assignAgent path)
+    (ClarifierService.startClarification as any).mockResolvedValue({ status: 'ready', clarificationId: 'c1' });
     (WidgetService.assignAgent as any).mockResolvedValue({ jobId: 'job-001' });
   });
 
@@ -178,7 +193,48 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     expect(body.error).toBe('Widget user not found');
   });
 
-  it('200 happy path; assignAgent called with correct args', async () => {
+  it('404 when ticket not found (getTicketForAssign returns null)', async () => {
+    (WidgetService.getTicketForAssign as any).mockResolvedValue(null);
+    const app = makeApp();
+    const res = await postAssign(app);
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe('ticket_not_found');
+  });
+
+  it('200 with clarification questions when startClarification returns asking; assignAgent NOT called', async () => {
+    (ClarifierService.startClarification as any).mockResolvedValue({
+      status: 'asking',
+      clarificationId: 'c1',
+      round: 0,
+      questions: [{ id: 'q1', prompt: 'Which browser?', options: null, multiselect: false }],
+    });
+    const app = makeApp();
+    const res = await postAssign(app, 'ticket-abc');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      clarification: {
+        clarificationId: 'c1',
+        status: 'asking',
+        round: 0,
+        questions: [{ id: 'q1', prompt: 'Which browser?', options: null, multiselect: false }],
+      },
+    });
+    // Job must NOT be started
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+    // Clarifier was called with correct args
+    expect(ClarifierService.startClarification).toHaveBeenCalledWith({
+      serverId: 'srv-1',
+      taskId: 'ticket-abc',
+      widgetUserId: 'wu-123',
+      agentId: 'agent-99',
+      command: 'Fix this issue',
+      ticket: { title: 'Fix login bug', description: 'Users cannot log in with SSO' },
+    });
+  });
+
+  it('200 happy path: startClarification returns ready → assignAgent called with correct args', async () => {
     const app = makeApp();
     const res = await postAssign(app, 'ticket-abc');
     expect(res.status).toBe(200);

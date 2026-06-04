@@ -103,7 +103,7 @@ describe('startClarification', () => {
     );
 
     const result = await startClarification(
-      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Dropdown broken', description: 'The dropdown does not open' } },
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-test-1', command: 'Fix the dropdown', ticket: { title: 'Dropdown broken', description: 'The dropdown does not open' } },
       { callModel: stub },
     );
 
@@ -126,6 +126,9 @@ describe('startClarification', () => {
     expect(clarRow!.taskId).toBe(taskId);
     expect(clarRow!.serverId).toBe(SERVER_ID);
     expect(clarRow!.widgetUserId).toBe(WIDGET_USER_ID);
+    // Part A: verify agentId+command persisted on the row
+    expect(clarRow!.agentId).toBe('agent-test-1');
+    expect(clarRow!.command).toBe('Fix the dropdown');
 
     // Verify DB: question row
     const questions = await db
@@ -148,7 +151,7 @@ describe('startClarification', () => {
     const stub: CallModel = vi.fn().mockResolvedValue(JSON.stringify({ ready: true }));
 
     const result = await startClarification(
-      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Clear title', description: 'Full spec' } },
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-test-1', command: 'Fix it', ticket: { title: 'Clear title', description: 'Full spec' } },
       { callModel: stub },
     );
 
@@ -183,7 +186,7 @@ describe('answerClarification', () => {
       JSON.stringify({ ready: false, questions: [{ prompt: 'What platform?' }] })
     );
     const startResult = await startClarification(
-      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Full loop test', description: 'Some description' } },
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-test-1', command: 'Fix it', ticket: { title: 'Full loop test', description: 'Some description' } },
       { callModel: startStub },
     );
     expect(startResult.status).toBe('asking');
@@ -236,7 +239,7 @@ describe('answerClarification', () => {
       })
     );
     const startResult = await startClarification(
-      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Partial answer test', description: null } },
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-test-1', command: 'Fix it', ticket: { title: 'Partial answer test', description: null } },
       { callModel: startStub },
     );
     expect(startResult.status).toBe('asking');
@@ -281,7 +284,7 @@ describe('answerClarification', () => {
     const garbageStub: CallModel = vi.fn().mockResolvedValue('this is not JSON at all!!!');
 
     const result = await startClarification(
-      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Parse failure test', description: 'desc' } },
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-test-1', command: 'Fix it', ticket: { title: 'Parse failure test', description: 'desc' } },
       { callModel: garbageStub },
     );
 
@@ -318,7 +321,7 @@ describe('answerClarification', () => {
       JSON.stringify({ ready: false, questions: [{ prompt: 'What went wrong?' }] })
     );
     const startResult = await startClarification(
-      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Unknown ID test', description: 'desc' } },
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-test-1', command: 'Fix it', ticket: { title: 'Unknown ID test', description: 'desc' } },
       { callModel: startStub },
     );
     expect(startResult.status).toBe('asking');

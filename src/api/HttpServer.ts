@@ -36,6 +36,7 @@ import { getServerSessionKeyPair } from './auth/serverSessionKeys';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
+import * as ClarifierService from './services/ClarifierService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
@@ -5685,8 +5686,37 @@ export function createHttpApp() {
     const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
     if (!wu) return c.json({ error: 'Widget user not found' }, 404);
 
+    const ticketId = c.req.param('id');
+
+    // Resolve project → serverId + ticket info for the clarification
+    const ticketInfo = await WidgetService.getTicketForAssign(auth.projectId, ticketId);
+    if (!ticketInfo) return c.json({ error: 'ticket_not_found' }, 404);
+
     try {
-      const result = await WidgetService.assignAgent(auth.projectId, c.req.param('id'), {
+      // v2: start clarification first; defer the job until clarification is ready
+      const clarStep = await ClarifierService.startClarification({
+        serverId: ticketInfo.serverId,
+        taskId: ticketId,
+        widgetUserId: auth.widgetUserId,
+        agentId: body.agentId,
+        command: body.command,
+        ticket: { title: ticketInfo.title, description: ticketInfo.description },
+      });
+
+      if (clarStep.status === 'asking') {
+        // Return questions to the caller — job NOT started yet
+        return c.json({
+          clarification: {
+            clarificationId: clarStep.clarificationId,
+            status: 'asking' as const,
+            round: clarStep.round,
+            questions: clarStep.questions,
+          },
+        });
+      }
+
+      // clarStep.status === 'ready' — proceed to start the job
+      const result = await WidgetService.assignAgent(auth.projectId, ticketId, {
         agentId: body.agentId,
         command: body.command,
         actor: {

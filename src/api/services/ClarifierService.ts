@@ -172,6 +172,8 @@ export async function startClarification(
     serverId: string;
     taskId: string;
     widgetUserId: string;
+    agentId: string;
+    command: string;
     ticket: { title: string; description: string | null };
   },
   deps?: { callModel?: CallModel },
@@ -193,6 +195,8 @@ export async function startClarification(
         taskId: input.taskId,
         serverId: input.serverId,
         widgetUserId: input.widgetUserId,
+        agentId: input.agentId,
+        command: input.command,
         status: action.action === 'proceed' ? 'ready' : 'asking',
         round: 0,
       })

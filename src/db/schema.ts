@@ -1492,6 +1492,8 @@ export const widgetClarifications = pgTable('widget_clarifications', {
   taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
   serverId: text('server_id').notNull().references(() => servers.id, { onDelete: 'cascade' }),
   widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id').notNull(),
+  command: text('command').notNull(),
   status: text('status').notNull().$type<'asking' | 'ready' | 'skipped' | 'duplicate' | 'started'>().default('asking'),
   round: integer('round').notNull().default(0),
   createdAt: timestamp('created_at').defaultNow().notNull(),
