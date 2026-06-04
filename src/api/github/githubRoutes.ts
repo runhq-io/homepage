@@ -19,6 +19,10 @@ export interface GithubRoutesDeps {
   /** Whether an installation is available in (associated with) a workspace. */
   isAssociatedWithWorkspace: (installationId: number, serverId: string) => Promise<boolean>;
   mintInstallationToken: (installationId: number) => Promise<{ token: string; expiresAt: string }>;
+  /** Authoritative account identity read from the GitHub App API. */
+  fetchInstallationAccount: (installationId: number) => Promise<{
+    accountLogin: string; accountType: 'User' | 'Organization'; repositorySelection: 'all' | 'selected' | null;
+  }>;
 }
 
 export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
@@ -29,9 +33,25 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
     if (!installationId || !decoded) {
       return c.redirect(`${deps.clientUrl}/github/installed?error=1`, 302);
     }
-    // (a) record the installation (connector = whoever completed the GitHub flow)
+    // (a) record the installation (connector = whoever completed the GitHub flow).
+    // The redirect is the authoritative, synchronous signal that the app was
+    // installed, so we read the account identity from GitHub right here instead
+    // of writing a blank placeholder and hoping the `installation` webhook later
+    // backfills it — that webhook may never reach this environment, which left
+    // accounts showing as blank/invisible rows. Best-effort: if the read fails
+    // the row is still created (login lazily healed on next list), but never
+    // overwriting a known identity (see upsertInstallation).
+    let account: { accountLogin: string; accountType: 'User' | 'Organization'; repositorySelection: 'all' | 'selected' | null } = {
+      accountLogin: '', accountType: 'User', repositorySelection: null,
+    };
+    try {
+      account = await deps.fetchInstallationAccount(installationId);
+    } catch {
+      // Swallow — keep the install flow resilient; identity heals on next read.
+    }
     await deps.upsertInstallation({
-      installationId, connectedByUserId: decoded.userId, accountLogin: '', accountType: 'User', repositorySelection: null,
+      installationId, connectedByUserId: decoded.userId,
+      accountLogin: account.accountLogin, accountType: account.accountType, repositorySelection: account.repositorySelection,
     });
     // (b) make it available in the originating workspace — never overwrite a 1:1 binding.
     await deps.associateWithWorkspace(installationId, decoded.serverId, decoded.userId);

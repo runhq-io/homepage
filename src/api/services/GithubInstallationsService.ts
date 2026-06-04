@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import {
   githubAppInstallations,
@@ -30,14 +30,40 @@ export async function upsertInstallation(input: UpsertInstallationInput): Promis
       target: githubAppInstallations.installationId,
       // connectedByUserId is intentionally NOT in the update set: the connector
       // is recorded once at first connect; re-installs/reconfigures preserve it.
+      //
+      // Identity fields (login/type/selection) are only overwritten when the
+      // incoming login is non-empty. A placeholder write with an empty login
+      // (e.g. the install redirect before GitHub is queried, or a webhook whose
+      // payload lacks an account) must NOT wipe an already-known identity — that
+      // is what produced blank, invisible account rows.
       set: {
-        accountLogin: input.accountLogin,
-        accountType: input.accountType,
-        repositorySelection: input.repositorySelection ?? null,
+        accountLogin: sql`case when excluded.account_login <> '' then excluded.account_login else ${githubAppInstallations.accountLogin} end`,
+        accountType: sql`case when excluded.account_login <> '' then excluded.account_type else ${githubAppInstallations.accountType} end`,
+        repositorySelection: sql`case when excluded.account_login <> '' then excluded.repository_selection else ${githubAppInstallations.repositorySelection} end`,
         suspendedAt: null,
         updatedAt: new Date(),
       },
     });
+}
+
+/**
+ * Backfill an existing installation's account identity (login/type/selection)
+ * without touching the connector or workspace associations. Used to heal rows
+ * created before the identity was known. No-op if the installation is gone.
+ */
+export async function setInstallationAccount(
+  installationId: number,
+  account: { accountLogin: string; accountType: 'User' | 'Organization'; repositorySelection: 'all' | 'selected' | null },
+): Promise<void> {
+  await db
+    .update(githubAppInstallations)
+    .set({
+      accountLogin: account.accountLogin,
+      accountType: account.accountType,
+      repositorySelection: account.repositorySelection,
+      updatedAt: new Date(),
+    })
+    .where(eq(githubAppInstallations.installationId, installationId));
 }
 
 export async function removeInstallation(installationId: number): Promise<void> {

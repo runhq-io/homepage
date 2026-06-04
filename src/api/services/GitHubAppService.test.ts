@@ -33,6 +33,34 @@ describe('GitHubAppService', () => {
     expect(repos[0].full_name).toBe('octo/app');
   });
 
+  it('reads an installation account via an app-JWT octokit (no installation token)', async () => {
+    const auth = vi.fn(async (opts: any) => ({ token: opts.type === 'app' ? 'app_jwt' : `tok_${opts.installationId}`, expiresAt: 'soon' }));
+    const makeOctokit = (token: string) => ({
+      token,
+      paginate: vi.fn(async () => []),
+      request: vi.fn(async (route: string, params: any) => {
+        expect(route).toBe('GET /app/installations/{installation_id}');
+        expect(params).toMatchObject({ installation_id: 42 });
+        return { data: { account: { login: 'pranshu6', type: 'Organization' }, repository_selection: 'selected' } };
+      }),
+    });
+    const svc = new GitHubAppService({ auth: auth as any, makeOctokit: makeOctokit as any });
+    const account = await svc.getInstallationAccount(42);
+    expect(account).toEqual({ accountLogin: 'pranshu6', accountType: 'Organization', repositorySelection: 'selected' });
+    expect(auth).toHaveBeenCalledWith({ type: 'app' });
+  });
+
+  it('falls back to an empty login / User type when GitHub omits the account', async () => {
+    const auth = vi.fn(async () => ({ token: 'app_jwt', expiresAt: 'soon' }));
+    const makeOctokit = (_token: string) => ({
+      token: _token,
+      paginate: vi.fn(async () => []),
+      request: vi.fn(async () => ({ data: { repository_selection: null } })),
+    });
+    const svc = new GitHubAppService({ auth: auth as any, makeOctokit: makeOctokit as any });
+    expect(await svc.getInstallationAccount(7)).toEqual({ accountLogin: '', accountType: 'User', repositorySelection: null });
+  });
+
   it('creates an org repo', async () => {
     const { svc, requests } = makeService();
     const repo = await svc.createOrgRepo(99, 'octo', 'newrepo', true);

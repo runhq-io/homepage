@@ -6505,6 +6505,7 @@ export function createHttpApp() {
       associateWithWorkspace: GithubInstallationsService.associateWithWorkspace,
       isAssociatedWithWorkspace: GithubInstallationsService.isAssociatedWithWorkspace,
       mintInstallationToken: (id) => getGitHubAppService().mintInstallationToken(id),
+      fetchInstallationAccount: (id) => getGitHubAppService().getInstallationAccount(id),
     });
     registerInternalGithubRoutes(app, {
       stateSecret: getGithubAppConfig().stateSecret,
@@ -6521,6 +6522,12 @@ export function createHttpApp() {
       mergePullRequest: (id, owner, repo, n, method) => getGitHubAppService().mergePullRequest(id, owner, repo, n, method),
       upsertProjectRepo: GithubProjectReposService.upsertProjectRepo,
       removeProjectRepo: GithubProjectReposService.removeProjectRepo,
+      backfillInstallationAccount: async (id) => {
+        const acct = await getGitHubAppService().getInstallationAccount(id);
+        if (!acct.accountLogin) return null;
+        await GithubInstallationsService.setInstallationAccount(id, acct);
+        return acct;
+      },
     });
 
     // User-scoped cross-server PR aggregate (Home hub "Pull Requests" page).

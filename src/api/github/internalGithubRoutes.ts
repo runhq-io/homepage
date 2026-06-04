@@ -27,6 +27,14 @@ export interface InternalGithubDeps {
     serverId: string; projectId: string; installationId: number; owner: string; repo: string; projectName?: string | null;
   }) => Promise<void>;
   removeProjectRepo: (serverId: string, projectId: string) => Promise<void>;
+  /**
+   * Heal an installation whose account identity is still blank (created before
+   * the identity was known). Returns the now-known identity, or null if it
+   * couldn't be resolved. Optional: when absent, blank rows are returned as-is.
+   */
+  backfillInstallationAccount?: (installationId: number) => Promise<{
+    accountLogin: string; accountType: string; repositorySelection: string | null;
+  } | null>;
 }
 
 export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps): void {
@@ -47,10 +55,23 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     return c.json({ url: `https://github.com/apps/${deps.appSlug}/installations/new?state=${encodeURIComponent(state)}` });
   });
 
+  // Resolve any blank account logins before returning. Rows can predate the
+  // synchronous identity read in the setup handler; this self-heals them on the
+  // next view so a member never sees a blank, unselectable account row.
+  type Install = { installationId: number; accountLogin: string; accountType: string; repositorySelection: string | null };
+  const healBlankLogins = async (rows: Install[]): Promise<Install[]> => {
+    if (!deps.backfillInstallationAccount) return rows;
+    return Promise.all(rows.map(async (r) => {
+      if (r.accountLogin) return r;
+      const healed = await deps.backfillInstallationAccount!(r.installationId).catch(() => null);
+      return healed && healed.accountLogin ? { ...r, ...healed } : r;
+    }));
+  };
+
   app.get('/api/internal/servers/:serverId/github/installations', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    return c.json({ installations: await deps.listInstallationsForServer(server.id) });
+    return c.json({ installations: await healBlankLogins(await deps.listInstallationsForServer(server.id)) });
   });
 
   // Accounts the current user has connected but that are NOT yet available in
@@ -65,7 +86,7 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
       deps.listInstallationsForServer(server.id),
     ]);
     const associatedIds = new Set(associated.map((i) => i.installationId));
-    return c.json({ installations: connected.filter((i) => !associatedIds.has(i.installationId)) });
+    return c.json({ installations: await healBlankLogins(connected.filter((i) => !associatedIds.has(i.installationId))) });
   });
 
   // Make a user-connected installation available in this workspace. Idempotent;

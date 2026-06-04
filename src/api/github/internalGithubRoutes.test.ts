@@ -53,6 +53,29 @@ describe('internal github routes', () => {
     expect(body.installations[0].installationId).toBe(5);
   });
 
+  it('heals a blank account login on read via backfill, returning the resolved identity', async () => {
+    const backfillInstallationAccount = vi.fn(async (id: number) =>
+      id === 8 ? { accountLogin: 'pranshu6', accountType: 'User', repositorySelection: 'selected' as string | null } : null);
+    const { app } = makeApp({
+      listInstallationsForServer: async (sid) => (sid === 'ws_a'
+        ? [{ installationId: 8, accountLogin: '', accountType: 'User', repositorySelection: null } as any]
+        : []),
+      backfillInstallationAccount,
+    });
+    const res = await app.request('/api/internal/servers/ws_a/github/installations', { headers: auth });
+    const body = await res.json();
+    expect(backfillInstallationAccount).toHaveBeenCalledWith(8);
+    expect(body.installations[0]).toMatchObject({ installationId: 8, accountLogin: 'pranshu6', accountType: 'User' });
+  });
+
+  it('does not backfill rows whose login is already known', async () => {
+    const backfillInstallationAccount = vi.fn(async () => null);
+    const { app } = makeApp({ backfillInstallationAccount });
+    const res = await app.request('/api/internal/servers/ws_a/github/installations', { headers: auth });
+    expect(res.status).toBe(200);
+    expect(backfillInstallationAccount).not.toHaveBeenCalled();
+  });
+
   it('lists repos for an installation associated with the server', async () => {
     const { app } = makeApp();
     const res = await app.request('/api/internal/servers/ws_a/github/installations/5/repos', { headers: auth });

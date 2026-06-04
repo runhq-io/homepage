@@ -16,13 +16,22 @@ export interface InstallationRepo {
   private: boolean;
 }
 
+export interface InstallationAccount {
+  accountLogin: string;
+  accountType: 'User' | 'Organization';
+  repositorySelection: 'all' | 'selected' | null;
+}
+
 interface OctokitLike {
   paginate(route: string, params?: Record<string, unknown>): Promise<any[]>;
   request(route: string, params?: Record<string, unknown>): Promise<{ data: any }>;
 }
 
 export interface GitHubAppDeps {
-  auth?: (opts: { type: 'installation'; installationId: number }) => Promise<InstallationToken>;
+  // Accepts app-JWT auth ({ type: 'app' }) as well as installation auth — the
+  // former is needed to read installation metadata (account login/type) before
+  // any installation token exists.
+  auth?: (opts: { type: 'installation'; installationId: number } | { type: 'app' }) => Promise<InstallationToken>;
   makeOctokit?: (token: string) => OctokitLike;
 }
 
@@ -49,6 +58,28 @@ export class GitHubAppService {
   private async octokitFor(installationId: number): Promise<OctokitLike> {
     const { token } = await this.mintInstallationToken(installationId);
     return this.makeOctokit(token);
+  }
+
+  /** App-JWT octokit (no installation token) — for App-level endpoints. */
+  private async appOctokit(): Promise<OctokitLike> {
+    const { token } = await this.auth({ type: 'app' });
+    return this.makeOctokit(token);
+  }
+
+  /**
+   * Authoritative read of an installation's account identity straight from
+   * GitHub. Used to populate accountLogin/accountType at install time and to
+   * heal rows that were created before the identity was known — so we never
+   * depend on the `installation` webhook being delivered to learn who owns it.
+   */
+  async getInstallationAccount(installationId: number): Promise<InstallationAccount> {
+    const okit = await this.appOctokit();
+    const { data } = await okit.request('GET /app/installations/{installation_id}', { installation_id: installationId });
+    return {
+      accountLogin: data.account?.login ?? '',
+      accountType: data.account?.type === 'Organization' ? 'Organization' : 'User',
+      repositorySelection: (data.repository_selection as 'all' | 'selected' | null) ?? null,
+    };
   }
 
   async listInstallationRepos(installationId: number): Promise<InstallationRepo[]> {

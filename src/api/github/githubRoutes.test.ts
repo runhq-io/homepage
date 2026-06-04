@@ -17,6 +17,7 @@ function makeApp(overrides: Partial<GithubRoutesDeps> = {}) {
     associateWithWorkspace: vi.fn(async () => {}),
     isAssociatedWithWorkspace: async (id: number, sid: string) => id === 5 && sid === 'ws_a',
     mintInstallationToken: async (id: number) => ({ token: `tok_${id}`, expiresAt: 'soon' }),
+    fetchInstallationAccount: vi.fn(async (_id: number) => ({ accountLogin: 'pranshu6', accountType: 'User' as const, repositorySelection: 'all' as const })),
     ...overrides,
   };
   const app = new Hono();
@@ -33,7 +34,21 @@ describe('github routes', () => {
     // Must redirect to the CLIENT SPA origin (app.runhq.io), not the BE origin —
     // the /github/installed page only exists on the client.
     expect(res.headers.get('location')).toBe('https://app.runhq.io/github/installed');
-    expect(deps.upsertInstallation).toHaveBeenCalledWith(expect.objectContaining({ installationId: 5, connectedByUserId: 'user_1' }));
+    // The account identity is read from GitHub synchronously and persisted — not
+    // left blank for a webhook to (maybe) backfill later.
+    expect(deps.fetchInstallationAccount).toHaveBeenCalledWith(5);
+    expect(deps.upsertInstallation).toHaveBeenCalledWith(
+      expect.objectContaining({ installationId: 5, connectedByUserId: 'user_1', accountLogin: 'pranshu6', accountType: 'User', repositorySelection: 'all' }),
+    );
+    expect(deps.associateWithWorkspace).toHaveBeenCalledWith(5, 'ws_a', 'user_1');
+  });
+
+  it('setup callback still records the installation (without a blank-clobbering identity) when the GitHub read fails', async () => {
+    const { app, deps } = makeApp({ fetchInstallationAccount: vi.fn(async () => { throw new Error('github down'); }) });
+    const state = signInstallState('ws_a', 'user_1', cfg.stateSecret);
+    const res = await app.request(`/api/github/setup?installation_id=5&setup_action=install&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
+    expect(res.status).toBe(302);
+    expect(deps.upsertInstallation).toHaveBeenCalledWith(expect.objectContaining({ installationId: 5, accountLogin: '' }));
     expect(deps.associateWithWorkspace).toHaveBeenCalledWith(5, 'ws_a', 'user_1');
   });
 
