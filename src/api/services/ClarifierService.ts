@@ -51,6 +51,16 @@ export type ClarifierStep =
       }>;
     };
 
+/** Input to startClarification. */
+export interface StartClarificationInput {
+  serverId: string;
+  taskId: string;
+  widgetUserId: string;
+  ticket: { title: string; description: string | null };
+  agentId: string;
+  command: string;
+}
+
 /**
  * Thrown by answerClarification when one or more provided questionIds do not
  * match a pending question of the given clarification.
@@ -168,14 +178,7 @@ async function insertQuestions(
 // ---------------------------------------------------------------------------
 
 export async function startClarification(
-  input: {
-    serverId: string;
-    taskId: string;
-    widgetUserId: string;
-    agentId: string;
-    command: string;
-    ticket: { title: string; description: string | null };
-  },
+  input: StartClarificationInput,
   deps?: { callModel?: CallModel },
 ): Promise<ClarifierStep> {
   const callModel = deps?.callModel ?? defaultCallModel;

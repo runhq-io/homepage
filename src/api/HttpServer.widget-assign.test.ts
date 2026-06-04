@@ -240,6 +240,13 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ jobId: 'job-001', agentId: 'agent-99' });
+    expect(ClarifierService.startClarification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'ticket-abc',
+        agentId: 'agent-99',
+        command: 'Fix this issue',
+      }),
+    );
     expect(WidgetService.assignAgent).toHaveBeenCalledWith(
       'proj-1',
       'ticket-abc',
@@ -254,6 +261,16 @@ describe('POST /api/widget/tickets/:id/assign', () => {
         },
       },
     );
+  });
+
+  it('503 when startClarification throws; assignAgent NOT called', async () => {
+    (ClarifierService.startClarification as any).mockRejectedValueOnce(new Error('no api key'));
+    const app = makeApp();
+    const res = await postAssign(app, 'ticket-abc');
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toEqual({ error: 'clarifier_unavailable' });
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
   });
 
   it('503 when assignAgent throws WidgetAssignError workspace_unreachable', async () => {

@@ -5692,9 +5692,10 @@ export function createHttpApp() {
     const ticketInfo = await WidgetService.getTicketForAssign(auth.projectId, ticketId);
     if (!ticketInfo) return c.json({ error: 'ticket_not_found' }, 404);
 
+    // Start clarification; only proceed to assignAgent when the model returns 'ready'.
+    let clarStep: Awaited<ReturnType<typeof ClarifierService.startClarification>>;
     try {
-      // v2: start clarification first; defer the job until clarification is ready
-      const clarStep = await ClarifierService.startClarification({
+      clarStep = await ClarifierService.startClarification({
         serverId: ticketInfo.serverId,
         taskId: ticketId,
         widgetUserId: auth.widgetUserId,
@@ -5702,20 +5703,25 @@ export function createHttpApp() {
         command: body.command,
         ticket: { title: ticketInfo.title, description: ticketInfo.description },
       });
+    } catch (err) {
+      console.error('[widget] clarifier failed:', err);
+      return c.json({ error: 'clarifier_unavailable' }, 503);
+    }
 
-      if (clarStep.status === 'asking') {
-        // Return questions to the caller — job NOT started yet
-        return c.json({
-          clarification: {
-            clarificationId: clarStep.clarificationId,
-            status: 'asking' as const,
-            round: clarStep.round,
-            questions: clarStep.questions,
-          },
-        });
-      }
+    if (clarStep.status === 'asking') {
+      // Return questions to the caller — job NOT started yet
+      return c.json({
+        clarification: {
+          clarificationId: clarStep.clarificationId,
+          status: 'asking' as const,
+          round: clarStep.round,
+          questions: clarStep.questions,
+        },
+      });
+    }
 
-      // clarStep.status === 'ready' — proceed to start the job
+    // clarStep.status === 'ready' — proceed to start the job
+    try {
       const result = await WidgetService.assignAgent(auth.projectId, ticketId, {
         agentId: body.agentId,
         command: body.command,
