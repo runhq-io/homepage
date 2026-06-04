@@ -5,8 +5,9 @@
  * the Anthropic SDK. The model call is injectable for testing without a real key.
  *
  * Exports:
- *   - CallModel        — the injectable model-call type
- *   - ClarifierStep    — the return shape for both entry points
+ *   - CallModel           — the injectable model-call type
+ *   - ClarifierStep       — the return shape for both entry points
+ *   - ClarifierAnswerError — thrown when provided questionIds don't match pending questions
  *   - startClarification(input, deps?) — begin a new clarification run
  *   - answerClarification(id, answers, deps?) — record answers and (if all done) advance
  */
@@ -33,7 +34,7 @@ import {
 /** Injectable model call — returns raw model text. */
 export type CallModel = (args: {
   system: string;
-  messages: Array<{ role: 'user'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
 }) => Promise<string>;
 
 export type ClarifierStep =
@@ -50,13 +51,26 @@ export type ClarifierStep =
       }>;
     };
 
+/**
+ * Thrown by answerClarification when one or more provided questionIds do not
+ * match a pending question of the given clarification.
+ *
+ * Route layer should map this to HTTP 400.
+ */
+export class ClarifierAnswerError extends Error {
+  constructor(message = 'one or more answers did not match a pending question') {
+    super(message);
+    this.name = 'ClarifierAnswerError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Default real model call (Haiku)
 // ---------------------------------------------------------------------------
 
 async function defaultCallModel(args: {
   system: string;
-  messages: Array<{ role: 'user'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
 }): Promise<string> {
   const { getSettings } = await import('./SettingsService');
   const settings = await getSettings();
@@ -88,7 +102,7 @@ const FALLBACK_QUESTION: ClarifierQuestion = {
  * If both attempts fail to parse, fall back to the generic question.
  */
 async function callModelWithFallback(
-  args: { system: string; messages: Array<{ role: 'user'; content: string }> },
+  args: { system: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> },
   callModel: CallModel,
 ): Promise<{ verdict: Awaited<ReturnType<typeof parseVerdict>>; usedFallback: boolean }> {
   // First attempt
@@ -114,13 +128,16 @@ async function callModelWithFallback(
   }
 }
 
+type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 /** Persist question rows for the given clarificationId+round, return the stored rows. */
 async function insertQuestions(
+  dbOrTx: DbOrTx,
   clarificationId: string,
   questions: ClarifierQuestion[],
   round: number,
 ): Promise<Array<{ id: string; prompt: string; options: string[] | null; multiselect: boolean }>> {
-  const inserted = await db
+  const inserted = await dbOrTx
     .insert(widgetClarificationQuestions)
     .values(
       questions.map((q) => ({
@@ -161,39 +178,37 @@ export async function startClarification(
 ): Promise<ClarifierStep> {
   const callModel = deps?.callModel ?? defaultCallModel;
 
-  // 1. Insert the clarification row (round 0, status 'asking')
-  const [clarRow] = await db
-    .insert(widgetClarifications)
-    .values({
-      taskId: input.taskId,
-      serverId: input.serverId,
-      widgetUserId: input.widgetUserId,
-      status: 'asking',
-      round: 0,
-    })
-    .returning({ id: widgetClarifications.id });
-  const clarificationId = clarRow!.id;
-
-  // 2. Build messages and call model (with fallback handling)
+  // 1. Call model FIRST — if this throws (non-parse error) no DB row is written.
   const { system, messages } = buildClarifierMessages(input.ticket, []);
   const { verdict } = await callModelWithFallback({ system, messages }, callModel);
 
-  // 3. Resolve action
+  // 2. Resolve action before touching the DB
   const action = resolveClarifierAction(0, verdict);
 
-  if (action.action === 'proceed') {
-    // Mark ready
-    await db
-      .update(widgetClarifications)
-      .set({ status: 'ready', updatedAt: new Date() })
-      .where(eq(widgetClarifications.id, clarificationId));
+  // 3. Write atomically: insert clarification row + questions (if asking) in one tx.
+  const result = await db.transaction(async (tx) => {
+    const [clarRow] = await tx
+      .insert(widgetClarifications)
+      .values({
+        taskId: input.taskId,
+        serverId: input.serverId,
+        widgetUserId: input.widgetUserId,
+        status: action.action === 'proceed' ? 'ready' : 'asking',
+        round: 0,
+      })
+      .returning({ id: widgetClarifications.id });
+    const clarificationId = clarRow!.id;
 
-    return { status: 'ready', clarificationId };
-  }
+    if (action.action === 'proceed') {
+      return { status: 'ready' as const, clarificationId };
+    }
 
-  // action === 'ask': persist questions
-  const questions = await insertQuestions(clarificationId, action.questions, 0);
-  return { status: 'asking', clarificationId, round: 0, questions };
+    // action === 'ask': insert question rows inside the same tx
+    const questions = await insertQuestions(tx, clarificationId, action.questions, 0);
+    return { status: 'asking' as const, clarificationId, round: 0 as const, questions };
+  });
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,10 +230,12 @@ export async function answerClarification(
     .limit(1);
   if (!clarRow) throw new Error(`Clarification not found: ${clarificationId}`);
 
-  // 2. Mark the provided questions answered (only 'pending' ones belonging to this clarification)
+  // 2. Mark the provided questions answered (only 'pending' ones belonging to this clarification).
+  //    Use .returning() to count how many rows were actually updated.
   const now = new Date();
+  let totalApplied = 0;
   for (const { questionId, answer } of answers) {
-    await db
+    const updated = await db
       .update(widgetClarificationQuestions)
       .set({ status: 'answered', answer, answeredAt: now })
       .where(
@@ -227,7 +244,14 @@ export async function answerClarification(
           eq(widgetClarificationQuestions.clarificationId, clarificationId),
           eq(widgetClarificationQuestions.status, 'pending'),
         ),
-      );
+      )
+      .returning({ id: widgetClarificationQuestions.id });
+    totalApplied += updated.length;
+  }
+
+  // 2b. If any provided IDs didn't match a pending question of this clarification, reject.
+  if (totalApplied < answers.length) {
+    throw new ClarifierAnswerError();
   }
 
   // 3. Check if any 'pending' questions remain
@@ -261,10 +285,9 @@ export async function answerClarification(
     };
   }
 
-  // 4. All answered — advance to next round
-  const newRound = clarRow.round + 1;
+  // 4. All answered — advance to next round.
 
-  // Rebuild Q&A history from all answered questions for this clarification
+  // Rebuild Q&A history from all answered questions for this clarification.
   const answeredRows = await db
     .select({
       prompt: widgetClarificationQuestions.prompt,
@@ -293,28 +316,33 @@ export async function answerClarification(
     .limit(1);
   const ticket = { title: taskRow?.title ?? '', description: taskRow?.description ?? null };
 
-  // 5. Call model (with fallback)
+  // 5. Call model OUTSIDE the transaction (avoid holding tx open during network I/O).
   const { system, messages } = buildClarifierMessages(ticket, qa);
   const { verdict } = await callModelWithFallback({ system, messages }, callModel);
 
+  const newRound = clarRow.round + 1;
   const action = resolveClarifierAction(newRound, verdict);
 
-  // 6. Update clarification row
-  if (action.action === 'proceed') {
-    await db
+  // 6. Atomically update clarification row + insert next question rows (if asking).
+  const result = await db.transaction(async (tx) => {
+    if (action.action === 'proceed') {
+      await tx
+        .update(widgetClarifications)
+        .set({ status: 'ready', round: newRound, updatedAt: new Date() })
+        .where(eq(widgetClarifications.id, clarificationId));
+
+      return { status: 'ready' as const, clarificationId };
+    }
+
+    // action === 'ask': update round + insert new question rows
+    await tx
       .update(widgetClarifications)
-      .set({ status: 'ready', round: newRound, updatedAt: new Date() })
+      .set({ round: newRound, updatedAt: new Date() })
       .where(eq(widgetClarifications.id, clarificationId));
 
-    return { status: 'ready', clarificationId };
-  }
+    const questions = await insertQuestions(tx, clarificationId, action.questions, newRound);
+    return { status: 'asking' as const, clarificationId, round: newRound, questions };
+  });
 
-  // Insert new question rows for this round
-  await db
-    .update(widgetClarifications)
-    .set({ round: newRound, updatedAt: new Date() })
-    .where(eq(widgetClarifications.id, clarificationId));
-
-  const questions = await insertQuestions(clarificationId, action.questions, newRound);
-  return { status: 'asking', clarificationId, round: newRound, questions };
+  return result;
 }

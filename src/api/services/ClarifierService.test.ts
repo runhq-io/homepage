@@ -18,7 +18,12 @@ import {
   widgetClarifications,
   widgetClarificationQuestions,
 } from '../../db/schema';
-import { startClarification, answerClarification, type CallModel } from './ClarifierService';
+import {
+  startClarification,
+  answerClarification,
+  ClarifierAnswerError,
+  type CallModel,
+} from './ClarifierService';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -63,14 +68,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Delete in FK-safe order: questions → clarifications → tasks → widget_users → widget_projects → servers → users
-  await db.delete(widgetClarificationQuestions).where(
-    eq(widgetClarificationQuestions.clarificationId,
-      db.select({ id: widgetClarifications.id }).from(widgetClarifications).where(eq(widgetClarifications.serverId, SERVER_ID)).limit(1) as any
-    )
-  ).catch(() => { /* best-effort */ });
-
-  // Cascade delete handles questions when clarifications are deleted
+  // Delete in FK-safe order.
+  // widgetClarificationQuestions cascade-deletes when widgetClarifications are deleted (FK onDelete:'cascade').
   await db.delete(widgetClarifications).where(eq(widgetClarifications.serverId, SERVER_ID));
   await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_ID));
@@ -246,7 +245,8 @@ describe('answerClarification', () => {
 
     const firstQuestionId = startResult.questions[0]!.id;
 
-    // Answer only the first question — model stub should NOT be called
+    // Answer only the first question (valid pending id) — model stub should NOT be called.
+    // This is NOT a mismatch (1 provided, 1 applied) — should return asking, not throw.
     const answerStub: CallModel = vi.fn().mockResolvedValue(JSON.stringify({ ready: true }));
     const answerResult = await answerClarification(
       startResult.clarificationId,
@@ -305,5 +305,46 @@ describe('answerClarification', () => {
     expect(questions[0]!.prompt).toBe(
       'Could you describe the expected behavior and any specific details the developer should know?'
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 6: unknown questionId → throws ClarifierAnswerError, round NOT advanced
+  // -------------------------------------------------------------------------
+  it('throws ClarifierAnswerError and does not advance round when a questionId does not match a pending question', async () => {
+    const taskId = await makeTask('Unknown ID test', 'desc');
+
+    // Start with 1 question
+    const startStub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'What went wrong?' }] })
+    );
+    const startResult = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, ticket: { title: 'Unknown ID test', description: 'desc' } },
+      { callModel: startStub },
+    );
+    expect(startResult.status).toBe('asking');
+    if (startResult.status !== 'asking') throw new Error('type narrowing');
+
+    // Provide a random UUID that does not belong to this clarification
+    const bogusId = '00000000-0000-4000-a000-000000000000';
+    const answerStub: CallModel = vi.fn().mockResolvedValue(JSON.stringify({ ready: true }));
+
+    await expect(
+      answerClarification(
+        startResult.clarificationId,
+        [{ questionId: bogusId, answer: 'some answer' }],
+        { callModel: answerStub },
+      )
+    ).rejects.toThrow(ClarifierAnswerError);
+
+    // Model must NOT have been called — clarification was not advanced
+    expect(answerStub).not.toHaveBeenCalled();
+
+    // Round must remain 0
+    const [clarRow] = await db
+      .select()
+      .from(widgetClarifications)
+      .where(eq(widgetClarifications.id, startResult.clarificationId));
+    expect(clarRow!.round).toBe(0);
+    expect(clarRow!.status).toBe('asking');
   });
 });
