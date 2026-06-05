@@ -10,6 +10,8 @@
  *   - ClarifierAnswerError — thrown when provided questionIds don't match pending questions
  *   - startClarification(input, deps?) — begin a new clarification run
  *   - answerClarification(id, answers, deps?) — record answers and (if all done) advance
+ *   - getOwnedClarification(id, scope) — load a clarification gated by taskId+widgetUserId ownership
+ *   - markClarificationStarted(id) — set status='started', updatedAt=now
  */
 
 import { db } from '../../db/index';
@@ -17,6 +19,7 @@ import {
   widgetClarifications,
   widgetClarificationQuestions,
   workspaceTasks,
+  type WidgetClarification,
 } from '../../db/schema';
 import { eq, and, asc } from 'drizzle-orm';
 import {
@@ -352,4 +355,60 @@ export async function answerClarification(
   });
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// getOwnedClarification
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a clarification by id, but only return it when the caller owns it.
+ *
+ * Ownership is enforced via:
+ *   - taskId   — the clarification must belong to this ticket
+ *   - widgetUserId — the clarification must have been initiated by this user
+ *
+ * An optional serverId is applied as an extra guard when provided.
+ *
+ * Returns null when not found or when ownership does not match — the caller
+ * should respond with 404 (intentionally non-distinguishable from not found).
+ */
+export async function getOwnedClarification(
+  clarificationId: string,
+  scope: { serverId?: string; taskId: string; widgetUserId: string },
+): Promise<WidgetClarification | null> {
+  const conditions = [
+    eq(widgetClarifications.id, clarificationId),
+    eq(widgetClarifications.taskId, scope.taskId),
+    eq(widgetClarifications.widgetUserId, scope.widgetUserId),
+  ];
+  if (scope.serverId) {
+    conditions.push(eq(widgetClarifications.serverId, scope.serverId));
+  }
+
+  const [row] = await db
+    .select()
+    .from(widgetClarifications)
+    .where(and(...conditions))
+    .limit(1);
+
+  return row ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// markClarificationStarted
+// ---------------------------------------------------------------------------
+
+/**
+ * Transition a clarification to 'started' after the job has been successfully
+ * enqueued via assignAgent.
+ *
+ * Idempotent: calling this more than once on the same row is harmless (the
+ * status column is just text, and updatedAt will be refreshed).
+ */
+export async function markClarificationStarted(clarificationId: string): Promise<void> {
+  await db
+    .update(widgetClarifications)
+    .set({ status: 'started', updatedAt: new Date() })
+    .where(eq(widgetClarifications.id, clarificationId));
 }

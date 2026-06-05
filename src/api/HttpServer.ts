@@ -5738,6 +5738,120 @@ export function createHttpApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/clarify-answer
+  //
+  // The identified user who triggered the clarification (assigner) provides
+  // answers to the clarifier's questions. We record the answers, re-run the
+  // clarifier, and — when it returns 'ready' — start the job via assignAgent
+  // using the agent+command stored on the clarification row.
+  //
+  // Error conventions mirror the assign route:
+  //   ClarifierAnswerError → 400 invalid_answers
+  //   Any other LLM/infra error → 503 clarifier_unavailable (fail-closed)
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/clarify-answer', async (c) => {
+    // Gate 1: JWT auth
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Gate 2: assign_agent permission (same gate as /assign — only assigners answer)
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    // Gate 3: identified user required
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    // Gate 4: body validation
+    let body: { clarificationId: string; answers: Array<{ questionId: string; answer: string | string[] }> };
+    try {
+      const raw = await c.req.json() as unknown;
+      if (
+        !raw ||
+        typeof raw !== 'object' ||
+        typeof (raw as any).clarificationId !== 'string' ||
+        !(raw as any).clarificationId ||
+        !Array.isArray((raw as any).answers) ||
+        (raw as any).answers.length === 0 ||
+        !(raw as any).answers.every(
+          (a: unknown) =>
+            a !== null &&
+            typeof a === 'object' &&
+            typeof (a as any).questionId === 'string' &&
+            (typeof (a as any).answer === 'string' || Array.isArray((a as any).answer)),
+        )
+      ) {
+        return c.json({ error: 'invalid_body' }, 400);
+      }
+      body = raw as typeof body;
+    } catch {
+      return c.json({ error: 'invalid_body' }, 400);
+    }
+
+    // Gate 5: load + ownership check (taskId + widgetUserId must match)
+    const ticketId = c.req.param('id');
+    const clar = await ClarifierService.getOwnedClarification(body.clarificationId, {
+      taskId: ticketId,
+      widgetUserId: auth.widgetUserId,
+    });
+    if (!clar) return c.json({ error: 'clarification_not_found' }, 404);
+
+    // Gate 6: rate limit (modest fixed cap — no per-project override for answer calls)
+    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, 'triager_assign', 60);
+    if (!rl.allowed) {
+      c.header('Retry-After', String(rl.retryAfterSec));
+      return c.json({ error: 'rate_limited' }, 429);
+    }
+
+    // Submit answers and advance the clarifier.
+    let step: Awaited<ReturnType<typeof ClarifierService.answerClarification>>;
+    try {
+      step = await ClarifierService.answerClarification(body.clarificationId, body.answers);
+    } catch (err) {
+      if (err instanceof ClarifierService.ClarifierAnswerError) {
+        return c.json({ error: 'invalid_answers' }, 400);
+      }
+      console.error('[widget] clarifier answer failed:', err);
+      return c.json({ error: 'clarifier_unavailable' }, 503);
+    }
+
+    if (step.status === 'asking') {
+      // Still needs more information — return next round of questions, job NOT started.
+      return c.json({
+        clarification: {
+          clarificationId: body.clarificationId,
+          status: 'asking' as const,
+          round: step.round,
+          questions: step.questions,
+        },
+      });
+    }
+
+    // step.status === 'ready' — proceed to start the job using the stored agent+command.
+    const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
+    if (!wu) return c.json({ error: 'Widget user not found' }, 404);
+
+    let result: Awaited<ReturnType<typeof WidgetService.assignAgent>>;
+    try {
+      result = await WidgetService.assignAgent(auth.projectId, ticketId, {
+        agentId: clar.agentId,
+        command: clar.command,
+        actor: {
+          widgetUserId: auth.widgetUserId,
+          externalUserId: wu.externalUserId,
+          name: wu.name,
+          matchedRoles: auth.matchedRoles,
+        },
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+
+    await ClarifierService.markClarificationStarted(body.clarificationId);
+    return c.json({
+      jobId: result.jobId,
+      agentId: clar.agentId,
+      clarification: { clarificationId: body.clarificationId, status: 'started' as const },
+    });
+  });
+
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
