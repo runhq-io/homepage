@@ -158,12 +158,26 @@ export async function handlePullRequestEvent(
 
     const { serverId, taskId, branch } = resolved;
 
-    // Idempotency: skip if a pr_linked activity for this PR number already exists
+    // Idempotency: skip if a pr_linked activity for this PR number already exists.
+    // Exception: on `reopened`, reset the existing activity's state back to 'open'
+    // so a close→reopen cycle is reflected correctly.
     const existing = await deps.listActivity(taskId);
-    const alreadyLinked = existing.some(
+    const linkedActivity = existing.find(
       (a) => a.type === 'pr_linked' && a.metadata?.number === pr.number,
     );
-    if (alreadyLinked) return 'skipped';
+    const alreadyLinked = !!linkedActivity;
+    if (alreadyLinked) {
+      if (action === 'reopened') {
+        const updatedMetadata = { ...(linkedActivity!.metadata ?? {}), state: 'open' };
+        await deps.updateActivityMetadata(linkedActivity!.id, updatedMetadata);
+        console.info('[github/pr_linked] reset PR state to open on task activity', {
+          taskId,
+          pr: pr.number,
+        });
+        return 'updated';
+      }
+      return 'skipped';
+    }
 
     // Write the pr_linked activity + set status → needs_review
     await deps.addActivity(serverId, taskId, {

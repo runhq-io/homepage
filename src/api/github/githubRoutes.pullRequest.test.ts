@@ -178,16 +178,17 @@ describe('handlePullRequestEvent', () => {
   });
 
   describe('idempotency', () => {
-    it('returns skipped when a pr_linked activity for this PR number already exists', async () => {
+    it('returns skipped when a duplicate opened event arrives for an already-linked PR', async () => {
       const deps = makeDeps({
         listActivity: vi.fn(async () => [
           { id: 'act-1', type: 'pr_linked' as const, metadata: { number: 42, url: '...', state: 'open', repoBranch: 'x' } },
         ]),
       });
-      const result = await handlePullRequestEvent(makePayload({ number: 42 }), deps);
+      const result = await handlePullRequestEvent(makePayload({ action: 'opened', number: 42 }), deps);
       expect(result).toBe('skipped');
       expect(deps.addActivity).not.toHaveBeenCalled();
       expect(deps.updateTask).not.toHaveBeenCalled();
+      expect(deps.updateActivityMetadata).not.toHaveBeenCalled();
     });
 
     it('links when the existing pr_linked activity is for a different PR number', async () => {
@@ -199,6 +200,88 @@ describe('handlePullRequestEvent', () => {
       const result = await handlePullRequestEvent(makePayload({ number: 42 }), deps);
       expect(result).toBe('linked');
       expect(deps.addActivity).toHaveBeenCalled();
+    });
+
+    it('reopened when already linked → updates existing activity state to "open", no new activity', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const ACTIVITY_ID = 'act-closed-1';
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => [
+          { id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, url: 'https://github.com/acme/web/pull/42', state: 'closed', repoBranch: 'session/job1/ticket-abcd1234' } },
+        ]),
+        updateActivityMetadata,
+      });
+      const result = await handlePullRequestEvent(makePayload({ action: 'reopened', number: 42 }), deps);
+      expect(result).toBe('updated');
+      expect(deps.addActivity).not.toHaveBeenCalled();
+      expect(updateActivityMetadata).toHaveBeenCalledOnce();
+      expect(updateActivityMetadata).toHaveBeenCalledWith(
+        ACTIVITY_ID,
+        expect.objectContaining({ state: 'open' }),
+      );
+    });
+  });
+
+  describe('opened → closed → reopened sequence', () => {
+    const ACTIVITY_ID = 'act-seq-1';
+
+    it('after reopened, updateActivityMetadata is called with state open; still exactly one pr_linked activity', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const addActivity = vi.fn(async () => {});
+
+      // Simulate state: PR was opened (activity exists, state=closed after close event)
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => [
+          { id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, url: 'https://github.com/acme/web/pull/42', state: 'closed', repoBranch: 'session/job1/ticket-abcd1234' } },
+        ]),
+        addActivity,
+        updateActivityMetadata,
+      });
+
+      const result = await handlePullRequestEvent(makePayload({ action: 'reopened', number: 42 }), deps);
+
+      expect(result).toBe('updated');
+      // No new activity created
+      expect(addActivity).not.toHaveBeenCalled();
+      // State reset to open
+      expect(updateActivityMetadata).toHaveBeenCalledWith(
+        ACTIVITY_ID,
+        expect.objectContaining({ state: 'open' }),
+      );
+    });
+
+    it('after reopened from merged state, state is reset to open', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => [
+          { id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, state: 'merged' } },
+        ]),
+        updateActivityMetadata,
+      });
+
+      const result = await handlePullRequestEvent(makePayload({ action: 'reopened', number: 42 }), deps);
+      expect(result).toBe('updated');
+      expect(updateActivityMetadata).toHaveBeenCalledWith(
+        ACTIVITY_ID,
+        expect.objectContaining({ state: 'open' }),
+      );
+    });
+
+    it('duplicate opened (alreadyLinked + action=opened) still skips — regression guard', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const addActivity = vi.fn(async () => {});
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => [
+          { id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, state: 'open' } },
+        ]),
+        addActivity,
+        updateActivityMetadata,
+      });
+
+      const result = await handlePullRequestEvent(makePayload({ action: 'opened', number: 42 }), deps);
+      expect(result).toBe('skipped');
+      expect(addActivity).not.toHaveBeenCalled();
+      expect(updateActivityMetadata).not.toHaveBeenCalled();
     });
   });
 
@@ -433,18 +516,20 @@ describe('pull_request webhook via HTTP route', () => {
     expect(addActivity).not.toHaveBeenCalled();
   });
 
-  it('reopened-after-opened: exactly ONE pr_linked activity written (idempotent across cycle)', async () => {
+  it('reopened-after-opened: exactly ONE pr_linked activity written; reopened resets state to open via updateActivityMetadata', async () => {
     const addActivity = vi.fn(async () => {});
-    // After `opened`, listActivity returns the pr_linked entry so `reopened` is a no-op.
+    const updateActivityMetadata = vi.fn(async () => {});
+    const ACTIVITY_ID = 'act-3';
+    // Simulate the PR being closed between opened and reopened events
     let callCount = 0;
     const listActivity = vi.fn(async () => {
-      // First call (for opened): empty → allow write.
-      // Second call (for reopened): return the already-written entry.
       callCount += 1;
+      // First call (for opened): empty → write new activity
       if (callCount === 1) return [];
-      return [{ id: 'act-3', type: 'pr_linked' as const, metadata: { number: 42 } }];
+      // Subsequent calls (for reopened): activity exists with state=closed
+      return [{ id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, state: 'closed' } }];
     });
-    const { app } = makeRouteApp({ addActivity, listActivity });
+    const { app } = makeRouteApp({ addActivity, listActivity, updateActivityMetadata });
 
     const payload = JSON.stringify(makePayload({ action: 'opened', number: 42 }));
     const sig = signPayload(payload, cfg.webhookSecret);
@@ -467,8 +552,13 @@ describe('pull_request webhook via HTTP route', () => {
     });
     expect(r2.status).toBe(200);
 
-    // Exactly one pr_linked activity written across both events
+    // Exactly one pr_linked activity written across both events (no duplicate)
     expect(addActivity).toHaveBeenCalledTimes(1);
+    // State reset to open on the existing activity
+    expect(updateActivityMetadata).toHaveBeenCalledWith(
+      ACTIVITY_ID,
+      expect.objectContaining({ state: 'open' }),
+    );
   });
 
   it('production wiring path: prLinked truthy → both addActivity and updateTask are invoked through the route', async () => {
