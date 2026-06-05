@@ -421,6 +421,27 @@ export async function markClarificationStarted(clarificationId: string): Promise
 }
 
 // ---------------------------------------------------------------------------
+// markDuplicate
+// ---------------------------------------------------------------------------
+
+/**
+ * Transition a clarification to 'duplicate' status, recording which existing
+ * ticket it duplicates. Called by the ready-finalize gate when the dedup check
+ * detects a likely duplicate.
+ *
+ * Idempotent: calling more than once on the same row refreshes updatedAt only.
+ */
+export async function markDuplicate(
+  clarificationId: string,
+  duplicateOfTaskId: string,
+): Promise<void> {
+  await db
+    .update(widgetClarifications)
+    .set({ status: 'duplicate', duplicateOfTaskId, updatedAt: new Date() })
+    .where(eq(widgetClarifications.id, clarificationId));
+}
+
+// ---------------------------------------------------------------------------
 // getAnsweredQa — Q&A export for workspace seeding
 // ---------------------------------------------------------------------------
 

@@ -44,6 +44,12 @@ vi.mock('./services/WidgetService', () => ({
 
 vi.mock('./services/ClarifierService', () => ({
   startClarification: vi.fn(),
+  markDuplicate: vi.fn(),
+  markClarificationStarted: vi.fn(),
+}));
+
+vi.mock('./services/DedupService', () => ({
+  findLikelyDuplicate: vi.fn(),
 }));
 
 vi.mock('./services/WidgetRateLimiter', () => ({
@@ -60,6 +66,7 @@ vi.mock('./services/TaskAttachmentStorageService', () => ({
 import { createHttpApp } from './HttpServer';
 import * as WidgetService from './services/WidgetService';
 import * as ClarifierService from './services/ClarifierService';
+import * as DedupService from './services/DedupService';
 import { widgetRateLimiter } from './services/WidgetRateLimiter';
 
 const makeApp = () => createHttpApp();
@@ -104,7 +111,11 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     (WidgetService.getTicketForAssign as any).mockResolvedValue(TICKET_INFO);
     // Default clarifier returns 'ready' so the job starts (assignAgent path)
     (ClarifierService.startClarification as any).mockResolvedValue({ status: 'ready', clarificationId: 'c1' });
+    (ClarifierService.markDuplicate as any).mockResolvedValue(undefined);
+    (ClarifierService.markClarificationStarted as any).mockResolvedValue(undefined);
     (WidgetService.assignAgent as any).mockResolvedValue({ jobId: 'job-001' });
+    // Default: no duplicate found
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: null });
   });
 
   it('401 when authenticateWidget returns null', async () => {
@@ -295,5 +306,40 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     const app = makeApp();
     await postAssign(app);
     expect(WidgetService.getWidgetProjectRateLimit).toHaveBeenCalledWith('proj-1');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Dedup gate — /assign round-0-ready path
+  // ---------------------------------------------------------------------------
+
+  it('assign round-0-ready + dup found → 200 status:duplicate, markDuplicate called, assignAgent NOT called', async () => {
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: 'existing-task-id' });
+
+    const app = makeApp();
+    const res = await postAssign(app, 'ticket-abc');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      clarification: {
+        clarificationId: 'c1',
+        status: 'duplicate',
+        duplicateOf: 'existing-task-id',
+      },
+    });
+
+    expect(ClarifierService.markDuplicate).toHaveBeenCalledWith('c1', 'existing-task-id');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+  });
+
+  it('assign round-0-ready + no dup → assigns normally (regression)', async () => {
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: null });
+
+    const app = makeApp();
+    const res = await postAssign(app, 'ticket-abc');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ jobId: 'job-001', agentId: 'agent-99' });
+    expect(WidgetService.assignAgent).toHaveBeenCalled();
+    expect(ClarifierService.markDuplicate).not.toHaveBeenCalled();
   });
 });

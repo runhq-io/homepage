@@ -603,4 +603,80 @@ describe('getPublicTicketDetail clarification field', () => {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
     }
   });
+
+  it('exposes clarification.duplicateOf when status=duplicate and duplicate_of_task_id is set', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Dup task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    // Create a reference task to serve as the "existing duplicate"
+    const [refTask] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Original issue', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    const [widgetUserF] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID,
+      externalUserId: `ext-f-${RUN_HEX}`,
+      name: 'Frank',
+    }).returning({ id: widgetUsers.id });
+    const ANSWERER_ID = widgetUserF!.id;
+
+    const [clar] = await db.insert(widgetClarifications).values({
+      taskId: task!.id,
+      serverId: SERVER_ID,
+      widgetUserId: ANSWERER_ID,
+      agentId: 'agent-test',
+      command: 'fix it',
+      status: 'duplicate',
+      round: 0,
+      duplicateOfTaskId: refTask!.id,
+    }).returning({ id: widgetClarifications.id });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id, ANSWERER_ID);
+      expect(detail).not.toBeNull();
+      expect(detail!.clarification).not.toBeNull();
+      expect(detail!.clarification!.status).toBe('duplicate');
+      expect(detail!.clarification!.duplicateOf).toBe(refTask!.id);
+    } finally {
+      await db.delete(widgetClarifications).where(eq(widgetClarifications.id, clar!.id));
+      await db.delete(widgetUsers).where(eq(widgetUsers.id, ANSWERER_ID));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, refTask!.id));
+    }
+  });
+
+  it('clarification.duplicateOf is null when status is not duplicate', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Non-dup task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    const [widgetUserG] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID,
+      externalUserId: `ext-g-${RUN_HEX}`,
+      name: 'Grace',
+    }).returning({ id: widgetUsers.id });
+    const ANSWERER_ID = widgetUserG!.id;
+
+    const [clar] = await db.insert(widgetClarifications).values({
+      taskId: task!.id,
+      serverId: SERVER_ID,
+      widgetUserId: ANSWERER_ID,
+      agentId: 'agent-test',
+      command: 'fix it',
+      status: 'started',
+      round: 0,
+      // duplicateOfTaskId intentionally omitted (null)
+    }).returning({ id: widgetClarifications.id });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id, ANSWERER_ID);
+      expect(detail!.clarification!.status).toBe('started');
+      expect(detail!.clarification!.duplicateOf).toBeNull();
+    } finally {
+      await db.delete(widgetClarifications).where(eq(widgetClarifications.id, clar!.id));
+      await db.delete(widgetUsers).where(eq(widgetUsers.id, ANSWERER_ID));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
 });

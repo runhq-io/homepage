@@ -1496,6 +1496,11 @@ export const widgetClarifications = pgTable('widget_clarifications', {
   command: text('command').notNull(),
   status: text('status').notNull().$type<'asking' | 'ready' | 'skipped' | 'duplicate' | 'started'>().default('asking'),
   round: integer('round').notNull().default(0),
+  /**
+   * When status='duplicate': the id of the workspace_tasks row that this ticket
+   * duplicates. Null otherwise.
+   */
+  duplicateOfTaskId: text('duplicate_of_task_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [

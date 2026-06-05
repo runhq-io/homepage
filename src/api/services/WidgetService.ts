@@ -200,6 +200,11 @@ export type PublicTicketDetail = {
     status: 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
     round: number;
     openQuestions: ClarificationQuestion[];
+    /**
+     * When status='duplicate': the id of the workspace_tasks row this ticket
+     * duplicates. Null otherwise. Populated from widget_clarifications.duplicate_of_task_id.
+     */
+    duplicateOf: string | null;
   } | null;
   /**
    * The linked pull request for this ticket, derived from the most recent
@@ -1082,7 +1087,13 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       isAnswerer && clar.status === 'asking'
         ? await ClarifierService.listOpenQuestions(clar.id)
         : [];
-    clarification = { id: clar.id, status: clar.status, round: clar.round, openQuestions };
+    clarification = {
+      id: clar.id,
+      status: clar.status,
+      round: clar.round,
+      openQuestions,
+      duplicateOf: clar.duplicateOfTaskId ?? null,
+    };
   }
 
   // Derive the most recent linked PR from the already-loaded activity feed.

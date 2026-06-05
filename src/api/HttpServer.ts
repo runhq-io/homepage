@@ -37,6 +37,7 @@ import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
 import * as ClarifierService from './services/ClarifierService';
+import * as DedupService from './services/DedupService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
@@ -5573,6 +5574,95 @@ export function createHttpApp() {
     return null;
   }
 
+  /**
+   * Shared ready-path finalizer: used by both /assign (round-0-ready) and
+   * /clarify-answer (ready after answering) and /clarify-proceed (override).
+   *
+   * When overrideDuplicate is false (default):
+   *   - Runs the LLM dedup check against recent open tickets on the same server.
+   *   - If a likely duplicate is found: records status='duplicate' on the
+   *     clarification and returns { status: 'duplicate', clarificationId, duplicateOf }.
+   *   - If no duplicate: falls through to assignAgent.
+   *
+   * When overrideDuplicate is true (human chose "not a duplicate, proceed"):
+   *   - Skips the dedup check entirely.
+   *
+   * In the no-dup / override case: runs agent exposure recheck (TOCTOU guard
+   * from Gate 5c), calls assignAgent with stored agent+command+qa, marks the
+   * clarification started, and returns { status: 'started', jobId, agentId, clarificationId }.
+   *
+   * Throws on:
+   *   - Agent not available (403-equivalent — caller checks exposed agents first
+   *     for the assign path; this handles clarify-answer + clarify-proceed)
+   *   - WidgetAssignError / WidgetError (assignAgent failures)
+   */
+  type FinalizeResult =
+    | { kind: 'duplicate'; clarificationId: string; duplicateOf: string }
+    | { kind: 'started'; clarificationId: string; jobId: string; agentId: string };
+
+  async function finalizeReadyClarification(
+    clar: {
+      id: string;
+      serverId: string;
+      agentId: string;
+      command: string;
+      taskId: string;
+      /** Title + description of the ticket — used for dedup candidate matching. */
+      candidate: { title: string; description: string | null };
+    },
+    actor: {
+      projectId: string;
+      ticketId: string;
+      widgetUserId: string;
+      externalUserId: string;
+      name: string | null;
+      matchedRoles: string[];
+    },
+    options: {
+      overrideDuplicate: boolean;
+      /** Pre-fetched Q&A (from getAnsweredQa). Pass [] when not applicable (round-0 ready). */
+      qa?: Array<{ question: string; answer: string }>;
+    },
+  ): Promise<FinalizeResult> {
+    // --- Dedup gate (skipped when human explicitly overrides) ---
+    if (!options.overrideDuplicate) {
+      const dup = await DedupService.findLikelyDuplicate({
+        serverId: clar.serverId,
+        ticketId: clar.taskId,
+        candidate: clar.candidate,
+      });
+
+      if (dup.duplicateOf !== null) {
+        // Record the duplicate on the clarification row
+        await ClarifierService.markDuplicate(clar.id, dup.duplicateOf);
+        return { kind: 'duplicate', clarificationId: clar.id, duplicateOf: dup.duplicateOf };
+      }
+    }
+
+    // --- Agent exposure recheck (TOCTOU guard) ---
+    const exposed = await WidgetService.listExposedAgents(actor.projectId);
+    if (!exposed.some((a) => a.id === clar.agentId)) {
+      throw Object.assign(new Error('Agent not available'), { _agentNotAvailable: true });
+    }
+
+    // --- Start the job ---
+    const result = await WidgetService.assignAgent(actor.projectId, actor.ticketId, {
+      agentId: clar.agentId,
+      command: clar.command,
+      actor: {
+        widgetUserId: actor.widgetUserId,
+        externalUserId: actor.externalUserId,
+        name: actor.name,
+        matchedRoles: actor.matchedRoles,
+      },
+      ...(options.qa && options.qa.length > 0 ? { qa: options.qa } : {}),
+    });
+
+    await ClarifierService.markClarificationStarted(clar.id);
+
+    return { kind: 'started', clarificationId: clar.id, jobId: result.jobId, agentId: clar.agentId };
+  }
+
   // CORS for /api/widget/* (preflight, credentialed echo, X-RunHQ-CSRF
   // header allowlisting) is handled by the unified global middleware
   // registered at the top of createHttpApp. Per-route helpers are no
@@ -5720,22 +5810,43 @@ export function createHttpApp() {
       });
     }
 
-    // clarStep.status === 'ready' — proceed to start the job
+    // clarStep.status === 'ready' — run the shared finalize gate (dedup + assignAgent)
+    let finalizeResult: FinalizeResult;
     try {
-      const result = await WidgetService.assignAgent(auth.projectId, ticketId, {
-        agentId: body.agentId,
-        command: body.command,
-        actor: {
+      finalizeResult = await finalizeReadyClarification(
+        {
+          id: clarStep.clarificationId,
+          serverId: ticketInfo.serverId,
+          agentId: body.agentId,
+          command: body.command,
+          taskId: ticketId,
+          candidate: { title: ticketInfo.title, description: ticketInfo.description },
+        },
+        {
+          projectId: auth.projectId,
+          ticketId,
           widgetUserId: auth.widgetUserId,
           externalUserId: wu.externalUserId,
           name: wu.name,
           matchedRoles: auth.matchedRoles,
         },
-      });
-      return c.json({ jobId: result.jobId, agentId: body.agentId });
-    } catch (err) {
+        { overrideDuplicate: false, qa: [] },
+      );
+    } catch (err: any) {
+      if (err?._agentNotAvailable) return c.json({ error: 'Agent not available' }, 403);
       return widgetErrorResponse(c, err);
     }
+
+    if (finalizeResult.kind === 'duplicate') {
+      return c.json({
+        clarification: {
+          clarificationId: finalizeResult.clarificationId,
+          status: 'duplicate' as const,
+          duplicateOf: finalizeResult.duplicateOf,
+        },
+      });
+    }
+    return c.json({ jobId: finalizeResult.jobId, agentId: body.agentId });
   });
 
   // ---------------------------------------------------------------------------
@@ -5833,14 +5944,108 @@ export function createHttpApp() {
       });
     }
 
-    // step.status === 'ready' — proceed to start the job using the stored agent+command.
+    // step.status === 'ready' — run the shared finalize gate (dedup + assignAgent).
 
-    // Gate 5c: re-validate agent exposure (TOCTOU guard).
-    // The stored agentId may have been un-exposed between /assign (which checked Gate 5)
-    // and this deferred /clarify-answer call. Mirror /assign Gate 5 exactly.
-    const exposedForAnswer = await WidgetService.listExposedAgents(auth.projectId);
-    if (!exposedForAnswer.some((a) => a.id === clar.agentId)) {
-      return c.json({ error: 'Agent not available' }, 403);
+    const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
+    if (!wu) return c.json({ error: 'widget_user_not_found' }, 404);
+
+    const qa = await ClarifierService.getAnsweredQa(body.clarificationId);
+
+    // Load ticket title/description for the dedup candidate (same call as /assign uses).
+    const ticketInfoForDedup = await WidgetService.getTicketForAssign(auth.projectId, ticketId);
+
+    let finalizeResult: FinalizeResult;
+    try {
+      finalizeResult = await finalizeReadyClarification(
+        {
+          id: clar.id,
+          serverId: clar.serverId,
+          agentId: clar.agentId,
+          command: clar.command,
+          taskId: ticketId,
+          candidate: {
+            title: ticketInfoForDedup?.title ?? '',
+            description: ticketInfoForDedup?.description ?? null,
+          },
+        },
+        {
+          projectId: auth.projectId,
+          ticketId,
+          widgetUserId: auth.widgetUserId,
+          externalUserId: wu.externalUserId,
+          name: wu.name,
+          matchedRoles: auth.matchedRoles,
+        },
+        { overrideDuplicate: false, qa },
+      );
+    } catch (err: any) {
+      if (err?._agentNotAvailable) return c.json({ error: 'Agent not available' }, 403);
+      return widgetErrorResponse(c, err);
+    }
+
+    if (finalizeResult.kind === 'duplicate') {
+      return c.json({
+        clarification: {
+          clarificationId: finalizeResult.clarificationId,
+          status: 'duplicate' as const,
+          duplicateOf: finalizeResult.duplicateOf,
+        },
+      });
+    }
+    return c.json({
+      jobId: finalizeResult.jobId,
+      agentId: clar.agentId,
+      clarification: { clarificationId: body.clarificationId, status: 'started' as const },
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/clarify-proceed
+  //
+  // Human override: the assigner has reviewed the "possible duplicate" signal
+  // and decided to proceed anyway. Loads the owned clarification (must be
+  // status='duplicate'), then calls finalizeReadyClarification with
+  // overrideDuplicate=true — which skips the dedup check and starts the job.
+  //
+  // Gate conventions mirror /clarify-answer.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/clarify-proceed', async (c) => {
+    // Gate 1: JWT auth
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Gate 2: assign_agent permission
+    if (!auth.permissions.has('assign_agent')) return c.json({ error: 'Forbidden' }, 403);
+    // Gate 3: identified user required
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    // Gate 4: body — clarificationId required
+    let body: { clarificationId: string };
+    try {
+      const raw = await c.req.json() as unknown;
+      if (
+        !raw ||
+        typeof raw !== 'object' ||
+        typeof (raw as any).clarificationId !== 'string' ||
+        !(raw as any).clarificationId
+      ) {
+        return c.json({ error: 'invalid_body' }, 400);
+      }
+      body = raw as typeof body;
+    } catch {
+      return c.json({ error: 'invalid_body' }, 400);
+    }
+
+    // Gate 5: load + ownership check
+    const ticketId = c.req.param('id');
+    const clar = await ClarifierService.getOwnedClarification(body.clarificationId, {
+      taskId: ticketId,
+      widgetUserId: auth.widgetUserId,
+    });
+    if (!clar) return c.json({ error: 'clarification_not_found' }, 404);
+
+    // Gate 5b: must be in 'duplicate' status to override
+    if (clar.status !== 'duplicate') {
+      return c.json({ error: 'clarification_not_open' }, 409);
     }
 
     const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
@@ -5848,26 +6053,46 @@ export function createHttpApp() {
 
     const qa = await ClarifierService.getAnsweredQa(body.clarificationId);
 
-    let result: Awaited<ReturnType<typeof WidgetService.assignAgent>>;
+    let finalizeResult: FinalizeResult;
     try {
-      result = await WidgetService.assignAgent(auth.projectId, ticketId, {
-        agentId: clar.agentId,
-        command: clar.command,
-        actor: {
+      finalizeResult = await finalizeReadyClarification(
+        {
+          id: clar.id,
+          serverId: clar.serverId,
+          agentId: clar.agentId,
+          command: clar.command,
+          taskId: ticketId,
+          // candidate not used when overrideDuplicate=true; provide empty to satisfy type
+          candidate: { title: '', description: null },
+        },
+        {
+          projectId: auth.projectId,
+          ticketId,
           widgetUserId: auth.widgetUserId,
           externalUserId: wu.externalUserId,
           name: wu.name,
           matchedRoles: auth.matchedRoles,
         },
-        qa,
-      });
-    } catch (err) {
+        { overrideDuplicate: true, qa },
+      );
+    } catch (err: any) {
+      if (err?._agentNotAvailable) return c.json({ error: 'Agent not available' }, 403);
       return widgetErrorResponse(c, err);
     }
 
-    await ClarifierService.markClarificationStarted(body.clarificationId);
+    // With overrideDuplicate:true, the dedup gate is bypassed — kind is always 'started'
+    if (finalizeResult.kind === 'duplicate') {
+      // Should never happen with overrideDuplicate:true, but guard defensively
+      return c.json({
+        clarification: {
+          clarificationId: finalizeResult.clarificationId,
+          status: 'duplicate' as const,
+          duplicateOf: finalizeResult.duplicateOf,
+        },
+      });
+    }
     return c.json({
-      jobId: result.jobId,
+      jobId: finalizeResult.jobId,
       agentId: clar.agentId,
       clarification: { clarificationId: body.clarificationId, status: 'started' as const },
     });

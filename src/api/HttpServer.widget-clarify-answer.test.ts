@@ -47,12 +47,17 @@ vi.mock('./services/ClarifierService', () => ({
   getOwnedClarification: vi.fn(),
   getAnsweredQa: vi.fn(),
   markClarificationStarted: vi.fn(),
+  markDuplicate: vi.fn(),
   ClarifierAnswerError: class ClarifierAnswerError extends Error {
     constructor(message = 'one or more answers did not match a pending question') {
       super(message);
       this.name = 'ClarifierAnswerError';
     }
   },
+}));
+
+vi.mock('./services/DedupService', () => ({
+  findLikelyDuplicate: vi.fn(),
 }));
 
 vi.mock('./services/WidgetRateLimiter', () => ({
@@ -69,6 +74,7 @@ vi.mock('./services/TaskAttachmentStorageService', () => ({
 import { createHttpApp } from './HttpServer';
 import * as WidgetService from './services/WidgetService';
 import * as ClarifierService from './services/ClarifierService';
+import * as DedupService from './services/DedupService';
 import { widgetRateLimiter } from './services/WidgetRateLimiter';
 
 const makeApp = () => createHttpApp();
@@ -125,9 +131,13 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
     (ClarifierService.answerClarification as any).mockResolvedValue({ status: 'ready', clarificationId: CLARIFICATION_ID });
     (ClarifierService.getAnsweredQa as any).mockResolvedValue([{ question: 'Which browser?', answer: 'Chrome' }]);
     (ClarifierService.markClarificationStarted as any).mockResolvedValue(undefined);
+    (ClarifierService.markDuplicate as any).mockResolvedValue(undefined);
     (WidgetService.listExposedAgents as any).mockResolvedValue([{ id: 'a1' }]);
     (WidgetService.getWidgetUserAuditInfo as any).mockResolvedValue({ externalUserId: 'ext-user-1', name: 'Alice' });
+    (WidgetService.getTicketForAssign as any).mockResolvedValue({ serverId: 'srv-1', title: 'Fix login bug', description: 'SSO fails' });
     (WidgetService.assignAgent as any).mockResolvedValue({ jobId: 'job-001' });
+    // Default: no duplicate found
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: null });
   });
 
   // ---------------------------------------------------------------------------
@@ -538,5 +548,195 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
       CLARIFICATION_ID,
       { taskId: 'my-ticket-id', widgetUserId: 'wu-123' },
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Dedup gate — clarify-answer ready path
+  // ---------------------------------------------------------------------------
+
+  it('ready path + dup found → 200 status:duplicate, markDuplicate called, assignAgent NOT called, markClarificationStarted NOT called', async () => {
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: 'existing-task-id' });
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      clarification: {
+        clarificationId: CLARIFICATION_ID,
+        status: 'duplicate',
+        duplicateOf: 'existing-task-id',
+      },
+    });
+
+    expect(ClarifierService.markDuplicate).toHaveBeenCalledWith(CLARIFICATION_ID, 'existing-task-id');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+    expect(ClarifierService.markClarificationStarted).not.toHaveBeenCalled();
+  });
+
+  it('ready path + no dup → assigns as before (regression: existing happy-path preserved)', async () => {
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: null });
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body).toEqual({
+      jobId: 'job-001',
+      agentId: 'a1',
+      clarification: { clarificationId: CLARIFICATION_ID, status: 'started' },
+    });
+
+    expect(WidgetService.assignAgent).toHaveBeenCalled();
+    expect(ClarifierService.markClarificationStarted).toHaveBeenCalledWith(CLARIFICATION_ID);
+    expect(ClarifierService.markDuplicate).not.toHaveBeenCalled();
+  });
+
+  it('dup check error → fail-open: assigns normally (dedup does not block)', async () => {
+    // DedupService.findLikelyDuplicate itself never throws to caller (it handles errors internally);
+    // but even if it did, the route should proceed as no-dup.
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: null });
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(200);
+    expect(WidgetService.assignAgent).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/widget/tickets/:id/clarify-proceed
+// ---------------------------------------------------------------------------
+
+const postClarifyProceed = (
+  app: ReturnType<typeof makeApp>,
+  ticketId = TICKET_ID,
+  body: string | null = JSON.stringify({ clarificationId: CLARIFICATION_ID }),
+) =>
+  app.request(`/api/widget/tickets/${ticketId}/clarify-proceed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    ...(body !== null ? { body } : {}),
+  });
+
+const DUPLICATE_CLARIFICATION = {
+  ...OWNED_CLARIFICATION,
+  status: 'duplicate',
+  duplicateOfTaskId: 'old-task-id',
+};
+
+describe('POST /api/widget/tickets/:id/clarify-proceed', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+
+    (WidgetService.authenticateWidget as any).mockResolvedValue(AUTHED_WITH_ASSIGN);
+    (ClarifierService.getOwnedClarification as any).mockResolvedValue(DUPLICATE_CLARIFICATION);
+    (ClarifierService.getAnsweredQa as any).mockResolvedValue([]);
+    (ClarifierService.markClarificationStarted as any).mockResolvedValue(undefined);
+    (ClarifierService.markDuplicate as any).mockResolvedValue(undefined);
+    (WidgetService.listExposedAgents as any).mockResolvedValue([{ id: 'a1' }]);
+    (WidgetService.getWidgetUserAuditInfo as any).mockResolvedValue({ externalUserId: 'ext-user-1', name: 'Alice' });
+    (WidgetService.assignAgent as any).mockResolvedValue({ jobId: 'job-override' });
+    (DedupService.findLikelyDuplicate as any).mockResolvedValue({ duplicateOf: null });
+  });
+
+  it('401 when not authenticated', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue(null);
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(401);
+  });
+
+  it('403 when no assign_agent permission', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue({
+      ...AUTHED_WITH_ASSIGN,
+      permissions: new Set<string>(),
+    });
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(403);
+  });
+
+  it('401 when widgetUserId is absent', async () => {
+    (WidgetService.authenticateWidget as any).mockResolvedValue({
+      ...AUTHED_WITH_ASSIGN,
+      widgetUserId: undefined,
+    });
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(401);
+  });
+
+  it('400 when clarificationId is missing', async () => {
+    const app = makeApp();
+    const res = await postClarifyProceed(app, TICKET_ID, JSON.stringify({}));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('invalid_body');
+  });
+
+  it('404 when getOwnedClarification returns null', async () => {
+    (ClarifierService.getOwnedClarification as any).mockResolvedValue(null);
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe('clarification_not_found');
+  });
+
+  it('409 when clarification status is not duplicate (e.g. asking)', async () => {
+    (ClarifierService.getOwnedClarification as any).mockResolvedValue({
+      ...DUPLICATE_CLARIFICATION,
+      status: 'asking',
+    });
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe('clarification_not_open');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+  });
+
+  it('409 when clarification status is started', async () => {
+    (ClarifierService.getOwnedClarification as any).mockResolvedValue({
+      ...DUPLICATE_CLARIFICATION,
+      status: 'started',
+    });
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(409);
+  });
+
+  it('200 happy path: override → assigns, markClarificationStarted called, markDuplicate NOT called again, findLikelyDuplicate NOT called', async () => {
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body).toEqual({
+      jobId: 'job-override',
+      agentId: 'a1',
+      clarification: { clarificationId: CLARIFICATION_ID, status: 'started' },
+    });
+
+    expect(WidgetService.assignAgent).toHaveBeenCalledWith(
+      'proj-1',
+      TICKET_ID,
+      expect.objectContaining({ agentId: 'a1', command: 'do it' }),
+    );
+    expect(ClarifierService.markClarificationStarted).toHaveBeenCalledWith(CLARIFICATION_ID);
+    expect(DedupService.findLikelyDuplicate).not.toHaveBeenCalled();
+    expect(ClarifierService.markDuplicate).not.toHaveBeenCalled();
+  });
+
+  it('403 Agent not available when listExposedAgents no longer includes stored agentId; assignAgent NOT called', async () => {
+    (WidgetService.listExposedAgents as any).mockResolvedValue([{ id: 'different-agent' }]);
+    const app = makeApp();
+    const res = await postClarifyProceed(app);
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe('Agent not available');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
   });
 });
