@@ -21,6 +21,8 @@ import {
 import {
   startClarification,
   answerClarification,
+  getOwnedClarification,
+  markClarificationStarted,
   ClarifierAnswerError,
   type CallModel,
 } from './ClarifierService';
@@ -349,5 +351,102 @@ describe('answerClarification', () => {
       .where(eq(widgetClarifications.id, startResult.clarificationId));
     expect(clarRow!.round).toBe(0);
     expect(clarRow!.status).toBe('asking');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getOwnedClarification — ownership enforcement
+// ---------------------------------------------------------------------------
+describe('getOwnedClarification', () => {
+  it('returns the row when taskId and widgetUserId both match', async () => {
+    const taskId = await makeTask('Ownership test — correct', 'desc');
+    const stub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'Which browser?' }] })
+    );
+    const started = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-1', command: 'Fix it', ticket: { title: 'Ownership test', description: 'desc' } },
+      { callModel: stub },
+    );
+
+    const clar = await getOwnedClarification(started.clarificationId, {
+      taskId,
+      widgetUserId: WIDGET_USER_ID,
+    });
+
+    expect(clar).not.toBeNull();
+    expect(clar!.id).toBe(started.clarificationId);
+    expect(clar!.taskId).toBe(taskId);
+    expect(clar!.widgetUserId).toBe(WIDGET_USER_ID);
+  });
+
+  it('returns null when taskId does not match', async () => {
+    const taskId = await makeTask('Ownership test — wrong taskId', 'desc');
+    const stub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'Which browser?' }] })
+    );
+    const started = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-1', command: 'Fix it', ticket: { title: 'Wrong task test', description: 'desc' } },
+      { callModel: stub },
+    );
+
+    const wrongTaskId = await makeTask('Unrelated task', null);
+    const clar = await getOwnedClarification(started.clarificationId, {
+      taskId: wrongTaskId,
+      widgetUserId: WIDGET_USER_ID,
+    });
+
+    expect(clar).toBeNull();
+  });
+
+  it('returns null when widgetUserId does not match', async () => {
+    const taskId = await makeTask('Ownership test — wrong widgetUserId', 'desc');
+    const stub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'Which browser?' }] })
+    );
+    const started = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-1', command: 'Fix it', ticket: { title: 'Wrong user test', description: 'desc' } },
+      { callModel: stub },
+    );
+
+    // Use a valid UUID format that belongs to no row in the DB
+    const clar = await getOwnedClarification(started.clarificationId, {
+      taskId,
+      widgetUserId: '00000000-dead-4000-beef-000000000000',
+    });
+
+    expect(clar).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// markClarificationStarted — status transition
+// ---------------------------------------------------------------------------
+describe('markClarificationStarted', () => {
+  it('sets status to started on the clarification row', async () => {
+    const taskId = await makeTask('Mark started test', 'desc');
+    const stub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'Which OS?' }] })
+    );
+    const started = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-2', command: 'Do it', ticket: { title: 'Mark started test', description: 'desc' } },
+      { callModel: stub },
+    );
+
+    // Verify it starts as 'asking'
+    const [beforeRow] = await db
+      .select({ status: widgetClarifications.status })
+      .from(widgetClarifications)
+      .where(eq(widgetClarifications.id, started.clarificationId));
+    expect(beforeRow!.status).toBe('asking');
+
+    // Transition
+    await markClarificationStarted(started.clarificationId);
+
+    // Verify status is now 'started'
+    const [afterRow] = await db
+      .select({ status: widgetClarifications.status, updatedAt: widgetClarifications.updatedAt })
+      .from(widgetClarifications)
+      .where(eq(widgetClarifications.id, started.clarificationId));
+    expect(afterRow!.status).toBe('started');
   });
 });

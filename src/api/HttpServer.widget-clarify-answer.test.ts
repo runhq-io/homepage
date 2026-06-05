@@ -118,6 +118,7 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
 
     // Default happy-path stubs.
     (WidgetService.authenticateWidget as any).mockResolvedValue(AUTHED_WITH_ASSIGN);
+    (WidgetService.getWidgetProjectRateLimit as any).mockResolvedValue(60);
     (widgetRateLimiter.check as any).mockReturnValue({ allowed: true, retryAfterSec: 0 });
     (ClarifierService.getOwnedClarification as any).mockResolvedValue(OWNED_CLARIFICATION);
     (ClarifierService.answerClarification as any).mockResolvedValue({ status: 'ready', clarificationId: CLARIFICATION_ID });
@@ -259,6 +260,36 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Status guard (409)
+  // ---------------------------------------------------------------------------
+
+  it('409 clarification_not_open when clarification status is ready; answerClarification NOT called', async () => {
+    (ClarifierService.getOwnedClarification as any).mockResolvedValue({
+      ...OWNED_CLARIFICATION,
+      status: 'ready',
+    });
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe('clarification_not_open');
+    expect(ClarifierService.answerClarification).not.toHaveBeenCalled();
+  });
+
+  it('409 clarification_not_open when clarification status is started; answerClarification NOT called', async () => {
+    (ClarifierService.getOwnedClarification as any).mockResolvedValue({
+      ...OWNED_CLARIFICATION,
+      status: 'started',
+    });
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe('clarification_not_open');
+    expect(ClarifierService.answerClarification).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
   // Rate limit
   // ---------------------------------------------------------------------------
 
@@ -395,13 +426,13 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
   // Widget user lookup miss
   // ---------------------------------------------------------------------------
 
-  it('404 Widget user not found when getWidgetUserAuditInfo returns null (ready path)', async () => {
+  it('404 widget_user_not_found when getWidgetUserAuditInfo returns null (ready path)', async () => {
     (WidgetService.getWidgetUserAuditInfo as any).mockResolvedValue(null);
     const app = makeApp();
     const res = await postClarifyAnswer(app);
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error).toBe('Widget user not found');
+    expect(body.error).toBe('widget_user_not_found');
     expect(WidgetService.assignAgent).not.toHaveBeenCalled();
   });
 

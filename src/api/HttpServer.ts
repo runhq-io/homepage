@@ -5793,8 +5793,17 @@ export function createHttpApp() {
     });
     if (!clar) return c.json({ error: 'clarification_not_found' }, 404);
 
-    // Gate 6: rate limit (modest fixed cap — no per-project override for answer calls)
-    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, 'triager_assign', 60);
+    // Gate 5b: explicit status guard — only 'asking' clarifications can accept answers.
+    // Fails fast with 409 Conflict instead of relying on the indirect ClarifierAnswerError→400
+    // path when the clarification is already 'ready'/'started'/'skipped'/'duplicate'.
+    if (clar.status !== 'asking') {
+      return c.json({ error: 'clarification_not_open' }, 409);
+    }
+
+    // Gate 6: rate limit (per-project override, shared 'triager_assign' bucket with /assign —
+    // combined assign+answer quota per user).
+    const limitPerHour = await WidgetService.getWidgetProjectRateLimit(auth.projectId);
+    const rl = widgetRateLimiter.check(auth.projectId, auth.widgetUserId, 'triager_assign', limitPerHour);
     if (!rl.allowed) {
       c.header('Retry-After', String(rl.retryAfterSec));
       return c.json({ error: 'rate_limited' }, 429);
@@ -5826,7 +5835,7 @@ export function createHttpApp() {
 
     // step.status === 'ready' — proceed to start the job using the stored agent+command.
     const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
-    if (!wu) return c.json({ error: 'Widget user not found' }, 404);
+    if (!wu) return c.json({ error: 'widget_user_not_found' }, 404);
 
     let result: Awaited<ReturnType<typeof WidgetService.assignAgent>>;
     try {
