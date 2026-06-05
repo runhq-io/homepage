@@ -207,6 +207,12 @@
     });
   }
 
+  function postClarifyProceed(ticketId, clarificationId) {
+    return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/clarify-proceed", {
+      method: "POST", body: { clarificationId: clarificationId },
+    });
+  }
+
   function uploadTicketAttachment(ticketId, file) {
     var fd = new FormData();
     fd.append("file", file, file.name || "upload");
@@ -2595,6 +2601,60 @@
       '.rw-modal-mount[data-theme="dark"] .rw-pr-state-open   { color: #4ade80; }',
       '.rw-modal-mount[data-theme="dark"] .rw-pr-state-closed { color: #f87171; }',
       '.rw-modal-mount[data-theme="dark"] .rw-pr-state-merged { color: #a78bfa; }',
+
+      /* -----------------------------------------------------------------------
+         Possible-duplicate card
+         Rendered below the timeline when clarification.status === "duplicate".
+         Amber-tinted notice with a clickable ticket reference and a ghost
+         override button.  Light and dark themes handled via CSS variables
+         where possible; a few amber values need explicit dark-mode overrides. */
+      '.rw-dup-card {',
+      '  margin: 8px 18px 2px;',
+      '  padding: 10px 12px;',
+      '  border-radius: 8px;',
+      '  border: 1px solid var(--rw-line-2);',
+      '  border-left: 3px solid #f59e0b;',
+      '  background: var(--rw-panel);',
+      '  display: flex; flex-direction: column; gap: 8px;',
+      '}',
+      '.rw-dup-card-body {',
+      '  display: flex; flex-direction: column; gap: 4px;',
+      '}',
+      '.rw-dup-badge {',
+      '  display: inline-block;',
+      '  font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;',
+      '  color: #92400e; background: rgba(245,158,11,0.15);',
+      '  border-radius: 4px; padding: 1px 5px;',
+      '  align-self: flex-start;',
+      '}',
+      '.rw-modal-mount[data-theme="dark"] .rw-dup-badge { color: #fbbf24; background: rgba(245,158,11,0.12); }',
+      '.rw-dup-card-text {',
+      '  font-size: 13px; line-height: 1.45; color: var(--rw-fg-2);',
+      '}',
+      '.rw-dup-ref-link {',
+      '  background: none; border: none; padding: 0;',
+      '  font: inherit; font-size: 13px; font-weight: 600;',
+      '  color: var(--rw-accent); cursor: pointer; text-decoration: underline;',
+      '  text-underline-offset: 2px;',
+      '}',
+      '.rw-dup-ref-link:hover { opacity: 0.8; }',
+      '.rw-dup-ref-unknown { font-size: 13px; color: var(--rw-fg-2); }',
+      '.rw-dup-card-footer {',
+      '  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;',
+      '}',
+      '.rw-dup-proceed-btn {',
+      '  display: inline-flex; align-items: center;',
+      '  height: 26px; padding: 0 10px;',
+      '  border-radius: 999px;',
+      '  border: 1px solid var(--rw-line-2);',
+      '  background: transparent; color: var(--rw-fg-2);',
+      '  font: inherit; font-size: 11.5px; font-weight: 600;',
+      '  cursor: pointer;',
+      '  transition: border-color .12s ease, color .12s ease, opacity .12s ease;',
+      '}',
+      '.rw-dup-proceed-btn:hover:not(:disabled) { border-color: var(--rw-muted); color: var(--rw-fg); }',
+      '.rw-dup-proceed-btn:active:not(:disabled) { opacity: 0.7; }',
+      '.rw-dup-proceed-btn:disabled { cursor: not-allowed; opacity: 0.4; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -3766,7 +3826,12 @@
       activeStep = 3;
     }
 
-    var labels = ["Submitted", "Clarifying", "In progress", "PR opened"];
+    // When the clarification was flagged as a possible duplicate, rename
+    // the "In progress" step to "Needs review" so the stepper communicates
+    // the pending-duplicate state (it sits at the same position — between
+    // Clarifying and PR opened — but the label makes the situation clearer).
+    var inProgressLabel = status === "duplicate" ? "Needs review" : "In progress";
+    var labels = ["Submitted", "Clarifying", inProgressLabel, "PR opened"];
     var items = [];
     for (var i = 0; i < labels.length; i++) {
       var cls = "rw-clarif-step";
@@ -3885,6 +3950,85 @@
     });
 
     return section;
+  }
+
+  // Duplicate-notice card — rendered when clarification.status === "duplicate".
+  // Shows the matched ticket reference (navigable), and a "Not a duplicate —
+  // start anyway" button that calls POST /clarify-proceed to override.
+  // `onProceeded` is called with the server response on success so the caller
+  // can re-fetch the detail.
+  function renderDuplicateCard(ticketId, clarification, onProceeded) {
+    if (!clarification || clarification.status !== "duplicate") return null;
+
+    var dupId = clarification.duplicateOf;
+
+    // Build the duplicate-ticket reference.  If we have an id, make it a
+    // clickable button that fetches the duplicate's detail and navigates to
+    // it inside the widget (mirrors the pattern used by onAssignSuccess).
+    var refEl;
+    if (dupId) {
+      var shortRef = String(dupId).slice(0, 8).toUpperCase();
+      refEl = h("button", {
+        className: "rw-dup-ref-link",
+        type: "button",
+        title: "View existing request " + shortRef,
+      }, "#" + shortRef);
+      refEl.addEventListener("click", function () {
+        loadTicketDetail(dupId).then(function (detail) {
+          var t = detail && detail.ticket;
+          if (t) openDetailModal(t);
+        }).catch(function () {
+          // Navigation failed silently — the user is still on the current ticket.
+        });
+      });
+    } else {
+      refEl = h("span", { className: "rw-dup-ref-unknown" }, "an existing request");
+    }
+
+    var errorEl = h("span", { className: "rw-clarif-error", style: { display: "none" } });
+    var proceedBtn = h("button", {
+      className: "rw-dup-proceed-btn",
+      type: "button",
+    }, "Not a duplicate — start anyway");
+
+    proceedBtn.addEventListener("click", function () {
+      errorEl.style.display = "none";
+      proceedBtn.disabled = true;
+      proceedBtn.textContent = "Starting…";
+
+      postClarifyProceed(ticketId, clarification.id).then(function (resp) {
+        onProceeded(resp);
+      }).catch(function (err) {
+        proceedBtn.disabled = false;
+        proceedBtn.textContent = "Not a duplicate — start anyway";
+        errorEl.style.display = "";
+        var code = err && err.status;
+        if (code === 409) {
+          errorEl.textContent = "This request has already been processed.";
+        } else if (code === 403) {
+          errorEl.textContent = "You don’t have permission to override this.";
+        } else if (code === 503) {
+          errorEl.textContent = "Service unavailable — please try again shortly.";
+        } else {
+          errorEl.textContent = "Failed to proceed: " + ((err && err.message) || "unknown error");
+        }
+      });
+    });
+
+    return h("div", { className: "rw-dup-card" }, [
+      h("div", { className: "rw-dup-card-body" }, [
+        h("span", { className: "rw-dup-badge" }, "Possible duplicate"),
+        h("span", { className: "rw-dup-card-text" }, [
+          document.createTextNode("This looks similar to "),
+          refEl,
+          document.createTextNode(". Check if it already covers your request."),
+        ]),
+      ]),
+      h("div", { className: "rw-dup-card-footer" }, [
+        proceedBtn,
+        errorEl,
+      ]),
+    ]);
   }
 
   // Small linked-PR card rendered between the ticket head and body.
@@ -4066,6 +4210,33 @@
         });
       });
       if (qaCards) scrollArea.appendChild(qaCards);
+    }
+
+    // Duplicate-notice card — rendered when the clarification flagged this
+    // ticket as a possible duplicate of an existing one.  The user can
+    // click through to the matched ticket or override and proceed anyway.
+    if (!loading && data.clarification && data.clarification.status === "duplicate") {
+      var dupCard = renderDuplicateCard(ticket.id, data.clarification, function () {
+        // On successful proceed: re-fetch the full detail so the timeline,
+        // stepper label, and this card all reflect the new state.
+        loadTicketDetail(ticket.id).then(function (freshData) {
+          if (view !== "detail") return;
+          renderDetailInto(card, freshData, false);
+        }).catch(function () {
+          // Fallback: re-render with clarification status cleared so the
+          // card disappears and the user isn't stuck on an error state.
+          renderDetailInto(card, {
+            ticket: ticket,
+            comments: comments,
+            activity: activity,
+            isOwner: data.isOwner,
+            isEditable: data.isEditable,
+            clarification: { id: data.clarification.id, status: "started", round: data.clarification.round, openQuestions: [] },
+            linkedPr: data.linkedPr,
+          }, false);
+        });
+      });
+      if (dupCard) scrollArea.appendChild(dupCard);
     }
 
     // body
