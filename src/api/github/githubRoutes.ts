@@ -2,7 +2,7 @@ import type { Hono } from 'hono';
 import { verifyGithubWebhook } from './verifyWebhook.js';
 import { verifyInstallState } from './installState.js';
 import type { GithubAppConfig } from './config.js';
-import type { ActivityType } from '@runhq/server-protocol';
+import type { ActivityType, CanonicalTaskStatus } from '@runhq/server-protocol';
 import type { TaskShareIdQuery, TaskCandidate } from '../services/WorkspaceTaskService.js';
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ export interface PrLinkedDeps {
     createdByName?: string | null;
   }) => Promise<void>;
   /** Update a task's fields (used to set status → needs_review). */
-  updateTask: (serverId: string, taskId: string, input: { status: string }) => Promise<void>;
+  updateTask: (serverId: string, taskId: string, input: { status: CanonicalTaskStatus }) => Promise<void>;
 }
 
 export interface GithubRoutesDeps {

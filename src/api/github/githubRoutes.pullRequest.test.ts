@@ -339,4 +339,84 @@ describe('pull_request webhook via HTTP route', () => {
 
     expect(res.status).toBe(401);
   });
+
+  it('malformed payload (missing pull_request/head/repository fields) — route returns 200 without writing activity', async () => {
+    const addActivity = vi.fn(async () => {});
+    const { app } = makeRouteApp({ addActivity });
+
+    // Totally empty object — no pull_request, head, or repository keys
+    const payload = JSON.stringify({ action: 'opened' });
+    const sig = signPayload(payload, cfg.webhookSecret);
+
+    const res = await app.request('/api/github/webhooks', {
+      method: 'POST',
+      headers: { 'x-github-event': 'pull_request', 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body: payload,
+    });
+
+    expect(res.status).toBe(200);
+    expect(addActivity).not.toHaveBeenCalled();
+  });
+
+  it('reopened-after-opened: exactly ONE pr_linked activity written (idempotent across cycle)', async () => {
+    const addActivity = vi.fn(async () => {});
+    // After `opened`, listActivity returns the pr_linked entry so `reopened` is a no-op.
+    let callCount = 0;
+    const listActivity = vi.fn(async () => {
+      // First call (for opened): empty → allow write.
+      // Second call (for reopened): return the already-written entry.
+      callCount += 1;
+      if (callCount === 1) return [];
+      return [{ type: 'pr_linked' as const, metadata: { number: 42 } }];
+    });
+    const { app } = makeRouteApp({ addActivity, listActivity });
+
+    const payload = JSON.stringify(makePayload({ action: 'opened', number: 42 }));
+    const sig = signPayload(payload, cfg.webhookSecret);
+
+    // Fire opened
+    const r1 = await app.request('/api/github/webhooks', {
+      method: 'POST',
+      headers: { 'x-github-event': 'pull_request', 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body: payload,
+    });
+    expect(r1.status).toBe(200);
+
+    // Fire reopened for the same PR number
+    const payload2 = JSON.stringify(makePayload({ action: 'reopened', number: 42 }));
+    const sig2 = signPayload(payload2, cfg.webhookSecret);
+    const r2 = await app.request('/api/github/webhooks', {
+      method: 'POST',
+      headers: { 'x-github-event': 'pull_request', 'x-hub-signature-256': sig2, 'content-type': 'application/json' },
+      body: payload2,
+    });
+    expect(r2.status).toBe(200);
+
+    // Exactly one pr_linked activity written across both events
+    expect(addActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it('production wiring path: prLinked truthy → both addActivity and updateTask are invoked through the route', async () => {
+    const addActivity = vi.fn(async () => {});
+    const updateTask = vi.fn(async () => {});
+    const { app } = makeRouteApp({ addActivity, updateTask });
+
+    const payload = JSON.stringify(makePayload({ action: 'opened', number: 77 }));
+    const sig = signPayload(payload, cfg.webhookSecret);
+
+    const res = await app.request('/api/github/webhooks', {
+      method: 'POST',
+      headers: { 'x-github-event': 'pull_request', 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body: payload,
+    });
+
+    expect(res.status).toBe(200);
+    // Both side-effects must fire when prLinked deps are wired in
+    expect(addActivity).toHaveBeenCalledTimes(1);
+    expect(updateTask).toHaveBeenCalledWith(
+      'ws_a',
+      'abcd1234-0000-4000-a000-000000000000',
+      { status: 'needs_review' },
+    );
+  });
 });

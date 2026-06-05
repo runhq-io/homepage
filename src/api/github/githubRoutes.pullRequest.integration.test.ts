@@ -119,8 +119,8 @@ function realDeps() {
     addActivity: async (serverId: string, taskId: string, input: Parameters<typeof addActivity>[2]) => {
       await addActivity(serverId, taskId, input);
     },
-    updateTask: async (serverId: string, taskId: string, input: { status: string }) => {
-      await updateTask(serverId, taskId, input as any);
+    updateTask: async (serverId: string, taskId: string, input: Parameters<typeof updateTask>[2]) => {
+      await updateTask(serverId, taskId, input);
     },
   };
 }

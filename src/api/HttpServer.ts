@@ -6674,6 +6674,18 @@ export function createHttpApp() {
       isAssociatedWithWorkspace: GithubInstallationsService.isAssociatedWithWorkspace,
       mintInstallationToken: (id) => getGitHubAppService().mintInstallationToken(id),
       fetchInstallationAccount: (id) => getGitHubAppService().getInstallationAccount(id),
+      prLinked: {
+        findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,
+        parseTaskShareId: WorkspaceTaskService.parseTaskShareId,
+        resolveTaskCandidates: WorkspaceTaskService.resolveTaskCandidates,
+        listActivity: WorkspaceTaskService.listActivity,
+        addActivity: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
+        updateTask: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.updateTask(serverId, taskId, input);
+        },
+      },
     });
     registerInternalGithubRoutes(app, {
       stateSecret: getGithubAppConfig().stateSecret,
