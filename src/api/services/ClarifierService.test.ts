@@ -23,6 +23,7 @@ import {
   answerClarification,
   getOwnedClarification,
   markClarificationStarted,
+  getTicketClarification,
   ClarifierAnswerError,
   type CallModel,
 } from './ClarifierService';
@@ -415,6 +416,58 @@ describe('getOwnedClarification', () => {
     });
 
     expect(clar).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getTicketClarification — active-over-duplicate ordering (Fix 1)
+// ---------------------------------------------------------------------------
+describe('getTicketClarification', () => {
+  it('returns the active (asking) clarification even when a duplicate row has a newer createdAt', async () => {
+    // Scenario: two rows for the same taskId.
+    //   Row A — status 'asking',   inserted first  (older createdAt)
+    //   Row B — status 'duplicate', inserted second (newer createdAt)
+    // Plain DESC ordering would surface Row B.
+    // With the CASE-based deprioritisation, Row A (active) must win.
+    const taskId = await makeTask('Dup-ordering test', 'desc');
+
+    const past = new Date(Date.now() - 5_000); // 5 seconds ago
+    const now  = new Date();
+
+    // Insert the asking row with an explicitly earlier timestamp
+    const [rowA] = await db.insert(widgetClarifications).values({
+      taskId,
+      serverId: SERVER_ID,
+      widgetUserId: WIDGET_USER_ID,
+      agentId: 'agent-dup-test',
+      command: 'do the thing',
+      status: 'asking',
+      round: 0,
+      createdAt: past,
+    }).returning({ id: widgetClarifications.id, status: widgetClarifications.status });
+
+    // Insert the duplicate row with a newer timestamp
+    const [rowB] = await db.insert(widgetClarifications).values({
+      taskId,
+      serverId: SERVER_ID,
+      widgetUserId: WIDGET_USER_ID,
+      agentId: 'agent-dup-test',
+      command: 'do the thing',
+      status: 'duplicate',
+      round: 0,
+      createdAt: now,
+    }).returning({ id: widgetClarifications.id, status: widgetClarifications.status });
+
+    try {
+      const result = await getTicketClarification(taskId);
+      expect(result).not.toBeNull();
+      // Must surface the asking row, not the newer duplicate
+      expect(result!.id).toBe(rowA!.id);
+      expect(result!.status).toBe('asking');
+    } finally {
+      await db.delete(widgetClarifications).where(eq(widgetClarifications.id, rowA!.id));
+      await db.delete(widgetClarifications).where(eq(widgetClarifications.id, rowB!.id));
+    }
   });
 });
 

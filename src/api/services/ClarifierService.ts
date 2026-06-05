@@ -21,7 +21,7 @@ import {
   workspaceTasks,
   type WidgetClarification,
 } from '../../db/schema';
-import { eq, and, asc, desc } from 'drizzle-orm';
+import { eq, and, asc, desc, sql } from 'drizzle-orm';
 import {
   buildClarifierMessages,
   parseVerdict,
@@ -33,6 +33,18 @@ import {
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/**
+ * A single clarification question as exposed to callers (WidgetService and
+ * the route layer). Declared once here to avoid duplicating the shape in
+ * every return type annotation.
+ */
+export interface ClarificationQuestion {
+  id: string;
+  prompt: string;
+  options: string[] | null;
+  multiselect: boolean;
+}
 
 /** Injectable model call — returns raw model text. */
 export type CallModel = (args: {
@@ -46,12 +58,7 @@ export type ClarifierStep =
       status: 'asking';
       clarificationId: string;
       round: number;
-      questions: Array<{
-        id: string;
-        prompt: string;
-        options: string[] | null;
-        multiselect: boolean;
-      }>;
+      questions: ClarificationQuestion[];
     };
 
 /** Input to startClarification. */
@@ -149,7 +156,7 @@ async function insertQuestions(
   clarificationId: string,
   questions: ClarifierQuestion[],
   round: number,
-): Promise<Array<{ id: string; prompt: string; options: string[] | null; multiselect: boolean }>> {
+): Promise<ClarificationQuestion[]> {
   const inserted = await dbOrTx
     .insert(widgetClarificationQuestions)
     .values(
@@ -427,7 +434,10 @@ export async function getTicketClarification(taskId: string): Promise<WidgetClar
     .select()
     .from(widgetClarifications)
     .where(eq(widgetClarifications.taskId, taskId))
-    .orderBy(desc(widgetClarifications.createdAt))
+    .orderBy(
+      sql`CASE WHEN ${widgetClarifications.status} IN ('duplicate','skipped') THEN 1 ELSE 0 END ASC`,
+      desc(widgetClarifications.createdAt),
+    )
     .limit(1);
   return row ?? null;
 }
@@ -439,7 +449,7 @@ export async function getTicketClarification(taskId: string): Promise<WidgetClar
  */
 export async function listOpenQuestions(
   clarificationId: string,
-): Promise<Array<{ id: string; prompt: string; options: string[] | null; multiselect: boolean }>> {
+): Promise<ClarificationQuestion[]> {
   const rows = await db
     .select({
       id: widgetClarificationQuestions.id,

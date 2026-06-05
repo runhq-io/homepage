@@ -30,6 +30,7 @@ import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
 import * as ClarifierService from './ClarifierService';
+import type { ClarificationQuestion } from './ClarifierService';
 import {
   RW_SESSION_COOKIE,
   verifyRwSession,
@@ -196,7 +197,7 @@ export type PublicTicketDetail = {
   clarification: {
     status: 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
     round: number;
-    openQuestions: Array<{ id: string; prompt: string; options: string[] | null; multiselect: boolean }>;
+    openQuestions: ClarificationQuestion[];
   } | null;
 };
 

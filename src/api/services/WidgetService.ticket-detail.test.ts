@@ -418,4 +418,50 @@ describe('getPublicTicketDetail clarification field', () => {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
     }
   });
+
+  it('exposes status+round but openQuestions=[] for anonymous viewer (no widgetUserId)', async () => {
+    // An asking clarification with pending questions exists.
+    // An anonymous viewer (undefined widgetUserId) must see status/round but
+    // must never receive openQuestions — question cards must not leak to
+    // unauthenticated callers.
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Clarif anon task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    const [widgetUserE] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID,
+      externalUserId: `ext-e-${RUN_HEX}`,
+      name: 'Eve',
+    }).returning({ id: widgetUsers.id });
+    const ANSWERER_ID = widgetUserE!.id;
+
+    const [clar] = await db.insert(widgetClarifications).values({
+      taskId: task!.id,
+      serverId: SERVER_ID,
+      widgetUserId: ANSWERER_ID,
+      agentId: 'agent-test',
+      command: 'help me',
+      status: 'asking',
+      round: 0,
+    }).returning({ id: widgetClarifications.id });
+
+    await db.insert(widgetClarificationQuestions).values([
+      { clarificationId: clar!.id, prompt: 'Private Q?', options: null, multiselect: false, status: 'pending', round: 0 },
+    ]);
+
+    try {
+      // Called with undefined widgetUserId — anonymous viewer
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id, undefined);
+      expect(detail).not.toBeNull();
+      expect(detail!.clarification).not.toBeNull();
+      expect(detail!.clarification!.status).toBe('asking');
+      expect(detail!.clarification!.round).toBe(0);
+      // Anonymous viewer must receive zero open questions
+      expect(detail!.clarification!.openQuestions).toHaveLength(0);
+    } finally {
+      await db.delete(widgetClarifications).where(eq(widgetClarifications.id, clar!.id));
+      await db.delete(widgetUsers).where(eq(widgetUsers.id, ANSWERER_ID));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
 });
