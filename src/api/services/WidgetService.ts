@@ -2672,6 +2672,44 @@ export async function getWidgetUserAuditInfo(
   return wu ?? null;
 }
 
+// ============================================================================
+// Shared resolution helpers (used by getTicketForAssign and assignAgent)
+// ============================================================================
+
+/**
+ * Resolve the serverId for a widget project.
+ * Returns null when the project does not exist.
+ */
+async function resolveWidgetServerId(widgetProjectId: string): Promise<string | null> {
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  return proj?.serverId ?? null;
+}
+
+/**
+ * Load the title and description for a widget-sourced task scoped to a server.
+ * Returns null when no matching row exists (task missing, wrong server, wrong sourceType).
+ */
+async function getWidgetTaskRow(
+  serverId: string,
+  ticketId: string,
+): Promise<{ title: string; description: string | null } | null> {
+  const [task] = await db
+    .select({ title: workspaceTasks.title, description: workspaceTasks.description })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, serverId),
+    ))
+    .limit(1);
+  if (!task) return null;
+  return { title: task.title, description: task.description ?? null };
+}
+
 /**
  * Resolve the serverId + ticket title/description for an assign or clarification request.
  * Returns null if the project or ticket cannot be found (caller should treat as 404).
@@ -2680,25 +2718,13 @@ export async function getTicketForAssign(
   widgetProjectId: string,
   ticketId: string,
 ): Promise<{ serverId: string; title: string; description: string | null } | null> {
-  const [proj] = await db
-    .select({ serverId: widgetProjects.serverId })
-    .from(widgetProjects)
-    .where(eq(widgetProjects.id, widgetProjectId))
-    .limit(1);
-  if (!proj) return null;
+  const serverId = await resolveWidgetServerId(widgetProjectId);
+  if (!serverId) return null;
 
-  const [task] = await db
-    .select({ title: workspaceTasks.title, description: workspaceTasks.description })
-    .from(workspaceTasks)
-    .where(and(
-      eq(workspaceTasks.id, ticketId),
-      eq(workspaceTasks.sourceType, 'widget'),
-      eq(workspaceTasks.serverId, proj.serverId),
-    ))
-    .limit(1);
+  const task = await getWidgetTaskRow(serverId, ticketId);
   if (!task) return null;
 
-  return { serverId: proj.serverId, title: task.title, description: task.description ?? null };
+  return { serverId, title: task.title, description: task.description };
 }
 
 export async function assignAgent(
@@ -2706,28 +2732,16 @@ export async function assignAgent(
   ticketId: string,
   req: AssignAgentRequest,
 ): Promise<AssignAgentResult> {
-  const [proj] = await db
-    .select({ serverId: widgetProjects.serverId })
-    .from(widgetProjects)
-    .where(eq(widgetProjects.id, widgetProjectId))
-    .limit(1);
-  if (!proj) throw new WidgetAssignError('project_not_found', 404);
+  const serverId = await resolveWidgetServerId(widgetProjectId);
+  if (!serverId) throw new WidgetAssignError('project_not_found', 404);
 
-  const [task] = await db
-    .select({ serverId: workspaceTasks.serverId })
-    .from(workspaceTasks)
-    .where(and(
-      eq(workspaceTasks.id, ticketId),
-      eq(workspaceTasks.sourceType, 'widget'),
-      eq(workspaceTasks.serverId, proj.serverId),
-    ))
-    .limit(1);
+  const task = await getWidgetTaskRow(serverId, ticketId);
   if (!task) throw new WidgetAssignError('ticket_not_found', 404);
 
   const [server] = await db
     .select()
     .from(servers)
-    .where(eq(servers.id, task.serverId))
+    .where(eq(servers.id, serverId))
     .limit(1);
   if (!server) throw new WidgetAssignError('server_not_found', 404);
 
@@ -2756,7 +2770,7 @@ export async function assignAgent(
   try {
     await db.insert(workspaceTaskActivity).values({
       taskId: ticketId,
-      serverId: task.serverId,
+      serverId,
       type: 'agent_assigned',
       createdByType: 'external',
       createdById: req.actor.widgetUserId,
