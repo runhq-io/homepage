@@ -21,7 +21,7 @@ import {
   workspaceTasks,
   type WidgetClarification,
 } from '../../db/schema';
-import { eq, and, asc } from 'drizzle-orm';
+import { eq, and, asc, desc } from 'drizzle-orm';
 import {
   buildClarifierMessages,
   parseVerdict,
@@ -411,4 +411,55 @@ export async function markClarificationStarted(clarificationId: string): Promise
     .update(widgetClarifications)
     .set({ status: 'started', updatedAt: new Date() })
     .where(eq(widgetClarifications.id, clarificationId));
+}
+
+// ---------------------------------------------------------------------------
+// Read helpers (used by WidgetService to surface clarification in ticket detail)
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the most recent clarification for a ticket (by taskId), or null if
+ * none exists.  If multiple clarification rows ever accumulate (e.g. duplicate
+ * attempts), only the latest is surfaced — callers never need to iterate.
+ */
+export async function getTicketClarification(taskId: string): Promise<WidgetClarification | null> {
+  const [row] = await db
+    .select()
+    .from(widgetClarifications)
+    .where(eq(widgetClarifications.taskId, taskId))
+    .orderBy(desc(widgetClarifications.createdAt))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * Return the pending (unanswered) questions for a clarification, in creation
+ * order.  Only 'pending' rows are returned — answered questions are intentionally
+ * excluded so callers get exactly the set the widget user still needs to act on.
+ */
+export async function listOpenQuestions(
+  clarificationId: string,
+): Promise<Array<{ id: string; prompt: string; options: string[] | null; multiselect: boolean }>> {
+  const rows = await db
+    .select({
+      id: widgetClarificationQuestions.id,
+      prompt: widgetClarificationQuestions.prompt,
+      options: widgetClarificationQuestions.options,
+      multiselect: widgetClarificationQuestions.multiselect,
+    })
+    .from(widgetClarificationQuestions)
+    .where(
+      and(
+        eq(widgetClarificationQuestions.clarificationId, clarificationId),
+        eq(widgetClarificationQuestions.status, 'pending'),
+      ),
+    )
+    .orderBy(asc(widgetClarificationQuestions.createdAt));
+
+  return rows.map((r) => ({
+    id: r.id,
+    prompt: r.prompt,
+    options: r.options ?? null,
+    multiselect: r.multiselect,
+  }));
 }

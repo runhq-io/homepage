@@ -29,6 +29,7 @@ import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
+import * as ClarifierService from './ClarifierService';
 import {
   RW_SESSION_COOKIE,
   verifyRwSession,
@@ -185,6 +186,18 @@ export type PublicTicketDetail = {
     metadata?: Record<string, unknown> | null;
     attachments?: PublicAttachmentSummary[] | null;
   }>;
+  /**
+   * The most recent clarification session for this ticket, or null if none exists.
+   *
+   * `openQuestions` is populated ONLY when the requester is the clarification's
+   * widgetUserId (the assigner who must answer) AND the status is 'asking'.
+   * All other viewers receive an empty array to prevent question-card leakage.
+   */
+  clarification: {
+    status: 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
+    round: number;
+    openQuestions: Array<{ id: string; prompt: string; options: string[] | null; multiselect: boolean }>;
+  } | null;
 };
 
 type PublicAttachmentLike = {
@@ -1023,6 +1036,21 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       ? externalUserIdMap.get(task.createdById) ?? null
       : null;
 
+  // Fetch the most recent clarification for this ticket and conditionally
+  // expose open questions to the answerer (the assigner who initiated the
+  // clarification session).  Non-owners and non-answerers get status+round but
+  // an empty openQuestions array so question cards are never leaked.
+  const clar = await ClarifierService.getTicketClarification(task.id);
+  let clarification: PublicTicketDetail['clarification'] = null;
+  if (clar !== null) {
+    const isAnswerer = !!widgetUserId && widgetUserId === clar.widgetUserId;
+    const openQuestions =
+      isAnswerer && clar.status === 'asking'
+        ? await ClarifierService.listOpenQuestions(clar.id)
+        : [];
+    clarification = { status: clar.status, round: clar.round, openQuestions };
+  }
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
@@ -1049,6 +1077,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       metadata: entry.metadata ?? null,
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
+    clarification,
   };
 }
 
