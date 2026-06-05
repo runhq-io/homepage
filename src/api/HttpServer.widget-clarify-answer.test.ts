@@ -123,6 +123,7 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
     (ClarifierService.getOwnedClarification as any).mockResolvedValue(OWNED_CLARIFICATION);
     (ClarifierService.answerClarification as any).mockResolvedValue({ status: 'ready', clarificationId: CLARIFICATION_ID });
     (ClarifierService.markClarificationStarted as any).mockResolvedValue(undefined);
+    (WidgetService.listExposedAgents as any).mockResolvedValue([{ id: 'a1' }]);
     (WidgetService.getWidgetUserAuditInfo as any).mockResolvedValue({ externalUserId: 'ext-user-1', name: 'Alice' });
     (WidgetService.assignAgent as any).mockResolvedValue({ jobId: 'job-001' });
   });
@@ -287,6 +288,54 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
     const body = await res.json();
     expect(body.error).toBe('clarification_not_open');
     expect(ClarifierService.answerClarification).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Exposure recheck on ready-path (Gate 5c — TOCTOU guard)
+  // ---------------------------------------------------------------------------
+
+  it('403 Agent not available when answerClarification returns ready but stored agentId is no longer exposed; assignAgent NOT called, markClarificationStarted NOT called', async () => {
+    // The clarification was stored with agentId 'a1', but exposure has since been revoked.
+    (WidgetService.listExposedAgents as any).mockResolvedValue([{ id: 'other-agent' }]);
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe('Agent not available');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+    expect(ClarifierService.markClarificationStarted).not.toHaveBeenCalled();
+  });
+
+  it('403 Agent not available when answerClarification returns ready and listExposedAgents is empty; assignAgent NOT called', async () => {
+    (WidgetService.listExposedAgents as any).mockResolvedValue([]);
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe('Agent not available');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+    expect(ClarifierService.markClarificationStarted).not.toHaveBeenCalled();
+  });
+
+  it('exposure recheck is NOT triggered on asking path (returns next questions even when listExposedAgents would deny)', async () => {
+    // The clarifier still has questions — we should not hit the exposure gate at all.
+    (WidgetService.listExposedAgents as any).mockResolvedValue([]);
+    const nextQuestions = [{ id: 'q2', prompt: 'Which OS?', options: null, multiselect: false }];
+    (ClarifierService.answerClarification as any).mockResolvedValue({
+      status: 'asking',
+      clarificationId: CLARIFICATION_ID,
+      round: 1,
+      questions: nextQuestions,
+    });
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.clarification.status).toBe('asking');
+    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------

@@ -5834,6 +5834,15 @@ export function createHttpApp() {
     }
 
     // step.status === 'ready' — proceed to start the job using the stored agent+command.
+
+    // Gate 5c: re-validate agent exposure (TOCTOU guard).
+    // The stored agentId may have been un-exposed between /assign (which checked Gate 5)
+    // and this deferred /clarify-answer call. Mirror /assign Gate 5 exactly.
+    const exposedForAnswer = await WidgetService.listExposedAgents(auth.projectId);
+    if (!exposedForAnswer.some((a) => a.id === clar.agentId)) {
+      return c.json({ error: 'Agent not available' }, 403);
+    }
+
     const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
     if (!wu) return c.json({ error: 'widget_user_not_found' }, 404);
 
