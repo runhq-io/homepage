@@ -6685,6 +6685,7 @@ export function createHttpApp() {
         updateTask: async (serverId, taskId, input) => {
           await WorkspaceTaskService.updateTask(serverId, taskId, input);
         },
+        updateActivityMetadata: WorkspaceTaskService.updateActivityMetadata,
       },
     });
     registerInternalGithubRoutes(app, {

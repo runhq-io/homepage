@@ -892,6 +892,21 @@ export async function addActivity(
   return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 
+/**
+ * Replace the metadata of an existing activity row.
+ * The caller is responsible for merging/building the full metadata object;
+ * this function performs a straightforward SET replacement.
+ */
+export async function updateActivityMetadata(
+  activityId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  await db
+    .update(workspaceTaskActivity)
+    .set({ metadata })
+    .where(eq(workspaceTaskActivity.id, activityId));
+}
+
 export async function updateAttachmentStorage(
   serverId: string,
   attachmentId: string,

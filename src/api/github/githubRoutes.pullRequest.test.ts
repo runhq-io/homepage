@@ -66,6 +66,7 @@ function makeDeps(overrides: Partial<PrLinkedDeps> = {}): PrLinkedDeps {
     listActivity: vi.fn(async () => []),
     addActivity: vi.fn(async () => {}),
     updateTask: vi.fn(async () => {}),
+    updateActivityMetadata: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -180,7 +181,7 @@ describe('handlePullRequestEvent', () => {
     it('returns skipped when a pr_linked activity for this PR number already exists', async () => {
       const deps = makeDeps({
         listActivity: vi.fn(async () => [
-          { type: 'pr_linked' as const, metadata: { number: 42, url: '...', state: 'open', repoBranch: 'x' } },
+          { id: 'act-1', type: 'pr_linked' as const, metadata: { number: 42, url: '...', state: 'open', repoBranch: 'x' } },
         ]),
       });
       const result = await handlePullRequestEvent(makePayload({ number: 42 }), deps);
@@ -192,7 +193,7 @@ describe('handlePullRequestEvent', () => {
     it('links when the existing pr_linked activity is for a different PR number', async () => {
       const deps = makeDeps({
         listActivity: vi.fn(async () => [
-          { type: 'pr_linked' as const, metadata: { number: 99 } },
+          { id: 'act-2', type: 'pr_linked' as const, metadata: { number: 99 } },
         ]),
       });
       const result = await handlePullRequestEvent(makePayload({ number: 42 }), deps);
@@ -235,6 +236,80 @@ describe('handlePullRequestEvent', () => {
     });
   });
 });
+
+  describe('closed action — PR state update', () => {
+    const ACTIVITY_ID = 'act-uuid-abcd';
+
+    function makeClosedPayload(merged: boolean, number = 42): PullRequestPayload {
+      return {
+        action: 'closed',
+        pull_request: {
+          number,
+          html_url: `https://github.com/acme/web/pull/${number}`,
+          state: 'closed',
+          merged,
+          head: { ref: 'session/job1/ticket-abcd1234' },
+        },
+        repository: { name: 'web', owner: { login: 'acme' } },
+      };
+    }
+
+    it('closed with merged:true → updates existing activity state to "merged"', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => [
+          { id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, url: 'https://github.com/acme/web/pull/42', state: 'open', repoBranch: 'session/job1/ticket-abcd1234' } },
+        ]),
+        updateActivityMetadata,
+      });
+
+      const result = await handlePullRequestEvent(makeClosedPayload(true), deps);
+      expect(result).toBe('updated');
+      expect(updateActivityMetadata).toHaveBeenCalledWith(
+        ACTIVITY_ID,
+        expect.objectContaining({ state: 'merged' }),
+      );
+      expect(deps.addActivity).not.toHaveBeenCalled();
+    });
+
+    it('closed with merged:false → updates existing activity state to "closed"', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => [
+          { id: ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 42, url: 'https://github.com/acme/web/pull/42', state: 'open' } },
+        ]),
+        updateActivityMetadata,
+      });
+
+      const result = await handlePullRequestEvent(makeClosedPayload(false), deps);
+      expect(result).toBe('updated');
+      expect(updateActivityMetadata).toHaveBeenCalledWith(
+        ACTIVITY_ID,
+        expect.objectContaining({ state: 'closed' }),
+      );
+    });
+
+    it('closed for a PR number that was never linked → no-op (skipped)', async () => {
+      const updateActivityMetadata = vi.fn(async () => {});
+      const deps = makeDeps({
+        listActivity: vi.fn(async () => []),
+        updateActivityMetadata,
+      });
+
+      const result = await handlePullRequestEvent(makeClosedPayload(true, 999), deps);
+      expect(result).toBe('skipped');
+      expect(updateActivityMetadata).not.toHaveBeenCalled();
+    });
+
+    it('opened flow is unchanged (regression guard)', async () => {
+      const deps = makeDeps();
+      const result = await handlePullRequestEvent(makePayload({ action: 'opened' }), deps);
+      expect(result).toBe('linked');
+      expect(deps.addActivity).toHaveBeenCalledTimes(1);
+      expect(deps.updateTask).toHaveBeenCalledTimes(1);
+      expect(deps.updateActivityMetadata).not.toHaveBeenCalled();
+    });
+  });
 
 // ---------------------------------------------------------------------------
 // Route integration: pull_request via HTTP (signature + dep wiring)
@@ -367,7 +442,7 @@ describe('pull_request webhook via HTTP route', () => {
       // Second call (for reopened): return the already-written entry.
       callCount += 1;
       if (callCount === 1) return [];
-      return [{ type: 'pr_linked' as const, metadata: { number: 42 } }];
+      return [{ id: 'act-3', type: 'pr_linked' as const, metadata: { number: 42 } }];
     });
     const { app } = makeRouteApp({ addActivity, listActivity });
 
@@ -417,6 +492,32 @@ describe('pull_request webhook via HTTP route', () => {
       'ws_a',
       'abcd1234-0000-4000-a000-000000000000',
       { status: 'needs_review' },
+    );
+  });
+
+  it('closed action: updateActivityMetadata is invoked through the route when an existing pr_linked activity is present', async () => {
+    const updateActivityMetadata = vi.fn(async () => {});
+    const EXISTING_ACTIVITY_ID = 'act-uuid-1234';
+    const { app } = makeRouteApp({
+      listActivity: vi.fn(async () => [
+        { id: EXISTING_ACTIVITY_ID, type: 'pr_linked' as const, metadata: { number: 99, url: 'https://github.com/acme/web/pull/99', state: 'open' } },
+      ]),
+      updateActivityMetadata,
+    });
+
+    const body = JSON.stringify({ ...makePayload({ action: 'closed', number: 99 }), pull_request: { number: 99, html_url: 'https://github.com/acme/web/pull/99', state: 'closed', merged: false, head: { ref: 'session/job1/ticket-abcd1234' } } });
+    const sig = signPayload(body, cfg.webhookSecret);
+
+    const res = await app.request('/api/github/webhooks', {
+      method: 'POST',
+      headers: { 'x-github-event': 'pull_request', 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateActivityMetadata).toHaveBeenCalledWith(
+      EXISTING_ACTIVITY_ID,
+      expect.objectContaining({ state: 'closed' }),
     );
   });
 });

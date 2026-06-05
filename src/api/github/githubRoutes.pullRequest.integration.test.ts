@@ -31,6 +31,7 @@ import {
   listActivity,
   addActivity,
   updateTask,
+  updateActivityMetadata,
 } from '../services/WorkspaceTaskService.js';
 import { findByOwnerRepo } from '../services/GithubProjectReposService.js';
 
@@ -122,6 +123,7 @@ function realDeps() {
     updateTask: async (serverId: string, taskId: string, input: Parameters<typeof updateTask>[2]) => {
       await updateTask(serverId, taskId, input);
     },
+    updateActivityMetadata,
   };
 }
 
@@ -217,7 +219,7 @@ describe('pull_request webhook — real DB integration', () => {
     expect(result).toBe('skipped');
   });
 
-  it('no-op for action=closed', async () => {
+  it('no-op for action=closed when PR was never linked', async () => {
     const activityBefore = await listActivity(TASK_ID);
     const result = await handlePullRequestEvent(
       makePayload({ action: 'closed', number: 999 }),
@@ -226,5 +228,57 @@ describe('pull_request webhook — real DB integration', () => {
     expect(result).toBe('skipped');
     const activityAfter = await listActivity(TASK_ID);
     expect(activityAfter).toHaveLength(activityBefore.length);
+  });
+
+  it('closed with merged:true → updates existing pr_linked activity state to "merged"', async () => {
+    // PR 101 was linked in the happy-path test above
+    const result = await handlePullRequestEvent(
+      makePayload({ action: 'closed', number: 101 }),
+      realDeps(),
+    );
+    // Override merged to true — the makePayload default has merged:false;
+    // call directly with a custom payload
+    const mergedResult = await handlePullRequestEvent(
+      {
+        action: 'closed',
+        pull_request: {
+          number: 202,
+          html_url: `https://github.com/${OWNER}/${REPO}/pull/202`,
+          state: 'closed',
+          merged: true,
+          head: { ref: BRANCH },
+        },
+        repository: { name: REPO, owner: { login: OWNER } },
+      },
+      realDeps(),
+    );
+    expect(mergedResult).toBe('updated');
+
+    const activity = await listActivity(TASK_ID);
+    const linked202 = activity.find((a) => a.type === 'pr_linked' && a.metadata?.number === 202);
+    expect(linked202?.metadata?.state).toBe('merged');
+  });
+
+  it('closed with merged:false → updates existing pr_linked activity state to "closed"', async () => {
+    // PR 101 was linked earlier; close it without merge
+    const result = await handlePullRequestEvent(
+      {
+        action: 'closed',
+        pull_request: {
+          number: 101,
+          html_url: `https://github.com/${OWNER}/${REPO}/pull/101`,
+          state: 'closed',
+          merged: false,
+          head: { ref: BRANCH },
+        },
+        repository: { name: REPO, owner: { login: OWNER } },
+      },
+      realDeps(),
+    );
+    expect(result).toBe('updated');
+
+    const activity = await listActivity(TASK_ID);
+    const linked101 = activity.find((a) => a.type === 'pr_linked' && a.metadata?.number === 101);
+    expect(linked101?.metadata?.state).toBe('closed');
   });
 });

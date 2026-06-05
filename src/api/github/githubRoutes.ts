@@ -16,8 +16,8 @@ export interface PrLinkedDeps {
   parseTaskShareId: (input: string) => TaskShareIdQuery | null;
   /** Fetch all non-deleted task rows that match the classified id. */
   resolveTaskCandidates: (query: TaskShareIdQuery) => Promise<TaskCandidate[]>;
-  /** List activity entries for a task (used for idempotency check). */
-  listActivity: (taskId: string) => Promise<Array<{ type: ActivityType; metadata?: Record<string, any> | null }>>;
+  /** List activity entries for a task (used for idempotency check and state updates). */
+  listActivity: (taskId: string) => Promise<Array<{ id: string; type: ActivityType; metadata?: Record<string, any> | null }>>;
   /** Append an activity entry to a task. */
   addActivity: (serverId: string, taskId: string, input: {
     type: ActivityType;
@@ -29,6 +29,8 @@ export interface PrLinkedDeps {
   }) => Promise<void>;
   /** Update a task's fields (used to set status → needs_review). */
   updateTask: (serverId: string, taskId: string, input: { status: CanonicalTaskStatus }) => Promise<void>;
+  /** Replace the metadata of an existing activity row (used to update PR state on close/merge). */
+  updateActivityMetadata: (activityId: string, metadata: Record<string, unknown>) => Promise<void>;
 }
 
 export interface GithubRoutesDeps {
@@ -86,10 +88,59 @@ export interface PullRequestPayload {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shared resolution helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the unique task that should receive a PR event, or return null for
+ * any intentional no-op (no branch match, no repo mapping, no task match,
+ * ambiguous match).
+ */
+async function resolvePrTask(
+  pr: PullRequestPayload['pull_request'],
+  repository: PullRequestPayload['repository'],
+  deps: PrLinkedDeps,
+): Promise<{ serverId: string; taskId: string; branch: string } | null> {
+  const branch = pr.head.ref;
+  const shortId = extractTicketShortId(branch);
+  if (!shortId) return null;
+
+  const owner = repository.owner.login;
+  const repo = repository.name;
+
+  const repoCandidates = await deps.findByOwnerRepo(owner, repo);
+  if (repoCandidates.length === 0) return null;
+  const repoServerIds = new Set(repoCandidates.map((r) => r.serverId));
+
+  const query = deps.parseTaskShareId(shortId);
+  if (!query) return null;
+
+  const taskCandidates = await deps.resolveTaskCandidates(query);
+
+  const matching = taskCandidates.filter((c) => repoServerIds.has(c.serverId));
+  if (matching.length === 0) {
+    if (taskCandidates.length > 0) {
+      console.info('[github/pr_linked] task found but no overlapping server with repo mapping', { shortId, owner, repo });
+    }
+    return null;
+  }
+
+  if (matching.length > 1) {
+    console.warn('[github/pr_linked] ambiguous task match — multiple tasks on repo-linked servers, skipping', {
+      shortId, owner, repo, count: matching.length,
+    });
+    return null;
+  }
+
+  return { serverId: matching[0].serverId, taskId: matching[0].taskId, branch };
+}
+
 /**
  * Handle a GitHub `pull_request` webhook event.
  *
- * Returns `'linked'` when a pr_linked activity was written, `'skipped'` for
+ * Returns `'linked'` when a pr_linked activity was written, `'updated'` when
+ * an existing activity's state was updated on close/merge, `'skipped'` for
  * intentional no-ops (wrong action, no branch match, no repo mapping, no task
  * match, already idempotent), and `'error'` on unexpected failures (caller
  * must still return 200 to GitHub).
@@ -97,72 +148,73 @@ export interface PullRequestPayload {
 export async function handlePullRequestEvent(
   payload: PullRequestPayload,
   deps: PrLinkedDeps,
-): Promise<'linked' | 'skipped' | 'error'> {
+): Promise<'linked' | 'updated' | 'skipped' | 'error'> {
   const { action, pull_request: pr, repository } = payload;
 
-  // Only link on open/reopen; ignore close, synchronize, etc.
-  if (action !== 'opened' && action !== 'reopened') return 'skipped';
+  // ── Opened / Reopened ────────────────────────────────────────────────────
+  if (action === 'opened' || action === 'reopened') {
+    const resolved = await resolvePrTask(pr, repository, deps);
+    if (!resolved) return 'skipped';
 
-  const branch = pr.head.ref;
-  const shortId = extractTicketShortId(branch);
-  if (!shortId) return 'skipped';
+    const { serverId, taskId, branch } = resolved;
 
-  const owner = repository.owner.login;
-  const repo = repository.name;
+    // Idempotency: skip if a pr_linked activity for this PR number already exists
+    const existing = await deps.listActivity(taskId);
+    const alreadyLinked = existing.some(
+      (a) => a.type === 'pr_linked' && a.metadata?.number === pr.number,
+    );
+    if (alreadyLinked) return 'skipped';
 
-  // Map repo → server candidates
-  const repoCandidates = await deps.findByOwnerRepo(owner, repo);
-  if (repoCandidates.length === 0) return 'skipped';
-  const repoServerIds = new Set(repoCandidates.map((r) => r.serverId));
-
-  // Resolve task by shortId
-  const query = deps.parseTaskShareId(shortId);
-  if (!query) return 'skipped';
-
-  const taskCandidates = await deps.resolveTaskCandidates(query);
-
-  // Intersect: task must live on one of the repo-linked servers
-  const matching = taskCandidates.filter((c) => repoServerIds.has(c.serverId));
-  if (matching.length === 0) {
-    if (taskCandidates.length > 0) {
-      console.info('[github/pr_linked] task found but no overlapping server with repo mapping', { shortId, owner, repo });
-    }
-    return 'skipped';
-  }
-
-  if (matching.length > 1) {
-    console.warn('[github/pr_linked] ambiguous task match — multiple tasks on repo-linked servers, skipping', {
-      shortId, owner, repo, count: matching.length,
+    // Write the pr_linked activity + set status → needs_review
+    await deps.addActivity(serverId, taskId, {
+      type: 'pr_linked',
+      content: `Pull request #${pr.number} opened`,
+      metadata: {
+        number: pr.number,
+        url: pr.html_url,
+        state: pr.state,
+        repoBranch: branch,
+      },
+      createdByType: 'system',
     });
-    return 'skipped';
+
+    await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+
+    console.info('[github/pr_linked] linked PR to task', { serverId, taskId, pr: pr.number, branch });
+    return 'linked';
   }
 
-  const { serverId, taskId } = matching[0];
+  // ── Closed (merged or just closed) ───────────────────────────────────────
+  if (action === 'closed') {
+    const resolved = await resolvePrTask(pr, repository, deps);
+    if (!resolved) return 'skipped';
 
-  // Idempotency: skip if a pr_linked activity for this PR number already exists
-  const existing = await deps.listActivity(taskId);
-  const alreadyLinked = existing.some(
-    (a) => a.type === 'pr_linked' && a.metadata?.number === pr.number,
-  );
-  if (alreadyLinked) return 'skipped';
+    const { taskId } = resolved;
 
-  // Write the pr_linked activity + set status → needs_review
-  await deps.addActivity(serverId, taskId, {
-    type: 'pr_linked',
-    content: `Pull request #${pr.number} opened`,
-    metadata: {
-      number: pr.number,
-      url: pr.html_url,
-      state: pr.state,
-      repoBranch: branch,
-    },
-    createdByType: 'system',
-  });
+    // Find the existing pr_linked activity for this PR number
+    const existing = await deps.listActivity(taskId);
+    const linkedActivity = existing.find(
+      (a) => a.type === 'pr_linked' && a.metadata?.number === pr.number,
+    );
+    if (!linkedActivity) {
+      // Never linked — no-op
+      return 'skipped';
+    }
 
-  await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+    const newState = pr.merged ? 'merged' : 'closed';
+    const updatedMetadata = { ...(linkedActivity.metadata ?? {}), state: newState };
+    await deps.updateActivityMetadata(linkedActivity.id, updatedMetadata);
 
-  console.info('[github/pr_linked] linked PR to task', { serverId, taskId, pr: pr.number, branch });
-  return 'linked';
+    console.info('[github/pr_linked] updated PR state on task activity', {
+      taskId,
+      pr: pr.number,
+      newState,
+    });
+    return 'updated';
+  }
+
+  // All other actions (synchronize, labeled, review_requested, etc.) → no-op
+  return 'skipped';
 }
 
 export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {

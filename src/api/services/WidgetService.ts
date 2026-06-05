@@ -199,6 +199,12 @@ export type PublicTicketDetail = {
     round: number;
     openQuestions: ClarificationQuestion[];
   } | null;
+  /**
+   * The linked pull request for this ticket, derived from the most recent
+   * `pr_linked` activity. null if no PR has been linked.
+   * Visible to all viewers — the PR link is not sensitive.
+   */
+  linkedPr: { number: number; url: string; state: string; repoBranch?: string | null } | null;
 };
 
 type PublicAttachmentLike = {
@@ -217,6 +223,31 @@ function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmen
     mimeType: attachment.mimeType,
     url: attachment.url ?? null,
   };
+}
+
+/**
+ * Derive the most recent linked PR from an activity feed (already loaded).
+ * Returns null if no valid pr_linked activity exists.
+ * Defensively validates that number is a number and url is a string.
+ */
+function deriveLinkedPr(
+  activity: Array<{ type: string; metadata?: Record<string, unknown> | null }>,
+): PublicTicketDetail['linkedPr'] {
+  // activity is ordered by createdAt asc; scan in reverse for the most recent
+  for (let i = activity.length - 1; i >= 0; i--) {
+    const entry = activity[i];
+    if (entry.type !== 'pr_linked') continue;
+    const m = entry.metadata;
+    if (!m) continue;
+    const number = m.number;
+    const url = m.url;
+    // Defensive validation — malformed metadata must not surface
+    if (typeof number !== 'number' || typeof url !== 'string') continue;
+    const state = typeof m.state === 'string' ? m.state : 'open';
+    const repoBranch = typeof m.repoBranch === 'string' ? m.repoBranch : null;
+    return { number, url, state, repoBranch };
+  }
+  return null;
 }
 
 // ============================================================================
@@ -1052,6 +1083,10 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     clarification = { status: clar.status, round: clar.round, openQuestions };
   }
 
+  // Derive the most recent linked PR from the already-loaded activity feed.
+  // Reuses the feed — no extra DB query needed.
+  const linkedPr = deriveLinkedPr(activity);
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
@@ -1079,6 +1114,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
     clarification,
+    linkedPr,
   };
 }
 

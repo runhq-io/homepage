@@ -267,6 +267,107 @@ describe('getPublicTicketDetail comment payload', () => {
 });
 
 // ============================================================================
+// linkedPr field on PublicTicketDetail
+// ============================================================================
+
+describe('getPublicTicketDetail linkedPr field', () => {
+  it('returns linkedPr:null when no pr_linked activity exists', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'No PR task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
+      expect(detail).not.toBeNull();
+      expect(detail!.linkedPr).toBeNull();
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
+
+  it('returns linkedPr populated when a pr_linked activity exists', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'PR linked task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: task!.id,
+      type: 'pr_linked',
+      createdByType: 'system',
+      metadata: { number: 42, url: 'https://github.com/acme/web/pull/42', state: 'open', repoBranch: 'session/job1/ticket-abc' },
+    });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
+      expect(detail!.linkedPr).not.toBeNull();
+      expect(detail!.linkedPr!.number).toBe(42);
+      expect(detail!.linkedPr!.url).toBe('https://github.com/acme/web/pull/42');
+      expect(detail!.linkedPr!.state).toBe('open');
+      expect(detail!.linkedPr!.repoBranch).toBe('session/job1/ticket-abc');
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, task!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
+
+  it('returns the most recent pr_linked activity when multiple exist', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Two PRs task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    // Insert older activity first, then newer (DB default createdAt = now(), but ordering matters)
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: task!.id,
+      type: 'pr_linked',
+      createdByType: 'system',
+      metadata: { number: 10, url: 'https://github.com/acme/web/pull/10', state: 'closed' },
+    });
+    // Small delay to ensure distinct timestamps
+    await new Promise((r) => setTimeout(r, 5));
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: task!.id,
+      type: 'pr_linked',
+      createdByType: 'system',
+      metadata: { number: 20, url: 'https://github.com/acme/web/pull/20', state: 'open' },
+    });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
+      // Most recent pr_linked wins
+      expect(detail!.linkedPr!.number).toBe(20);
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, task!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
+
+  it('returns linkedPr:null when pr_linked metadata is malformed (number missing)', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Malformed PR task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: task!.id,
+      type: 'pr_linked',
+      createdByType: 'system',
+      // number is missing — url is present but number is not a number
+      metadata: { url: 'https://github.com/acme/web/pull/99', state: 'open' },
+    });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
+      expect(detail!.linkedPr).toBeNull();
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, task!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
+});
+
+// ============================================================================
 // Clarification field on PublicTicketDetail
 // ============================================================================
 
