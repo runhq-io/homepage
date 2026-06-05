@@ -8,7 +8,7 @@ import * as WidgetService from './WidgetService';
 const SERVER_ID = 'srv_settings';
 const SLUG = 'settings-test';
 const CHANNEL_ID = 'ch_settings';
-const LOOKUP = { channelId: CHANNEL_ID };
+const LOOKUP = { workspaceProjectId: 'wsp_settings' };
 let projectId: string;
 
 beforeAll(async () => {
@@ -53,6 +53,24 @@ describe('updateWidgetSettings — policy fields', () => {
       widgetAssignRoles: [],
     }, LOOKUP);
     // No throw — pass implies success
+  });
+
+  it('exposes all four policy fields through getWidgetSettings', async () => {
+    await db.update(widgetProjects)
+      .set({
+        widgetAgentAssignmentEnabled: true,
+        widgetAssignRoles: ['triager', 'pm'],
+        widgetRoleClaimName: 'company_roles',
+        widgetAssignRateLimitPerHour: 60,
+      })
+      .where(eq(widgetProjects.id, projectId));
+
+    const settings = await WidgetService.getWidgetSettings(SERVER_ID, LOOKUP);
+    expect(settings).not.toBeNull();
+    expect(settings!.widget_agent_assignment_enabled).toBe(true);
+    expect(settings!.widget_assign_roles).toEqual(['triager', 'pm']);
+    expect(settings!.widget_role_claim_name).toBe('company_roles');
+    expect(settings!.widget_assign_rate_limit_per_hour).toBe(60);
   });
 });
 

@@ -16,6 +16,7 @@ const SERVER_ID = `ws_ca_test_${RUN_HEX}`;
 const ADMIN_USER_ID = `00000000-0004-4000-a000-${RUN_HEX.padStart(12, '0')}`;
 const MEMBER_USER_ID = `00000000-0005-4000-a000-${RUN_HEX.padStart(12, '0')}`;
 const NON_MEMBER_USER_ID = `00000000-0006-4000-a000-${RUN_HEX.padStart(12, '0')}`;
+const OWNER_USER_ID = `00000000-0007-4000-a000-${RUN_HEX.padStart(12, '0')}`;
 const ALLOWED_ORIGIN = 'https://acme.test';
 const OTHER_ORIGIN = 'https://malicious.test';
 
@@ -69,10 +70,15 @@ beforeAll(async () => {
     { id: ADMIN_USER_ID, email: `admin+${RUN_HEX}@test.invalid`, name: 'Admin' },
     { id: MEMBER_USER_ID, email: `member+${RUN_HEX}@test.invalid`, name: 'Member' },
     { id: NON_MEMBER_USER_ID, email: `nonmember+${RUN_HEX}@test.invalid`, name: 'Non-Member' },
+    { id: OWNER_USER_ID, email: `owner+${RUN_HEX}@test.invalid`, name: 'Owner' },
   ]).onConflictDoNothing();
-  await db.insert(servers).values({ id: SERVER_ID, name: `Srv ${RUN_HEX}`, ownerId: ADMIN_USER_ID }).onConflictDoNothing();
+  await db.insert(servers).values({ id: SERVER_ID, name: `Srv ${RUN_HEX}`, ownerId: OWNER_USER_ID }).onConflictDoNothing();
   await db.insert(serverMembers).values([
-    { serverId: SERVER_ID, userId: ADMIN_USER_ID, role: 'owner', isAdmin: true },
+    // Production-realistic rows: owners are stamped role='owner' with
+    // is_admin=false (is_admin is the workspace-derived mirror, only set
+    // for workspace-PROMOTED admins — see ServerService.checkCloudOpPermission).
+    { serverId: SERVER_ID, userId: OWNER_USER_ID, role: 'owner', isAdmin: false },
+    { serverId: SERVER_ID, userId: ADMIN_USER_ID, role: 'member', isAdmin: true },
     { serverId: SERVER_ID, userId: MEMBER_USER_ID, role: 'member', isAdmin: false },
   ]).onConflictDoNothing();
 
@@ -82,6 +88,7 @@ beforeAll(async () => {
     slug: PROJECT_ENABLED_SLUG,
     apiKey: `ekey-${RUN_HEX}`,
     apiSecretHash: `esecret-${RUN_HEX}`,
+    channelId: `ch_ca_e_${RUN_HEX}`,
     enabled: true,
     autoRecognizeRunhqMembers: true,
     allowedOrigins: [ALLOWED_ORIGIN],
@@ -96,6 +103,7 @@ beforeAll(async () => {
     slug: PROJECT_DISABLED_SLUG,
     apiKey: `dkey-${RUN_HEX}`,
     apiSecretHash: `dsecret-${RUN_HEX}`,
+    channelId: `ch_ca_d_${RUN_HEX}`,
     enabled: true,
     autoRecognizeRunhqMembers: false, // opt-in OFF
     allowedOrigins: [ALLOWED_ORIGIN],
@@ -113,6 +121,7 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, ADMIN_USER_ID));
   await db.delete(users).where(eq(users.id, MEMBER_USER_ID));
   await db.delete(users).where(eq(users.id, NON_MEMBER_USER_ID));
+  await db.delete(users).where(eq(users.id, OWNER_USER_ID));
 });
 
 describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
@@ -136,6 +145,23 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
 
   it('grants assign_agent permission to workspace admins (when triager assignment is enabled)', async () => {
     const { token } = await makeRwSession(ADMIN_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_ENABLED_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(auth!.authSource).toBe('runhq');
+    expect(Array.from(auth!.permissions)).toEqual(['assign_agent']);
+    expect(auth!.matchedRoles).toEqual(['admin']);
+  });
+
+  it('grants assign_agent permission to the workspace OWNER (role=owner, is_admin=false)', async () => {
+    // Real owner rows have is_admin=false — the flag is only mirrored for
+    // workspace-promoted admins. The owner must still count as an admin here.
+    const { token } = await makeRwSession(OWNER_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
       origin: ALLOWED_ORIGIN,

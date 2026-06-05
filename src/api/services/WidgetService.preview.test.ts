@@ -45,4 +45,28 @@ describe('signWidgetUserJwt', () => {
     const wrongKey = new TextEncoder().encode('wrong-secret-xxxxxxxxxxxxxxxxxxxxxxxx');
     await expect(jose.jwtVerify(token, wrongKey, { algorithms: ['HS256'] })).rejects.toThrow();
   });
+
+  it('embeds the role claim under the given claim name', async () => {
+    const token = await signWidgetUserJwt({
+      apiSecretHash, apiKey, userId: 'user-1',
+      roleClaim: { name: 'runhq_roles', roles: ['triager'] },
+    });
+    const { payload } = await verifyAndDecode(token);
+    expect(payload.runhq_roles).toEqual(['triager']);
+  });
+
+  it('omits the role claim by default', async () => {
+    const token = await signWidgetUserJwt({ apiSecretHash, apiKey, userId: 'user-1' });
+    const { payload } = await verifyAndDecode(token);
+    expect(payload.runhq_roles).toBeUndefined();
+  });
+
+  it('a role claim name colliding with a reserved claim cannot clobber it', async () => {
+    const token = await signWidgetUserJwt({
+      apiSecretHash, apiKey, userId: 'user-1', userName: 'Alice',
+      roleClaim: { name: 'sub', roles: ['triager'] },
+    });
+    const { payload } = await verifyAndDecode(token);
+    expect(payload.sub).toBe('user-1'); // reserved claim wins
+  });
 });

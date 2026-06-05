@@ -2413,7 +2413,9 @@
       '  position: fixed; inset: 0;',
       '  background: rgba(0,0,0,0.4);',
       '  display: flex; align-items: center; justify-content: center;',
-      '  z-index: 1000000;',
+      // Must stack above .rw-shell-scrim (2147483645) like the other
+      // modalMountEl overlays (.rw-modal-scrim, .rw-lightbox-scrim).
+      '  z-index: 2147483647;',
       '}',
       '.rw-assign-modal {',
       '  background: #fff; border-radius: 8px; padding: 20px; width: 420px;',

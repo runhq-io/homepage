@@ -471,6 +471,16 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 
 const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
 
+/**
+ * Owner-or-admin check on a server_members row. Owner rows carry
+ * role='owner' with is_admin=false — is_admin is the workspace-derived
+ * mirror, set only for workspace-PROMOTED admins. Same shape as
+ * ServerService.checkCloudOpPermission.
+ */
+function isOwnerOrAdmin(membership: { role: string; isAdmin: boolean }): boolean {
+  return membership.role === 'owner' || membership.isAdmin === true;
+}
+
 interface PermissionPolicyRow {
   widgetAgentAssignmentEnabled: boolean;
   widgetAssignRoles: string[];
@@ -607,11 +617,11 @@ export async function authenticateWidget(
             widgetUserId = inserted.id;
           }
 
-          // Workspace admins auto-grant the assign_agent permission when
-          // the project has triager-assignment enabled. Regular members
+          // Workspace owners/admins auto-grant the assign_agent permission
+          // when the project has triager-assignment enabled. Regular members
           // continue to need explicit role-claim configuration via JWT —
           // expanding the trust boundary further requires explicit owner opt-in.
-          const isAdmin = !!membership.isAdmin;
+          const isAdmin = isOwnerOrAdmin(membership);
           const permissions: ReadonlySet<WidgetPermission> =
             isAdmin && project.widgetAgentAssignmentEnabled
               ? new Set<WidgetPermission>(['assign_agent'])
@@ -2021,9 +2031,20 @@ export async function signWidgetUserJwt(params: {
   apiKey: string;
   userId: string;
   userName?: string;
+  /**
+   * Role claim to embed, using the project's configured claim name —
+   * exactly the shape derivePermissions reads at auth time. Set by the
+   * BE's own mint paths (dogfood feedback embed, preview auto-inject)
+   * after verifying the user is an owner/admin of the widget's workspace.
+   */
+  roleClaim?: { name: string; roles: string[] };
 }): Promise<string> {
   const signingKey = new TextEncoder().encode(params.apiSecretHash);
   return await new jose.SignJWT({
+    // Role claim is spread FIRST so a claim name colliding with a reserved
+    // claim (fp/type/name — and sub/iat/exp via the setters below) can
+    // never clobber it: the reserved value always wins.
+    ...(params.roleClaim ? { [params.roleClaim.name]: params.roleClaim.roles } : {}),
     fp: params.apiKey,
     type: 'widget_user',
     ...(params.userName ? { name: params.userName } : {}),
@@ -2033,6 +2054,35 @@ export async function signWidgetUserJwt(params: {
     .setIssuedAt()
     .setExpirationTime(WIDGET_JWT_MAX_TOKEN_AGE)
     .sign(signingKey);
+}
+
+/**
+ * Mint-time role resolution for BE-issued widget tokens.
+ *
+ * The widget key (`fp`) identifies the project, the project identifies the
+ * workspace (`server_id`). When the authenticated RunHQ user is an
+ * owner/admin of that workspace and the project has triager assignment
+ * enabled, return the project's configured role claim — the exact shape
+ * derivePermissions reads at auth time, so the minted token grants
+ * assign_agent through the same single code path customer JWTs use.
+ *
+ * Returns undefined otherwise: the token mints with no role claim and the
+ * viewer is a regular identified widget user.
+ */
+async function workspaceRoleClaimFor(
+  project: {
+    serverId: string;
+    widgetAgentAssignmentEnabled: boolean;
+    widgetAssignRoles: string[];
+    widgetRoleClaimName: string;
+  },
+  userId: string,
+): Promise<{ name: string; roles: string[] } | undefined> {
+  if (!project.widgetAgentAssignmentEnabled) return undefined;
+  if (project.widgetAssignRoles.length === 0) return undefined;
+  const membership = await getServerMembership(project.serverId, userId);
+  if (!membership || !isOwnerOrAdmin(membership)) return undefined;
+  return { name: project.widgetRoleClaimName, roles: project.widgetAssignRoles };
 }
 
 /**
@@ -2049,6 +2099,10 @@ export async function generateUserTokenBySecret(
       apiKey: widgetProjects.apiKey,
       apiSecretHash: widgetProjects.apiSecretHash,
       enabled: widgetProjects.enabled,
+      serverId: widgetProjects.serverId,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.apiKey, fingerprint), eq(widgetProjects.enabled, true)))
@@ -2061,6 +2115,9 @@ export async function generateUserTokenBySecret(
     apiKey: project.apiKey,
     userId,
     userName,
+    // userId is console-verified — workspace owners/admins get the project's
+    // triager role claim baked in at mint time.
+    roleClaim: await workspaceRoleClaimFor(project, userId),
   });
 
   return { token };
@@ -2123,6 +2180,10 @@ export async function generatePreviewWidgetBootstrap(
       widgetPosition: widgetProjects.widgetPosition,
       channelId: widgetProjects.channelId,
       autoApprove: widgetProjects.autoApprove,
+      serverId: widgetProjects.serverId,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2137,6 +2198,9 @@ export async function generatePreviewWidgetBootstrap(
     apiKey: project.apiKey,
     userId,
     userName,
+    // userId is workspace-verified — owners/admins get the project's
+    // triager role claim baked in at mint time.
+    roleClaim: await workspaceRoleClaimFor(project, userId),
   });
 
   return {
@@ -2208,6 +2272,10 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
       autoInjectInPreview: widgetProjects.autoInjectInPreview,
       channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetAssignRateLimitPerHour: widgetProjects.widgetAssignRateLimitPerHour,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2227,6 +2295,10 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     auto_inject_in_preview: project.autoInjectInPreview,
     channel_id: project.channelId,
     slug: project.slug,
+    widget_agent_assignment_enabled: project.widgetAgentAssignmentEnabled,
+    widget_assign_roles: project.widgetAssignRoles,
+    widget_role_claim_name: project.widgetRoleClaimName,
+    widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
   };
 }
 
