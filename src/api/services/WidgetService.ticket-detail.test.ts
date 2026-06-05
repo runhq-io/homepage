@@ -387,6 +387,44 @@ describe('getPublicTicketDetail clarification field', () => {
     }
   });
 
+  it('exposes clarification.id so the widget can POST /clarify-answer', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, title: 'Clarif id exposure task', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    const [widgetUserZ] = await db.insert(widgetUsers).values({
+      projectId: PROJECT_ID,
+      externalUserId: `ext-z-${RUN_HEX}`,
+      name: 'Zara',
+    }).returning({ id: widgetUsers.id });
+    const ANSWERER_ID = widgetUserZ!.id;
+
+    const [clar] = await db.insert(widgetClarifications).values({
+      taskId: task!.id,
+      serverId: SERVER_ID,
+      widgetUserId: ANSWERER_ID,
+      agentId: 'agent-test',
+      command: 'fix this',
+      status: 'asking',
+      round: 0,
+    }).returning({ id: widgetClarifications.id });
+
+    await db.insert(widgetClarificationQuestions).values([
+      { clarificationId: clar!.id, prompt: 'Id Q?', options: null, multiselect: false, status: 'pending', round: 0 },
+    ]);
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id, ANSWERER_ID);
+      expect(detail!.clarification).not.toBeNull();
+      // id must be present and match the inserted clarification row
+      expect(detail!.clarification!.id).toBe(clar!.id);
+    } finally {
+      await db.delete(widgetClarifications).where(eq(widgetClarifications.id, clar!.id));
+      await db.delete(widgetUsers).where(eq(widgetUsers.id, ANSWERER_ID));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
+
   it('exposes status+round+openQuestions(2) to the clarification answerer when status=asking', async () => {
     const [task] = await db.insert(workspaceTasks).values({
       serverId: SERVER_ID, title: 'Clarif asking task', visibility: 'public',

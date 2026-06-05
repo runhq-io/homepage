@@ -195,6 +195,8 @@ export type PublicTicketDetail = {
    * All other viewers receive an empty array to prevent question-card leakage.
    */
   clarification: {
+    /** The clarification row id — required by the widget to POST /clarify-answer. */
+    id: string;
     status: 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
     round: number;
     openQuestions: ClarificationQuestion[];
@@ -1080,7 +1082,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       isAnswerer && clar.status === 'asking'
         ? await ClarifierService.listOpenQuestions(clar.id)
         : [];
-    clarification = { status: clar.status, round: clar.round, openQuestions };
+    clarification = { id: clar.id, status: clar.status, round: clar.round, openQuestions };
   }
 
   // Derive the most recent linked PR from the already-loaded activity feed.

@@ -48,6 +48,13 @@
   var view = "list";
   var currentDetailTicket = null;
 
+  // Polling interval handle for the ticket detail view.
+  // Started when a detail is opened, cleared when the detail closes.
+  // Only one interval is active at a time; stored here to guarantee cleanup
+  // on back-navigation, view switches, and panel close.
+  var detailPollIntervalId = null;
+  var DETAIL_POLL_INTERVAL_MS = 5000;
+
   // ===========================================================================
   // Console & error capture
   // ===========================================================================
@@ -192,6 +199,11 @@
   function postComment(ticketId, content) {
     return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/comments", {
       method: "POST", body: { content: content },
+    });
+  }
+  function postClarifyAnswer(ticketId, clarificationId, answers) {
+    return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/clarify-answer", {
+      method: "POST", body: { clarificationId: clarificationId, answers: answers },
     });
   }
 
@@ -2457,6 +2469,132 @@
       '.rw-assign-modal .rw-empty-agents {',
       '  font-size: 13px; color: #666; padding: 12px 0; line-height: 1.5;',
       '}',
+
+      /* -----------------------------------------------------------------------
+         Clarification timeline stepper
+         Compact horizontal stepper displayed in the ticket detail when a
+         clarification or linked PR exists.  Steps are: Submitted → Clarifying
+         → In progress → PR opened.  Active step is highlighted with the accent
+         colour; past steps are muted; future steps are dimmed. */
+      '.rw-clarif-timeline {',
+      '  display: flex; align-items: center; gap: 0;',
+      '  padding: 10px 18px 6px;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '  flex-wrap: nowrap; overflow-x: auto;',
+      '}',
+      '.rw-clarif-step {',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;',
+      '  color: var(--rw-muted-2);',
+      '  white-space: nowrap;',
+      '  flex: 0 0 auto;',
+      '}',
+      '.rw-clarif-step.rw-clarif-past {',
+      '  color: var(--rw-muted);',
+      '}',
+      '.rw-clarif-step.rw-clarif-active {',
+      '  color: var(--rw-accent);',
+      '}',
+      '.rw-clarif-step-dot {',
+      '  width: 6px; height: 6px; border-radius: 50%;',
+      '  background: currentColor; flex: 0 0 auto;',
+      '  opacity: 0.45;',
+      '}',
+      '.rw-clarif-step.rw-clarif-past .rw-clarif-step-dot { opacity: 0.7; }',
+      '.rw-clarif-step.rw-clarif-active .rw-clarif-step-dot { opacity: 1; }',
+      '.rw-clarif-connector {',
+      '  flex: 0 0 auto;',
+      '  width: 18px; height: 1px;',
+      '  background: var(--rw-line-2);',
+      '  margin: 0 2px;',
+      '}',
+
+      /* -----------------------------------------------------------------------
+         Clarification question cards
+         Rendered below the timeline when status=asking and questions exist.
+         Each question is a labelled input card; the Send-answers button is
+         shared and sits below all cards. */
+      '.rw-clarif-section {',
+      '  padding: 14px 18px 10px;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '  display: flex; flex-direction: column; gap: 10px;',
+      '}',
+      '.rw-clarif-title {',
+      '  font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;',
+      '  color: var(--rw-muted); margin: 0;',
+      '}',
+      '.rw-clarif-card {',
+      '  background: var(--rw-panel); border: 1px solid var(--rw-line-2);',
+      '  border-radius: 8px; padding: 10px 12px;',
+      '  display: flex; flex-direction: column; gap: 8px;',
+      '}',
+      '.rw-clarif-prompt {',
+      '  font-size: 13px; font-weight: 500; color: var(--rw-fg);',
+      '  line-height: 1.4; margin: 0;',
+      '}',
+      '.rw-clarif-input {',
+      '  width: 100%; background: var(--rw-bg); border: 1px solid var(--rw-line-2);',
+      '  border-radius: 6px; color: var(--rw-fg); font: inherit; font-size: 13px;',
+      '  padding: 6px 8px; outline: none; box-sizing: border-box;',
+      '  transition: border-color .15s ease;',
+      '}',
+      '.rw-clarif-input:focus { border-color: var(--rw-accent); }',
+      '.rw-clarif-options { display: flex; flex-direction: column; gap: 5px; }',
+      '.rw-clarif-option {',
+      '  display: flex; align-items: center; gap: 7px;',
+      '  font-size: 13px; color: var(--rw-fg-2); cursor: pointer; user-select: none;',
+      '}',
+      '.rw-clarif-option input { margin: 0; cursor: pointer; accent-color: var(--rw-accent); }',
+      '.rw-clarif-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }',
+      '.rw-clarif-send-btn {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  height: 28px; padding: 0 12px;',
+      '  border-radius: 999px;',
+      '  border: 1px solid var(--rw-accent);',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  font: inherit; font-size: 12px; font-weight: 600;',
+      '  cursor: pointer;',
+      '  transition: transform .12s ease, filter .12s ease, opacity .12s ease;',
+      '}',
+      '.rw-clarif-send-btn:hover:not(:disabled) { filter: brightness(1.06); }',
+      '.rw-clarif-send-btn:active:not(:disabled) { transform: translateY(1px); }',
+      '.rw-clarif-send-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
+      '.rw-clarif-error { font-size: 12px; color: #fca5a5; margin: 0; }',
+      '.rw-modal-mount[data-theme="light"] .rw-clarif-error { color: #b91c1c; }',
+
+      /* -----------------------------------------------------------------------
+         Linked-PR card
+         Shown near the top of the detail (between head and body) when a PR is
+         linked.  Minimal treatment: left-accent border + PR number link + state badge. */
+      '.rw-pr-card {',
+      '  margin: 8px 18px 2px;',
+      '  padding: 9px 12px;',
+      '  border-radius: 8px;',
+      '  border: 1px solid var(--rw-line-2);',
+      '  border-left: 3px solid var(--rw-accent);',
+      '  display: flex; align-items: center; gap: 10px;',
+      '  background: var(--rw-panel);',
+      '}',
+      '.rw-pr-card-label {',
+      '  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;',
+      '  color: var(--rw-muted); flex: 0 0 auto;',
+      '}',
+      '.rw-pr-card-link {',
+      '  font-size: 13px; font-weight: 600; color: var(--rw-fg);',
+      '  text-decoration: none; flex: 1 1 auto; min-width: 0;',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      '}',
+      '.rw-pr-card-link:hover { text-decoration: underline; color: var(--rw-accent); }',
+      '.rw-pr-state {',
+      '  display: inline-block; padding: 1px 6px; border-radius: 6px;',
+      '  font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; flex: 0 0 auto;',
+      '}',
+      '.rw-pr-state-open   { background: rgba(34,197,94,0.15); color: #16a34a; }',
+      '.rw-pr-state-closed { background: rgba(220,38,38,0.12); color: #dc2626; }',
+      '.rw-pr-state-merged { background: rgba(139,92,246,0.15); color: #7c3aed; }',
+      '.rw-modal-mount[data-theme="dark"] .rw-pr-state-open   { color: #4ade80; }',
+      '.rw-modal-mount[data-theme="dark"] .rw-pr-state-closed { color: #f87171; }',
+      '.rw-modal-mount[data-theme="dark"] .rw-pr-state-merged { color: #a78bfa; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -3100,6 +3238,7 @@
         h("span", null, t("detail.back")),
       ]);
       backBtn.addEventListener("click", function () {
+        stopDetailPoll();
         view = "list";
         currentDetailTicket = null;
         renderPanelBody();
@@ -3576,6 +3715,201 @@
     if (scrollEl) scrollEl.scrollTop = 0;
   }
 
+  // ===========================================================================
+  // Detail polling helpers
+  // ===========================================================================
+
+  // Start a recurring poll of loadTicketDetail while the given ticket's detail
+  // view is open. The callback receives the fresh detail data.
+  // Guards: clears any existing interval first to avoid stacking; bails on
+  // navigation away from the ticket.
+  function startDetailPoll(ticketId, onData) {
+    stopDetailPoll();
+    var snap = currentDetailTicket;
+    detailPollIntervalId = setInterval(function () {
+      if (view !== "detail" || currentDetailTicket !== snap) {
+        stopDetailPoll();
+        return;
+      }
+      loadTicketDetail(ticketId).then(function (data) {
+        if (view !== "detail" || currentDetailTicket !== snap) return;
+        onData(data);
+      }).catch(function () {
+        // polling failure is silent — the next tick will retry
+      });
+    }, DETAIL_POLL_INTERVAL_MS);
+  }
+
+  function stopDetailPoll() {
+    if (detailPollIntervalId !== null) {
+      clearInterval(detailPollIntervalId);
+      detailPollIntervalId = null;
+    }
+  }
+
+  // ===========================================================================
+  // Clarification timeline, question cards, PR card rendering
+  // ===========================================================================
+
+  // Compact horizontal stepper: Submitted → Clarifying → In progress → PR opened.
+  // `clarification` and `linkedPr` may each be null.
+  function renderClarificationTimeline(clarification, linkedPr) {
+    var status = clarification ? clarification.status : null;
+
+    // Determine active step index (0-based): 0=Submitted 1=Clarifying 2=InProgress 3=PROpened
+    var activeStep = 0;
+    if (status === "asking") {
+      activeStep = 1;
+    } else if (status === "ready" || status === "started" || status === "skipped" || status === "duplicate") {
+      activeStep = linkedPr ? 3 : 2;
+    } else if (linkedPr) {
+      activeStep = 3;
+    }
+
+    var labels = ["Submitted", "Clarifying", "In progress", "PR opened"];
+    var items = [];
+    for (var i = 0; i < labels.length; i++) {
+      var cls = "rw-clarif-step";
+      if (i < activeStep) cls += " rw-clarif-past";
+      else if (i === activeStep) cls += " rw-clarif-active";
+
+      items.push(h("span", { className: cls }, [
+        h("span", { className: "rw-clarif-step-dot" }),
+        document.createTextNode(labels[i]),
+      ]));
+
+      if (i < labels.length - 1) {
+        items.push(h("span", { className: "rw-clarif-connector" }));
+      }
+    }
+    return h("div", { className: "rw-clarif-timeline", "aria-label": "Progress: " + labels[activeStep] }, items);
+  }
+
+  // Render question cards when status=asking and questions are present.
+  // `onAnswered(responseData)` is called with the server response after submit.
+  function renderClarificationCards(ticketId, clarification, onAnswered) {
+    if (!clarification || clarification.status !== "asking" || !clarification.openQuestions || clarification.openQuestions.length === 0) {
+      return null;
+    }
+
+    var questions = clarification.openQuestions;
+    var cards = [];
+
+    for (var i = 0; i < questions.length; i++) {
+      (function (q) {
+        var inputEl;
+        if (q.options && q.options.length > 0) {
+          // options → radio (single) or checkboxes (multiselect)
+          var optionEls = q.options.map(function (opt, idx) {
+            var inputType = q.multiselect ? "checkbox" : "radio";
+            var name = "rw-q-" + q.id;
+            var inputOpt = h("input", { type: inputType, name: name, value: opt });
+            var label = h("label", { className: "rw-clarif-option" }, [inputOpt, document.createTextNode(opt)]);
+            return label;
+          });
+          inputEl = h("div", { className: "rw-clarif-options", "data-qid": q.id, "data-multiselect": q.multiselect ? "true" : "false" }, optionEls);
+        } else {
+          // free-text
+          inputEl = h("input", { type: "text", className: "rw-clarif-input", "data-qid": q.id, placeholder: "Your answer…" });
+        }
+        cards.push(h("div", { className: "rw-clarif-card" }, [
+          h("p", { className: "rw-clarif-prompt" }, q.prompt),
+          inputEl,
+        ]));
+      })(questions[i]);
+    }
+
+    var errorEl = h("span", { className: "rw-clarif-error", style: { display: "none" } });
+    var sendBtn = h("button", { className: "rw-clarif-send-btn", type: "button" }, "Send answers");
+
+    var section = h("div", { className: "rw-clarif-section" }, [
+      h("p", { className: "rw-clarif-title" }, "We have a few questions"),
+    ].concat(cards).concat([
+      h("div", { className: "rw-clarif-actions" }, [sendBtn, errorEl]),
+    ]));
+
+    sendBtn.addEventListener("click", function () {
+      // Collect answers for all questions
+      var answers = [];
+      var valid = true;
+      for (var qi = 0; qi < questions.length; qi++) {
+        var q = questions[qi];
+        // Find the input by data-qid within section
+        var inputNode = section.querySelector('[data-qid="' + q.id + '"]');
+        var answer;
+        if (!inputNode) { valid = false; break; }
+        if (inputNode.tagName === "DIV") {
+          // options container
+          var isMultiselect = inputNode.getAttribute("data-multiselect") === "true";
+          var checked = [];
+          var inputs = inputNode.querySelectorAll("input");
+          for (var ci = 0; ci < inputs.length; ci++) {
+            if (inputs[ci].checked) checked.push(inputs[ci].value);
+          }
+          if (checked.length === 0) { valid = false; break; }
+          answer = isMultiselect ? checked : checked[0];
+        } else {
+          answer = inputNode.value.trim();
+          if (!answer) { valid = false; break; }
+        }
+        answers.push({ questionId: q.id, answer: answer });
+      }
+
+      if (!valid) {
+        errorEl.style.display = "";
+        errorEl.textContent = "Please answer all questions before sending.";
+        return;
+      }
+
+      errorEl.style.display = "none";
+      sendBtn.disabled = true;
+      sendBtn.textContent = "Sending…";
+
+      postClarifyAnswer(ticketId, clarification.id, answers).then(function (resp) {
+        onAnswered(resp);
+      }).catch(function (err) {
+        sendBtn.disabled = false;
+        sendBtn.textContent = "Send answers";
+        errorEl.style.display = "";
+        var code = err && err.status;
+        if (code === 409) {
+          errorEl.textContent = "These questions have already been answered.";
+        } else if (code === 400) {
+          errorEl.textContent = "Some answers were invalid — please review and try again.";
+        } else if (code === 503) {
+          errorEl.textContent = "Clarification service unavailable — please try again shortly.";
+        } else {
+          errorEl.textContent = "Failed to submit answers: " + ((err && err.message) || "unknown error");
+        }
+      });
+    });
+
+    return section;
+  }
+
+  // Small linked-PR card rendered between the ticket head and body.
+  function renderPrCard(linkedPr) {
+    if (!linkedPr) return null;
+    var stateLabel = linkedPr.state === "merged" ? "Merged"
+      : linkedPr.state === "closed" ? "Closed"
+      : "Open";
+    var stateCls = "rw-pr-state rw-pr-state-" + (linkedPr.state === "merged" ? "merged"
+      : linkedPr.state === "closed" ? "closed"
+      : "open");
+
+    return h("div", { className: "rw-pr-card" }, [
+      h("span", { className: "rw-pr-card-label" }, "PR"),
+      h("a", {
+        className: "rw-pr-card-link",
+        href: linkedPr.url,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        title: "View pull request #" + linkedPr.number + " on GitHub",
+      }, "Pull request #" + linkedPr.number),
+      h("span", { className: stateCls }, stateLabel),
+    ]);
+  }
+
   function renderDetailInto(card, data, loading) {
     clearChildren(card);
 
@@ -3689,6 +4023,51 @@
     var scrollArea = h("div", { className: "rw-td-scroll" });
     scrollArea.appendChild(head);
 
+    // Timeline stepper — shown when clarification or linked PR is present.
+    // Only present on the fully-loaded render (not the loading skeleton).
+    if (!loading && (data.clarification || data.linkedPr)) {
+      scrollArea.appendChild(renderClarificationTimeline(data.clarification, data.linkedPr));
+    }
+
+    // Linked-PR card — shown between timeline and body when a PR is attached.
+    if (!loading && data.linkedPr) {
+      var prCard = renderPrCard(data.linkedPr);
+      if (prCard) scrollArea.appendChild(prCard);
+    }
+
+    // Clarification question cards — rendered when status=asking and the
+    // viewer is the answerer (server only populates openQuestions for them).
+    if (!loading && data.clarification && data.clarification.status === "asking"
+        && data.clarification.openQuestions && data.clarification.openQuestions.length > 0) {
+      var qaCards = renderClarificationCards(ticket.id, data.clarification, function (resp) {
+        // On successful answer: the server returns an updated clarification.
+        // Re-fetch the full detail so the timeline and thread reflect the new state.
+        loadTicketDetail(ticket.id).then(function (freshData) {
+          if (view !== "detail") return;
+          renderDetailInto(card, freshData, false);
+        }).catch(function () {
+          // If the re-fetch fails, at minimum update the clarification section
+          // by re-rendering with the response data merged in.
+          var merged = {
+            ticket: ticket,
+            comments: comments,
+            activity: activity,
+            isOwner: data.isOwner,
+            isEditable: data.isEditable,
+            clarification: (resp && resp.clarification) ? {
+              id: data.clarification.id,
+              status: resp.clarification.status,
+              round: resp.clarification.round || data.clarification.round,
+              openQuestions: resp.clarification.questions || [],
+            } : data.clarification,
+            linkedPr: data.linkedPr,
+          };
+          renderDetailInto(card, merged, false);
+        });
+      });
+      if (qaCards) scrollArea.appendChild(qaCards);
+    }
+
     // body
     var body = h("div", { className: "rw-td-body" });
 
@@ -3740,8 +4119,27 @@
     // composer (outside the scroll area, pinned to the bottom of the card)
     card.appendChild(renderComposer(ticket, function (newComment) {
       comments.push(newComment);
-      renderDetailInto(card, { ticket: ticket, comments: comments, activity: activity, isOwner: data.isOwner, isEditable: data.isEditable }, false);
+      renderDetailInto(card, { ticket: ticket, comments: comments, activity: activity, isOwner: data.isOwner, isEditable: data.isEditable, clarification: data.clarification, linkedPr: data.linkedPr }, false);
     }));
+
+    // Polling — start once the full detail is loaded (not during the loading skeleton).
+    // The poll fetches fresh data and re-renders only the mutable sections
+    // (clarification + PR card + thread) when content has changed.
+    // Stop immediately if the view has navigated away.
+    if (!loading) {
+      startDetailPoll(ticket.id, function (freshData) {
+        var clarifChanged =
+          JSON.stringify(freshData.clarification) !== JSON.stringify(data.clarification);
+        var prChanged =
+          JSON.stringify(freshData.linkedPr) !== JSON.stringify(data.linkedPr);
+        var threadChanged =
+          (freshData.comments || []).length !== comments.length
+          || (freshData.activity || []).length !== activity.length;
+        if (clarifChanged || prChanged || threadChanged) {
+          renderDetailInto(card, freshData, false);
+        }
+      });
+    }
   }
 
   function renderHeadMeta(ticket) {
@@ -4177,6 +4575,8 @@
     widgetEl.classList.remove("rw-open");
     tabEl.classList.remove("rw-open");
     closeActiveModal();
+    // Stop any running detail poll before resetting view state.
+    stopDetailPoll();
     // Reset the dashboard so re-opening lands on a fresh state rather
     // than wherever the user last left it (detail view, Hot tab, etc.).
     view = "list";
