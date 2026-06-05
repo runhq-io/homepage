@@ -2616,6 +2616,8 @@ export interface AssignAgentRequest {
     name: string | null;
     matchedRoles: string[];
   };
+  /** Clarification Q&A to seed the workspace coder with context. Absent when the ticket needed no clarification. */
+  qa?: Array<{ question: string; answer: string }>;
 }
 
 export interface AssignAgentResult {
@@ -2795,6 +2797,7 @@ export async function assignAgent(
           name: req.actor.name,
           via: 'widget_triage',
         },
+        ...(req.qa && req.qa.length > 0 ? { clarification: { qa: req.qa } } : {}),
       },
     );
   } catch (err) {

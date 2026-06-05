@@ -6,7 +6,7 @@
  * widget project belongs to Server A.
  */
 import 'dotenv/config';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { eq, inArray } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
@@ -17,7 +17,8 @@ import {
   widgetProjects,
   widgetExposedAgents,
 } from '../../db/schema';
-import { assignAgent, suggestAssignment, WidgetAssignError } from './WidgetService';
+import { assignAgent, suggestAssignment, WidgetAssignError, type AssignAgentRequest } from './WidgetService';
+import * as ServerService from './ServerService';
 
 // ---------------------------------------------------------------------------
 // Mock external I/O — ServerService is never reached in the cross-tenant case
@@ -173,6 +174,57 @@ describe('assignAgent — cross-tenant guard', () => {
       code: 'project_not_found',
       status: 404,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assignAgent — clarification Q&A forwarding
+// ---------------------------------------------------------------------------
+
+describe('assignAgent — qa forwarding to serverTokenFetch', () => {
+  const BASE_REQ: AssignAgentRequest = {
+    agentId: 'agent-exposed-a',
+    command: 'Handle this',
+    actor: {
+      widgetUserId: 'wu-test',
+      externalUserId: 'ext-test',
+      name: 'Triager',
+      matchedRoles: ['triager'],
+    },
+  };
+
+  beforeEach(() => {
+    vi.mocked(ServerService.serverTokenFetch).mockReset();
+    vi.mocked(ServerService.serverTokenFetch).mockResolvedValue({ jobId: 'job-123' });
+  });
+
+  it('includes clarification.qa in the forwarded body when qa is provided', async () => {
+    const qa = [
+      { question: 'What browser?', answer: 'Chrome' },
+      { question: 'Which OS?', answer: 'macOS, Windows' },
+    ];
+
+    await assignAgent(PROJECT_A_ID, TASK_A_ID, { ...BASE_REQ, qa });
+
+    expect(ServerService.serverTokenFetch).toHaveBeenCalledWith(
+      expect.anything(),
+      '/api/internal/widget-triager-assign',
+      expect.objectContaining({ clarification: { qa } }),
+    );
+  });
+
+  it('omits clarification from the forwarded body when qa is not provided', async () => {
+    await assignAgent(PROJECT_A_ID, TASK_A_ID, BASE_REQ);
+
+    const [, , body] = vi.mocked(ServerService.serverTokenFetch).mock.calls[0]!;
+    expect((body as any).clarification).toBeUndefined();
+  });
+
+  it('omits clarification from the forwarded body when qa is an empty array', async () => {
+    await assignAgent(PROJECT_A_ID, TASK_A_ID, { ...BASE_REQ, qa: [] });
+
+    const [, , body] = vi.mocked(ServerService.serverTokenFetch).mock.calls[0]!;
+    expect((body as any).clarification).toBeUndefined();
   });
 });
 

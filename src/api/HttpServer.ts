@@ -5846,6 +5846,8 @@ export function createHttpApp() {
     const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
     if (!wu) return c.json({ error: 'widget_user_not_found' }, 404);
 
+    const qa = await ClarifierService.getAnsweredQa(body.clarificationId);
+
     let result: Awaited<ReturnType<typeof WidgetService.assignAgent>>;
     try {
       result = await WidgetService.assignAgent(auth.projectId, ticketId, {
@@ -5857,6 +5859,7 @@ export function createHttpApp() {
           name: wu.name,
           matchedRoles: auth.matchedRoles,
         },
+        qa,
       });
     } catch (err) {
       return widgetErrorResponse(c, err);

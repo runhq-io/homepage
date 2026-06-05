@@ -45,6 +45,7 @@ vi.mock('./services/ClarifierService', () => ({
   startClarification: vi.fn(),
   answerClarification: vi.fn(),
   getOwnedClarification: vi.fn(),
+  getAnsweredQa: vi.fn(),
   markClarificationStarted: vi.fn(),
   ClarifierAnswerError: class ClarifierAnswerError extends Error {
     constructor(message = 'one or more answers did not match a pending question') {
@@ -122,6 +123,7 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
     (widgetRateLimiter.check as any).mockReturnValue({ allowed: true, retryAfterSec: 0 });
     (ClarifierService.getOwnedClarification as any).mockResolvedValue(OWNED_CLARIFICATION);
     (ClarifierService.answerClarification as any).mockResolvedValue({ status: 'ready', clarificationId: CLARIFICATION_ID });
+    (ClarifierService.getAnsweredQa as any).mockResolvedValue([{ question: 'Which browser?', answer: 'Chrome' }]);
     (ClarifierService.markClarificationStarted as any).mockResolvedValue(undefined);
     (WidgetService.listExposedAgents as any).mockResolvedValue([{ id: 'a1' }]);
     (WidgetService.getWidgetUserAuditInfo as any).mockResolvedValue({ externalUserId: 'ext-user-1', name: 'Alice' });
@@ -403,7 +405,7 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
       VALID_ANSWERS,
     );
 
-    // assignAgent called with STORED agent+command (from OWNED_CLARIFICATION), not from body
+    // assignAgent called with STORED agent+command (from OWNED_CLARIFICATION) + the qa from getAnsweredQa
     expect(WidgetService.assignAgent).toHaveBeenCalledWith(
       'proj-1',
       TICKET_ID,
@@ -416,10 +418,31 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
           name: 'Alice',
           matchedRoles: ['triager'],
         },
+        qa: [{ question: 'Which browser?', answer: 'Chrome' }],
       },
     );
 
     expect(ClarifierService.markClarificationStarted).toHaveBeenCalledWith(CLARIFICATION_ID);
+  });
+
+  it('ready path: getAnsweredQa is called with the clarificationId and its result is forwarded to assignAgent as qa', async () => {
+    const QA = [
+      { question: 'What browser?', answer: 'Chrome' },
+      { question: 'Which OS?', answer: 'macOS, Windows' }, // joined array
+    ];
+    (ClarifierService.getAnsweredQa as any).mockResolvedValue(QA);
+
+    const app = makeApp();
+    const res = await postClarifyAnswer(app);
+    expect(res.status).toBe(200);
+
+    expect(ClarifierService.getAnsweredQa).toHaveBeenCalledWith(CLARIFICATION_ID);
+
+    expect(WidgetService.assignAgent).toHaveBeenCalledWith(
+      'proj-1',
+      TICKET_ID,
+      expect.objectContaining({ qa: QA }),
+    );
   });
 
   // ---------------------------------------------------------------------------

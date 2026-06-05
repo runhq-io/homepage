@@ -421,6 +421,44 @@ export async function markClarificationStarted(clarificationId: string): Promise
 }
 
 // ---------------------------------------------------------------------------
+// getAnsweredQa — Q&A export for workspace seeding
+// ---------------------------------------------------------------------------
+
+/**
+ * Return all answered questions for a clarification, ordered by creation time.
+ *
+ * The returned shape matches the `clarification.qa` payload accepted by the
+ * workspace route `POST /api/internal/widget-triager-assign`. Only
+ * `status='answered'` rows are included; pending questions are excluded.
+ *
+ * Array answers (multiselect) are joined with ', ' to produce a single string,
+ * consistent with the Q&A rebuild logic in `answerClarification`.
+ */
+export async function getAnsweredQa(
+  clarificationId: string,
+): Promise<Array<{ question: string; answer: string }>> {
+  const answeredRows = await db
+    .select({
+      prompt: widgetClarificationQuestions.prompt,
+      answer: widgetClarificationQuestions.answer,
+      createdAt: widgetClarificationQuestions.createdAt,
+    })
+    .from(widgetClarificationQuestions)
+    .where(
+      and(
+        eq(widgetClarificationQuestions.clarificationId, clarificationId),
+        eq(widgetClarificationQuestions.status, 'answered'),
+      ),
+    )
+    .orderBy(asc(widgetClarificationQuestions.createdAt));
+
+  return answeredRows.map((r) => ({
+    question: r.prompt,
+    answer: Array.isArray(r.answer) ? (r.answer as string[]).join(', ') : String(r.answer ?? ''),
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Read helpers (used by WidgetService to surface clarification in ticket detail)
 // ---------------------------------------------------------------------------
 

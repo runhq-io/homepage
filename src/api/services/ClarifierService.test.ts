@@ -24,6 +24,7 @@ import {
   getOwnedClarification,
   markClarificationStarted,
   getTicketClarification,
+  getAnsweredQa,
   ClarifierAnswerError,
   type CallModel,
 } from './ClarifierService';
@@ -468,6 +469,101 @@ describe('getTicketClarification', () => {
       await db.delete(widgetClarifications).where(eq(widgetClarifications.id, rowA!.id));
       await db.delete(widgetClarifications).where(eq(widgetClarifications.id, rowB!.id));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getAnsweredQa — Q&A export for workspace seeding
+// ---------------------------------------------------------------------------
+describe('getAnsweredQa', () => {
+  it('returns answered questions in creation order, joins array answers with ", ", excludes pending questions', async () => {
+    const taskId = await makeTask('getAnsweredQa test', 'desc');
+
+    // Start with 2 questions
+    const startStub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({
+        ready: false,
+        questions: [
+          { prompt: 'What browser?', options: ['Chrome', 'Firefox', 'Safari'], multiselect: false },
+          { prompt: 'Which platforms?', options: ['macOS', 'Windows', 'Linux'], multiselect: true },
+        ],
+      }),
+    );
+    const startResult = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-qa', command: 'Fix it', ticket: { title: 'getAnsweredQa test', description: 'desc' } },
+      { callModel: startStub },
+    );
+    expect(startResult.status).toBe('asking');
+    if (startResult.status !== 'asking') throw new Error('type narrowing');
+    const [q1, q2] = startResult.questions;
+
+    // Empty before any answers
+    const emptyResult = await getAnsweredQa(startResult.clarificationId);
+    expect(emptyResult).toHaveLength(0);
+
+    // Answer first question with a string value
+    await db
+      .update(widgetClarificationQuestions)
+      .set({ status: 'answered', answer: 'Chrome', answeredAt: new Date() })
+      .where(eq(widgetClarificationQuestions.id, q1!.id));
+
+    // Answer second question with a string[] value (simulates multiselect)
+    await db
+      .update(widgetClarificationQuestions)
+      .set({ status: 'answered', answer: ['macOS', 'Windows'], answeredAt: new Date() })
+      .where(eq(widgetClarificationQuestions.id, q2!.id));
+
+    const qa = await getAnsweredQa(startResult.clarificationId);
+
+    // Both answered questions returned
+    expect(qa).toHaveLength(2);
+
+    // Ordered by createdAt → q1 first, q2 second
+    expect(qa[0]).toEqual({ question: 'What browser?', answer: 'Chrome' });
+    expect(qa[1]).toEqual({ question: 'Which platforms?', answer: 'macOS, Windows' });
+  });
+
+  it('excludes pending questions and returns only answered ones', async () => {
+    const taskId = await makeTask('getAnsweredQa partial test', 'desc');
+
+    const startStub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({
+        ready: false,
+        questions: [{ prompt: 'Q answered' }, { prompt: 'Q still pending' }],
+      }),
+    );
+    const startResult = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-qa2', command: 'Do it', ticket: { title: 'partial test', description: null } },
+      { callModel: startStub },
+    );
+    expect(startResult.status).toBe('asking');
+    if (startResult.status !== 'asking') throw new Error('type narrowing');
+    const [q1] = startResult.questions;
+
+    // Answer only the first question
+    await db
+      .update(widgetClarificationQuestions)
+      .set({ status: 'answered', answer: 'yes', answeredAt: new Date() })
+      .where(eq(widgetClarificationQuestions.id, q1!.id));
+
+    const qa = await getAnsweredQa(startResult.clarificationId);
+
+    // Only the answered row is returned
+    expect(qa).toHaveLength(1);
+    expect(qa[0]).toEqual({ question: 'Q answered', answer: 'yes' });
+  });
+
+  it('returns empty array for a clarification with no questions (ready-immediately path)', async () => {
+    const taskId = await makeTask('getAnsweredQa empty test', 'desc');
+    const stub: CallModel = vi.fn().mockResolvedValue(JSON.stringify({ ready: true }));
+    const startResult = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'ag-qa3', command: 'Fix', ticket: { title: 'empty test', description: null } },
+      { callModel: stub },
+    );
+    expect(startResult.status).toBe('ready');
+
+    const qa = await getAnsweredQa(startResult.clarificationId);
+    expect(qa).toHaveLength(0);
   });
 });
 
