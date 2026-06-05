@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { githubProjectRepos, serverMembers } from '../../db/schema';
 
@@ -50,6 +50,27 @@ export async function removeProjectRepo(serverId: string, projectId: string): Pr
   await db
     .delete(githubProjectRepos)
     .where(and(eq(githubProjectRepos.serverId, serverId), eq(githubProjectRepos.projectId, projectId)));
+}
+
+/** Find all project-repo links for a given GitHub owner/repo (case-insensitive). */
+export async function findByOwnerRepo(
+  owner: string,
+  repo: string,
+): Promise<Array<{ serverId: string; projectId: string; installationId: number }>> {
+  const rows = await db
+    .select({
+      serverId: githubProjectRepos.serverId,
+      projectId: githubProjectRepos.projectId,
+      installationId: githubProjectRepos.installationId,
+    })
+    .from(githubProjectRepos)
+    .where(
+      and(
+        sql`lower(${githubProjectRepos.owner}) = lower(${owner})`,
+        sql`lower(${githubProjectRepos.repo}) = lower(${repo})`,
+      ),
+    );
+  return rows;
 }
 
 /** All repo links across every server the given user is a member of. */

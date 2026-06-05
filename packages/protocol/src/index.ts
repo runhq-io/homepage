@@ -308,7 +308,8 @@ export type ActivityType =
   | 'agent_unassigned'
   | 'task_archived'
   | 'task_unarchived'
-  | 'task_deleted';
+  | 'task_deleted'
+  | 'pr_linked';
 
 export interface ActivityLogEntry {
   id: string;
