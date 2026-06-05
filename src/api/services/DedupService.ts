@@ -11,7 +11,7 @@
 
 import { db } from '../../db/index';
 import { workspaceTasks } from '../../db/schema';
-import { eq, and, ne, isNull, notInArray } from 'drizzle-orm';
+import { eq, and, ne, isNull, notInArray, desc } from 'drizzle-orm';
 import type { CallModel } from './ClarifierService';
 import { buildDedupMessages, parseDedupVerdict, DedupParseError } from './dedupCore';
 
@@ -65,12 +65,6 @@ async function defaultCallModel(args: {
 export interface FindLikelyDuplicateArgs {
   /** The server that owns the candidate ticket. Used to scope the candidate set. */
   serverId: string;
-  /**
-   * Optional workspace project id. When provided, the candidate set is further
-   * scoped to the same project. When null/undefined, all open tickets on the
-   * server are compared (cross-project dedup).
-   */
-  projectId?: string | null;
   /** The id of the ticket being checked — excluded from the candidate set. */
   ticketId: string;
   /** The candidate ticket's title and description. */
@@ -104,10 +98,6 @@ export async function findLikelyDuplicate(
       notInArray(workspaceTasks.status, ['done', 'deployed', 'cancelled'] as any[]),
     ];
 
-    if (args.projectId) {
-      conditions.push(eq(workspaceTasks.workspaceProjectId, args.projectId));
-    }
-
     const existing = await db
       .select({
         id: workspaceTasks.id,
@@ -116,7 +106,7 @@ export async function findLikelyDuplicate(
       })
       .from(workspaceTasks)
       .where(and(...conditions))
-      .orderBy(workspaceTasks.createdAt)
+      .orderBy(desc(workspaceTasks.createdAt))
       .limit(MAX_CANDIDATES);
 
     // 2. No candidates → no duplicate possible, skip model call.

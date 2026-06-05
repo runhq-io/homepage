@@ -4203,6 +4203,7 @@
               status: resp.clarification.status,
               round: resp.clarification.round || data.clarification.round,
               openQuestions: resp.clarification.questions || [],
+              duplicateOf: resp.clarification.duplicateOf ?? data.clarification.duplicateOf ?? null,
             } : data.clarification,
             linkedPr: data.linkedPr,
           };

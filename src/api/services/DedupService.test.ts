@@ -194,4 +194,71 @@ describe('DedupService.findLikelyDuplicate', () => {
     );
     expect(result).toEqual({ duplicateOf: null });
   });
+
+  it('passes candidates to the model newest-first (descending createdAt)', async () => {
+    // Seed three tickets with explicitly staggered timestamps, then capture
+    // the order in which the model sees them by extracting ticket ids from
+    // the user message content (buildDedupMessages embeds "id: <uuid>" lines
+    // in document order).
+    const now = Date.now();
+    const orderedServer = `ws_dedup_order_${RUN_HEX}`;
+    await db.insert(servers).values({ id: orderedServer, name: `Ord ${RUN_HEX}`, ownerId: USER_ID }).onConflictDoNothing();
+
+    const [oldest] = await db.insert(workspaceTasks).values({
+      serverId: orderedServer,
+      title: 'Oldest ticket',
+      status: 'pending',
+      visibility: 'public',
+      createdAt: new Date(now - 3000),
+      updatedAt: new Date(now - 3000),
+    }).returning({ id: workspaceTasks.id });
+
+    const [middle] = await db.insert(workspaceTasks).values({
+      serverId: orderedServer,
+      title: 'Middle ticket',
+      status: 'pending',
+      visibility: 'public',
+      createdAt: new Date(now - 2000),
+      updatedAt: new Date(now - 2000),
+    }).returning({ id: workspaceTasks.id });
+
+    const [newest] = await db.insert(workspaceTasks).values({
+      serverId: orderedServer,
+      title: 'Newest ticket',
+      status: 'pending',
+      visibility: 'public',
+      createdAt: new Date(now - 1000),
+      updatedAt: new Date(now - 1000),
+    }).returning({ id: workspaceTasks.id });
+
+    // Fake candidate (excluded from its own check)
+    const [candidate] = await db.insert(workspaceTasks).values({
+      serverId: orderedServer,
+      title: 'New incoming ticket',
+      status: 'pending',
+      visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    // Capture the ids in the order the model receives them.
+    // buildDedupMessages serialises each ticket as "id: <uuid>" on its own line.
+    let capturedIdOrder: string[] = [];
+    const capturingModel: CallModel = async ({ messages }) => {
+      const content = messages.find((m) => m.role === 'user')?.content ?? '';
+      capturedIdOrder = [...content.matchAll(/\] id:\s*(\S+)/g)].map((m) => m[1]!);
+      return JSON.stringify({ duplicateOf: null });
+    };
+
+    try {
+      await findLikelyDuplicate(
+        { serverId: orderedServer, ticketId: candidate!.id, candidate: { title: 'New incoming ticket' } },
+        { callModel: capturingModel },
+      );
+
+      // All three non-candidate tickets should appear in newest→oldest order.
+      expect(capturedIdOrder).toEqual([newest!.id, middle!.id, oldest!.id]);
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, orderedServer));
+      await db.delete(servers).where(eq(servers.id, orderedServer));
+    }
+  });
 });
