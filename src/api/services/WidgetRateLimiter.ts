@@ -30,6 +30,8 @@ export const WIDGET_ACTION_LIMITS = {
   comment_update: 30,
   comment_delete: 30,
   attachment_upload: 20,
+  /** Widget chat user messages — each one dispatches a paid agent turn. */
+  chat_message: 60,
   /** Triager assignment — overridden per-project via widgetAssignRateLimitPerHour. */
   triager_assign: 30,
 } as const;
