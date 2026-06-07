@@ -277,3 +277,262 @@ export async function listMessages(
     ))
     .orderBy(widgetChatMessages.createdAt, widgetChatMessages.id);
 }
+
+// ---------------------------------------------------------------------------
+// Pure transcript helpers
+// ---------------------------------------------------------------------------
+
+export type TranscriptEntry =
+  | { role: 'user' | 'agent'; content: string }
+  | { role: 'event'; payload: WidgetChatEventPayload };
+
+/**
+ * Map persisted rows onto the turn-dispatch transcript shape. Defensive:
+ * payload-less event rows and empty user/agent rows are dropped.
+ */
+export function buildTranscript(
+  rows: Pick<ChatMessageRow, 'role' | 'content' | 'payload'>[],
+): TranscriptEntry[] {
+  const out: TranscriptEntry[] = [];
+  for (const row of rows) {
+    if (row.role === 'event') {
+      if (row.payload) out.push({ role: 'event', payload: row.payload });
+    } else if (row.content) {
+      out.push({ role: row.role, content: row.content });
+    }
+  }
+  return out;
+}
+
+/**
+ * Derive the LATEST proposal and its resolution state from a chronologically
+ * ordered transcript. A proposal_resolved row resolves the most recent
+ * proposal before it; a proposal with no later resolution is pending
+ * ({ noAction: true }). created:true without a ticketId is treated as
+ * dismissed (defensive — that combination should not exist).
+ */
+export function computePendingProposal(
+  rows: Pick<ChatMessageRow, 'role' | 'payload'>[],
+): PendingProposal | null {
+  let pending: PendingProposal | null = null;
+  for (const row of rows) {
+    const p = row.payload;
+    if (!p) continue;
+    if (p.kind === 'proposal') {
+      pending = {
+        toolUseId: p.toolUseId,
+        title: p.title,
+        description: p.description,
+        resolution: { noAction: true },
+      };
+    } else if (p.kind === 'proposal_resolved' && pending) {
+      pending = {
+        ...pending,
+        resolution: p.created && p.ticketId
+          ? { created: true, ticketId: p.ticketId }
+          : { dismissed: true },
+      };
+    }
+  }
+  return pending;
+}
+
+// ---------------------------------------------------------------------------
+// Turn timeout machinery
+// ---------------------------------------------------------------------------
+
+/**
+ * Read at arm time (not module load) so tests can shrink the window via
+ * WIDGET_CHAT_TURN_TIMEOUT_MS. Production default: 90s — long enough for a
+ * multi-tool agent turn, short enough that the visitor isn't staring at a
+ * dead typing indicator.
+ */
+function turnTimeoutMs(): number {
+  const n = Number(process.env.WIDGET_CHAT_TURN_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 90_000;
+}
+
+const turnTimeouts = new Map<string, NodeJS.Timeout>();
+
+function cancelTurnTimeout(turnId: string): void {
+  const timer = turnTimeouts.get(turnId);
+  if (timer) {
+    clearTimeout(timer);
+    turnTimeouts.delete(turnId);
+  }
+}
+
+/**
+ * The graceful-degradation notice (workspace offline / turn timed out).
+ * Written with (turnId, seq=null) so a LATE turn_done can find and delete it
+ * (ingestTurnEvents) — model output is paid for, so late replies replace the
+ * failure state. No-ops if the turn already completed or was superseded.
+ */
+async function writeAgentUnavailableNotice(conversationId: string, turnId: string): Promise<void> {
+  const [conv] = await db
+    .select()
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!conv || conv.pendingTurnId !== turnId) return;
+  const [notice] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'event',
+      turnId,
+      seq: null,
+      payload: {
+        kind: 'system_notice',
+        code: 'agent_unavailable',
+        text: 'The agent is unavailable right now. Please try again in a moment, or join the open discussion instead.',
+      },
+    })
+    .returning();
+  if (notice) publish(notice);
+  await db
+    .update(widgetChatConversations)
+    .set({ pendingTurnId: null, updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversationId));
+}
+
+function armTurnTimeout(conversationId: string, turnId: string): void {
+  const timer = setTimeout(() => {
+    turnTimeouts.delete(turnId);
+    void writeAgentUnavailableNotice(conversationId, turnId).catch((err) => {
+      console.error('[WidgetChatService] timeout notice failed:', err);
+    });
+  }, turnTimeoutMs());
+  // Never hold the process open for a pending widget turn (also lets vitest exit).
+  timer.unref?.();
+  turnTimeouts.set(turnId, timer);
+}
+
+// ---------------------------------------------------------------------------
+// Turn dispatch + user messages
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch one agent turn to the workspace. Stamps pending_turn_id BEFORE the
+ * HTTP call (the events callback may race the ACK), arms the timeout, and
+ * degrades to an agent_unavailable notice when the workspace is unreachable.
+ * The transcript is rebuilt from Postgres every turn — the workspace holds no
+ * durable conversation state. The workspace ACKs fast (the 10s transport
+ * timeout covers the ACK only; the turn itself runs async under the 90s
+ * window) and reports events to POST /api/internal/widget-chat/events.
+ */
+async function dispatchTurn(
+  conversation: ChatConversationRow,
+  opts: { forceProposal?: boolean } = {},
+): Promise<string> {
+  const project = await getChatProject(conversation.widgetProjectId);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
+  if (!project.widgetChatAgentEntityId) {
+    throw new WidgetService.WidgetError('chat_not_enabled', 409);
+  }
+
+  const turnId = randomUUID();
+  await db
+    .update(widgetChatConversations)
+    .set({ pendingTurnId: turnId, updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversation.id));
+
+  const rows = await loadAllMessages(conversation.id);
+  const pending = computePendingProposal(rows);
+
+  const [server] = await db.select().from(servers).where(eq(servers.id, project.serverId)).limit(1);
+  if (!server) {
+    await writeAgentUnavailableNotice(conversation.id, turnId);
+    return turnId;
+  }
+
+  armTurnTimeout(conversation.id, turnId);
+  try {
+    await ServerService.serverTokenFetch(
+      server,
+      '/api/internal/widget-chat/turn',
+      {
+        conversationId: conversation.id,
+        turnId,
+        serverId: project.serverId,
+        projectId: project.workspaceProjectId,
+        agentEntityId: project.widgetChatAgentEntityId,
+        chatInstructions: project.widgetChatInstructions,
+        forceProposal: opts.forceProposal === true,
+        transcript: buildTranscript(rows),
+        pendingProposal: pending
+          ? { toolUseId: pending.toolUseId, resolution: pending.resolution }
+          : null,
+      },
+      { timeoutMs: 10_000 },
+    );
+  } catch (err) {
+    console.warn('[WidgetChatService] turn dispatch failed:', err);
+    cancelTurnTimeout(turnId);
+    await writeAgentUnavailableNotice(conversation.id, turnId);
+  }
+  return turnId;
+}
+
+/**
+ * Append a user message and trigger a turn. Caps: 4000 chars per message,
+ * 30 user turns per conversation (abuse backstop — each turn is paid model
+ * time). The HTTP layer additionally rate-limits via the chat_message bucket.
+ */
+export async function sendUserMessage(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  content: string,
+): Promise<ChatMessageRow> {
+  const text = content.trim();
+  if (!text) throw new WidgetService.WidgetError('message_required', 400);
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw new WidgetService.WidgetError('message_too_long', 400);
+  }
+
+  const conversation = await requireWritableConversation(conversationId, projectId, widgetUserId);
+  if (conversation.userTurnCount >= MAX_USER_TURNS) {
+    throw new WidgetService.WidgetError('turn_limit_reached', 409);
+  }
+
+  const [message] = await db
+    .insert(widgetChatMessages)
+    .values({ conversationId, role: 'user', content: text })
+    .returning();
+  publish(message!);
+
+  await db
+    .update(widgetChatConversations)
+    .set({
+      userTurnCount: sql`${widgetChatConversations.userTurnCount} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(eq(widgetChatConversations.id, conversationId));
+
+  await dispatchTurn(conversation);
+  return message!;
+}
+
+/**
+ * Anti-"AI jail" escape hatch: the widget's "Create ticket from this
+ * conversation" link. Appends a visible marker event and forces the next
+ * turn to call propose_ticket from what the agent already has.
+ */
+export async function forceProposal(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+): Promise<void> {
+  const conversation = await requireWritableConversation(conversationId, projectId, widgetUserId);
+  const [marker] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'event',
+      payload: { kind: 'force_proposal_requested' },
+    })
+    .returning();
+  publish(marker!);
+  await dispatchTurn(conversation, { forceProposal: true });
+}
