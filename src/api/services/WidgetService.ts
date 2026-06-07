@@ -2746,6 +2746,16 @@ export const WIDGET_ERROR_CODES = [
   'attachment_count_exceeded',
   'attachment_storage_unconfigured',
   'rate_limited',
+  // Widget chat (agent intake)
+  'chat_not_enabled',
+  'conversation_not_found',
+  'conversation_closed',
+  'message_required',
+  'message_too_long',
+  'turn_limit_reached',
+  'invalid_cursor',
+  'no_pending_proposal',
+  'invalid_proposal_draft',
 ] as const;
 
 export type WidgetErrorCode = typeof WIDGET_ERROR_CODES[number];
