@@ -4267,6 +4267,193 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Transport. SSE (EventSource) is preferred; a stream that errors once
+  // (auth, proxy buffering, old browser) is not retried — adaptive polling
+  // is the reliable path (~1.5s while a turn is pending, 5s idle).
+  //
+  // EventSource cannot attach an Authorization header, so the app-token
+  // path passes the JWT as ?token= (the BE chat-events route shims it into
+  // Authorization). The runhq-cookie path uses withCredentials plus
+  // ?project= in place of the X-RW-Project header — the BE does not read
+  // that param yet, so cookie embeds degrade to polling (by design: the
+  // stream errors once and never retries). The BE replays rows newer than
+  // ?after= on subscribe, closing the gap between the bootstrap fetch and
+  // the stream opening (clients dedupe by id).
+  // ---------------------------------------------------------------------------
+
+  function chatEventsUrl(conversationId) {
+    var url = RUNHQ_API + "/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/events";
+    var params = [];
+    if (config.identitySource !== "runhq" && config.token) {
+      params.push("token=" + encodeURIComponent(config.token));
+    }
+    if (config.project) params.push("project=" + encodeURIComponent(config.project));
+    var cursor = chatLastCursor();
+    if (cursor) params.push("after=" + encodeURIComponent(cursor));
+    return params.length ? url + "?" + params.join("&") : url;
+  }
+
+  // Newest server-assigned message id (skips local- optimistic echoes) —
+  // the `after` cursor for the polling fallback.
+  function chatLastCursor() {
+    for (var i = chatMessages.length - 1; i >= 0; i--) {
+      if (String(chatMessages[i].id).indexOf("local-") !== 0) return chatMessages[i].id;
+    }
+    return null;
+  }
+
+  // Server rows replace optimistic local echoes: same role 'user' + same
+  // content, or same event kind. Returns true when a swap happened.
+  function chatReplaceLocalEcho(row) {
+    for (var i = chatMessages.length - 1; i >= 0; i--) {
+      var m = chatMessages[i];
+      if (String(m.id).indexOf("local-") !== 0) continue;
+      if (row.role === "user" && m.role === "user" && m.content === row.content) {
+        chatMessages[i] = row;
+        return true;
+      }
+      if (row.role === "event" && m.role === "event"
+          && m.payload && row.payload && m.payload.kind === row.payload.kind) {
+        chatMessages[i] = row;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Whether a turn is still awaiting the agent's visible reply, derived from
+  // the message flow itself: scanning from the end, the first turn-relevant
+  // row decides — a user action (user message, proposal resolution, force
+  // marker) means pending; an agent reply / proposal / system notice means
+  // settled. Needed because SSE can deliver the turn's outcome BEFORE the
+  // user-action POST resolves (the BE awaits the turn dispatch) — a blind
+  // `chatTurnPending = true` after the POST would wedge the typing
+  // indicator on. ticket_link / assigned arrive mid-turn and are skipped.
+  function chatTurnStillPending() {
+    for (var i = chatMessages.length - 1; i >= 0; i--) {
+      var m = chatMessages[i];
+      if (m.role === "agent") return false;
+      if (m.role === "user") return true;
+      if (m.role === "event" && m.payload) {
+        var kind = m.payload.kind;
+        if (kind === "proposal" || kind === "system_notice") return false;
+        if (kind === "proposal_resolved" || kind === "force_proposal_requested") return true;
+      }
+    }
+    return false;
+  }
+
+  // Merge incoming rows (SSE or poll). Dedupe by id; agent text, proposals,
+  // and system notices end the pending turn (ticket_link / assigned arrive
+  // mid-turn and keep the typing indicator up).
+  function chatApplyMessages(rows) {
+    if (!rows || rows.length === 0) return;
+    var changed = false;
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      if (!row || row.id == null) continue;
+      var dup = false;
+      for (var i = 0; i < chatMessages.length; i++) {
+        if (chatMessages[i].id === row.id) { dup = true; break; }
+      }
+      if (dup) continue;
+      if (!chatReplaceLocalEcho(row)) chatMessages.push(row);
+      changed = true;
+      if (row.role === "agent") chatTurnPending = false;
+      if (row.role === "event" && row.payload) {
+        var kind = row.payload.kind;
+        if (kind === "proposal" || kind === "system_notice") chatTurnPending = false;
+        if (kind === "proposal_resolved" && row.payload.created) startChatClosedWatch();
+      }
+    }
+    if (changed && view === "chat") renderChatMessageList();
+  }
+
+  function startChatTransport() {
+    if (!chatConversation || chatConversation.status !== "active") return;
+    if (chatEventSourceRef || chatPollTimerId !== null) return; // already running
+    if (typeof window.EventSource === "function") {
+      try {
+        var convAtOpen = chatConversation;
+        var es = new EventSource(chatEventsUrl(convAtOpen.id), { withCredentials: wantsCookieAuth() });
+        es.onmessage = function (e) {
+          if (view !== "chat" || chatConversation !== convAtOpen) return;
+          var row = null;
+          try { row = JSON.parse(e.data); } catch (_) { return; }
+          chatApplyMessages([row]);
+        };
+        es.onerror = function () {
+          try { es.close(); } catch (_) {}
+          if (chatEventSourceRef === es) {
+            chatEventSourceRef = null;
+            if (view === "chat" && chatConversation === convAtOpen) scheduleChatPoll();
+          }
+        };
+        chatEventSourceRef = es;
+        return;
+      } catch (_) {
+        chatEventSourceRef = null;
+      }
+    }
+    scheduleChatPoll();
+  }
+
+  function scheduleChatPoll() {
+    if (chatPollTimerId !== null) clearTimeout(chatPollTimerId);
+    chatPollTimerId = setTimeout(chatPollTick, chatTurnPending ? CHAT_POLL_FAST_MS : CHAT_POLL_IDLE_MS);
+  }
+
+  function chatPollTick() {
+    chatPollTimerId = null;
+    if (view !== "chat" || !chatConversation || chatConversation.status !== "active") return;
+    var conv = chatConversation;
+    chatLoadMessages(conv.id, chatLastCursor()).then(function (data) {
+      if (view !== "chat" || chatConversation !== conv) return;
+      chatApplyMessages((data && data.messages) || []);
+    }).catch(function () {
+      // Silent — the next tick retries (matches startDetailPoll's posture).
+    }).then(function () {
+      if (view !== "chat" || chatConversation !== conv || chatConversation.status !== "active") return;
+      scheduleChatPoll();
+    });
+  }
+
+  // After a ticket is created the agent gets a wrap-up turn and the BE
+  // closes the conversation. Status changes don't stream as message rows,
+  // so watch GET /conversations/active until this conversation stops being
+  // the active one, then flip the footer to "Start new conversation".
+  function startChatClosedWatch() {
+    if (chatClosedWatchTimerId !== null) return;
+    var conv = chatConversation;
+    chatClosedWatchTimerId = setInterval(function () {
+      if (view !== "chat" || chatConversation !== conv) {
+        clearInterval(chatClosedWatchTimerId);
+        chatClosedWatchTimerId = null;
+        return;
+      }
+      chatLoadActive().then(function (data) {
+        if (view !== "chat" || chatConversation !== conv) return;
+        var active = data && data.conversation;
+        if (!active || active.id !== conv.id || active.status === "closed") chatMarkClosed();
+      }).catch(function (err) {
+        if (view !== "chat" || chatConversation !== conv) return;
+        if (err && err.status === 404) chatMarkClosed();
+      });
+    }, CHAT_CLOSED_WATCH_MS);
+  }
+
+  function chatMarkClosed() {
+    if (!chatConversation) return;
+    chatConversation.status = "closed";
+    stopChatTransport();
+    chatTurnPending = false;
+    if (view === "chat" && chatUi) {
+      renderChatMessageList();
+      renderChatFooter();
+    }
+  }
+
   // The latest 'proposal' event with no subsequent 'proposal_resolved'.
   // Resolved proposals collapse out of the flow; their outcome renders from
   // the 'proposal_resolved' event itself.
@@ -4382,6 +4569,7 @@
           chatTurnPending = false;
           renderChatMessageList();
           renderChatFooter();
+          startChatTransport();
         }).catch(function () {
           newBtn.disabled = false;
         });
@@ -4436,8 +4624,13 @@
           payload: null,
           createdAt: new Date().toISOString(),
         };
-        chatMessages.push(row);
-        chatTurnPending = true;
+        // Merge through chatApplyMessages — SSE may have already delivered
+        // this row (and even the turn's reply) before the POST resolved, so
+        // a raw push would duplicate it. Pending state is recomputed from
+        // the flow for the same reason.
+        chatApplyMessages([row]);
+        chatTurnPending = chatTurnStillPending();
+        if (chatPollTimerId !== null) scheduleChatPoll();
         renderChatMessageList();
       }).catch(function (err) {
         var code = err && err.status;
@@ -4509,6 +4702,10 @@
         && chatConversation.pendingTurnId);
       renderChatMessageList();
       renderChatFooter();
+      if (chatConversation && chatConversation.status === "active") {
+        startChatTransport();
+        if (chatConversation.createdTaskId) startChatClosedWatch();
+      }
     }).catch(function (err) {
       if (view !== "chat" || !chatUi) return;
       clearChildren(listEl);
