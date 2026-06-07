@@ -537,6 +537,111 @@ export async function forceProposal(
   await dispatchTurn(conversation, { forceProposal: true });
 }
 
+// ---------------------------------------------------------------------------
+// Proposal confirmation / dismissal
+// ---------------------------------------------------------------------------
+
+const MAX_DRAFT_TITLE_LENGTH = 300;
+const MAX_DRAFT_DESCRIPTION_LENGTH = 10_000;
+
+/** The latest proposal, iff still unresolved. Throws no_pending_proposal otherwise. */
+async function requirePendingProposal(conversationId: string): Promise<PendingProposal> {
+  const rows = await loadAllMessages(conversationId);
+  const pending = computePendingProposal(rows);
+  if (!pending || !('noAction' in pending.resolution)) {
+    throw new WidgetService.WidgetError('no_pending_proposal', 409);
+  }
+  return pending;
+}
+
+/**
+ * The user confirmed the proposal card (possibly with edits). Creates the
+ * ticket through the existing WidgetService create path, born READY: a
+ * widget_clarifications row with status='skipped' marks the conversation as
+ * having BEEN the clarification (and search_tickets as having been the
+ * dedup), so the ticket-detail UI shows no clarifying state and the human
+ * triager flow treats it as settled.
+ *
+ * The conversation stays ACTIVE: the post-creation turn delivers the
+ * {created:true, ticketId} tool result to the agent (which may assign), and
+ * BE closes the conversation on that turn's turn_done (see ingestTurnEvents).
+ */
+export async function createTicketFromChat(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  draft: { title?: string; description?: string },
+): Promise<{ ticketId: string }> {
+  const fresh = await requireWritableConversation(conversationId, projectId, widgetUserId);
+  await requirePendingProposal(conversationId);
+
+  const title = (draft.title ?? '').trim();
+  const description = (draft.description ?? '').trim();
+  if (!title || title.length > MAX_DRAFT_TITLE_LENGTH || description.length > MAX_DRAFT_DESCRIPTION_LENGTH) {
+    throw new WidgetService.WidgetError('invalid_proposal_draft', 400);
+  }
+
+  const project = await getChatProject(projectId);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
+
+  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+
+  // Clarifier suppression: 'skipped' is the codebase's native "no clarifying
+  // state" marker (getTicketClarification orders 'skipped' rows last; the
+  // widget detail renders nothing for it).
+  await db.insert(widgetClarifications).values({
+    taskId: task.id,
+    serverId: project.serverId,
+    widgetUserId,
+    agentId: project.widgetChatAgentEntityId ?? 'widget_chat',
+    command: 'widget_chat',
+    status: 'skipped',
+  });
+
+  await db
+    .update(widgetChatConversations)
+    .set({ createdTaskId: task.id, updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversationId));
+
+  const [resolvedEvent] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'event',
+      payload: { kind: 'proposal_resolved', created: true, ticketId: task.id },
+    })
+    .returning();
+  publish(resolvedEvent!);
+
+  // Post-creation turn: computePendingProposal now derives
+  // {created:true, ticketId} from the row just written.
+  await dispatchTurn({ ...fresh, createdTaskId: task.id });
+
+  return { ticketId: task.id };
+}
+
+/** The user dismissed the proposal card. The next turn synthesizes {dismissed:true}. */
+export async function dismissProposal(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+): Promise<void> {
+  const fresh = await requireWritableConversation(conversationId, projectId, widgetUserId);
+  await requirePendingProposal(conversationId);
+
+  const [resolvedEvent] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'event',
+      payload: { kind: 'proposal_resolved', created: false },
+    })
+    .returning();
+  publish(resolvedEvent!);
+
+  await dispatchTurn(fresh);
+}
+
 /**
  * Idempotently persist a batch of turn events. Rows upsert on the partial
  * unique index (turn_id, seq) via onConflictDoNothing — retries cannot
