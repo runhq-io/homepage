@@ -1604,7 +1604,13 @@
       '  opacity: 0; pointer-events: none;',
       '  transition: opacity .18s ease;',
       '}',
-      '.rw-shell-scrim.rw-open { opacity: 1; pointer-events: auto; }',
+      /* While open, background/blur also transition so the compact↔expanded
+         mode flip (home ↔ list) cross-fades the scrim in step with the
+         geometry morph. Closed keeps the plain opacity fade. */
+      '.rw-shell-scrim.rw-open {',
+      '  opacity: 1; pointer-events: auto;',
+      '  transition: opacity .18s ease, background-color .25s ease, -webkit-backdrop-filter .25s ease, backdrop-filter .25s ease;',
+      '}',
       '.rw-shell-scrim[data-theme="dark"] { background: rgba(6,5,4,0.66); }',
 
       /* the card itself — centered via top/left 50% + translate(-50%,-50%),
@@ -1620,12 +1626,52 @@
       '  min-height: 540px;',
       '  display: flex; flex-direction: column;',
       '}',
+      /* Geometry morph is gated on .rw-open: mode flips while the panel is
+         CLOSED (openPanel pre-sets the mode, then flushes styles, then adds
+         rw-open) snap instantly — so deep-link opens paint expanded from the
+         first frame, and every open lands directly at its final geometry.
+         In-panel navigation (home ↔ list ↔ chat) morphs at .25s. */
+      '.rw-shell-scrim.rw-open .rw-shell {',
+      '  pointer-events: auto;',
+      '  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, transform .25s ease;',
+      '}',
+
+      /* Compact corner panel (home + chat views). The scrim element stays
+         mounted (it is widgetEl, the open/close fade carrier) but goes fully
+         transparent AND click-transparent: the host page stays visible and
+         interactive, Intercom-style — outside clicks land on the page and do
+         NOT close the panel. Only the card itself accepts events. */
+      '.rw-shell-scrim.rw-compact {',
+      '  background: transparent;',
+      '  -webkit-backdrop-filter: none; backdrop-filter: none;',
+      '}',
+      '.rw-shell-scrim.rw-compact.rw-open { pointer-events: none; }',
+      /* Corner anchor, adjacent to the launcher edge: 20px inset from the
+         bottom + configured side. translate(-100%) is relative to the
+         panel\'s own box, so these are the same transitionable properties
+         the expanded state sets — the morph animates between them. */
+      '.rw-shell-scrim.rw-compact .rw-shell {',
+      '  top: 100%; left: ' + (isRight ? "100%" : "20px") + ';',
+      '  transform: translate(' + (isRight ? "calc(-100% - 20px)" : "0px") + ', calc(-100% - 20px));',
+      '  width: 400px;',
+      '  height: min(704px, calc(100vh - 40px));',
+      '  min-height: 0;',
+      '}',
+      '@media (prefers-reduced-motion: reduce) {',
+      '  .rw-shell-scrim.rw-open { transition: opacity .18s ease; }',
+      '  .rw-shell-scrim.rw-open .rw-shell { transition: none; }',
+      '}',
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
-         browsers that don't parse dvh. */
+         browsers that don't parse dvh. The selector list also outguns the
+         compact rules above (mobile keeps one near-full-screen layout in
+         BOTH modes). */
       '@media (max-width: 640px) {',
-      '  .rw-shell { top: 0; left: 0; transform: none; width: 100%; height: 100vh; height: 100dvh; min-height: 0; }',
+      '  .rw-shell, .rw-shell-scrim.rw-compact .rw-shell {',
+      '    top: 0; left: 0; transform: none;',
+      '    width: 100%; height: 100vh; height: 100dvh; min-height: 0;',
+      '  }',
       '}',
 
       /* The open "pop" (translateY + scale → none) used to live on .rw-shell,
@@ -3793,12 +3839,31 @@
   }
 
   // -----------------------------------------------------------------------
+  // Shell mode. Home + chat live in a compact corner panel (Intercom-style);
+  // list + detail keep the large centered modal. The class lands on widgetEl
+  // (the scrim) so one toggle drives both the scrim treatment and the panel
+  // geometry. Synced from openPanel — BEFORE rw-open, so the very first
+  // paint is already in the right mode, including deep-link opens that
+  // pre-set view = "list" — and from renderPanelBody, which every in-panel
+  // navigation funnels through. closePanel deliberately does NOT re-sync
+  // (its view reset would snap the still-fading-out card to compact).
+  // -----------------------------------------------------------------------
+
+  function isCompactView(v) { return v === "home" || v === "chat"; }
+
+  function applyShellMode() {
+    if (!widgetEl) return;
+    widgetEl.classList.toggle("rw-compact", isCompactView(view));
+  }
+
+  // -----------------------------------------------------------------------
   // Top-level body renderer — builds either the split (list) view or the
   // full-width detail view, depending on `view` state.
   // -----------------------------------------------------------------------
 
   function renderPanelBody() {
     if (!scrollEl) return;
+    applyShellMode();
     clearChildren(scrollEl);
 
     if (view === "home") {
@@ -5975,6 +6040,12 @@
       return;
     }
     isOpen = true;
+    // Mode class BEFORE the open class, with a forced style flush between:
+    // the geometry transition is gated on .rw-open, so the panel always
+    // opens already AT its final geometry (no compact↔expanded morph during
+    // the fade-in) — including deep-link opens that pre-set view = "list".
+    applyShellMode();
+    void widgetEl.offsetWidth;
     widgetEl.classList.add("rw-open");
     tabEl.classList.add("rw-open");
     markPanelOpened();
