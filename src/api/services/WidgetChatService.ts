@@ -536,3 +536,161 @@ export async function forceProposal(
   publish(marker!);
   await dispatchTurn(conversation, { forceProposal: true });
 }
+
+/**
+ * Idempotently persist a batch of turn events. Rows upsert on the partial
+ * unique index (turn_id, seq) via onConflictDoNothing — retries cannot
+ * duplicate, reordering cannot corrupt (rows are processed in seq order and
+ * inserted one statement at a time so created_at preserves seq order for the
+ * cursor/ordering scheme). Late events for a timed-out turn still land; a
+ * late turn_done deletes the BE-written agent_unavailable notice.
+ */
+export async function ingestTurnEvents(
+  serverId: string,
+  input: { conversationId: string; turnId: string; events: TurnEventInput[] },
+): Promise<IngestResult> {
+  // Cross-tenant guard: the conversation's project must belong to the server
+  // that authenticated this request.
+  const [found] = await db
+    .select({
+      conversation: widgetChatConversations,
+      projectServerId: widgetProjects.serverId,
+      widgetProjectId: widgetProjects.id,
+    })
+    .from(widgetChatConversations)
+    .innerJoin(widgetProjects, eq(widgetChatConversations.widgetProjectId, widgetProjects.id))
+    .where(eq(widgetChatConversations.id, input.conversationId))
+    .limit(1);
+  if (!found || found.projectServerId !== serverId) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+
+  const events = [...input.events].sort((a, b) => a.seq - b.seq);
+  let inserted = 0;
+  let turnDone = false;
+  let turnError = false;
+
+  for (const ev of events) {
+    if (!Number.isInteger(ev.seq) || ev.seq < 0) continue;
+    if (ev.kind === 'turn_done') {
+      turnDone = true;
+      continue;
+    }
+
+    let row: { role: 'agent' | 'event'; content: string; payload: WidgetChatEventPayload | null } | null = null;
+    switch (ev.kind) {
+      case 'agent_message': {
+        if (typeof ev.text === 'string' && ev.text.length > 0) {
+          row = { role: 'agent', content: ev.text, payload: null };
+        }
+        break;
+      }
+      case 'proposal': {
+        if (typeof ev.title === 'string' && typeof ev.description === 'string' && typeof ev.toolUseId === 'string') {
+          row = {
+            role: 'event', content: '',
+            payload: { kind: 'proposal', title: ev.title, description: ev.description, toolUseId: ev.toolUseId },
+          };
+        }
+        break;
+      }
+      case 'ticket_link': {
+        if (typeof ev.ticketId !== 'string' || !UUID_RE.test(ev.ticketId)) break;
+        // Enrich from the synced task store, scoped to this server — a bogus
+        // or cross-tenant ticketId silently drops the event.
+        const [task] = await db
+          .select({ title: workspaceTasks.title, status: workspaceTasks.status })
+          .from(workspaceTasks)
+          .where(and(eq(workspaceTasks.id, ev.ticketId), eq(workspaceTasks.serverId, serverId)))
+          .limit(1);
+        if (!task) {
+          console.warn('[WidgetChatService] ticket_link to unknown task dropped:', ev.ticketId);
+          break;
+        }
+        row = {
+          role: 'event', content: '',
+          payload: { kind: 'ticket_link', ticketId: ev.ticketId, title: task.title, status: task.status },
+        };
+        break;
+      }
+      case 'assigned': {
+        if (typeof ev.ticketId !== 'string' || typeof ev.agentEntityId !== 'string') break;
+        const [agentRow] = await db
+          .select({ name: widgetExposedAgents.agentName })
+          .from(widgetExposedAgents)
+          .where(and(
+            eq(widgetExposedAgents.widgetProjectId, found.widgetProjectId),
+            eq(widgetExposedAgents.agentId, ev.agentEntityId),
+          ))
+          .limit(1);
+        row = {
+          role: 'event', content: '',
+          payload: {
+            kind: 'assigned', ticketId: ev.ticketId,
+            agentEntityId: ev.agentEntityId, agentName: agentRow?.name ?? null,
+          },
+        };
+        break;
+      }
+      case 'turn_error': {
+        turnError = true;
+        const text = (typeof ev.message === 'string' && ev.message ? ev.message : 'The agent hit an error.').slice(0, 500);
+        row = { role: 'event', content: '', payload: { kind: 'system_notice', code: 'turn_failed', text } };
+        break;
+      }
+    }
+    if (!row) continue;
+
+    // One statement per row (NOT a wrapping transaction): each insert gets a
+    // distinct now(), so created_at order matches seq order.
+    const ins = await db
+      .insert(widgetChatMessages)
+      .values({
+        conversationId: input.conversationId,
+        role: row.role,
+        content: row.content,
+        payload: row.payload,
+        turnId: input.turnId,
+        seq: ev.seq,
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (ins[0]) {
+      inserted++;
+      publish(ins[0]);
+    }
+  }
+
+  if (turnError || turnDone) {
+    cancelTurnTimeout(input.turnId);
+    if (turnDone) {
+      // Late completion clears the timeout notice (model output is paid for —
+      // the late reply rows above replace the failure state).
+      await db.delete(widgetChatMessages).where(and(
+        eq(widgetChatMessages.conversationId, input.conversationId),
+        eq(widgetChatMessages.turnId, input.turnId),
+        isNull(widgetChatMessages.seq),
+        sql`${widgetChatMessages.payload}->>'kind' = 'system_notice'`,
+        sql`${widgetChatMessages.payload}->>'code' = 'agent_unavailable'`,
+      ));
+    }
+    const [current] = await db
+      .select()
+      .from(widgetChatConversations)
+      .where(eq(widgetChatConversations.id, input.conversationId))
+      .limit(1);
+    if (current) {
+      const updates: Partial<typeof widgetChatConversations.$inferInsert> = { updatedAt: new Date() };
+      if (current.pendingTurnId === input.turnId) updates.pendingTurnId = null;
+      // Contract: turn_done after a created proposal_resolved closes the
+      // conversation (createdTaskId is set exactly then).
+      if (turnDone && current.createdTaskId) updates.status = 'closed';
+      await db
+        .update(widgetChatConversations)
+        .set(updates)
+        .where(eq(widgetChatConversations.id, input.conversationId));
+    }
+  }
+
+  return { inserted, turnDone };
+}
