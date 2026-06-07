@@ -59,6 +59,39 @@
   var DETAIL_POLL_INTERVAL_MS = 5000;
 
   // ===========================================================================
+  // Chat state (agent conversation view)
+  // ===========================================================================
+
+  // Active conversation: {id, status: 'active'|'closed', createdTaskId, userTurnCount}.
+  var chatConversation = null;
+  // Message rows in arrival order: {id, role, content, payload, createdAt}.
+  // Optimistic local echoes use ids prefixed "local-" and are replaced by
+  // the server's authoritative rows on arrival (see chatReplaceLocalEcho).
+  var chatMessages = [];
+  // True between a user action (send / create / dismiss / force-proposal)
+  // and the agent's next visible reply — drives the typing indicator and
+  // the fast polling cadence.
+  var chatTurnPending = false;
+  // Transport handles. At most one of EventSource / poll timer is live.
+  var chatEventSourceRef = null;
+  var chatPollTimerId = null;
+  // Started once a ticket has been created from this conversation; watches
+  // GET /conversations/active until the BE closes the conversation.
+  var chatClosedWatchTimerId = null;
+  // Element refs for the mounted chat view ({listEl, footerEl, hatchSlot,
+  // inputEl}); null whenever view !== "chat".
+  var chatUi = null;
+  // When "chat", the detail view's back button returns to the chat instead
+  // of the list (set when navigating chat → ticket detail).
+  var detailReturnView = null;
+
+  var CHAT_POLL_FAST_MS = 1500;    // while a turn is pending
+  var CHAT_POLL_IDLE_MS = 5000;    // idle (matches DETAIL_POLL_INTERVAL_MS)
+  var CHAT_CLOSED_WATCH_MS = 5000;
+  var CHAT_INPUT_MAX = 4000;
+  var CHAT_ESCAPE_HATCH_MIN_TURNS = 4;
+
+  // ===========================================================================
   // Console & error capture
   // ===========================================================================
 
@@ -213,6 +246,37 @@
   function postClarifyProceed(ticketId, clarificationId) {
     return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/clarify-proceed", {
       method: "POST", body: { clarificationId: clarificationId },
+    });
+  }
+
+  function chatOpenConversation() {
+    return api("/api/widget/chat/conversations", { method: "POST", body: {} });
+  }
+  function chatLoadActive() {
+    return api("/api/widget/chat/conversations/active");
+  }
+  function chatLoadMessages(conversationId, afterCursor) {
+    var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages" + qs);
+  }
+  function chatSendMessage(conversationId, content) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages", {
+      method: "POST", body: { content: content },
+    });
+  }
+  function chatForceProposal(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/force-proposal", {
+      method: "POST", body: {},
+    });
+  }
+  function chatCreateTicket(conversationId, title, description) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/create-ticket", {
+      method: "POST", body: { title: title, description: description },
+    });
+  }
+  function chatDismissProposal(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/dismiss-proposal", {
+      method: "POST", body: {},
     });
   }
 
@@ -661,6 +725,44 @@
         ticketEdited: "edited the ticket",
         ticketDeleted: "deleted the ticket",
       },
+      chat: {
+        back: "Back",
+        backToChat: "Back to chat",
+        title: "Chat with {name}",
+        agentDefault: "Support",
+        empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
+        inputPlaceholder: "Type your message…",
+        send: "Send",
+        typing: "{name} is typing…",
+        loadFailed: "Could not load the conversation: {msg}",
+        signInPrompt: "Sign in to chat with our support agent.",
+        sendFailed: "Could not send: {msg}",
+        rateLimited: "You're sending messages too quickly — please wait a moment and try again.",
+        turnCap: "This conversation has reached its message limit. Create a ticket from it or start a new conversation.",
+        unavailable: "The agent is unavailable right now — try Open Discussion instead.",
+        proposalTitle: "Ready to create this ticket?",
+        proposalTitleLabel: "Title",
+        proposalDescLabel: "Description",
+        proposalIncomplete: "Title and description are both required.",
+        createTicket: "Create Ticket",
+        creating: "Creating…",
+        createFailed: "Could not create the ticket: {msg}",
+        dismiss: "Dismiss",
+        dismissFailed: "Could not dismiss: {msg}",
+        proposalDismissed: "Ticket draft dismissed — the conversation continues.",
+        ticketCreated: "Ticket created",
+        viewTicket: "View ticket",
+        assignedTo: "Assigned to {name}",
+        escapeHatch: "Create ticket from this conversation",
+        forceRequested: "Preparing a ticket draft from this conversation…",
+        closed: "This conversation has ended.",
+        startNew: "Start new conversation",
+        transcriptTitle: "Created from a conversation",
+        transcriptShow: "Show transcript",
+        transcriptHide: "Hide transcript",
+        transcriptEmpty: "No messages in this conversation.",
+        transcriptYou: "You",
+      },
     },
     ko: {
       aria: {
@@ -795,6 +897,44 @@
         ticketCreated: "티켓을 열었습니다",
         ticketEdited: "티켓을 수정했습니다",
         ticketDeleted: "티켓을 삭제했습니다",
+      },
+      chat: {
+        back: "뒤로",
+        backToChat: "채팅으로 돌아가기",
+        title: "{name}와의 대화",
+        agentDefault: "지원 담당",
+        empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
+        inputPlaceholder: "메시지를 입력하세요…",
+        send: "보내기",
+        typing: "{name} 입력 중…",
+        loadFailed: "대화를 불러올 수 없습니다: {msg}",
+        signInPrompt: "상담을 시작하려면 로그인하세요.",
+        sendFailed: "전송 실패: {msg}",
+        rateLimited: "메시지를 너무 빠르게 보내고 있습니다 — 잠시 후 다시 시도해 주세요.",
+        turnCap: "이 대화는 메시지 한도에 도달했습니다. 대화 내용으로 티켓을 만들거나 새 대화를 시작하세요.",
+        unavailable: "지금은 에이전트를 이용할 수 없습니다 — 공개 토론을 이용해 보세요.",
+        proposalTitle: "이 티켓을 생성할까요?",
+        proposalTitleLabel: "제목",
+        proposalDescLabel: "설명",
+        proposalIncomplete: "제목과 설명을 모두 입력해 주세요.",
+        createTicket: "티켓 생성",
+        creating: "생성 중…",
+        createFailed: "티켓을 생성하지 못했습니다: {msg}",
+        dismiss: "닫기",
+        dismissFailed: "초안을 닫지 못했습니다: {msg}",
+        proposalDismissed: "티켓 초안을 닫았습니다 — 대화를 계속할 수 있어요.",
+        ticketCreated: "티켓이 생성되었습니다",
+        viewTicket: "티켓 보기",
+        assignedTo: "{name}에게 할당됨",
+        escapeHatch: "이 대화로 티켓 만들기",
+        forceRequested: "대화 내용으로 티켓 초안을 준비하고 있습니다…",
+        closed: "대화가 종료되었습니다.",
+        startNew: "새 대화 시작",
+        transcriptTitle: "대화에서 생성됨",
+        transcriptShow: "대화 내용 보기",
+        transcriptHide: "대화 내용 숨기기",
+        transcriptEmpty: "대화 메시지가 없습니다.",
+        transcriptYou: "나",
       },
     },
   };
