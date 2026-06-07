@@ -1901,6 +1901,30 @@
       '.rw-home-powered { margin-top: auto; padding-top: 18px; }',
       '@media (max-width: 640px) { .rw-home { padding: 64px 20px 20px; } }',
 
+      /* Compact back-to-home control shared by the list + detail headers.
+         Quiet outline styling so it never competes with the accent-filled
+         "Back to activity" action sitting next to it in the detail topbar. */
+      '.rw-home-btn {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 5px 11px 5px 9px;',
+      '  background: transparent; border: 1px solid var(--rw-line-2);',
+      '  border-radius: 999px;',
+      '  color: var(--rw-muted); font: inherit; font-size: 12px; font-weight: 500;',
+      '  cursor: pointer; flex: 0 0 auto;',
+      '  transition: color .12s, border-color .12s, transform .12s;',
+      '}',
+      '.rw-home-btn:hover { color: var(--rw-fg); border-color: var(--rw-accent); }',
+      '.rw-home-btn:active { transform: translateY(1px); }',
+      /* Slim list-view topbar hosting the back-to-home control. The split
+         layout below it is untouched — Home is a layer above the dashboard.
+         Right padding keeps clear of the absolute-positioned shell actions. */
+      '.rw-list-topbar {',
+      '  display: flex; align-items: center;',
+      '  padding: 14px 80px 10px 22px;',
+      '  border-bottom: 1px solid var(--rw-line);',
+      '  flex: 0 0 auto;',
+      '}',
+
       /* header */
       '.rw-hdr {',
       '  display: flex; align-items: center; justify-content: space-between;',
@@ -3485,7 +3509,15 @@
         currentDetailTicket = null;
         renderPanelBody();
       });
-      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [backBtn]));
+      // Home control opposite the existing "Back to activity" action. Back
+      // (←) means "up one level" (the list); Home jumps to the landing view
+      // — hence a house glyph, not a second left arrow. The detail topbar's
+      // space-between layout places them at opposite ends.
+      var detailHomeBtn = h("button", {
+        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
+      }, [Icons.home(13), h("span", null, t("home.back"))]);
+      detailHomeBtn.addEventListener("click", goHome);
+      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [backBtn, detailHomeBtn]));
 
       // Body uses the same renderDetailInto pipeline as the legacy modal,
       // just rendered inline. Loads detail data on demand.
@@ -3507,6 +3539,14 @@
           renderNotice("error", t("detail.loadFailed", { msg: err.message || "" }))));
       });
     } else {
+      // Slim topbar with the back-to-home control. Home is a layer above
+      // the dashboard — the split layout below is untouched.
+      var listHomeBtn = h("button", {
+        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
+      }, [Icons.arrowLeft(13), h("span", null, t("home.back"))]);
+      listHomeBtn.addEventListener("click", goHome);
+      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [listHomeBtn]));
+
       // Split layout: composer + others on the left, tabbed activity on the right.
       var split = h("div", { className: "rw-split" });
 
