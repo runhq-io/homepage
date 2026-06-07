@@ -755,7 +755,8 @@
         agentDefault: "Support",
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
-        collectPrompt: "Do you have any more information you'd like to provide?",
+        agentlessIntro: "Our support agent is currently offline. You can still submit a ticket directly — describe your issue or request with as much detail as possible (what happened, steps to reproduce, what you expected), then tap Submit Ticket below.",
+        collectPrompt: "Anything more you'd like to add? When you're ready, tap Submit Ticket below — the more detail, the faster we can help.",
         submitTicket: "Submit Ticket",
         submitFailed: "Could not submit the ticket: {msg}",
         submitAgentActive: "An agent has joined this conversation — continue chatting to create the ticket.",
@@ -942,7 +943,8 @@
         agentDefault: "지원 담당",
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
-        collectPrompt: "추가로 제공해 주실 정보가 있을까요?",
+        agentlessIntro: "지금은 상담원이 오프라인 상태예요. 그래도 바로 티켓을 제출하실 수 있어요 — 무슨 일이 있었는지, 재현 방법, 기대했던 동작 등 가능한 한 자세히 알려주신 뒤 아래 '티켓 제출'을 눌러주세요.",
+        collectPrompt: "더 추가하실 내용이 있나요? 준비되셨으면 아래 '티켓 제출'을 눌러주세요 — 자세할수록 빠르게 도와드릴 수 있어요.",
         submitTicket: "티켓 제출",
         submitFailed: "티켓을 제출하지 못했습니다: {msg}",
         submitAgentActive: "상담원이 대화에 참여했습니다 — 대화를 이어가며 티켓을 만들어 주세요.",
@@ -5032,11 +5034,19 @@
     var listEl = chatUi.listEl;
     clearChildren(listEl);
 
-    if (chatMessages.length === 0) {
+    // Agentless threads open with a scripted offline notice that doubles as
+    // submission guidance ("provide as much detail as possible, then Submit
+    // Ticket"). Rendered as a bot bubble pinned to the top of the thread —
+    // including before the first message — so the user always knows who is
+    // (not) on the other end. Threads an agent has joined skip it; the
+    // agent speaks for itself.
+    if (!chatAgentMode() && !chatThreadHasAgent()) {
+      listEl.appendChild(renderChatAgentRow({ content: t("chat.agentlessIntro") }));
+    }
+
+    if (chatMessages.length === 0 && chatAgentMode()) {
       listEl.appendChild(h("div", { className: "rw-chat-empty" },
-        chatAgentMode()
-          ? t("chat.empty", { name: chatAgentName() })
-          : t("chat.emptyAgentless")));
+        t("chat.empty", { name: chatAgentName() })));
     }
 
     var activeProposal = chatFindActiveProposal();
