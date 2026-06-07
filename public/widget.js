@@ -494,6 +494,8 @@
     link:      function (s) { return icon([{ d: "M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" }, { d: "M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" }], s); },
     image:     function (s) { return icon([{ tag: "rect", x: 3, y: 4, width: 18, height: 16, rx: 2 }, { tag: "circle", cx: 9, cy: 10, r: 1.5 }, { d: "M21 16l-5-5-8 8" }], s); },
     globe:     function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 10 }, { d: "M2 12h20" }, { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" }], s); },
+    chevRight: function (s) { return icon([{ d: "M9 6l6 6-6 6" }], s, 2); },
+    home:      function (s) { return icon([{ d: "M3 11l9-8 9 8" }, { d: "M5 9.5V21h14V9.5" }], s, 2); },
   };
 
   // ===========================================================================
@@ -563,6 +565,21 @@
         pastedImage: "Pasted image",
       },
       others: { label: "Recent Submissions", empty: "No tickets yet." },
+      // Intercom-style home screen (landing view). The chat strings only
+      // surface when the bootstrap payload carries `chat: { enabled, … }`
+      // — see renderHomeView.
+      home: {
+        greeting: "Hi 👋 How can we help?",
+        chatTitle: "Chat with Agent",
+        chatSub: "{name} is ready to help",
+        chatSubGeneric: "Tell us what's going on",
+        chatComingSoon: "Chat is coming soon.",
+        discussTitle: "Join Open Discussion",
+        discussSub: "Vote and weigh in on what gets built next",
+        updatesTitle: "View Latest Updates",
+        updatesSub: "See what shipped recently",
+        back: "Home",
+      },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
@@ -689,6 +706,18 @@
         pastedImage: "붙여넣은 이미지",
       },
       others: { label: "최근 제출 내역", empty: "아직 티켓이 없습니다." },
+      home: {
+        greeting: "안녕하세요 👋 무엇을 도와드릴까요?",
+        chatTitle: "상담원과 채팅",
+        chatSub: "{name} 님이 도와드릴 준비가 되어 있어요",
+        chatSubGeneric: "어떤 일인지 알려주세요",
+        chatComingSoon: "채팅 기능이 곧 제공될 예정입니다.",
+        discussTitle: "공개 토론 참여",
+        discussSub: "투표와 의견으로 개발 방향에 참여하세요",
+        updatesTitle: "최신 업데이트 보기",
+        updatesSub: "최근 배포된 내용을 확인하세요",
+        back: "홈",
+      },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
       status: {
         pending: "대기 중",
