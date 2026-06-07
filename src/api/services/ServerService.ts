@@ -1654,15 +1654,18 @@ export async function serverTokenFetch<T = unknown>(
   if (server.machineId) {
     const provider = getProvider((server.provider || 'fly') as ProviderId);
     const routing = provider.getRoutingInfo(server.machineId, server.flyAppName);
-    baseUrl = routing.serverUrl;
+    // DockerProvider returns an empty serverUrl by contract — callers fall
+    // back to the canonical servers.serverUrl persisted at provision time
+    // (see DockerProvider.getRoutingInfo).
+    baseUrl = routing.serverUrl || server.serverUrl || '';
     if (routing.routingToken && routing.requiresRoutingHeaders) {
       headers['fly-force-instance-id'] = routing.routingToken;
     }
   } else {
-    if (!server.serverUrl) {
-      throw new Error(`Server ${server.id} has no serverUrl — cannot route request`);
-    }
-    baseUrl = server.serverUrl;
+    baseUrl = server.serverUrl || '';
+  }
+  if (!baseUrl) {
+    throw new Error(`Server ${server.id} has no routable URL — cannot route request`);
   }
 
   const url = new URL(path, baseUrl);
