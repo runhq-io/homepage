@@ -761,6 +761,7 @@
         submitAgentActive: "An agent has joined this conversation — continue chatting to create the ticket.",
         submitEmpty: "Write a message first — the ticket is created from what you've sent.",
         alreadyTicketed: "A ticket was already created from this conversation.",
+        teamDefault: "Team",
         inputPlaceholder: "Type your message…",
         send: "Send",
         typing: "{name} is typing…",
@@ -947,6 +948,7 @@
         submitAgentActive: "상담원이 대화에 참여했습니다 — 대화를 이어가며 티켓을 만들어 주세요.",
         submitEmpty: "먼저 메시지를 작성해 주세요 — 보내신 내용으로 티켓이 생성됩니다.",
         alreadyTicketed: "이 대화에서 이미 티켓이 생성되었습니다.",
+        teamDefault: "팀",
         inputPlaceholder: "메시지를 입력하세요…",
         send: "보내기",
         typing: "{name} 입력 중…",
@@ -4578,6 +4580,21 @@
     ]);
   }
 
+  // Workspace-member reply (role='team', payload {authorName}) — rendered
+  // like an agent bubble but attributed to the human author with an
+  // initials avatar. Delivered over the same SSE/polling transport; never
+  // starts or settles a turn (see chatTurnStillPending).
+  function renderChatTeamRow(row) {
+    var name = (row.payload && row.payload.authorName) || t("chat.teamDefault");
+    return h("div", { className: "rw-chat-msg rw-chat-msg-agent" }, [
+      renderAvatar(name, 24),
+      h("div", { className: "rw-chat-agent-col" }, [
+        h("div", { className: "rw-chat-agent-name" }, name),
+        h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, row.content || ""),
+      ]),
+    ]);
+  }
+
   function renderChatTypingRow() {
     return h("div", { className: "rw-chat-msg rw-chat-msg-agent" }, [
       renderChatAgentAvatar(24),
@@ -5028,6 +5045,7 @@
       var node = null;
       if (row.role === "user") node = renderChatUserRow(row);
       else if (row.role === "agent") node = renderChatAgentRow(row);
+      else if (row.role === "team") node = renderChatTeamRow(row);
       else if (row.role === "event") node = renderChatEventRow(row, activeProposal);
       if (node) listEl.appendChild(node);
     }
