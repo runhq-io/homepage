@@ -22,6 +22,7 @@ import {
   widgetClarifications,
   widgetExposedAgents,
   widgetProjects,
+  widgetUsers,
   workspaceTasks,
   type WidgetChatEventPayload,
 } from '../../db/schema';
@@ -323,7 +324,11 @@ export type TranscriptEntry =
 
 /**
  * Map persisted rows onto the turn-dispatch transcript shape. Defensive:
- * payload-less event rows and empty user/agent rows are dropped.
+ * payload-less event rows and empty user/agent rows are dropped. role='team'
+ * rows are EXCLUDED — the workspace turn contract only knows
+ * user/agent/event entries, and team replies are a human side-channel the
+ * agent does not consume (widening the workspace ingest is a separate,
+ * cross-repo contract change).
  */
 export function buildTranscript(
   rows: Pick<ChatMessageRow, 'role' | 'content' | 'payload'>[],
@@ -331,8 +336,9 @@ export function buildTranscript(
   const out: TranscriptEntry[] = [];
   for (const row of rows) {
     if (row.role === 'event') {
-      if (row.payload) out.push({ role: 'event', payload: row.payload });
-    } else if (row.content) {
+      // 'kind' in — narrows away the role='team' attribution payload shape.
+      if (row.payload && 'kind' in row.payload) out.push({ role: 'event', payload: row.payload });
+    } else if (row.role !== 'team' && row.content) {
       out.push({ role: row.role, content: row.content });
     }
   }
@@ -352,7 +358,7 @@ export function computePendingProposal(
   let pending: PendingProposal | null = null;
   for (const row of rows) {
     const p = row.payload;
-    if (!p) continue;
+    if (!p || !('kind' in p)) continue;
     if (p.kind === 'proposal') {
       pending = {
         toolUseId: p.toolUseId,
@@ -819,6 +825,207 @@ export async function dismissProposal(
   publish(resolvedEvent!);
 
   await dispatchTurn(fresh);
+}
+
+// ---------------------------------------------------------------------------
+// Team side (Conversations inbox) — workspace-member surface behind
+// /api/widget/team/*. Server-scoped, NOT widget-user-scoped: routes
+// authenticate a runhq session member and resolve the server, then every
+// accessor here re-verifies the conversation/project belongs to that server
+// (cross-tenant access answers *_not_found, never an existence signal).
+// ---------------------------------------------------------------------------
+
+const PREVIEW_LENGTH = 140;
+
+/** Inbox list/detail header shape (wire DTO — dates are ISO strings). */
+export interface TeamConversationSummary {
+  id: string;
+  /** Widget visitor attribution: name, falling back to username / external id. */
+  userDisplay: string;
+  /** Latest non-empty message text (user/agent/team), truncated to 140 chars. */
+  lastMessagePreview: string | null;
+  /** Count of user/agent/team rows — event cards are not "messages". */
+  messageCount: number;
+  status: 'active' | 'closed';
+  createdTaskId: string | null;
+  /** Same derived flag the widget gets: any agent turn touched this thread. */
+  hasAgentTurns: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Server-scoped conversation load for the team surface. ONE error for
+ * "missing", "another server's", and "not even a uuid".
+ */
+async function getConversationForServer(
+  serverId: string,
+  conversationId: string,
+): Promise<ChatConversationRow> {
+  if (!UUID_RE.test(conversationId)) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  const [found] = await db
+    .select({
+      conversation: widgetChatConversations,
+      projectServerId: widgetProjects.serverId,
+    })
+    .from(widgetChatConversations)
+    .innerJoin(widgetProjects, eq(widgetChatConversations.widgetProjectId, widgetProjects.id))
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!found || found.projectServerId !== serverId) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  return found.conversation;
+}
+
+/** Joined select shape shared by the list + detail summary queries. */
+function teamSummaryColumns() {
+  return {
+    conversation: widgetChatConversations,
+    userName: widgetUsers.name,
+    userUsername: widgetUsers.username,
+    userExternalId: widgetUsers.externalUserId,
+    messageCount: sql<number>`(
+      SELECT count(*)::int FROM widget_chat_messages m
+      WHERE m.conversation_id = ${widgetChatConversations.id}
+        AND m.role IN ('user', 'agent', 'team')
+    )`,
+    lastMessagePreview: sql<string | null>`(
+      SELECT left(m.content, ${PREVIEW_LENGTH}) FROM widget_chat_messages m
+      WHERE m.conversation_id = ${widgetChatConversations.id} AND m.content <> ''
+      ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+    )`,
+    hasAgentTurns: sql<boolean>`(
+      ${widgetChatConversations.pendingTurnId} IS NOT NULL OR EXISTS(
+        SELECT 1 FROM widget_chat_messages m
+        WHERE m.conversation_id = ${widgetChatConversations.id}
+          AND (m.turn_id IS NOT NULL OR m.role = 'agent')
+      )
+    )`,
+  };
+}
+
+type TeamSummaryRow = {
+  conversation: ChatConversationRow;
+  userName: string | null;
+  userUsername: string | null;
+  userExternalId: string;
+  messageCount: number;
+  lastMessagePreview: string | null;
+  hasAgentTurns: boolean;
+};
+
+function toTeamSummary(row: TeamSummaryRow): TeamConversationSummary {
+  return {
+    id: row.conversation.id,
+    userDisplay: row.userName || row.userUsername || row.userExternalId,
+    lastMessagePreview: row.lastMessagePreview,
+    messageCount: row.messageCount,
+    status: row.conversation.status,
+    createdTaskId: row.conversation.createdTaskId,
+    hasAgentTurns: row.hasAgentTurns,
+    createdAt: row.conversation.createdAt.toISOString(),
+    updatedAt: row.conversation.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * Inbox listing for one widget project (ALL conversations — agent-driven
+ * included; the team can jump into any thread), newest activity first.
+ * Addressed by workspaceProjectId because that is the id the runhq client
+ * holds; (serverId, workspaceProjectId) pins the tenant.
+ */
+export async function listTeamConversations(
+  serverId: string,
+  workspaceProjectId: string,
+): Promise<TeamConversationSummary[]> {
+  const [project] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      eq(widgetProjects.workspaceProjectId, workspaceProjectId),
+    ))
+    .limit(1);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
+
+  const rows = await db
+    .select(teamSummaryColumns())
+    .from(widgetChatConversations)
+    .innerJoin(widgetUsers, eq(widgetChatConversations.widgetUserId, widgetUsers.id))
+    .where(eq(widgetChatConversations.widgetProjectId, project.id))
+    .orderBy(desc(widgetChatConversations.updatedAt), desc(widgetChatConversations.id));
+  return rows.map(toTeamSummary);
+}
+
+export interface TeamConversationDetail {
+  conversation: TeamConversationSummary;
+  messages: ChatMessageRow[];
+}
+
+/** Full thread for the inbox: summary header + every row (all roles + events). */
+export async function getTeamConversation(
+  serverId: string,
+  conversationId: string,
+): Promise<TeamConversationDetail> {
+  await getConversationForServer(serverId, conversationId);
+  const [row] = await db
+    .select(teamSummaryColumns())
+    .from(widgetChatConversations)
+    .innerJoin(widgetUsers, eq(widgetChatConversations.widgetUserId, widgetUsers.id))
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!row) throw new WidgetService.WidgetError('conversation_not_found', 404);
+  return {
+    conversation: toTeamSummary(row),
+    messages: await loadAllMessages(conversationId),
+  };
+}
+
+/**
+ * Append a workspace member's reply as a role='team' row (payload carries
+ * the author's display name) and fan it out over the conversation's SSE
+ * stream — the widget renders it like an agent bubble, attributed. Works on
+ * any OPEN conversation regardless of agent mode, and NEVER dispatches a
+ * turn (a human reply is not model input until the user writes again, at
+ * which point buildTranscript intentionally excludes team rows).
+ */
+export async function sendTeamReply(
+  serverId: string,
+  conversationId: string,
+  authorName: string,
+  content: string,
+): Promise<ChatMessageRow> {
+  const text = content.trim();
+  if (!text) throw new WidgetService.WidgetError('message_required', 400);
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw new WidgetService.WidgetError('message_too_long', 400);
+  }
+
+  const conversation = await getConversationForServer(serverId, conversationId);
+  if (conversation.status !== 'active') {
+    throw new WidgetService.WidgetError('conversation_closed', 409);
+  }
+
+  const [message] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'team',
+      content: text,
+      payload: { authorName: authorName.trim() || 'Team' },
+    })
+    .returning();
+  publish(message!);
+
+  await db
+    .update(widgetChatConversations)
+    .set({ updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversationId));
+
+  return message!;
 }
 
 /**

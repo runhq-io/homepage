@@ -146,7 +146,7 @@ describe('submitTicketFromConversation', () => {
       sql`${widgetChatMessages.payload}->>'kind' = 'proposal_resolved'`,
     ));
     expect(resolved!.payload).toEqual({ kind: 'proposal_resolved', created: true, ticketId });
-    expect(seen.some((r) => r.payload?.kind === 'proposal_resolved')).toBe(true);
+    expect(seen.some((r) => r.payload && 'kind' in r.payload && r.payload.kind === 'proposal_resolved')).toBe(true);
 
     // Conversation linked + closed; no turn ever dispatched.
     const [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));

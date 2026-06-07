@@ -1552,6 +1552,16 @@ export type WidgetChatEventPayload =
   // bubble + persistent [Submit Ticket] affordance off it.
   | { kind: 'collect_prompt' };
 
+/**
+ * Attribution payload on role='team' rows (workspace-member replies from the
+ * Conversations inbox). Discriminated by the row's role, not a kind tag —
+ * role='team' rows always carry exactly this shape.
+ */
+export type WidgetChatTeamPayload = { authorName: string };
+
+/** Everything widget_chat_messages.payload can hold, across all roles. */
+export type WidgetChatMessagePayload = WidgetChatEventPayload | WidgetChatTeamPayload;
+
 // One agent-intake conversation per widget user at a time (status='active');
 // closed after ticket creation. BE Postgres is the source of truth — the
 // workspace rehydrates the transcript from here every turn.
@@ -1573,16 +1583,18 @@ export const widgetChatConversations = pgTable('widget_chat_conversations', {
 ]);
 
 // Transcript rows. role='user' (widget visitor), 'agent' (model reply text),
-// 'event' (structured card — see WidgetChatEventPayload). Workspace-reported
-// rows carry (turn_id, seq) for idempotent ingestion; user rows and BE-written
-// notices leave seq null (notices keep turn_id so a late turn_done can find
-// and delete them).
+// 'team' (workspace-member reply; payload = WidgetChatTeamPayload), 'event'
+// (structured card — see WidgetChatEventPayload). The role column is
+// app-enforced (TEXT, no CHECK constraint) so widening it is a type-only
+// change. Workspace-reported rows carry (turn_id, seq) for idempotent
+// ingestion; user rows and BE-written notices leave seq null (notices keep
+// turn_id so a late turn_done can find and delete them).
 export const widgetChatMessages = pgTable('widget_chat_messages', {
   id: uuid('id').primaryKey().defaultRandom(),
   conversationId: uuid('conversation_id').notNull().references(() => widgetChatConversations.id, { onDelete: 'cascade' }),
-  role: text('role').notNull().$type<'user' | 'agent' | 'event'>(),
+  role: text('role').notNull().$type<'user' | 'agent' | 'team' | 'event'>(),
   content: text('content').notNull().default(''),
-  payload: jsonb('payload').$type<WidgetChatEventPayload | null>(),
+  payload: jsonb('payload').$type<WidgetChatMessagePayload | null>(),
   turnId: uuid('turn_id'),
   seq: integer('seq'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
