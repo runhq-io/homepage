@@ -3039,6 +3039,31 @@
       '}',
       '.rw-chat-escape-link:hover:not(:disabled) { color: var(--rw-fg); }',
       '.rw-chat-escape-link:disabled { cursor: not-allowed; opacity: 0.45; }',
+
+      /* "Created from a conversation" — collapsed transcript section on the
+         ticket detail for tickets born from chat. Reporter-only by
+         construction (the chat API is owner-scoped). */
+      '.rw-chat-transcript {',
+      '  margin: 8px 18px 2px; border: 1px solid var(--rw-line-2); border-radius: 8px;',
+      '  background: var(--rw-panel); overflow: hidden;',
+      '}',
+      '.rw-chat-transcript-toggle {',
+      '  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;',
+      '  background: none; border: none; padding: 9px 12px; font: inherit; cursor: pointer;',
+      '  color: var(--rw-muted); font-size: 11.5px;',
+      '}',
+      '.rw-chat-transcript-toggle:hover { color: var(--rw-fg); }',
+      '.rw-chat-transcript-title {',
+      '  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;',
+      '  color: var(--rw-muted);',
+      '}',
+      '.rw-chat-transcript-body {',
+      '  border-top: 1px solid var(--rw-line-2); padding: 10px 12px;',
+      '  display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto;',
+      '}',
+      '.rw-chat-transcript-line { display: flex; gap: 8px; font-size: 12.5px; line-height: 1.45; }',
+      '.rw-chat-transcript-who { flex: 0 0 auto; font-weight: 600; color: var(--rw-muted); }',
+      '.rw-chat-transcript-text { color: var(--rw-fg-2); white-space: pre-wrap; word-break: break-word; min-width: 0; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -4806,6 +4831,53 @@
     slot.appendChild(hatchLink);
   }
 
+  // Collapsed transcript section for the ticket detail view. Lazily fetches
+  // the full conversation history (no `after` cursor = from the beginning)
+  // on first expand. A 403/404 (not the owner / conversation gone) removes
+  // the section quietly — it only ever renders for the reporter.
+  function renderChatTranscriptSection(conversationId) {
+    var bodyEl = h("div", { className: "rw-chat-transcript-body", style: { display: "none" } });
+    var loaded = false;
+    var expanded = false;
+    var toggleLabel = h("span", null, t("chat.transcriptShow"));
+    var toggleBtn = h("button", { className: "rw-chat-transcript-toggle", type: "button" }, [
+      h("span", { className: "rw-chat-transcript-title" }, t("chat.transcriptTitle")),
+      toggleLabel,
+    ]);
+    var section = h("div", { className: "rw-chat-transcript" }, [toggleBtn, bodyEl]);
+
+    toggleBtn.addEventListener("click", function () {
+      expanded = !expanded;
+      bodyEl.style.display = expanded ? "" : "none";
+      toggleLabel.textContent = expanded ? t("chat.transcriptHide") : t("chat.transcriptShow");
+      if (!expanded || loaded) return;
+      loaded = true;
+      bodyEl.appendChild(renderLoading());
+      chatLoadMessages(conversationId, null).then(function (data) {
+        clearChildren(bodyEl);
+        var rows = (data && data.messages) || [];
+        var lines = 0;
+        rows.forEach(function (row) {
+          // The transcript is about what was said — event rows are omitted.
+          if (row.role !== "user" && row.role !== "agent") return;
+          lines++;
+          bodyEl.appendChild(h("div", { className: "rw-chat-transcript-line" }, [
+            h("span", { className: "rw-chat-transcript-who" },
+              row.role === "user" ? t("chat.transcriptYou") : chatAgentName()),
+            h("span", { className: "rw-chat-transcript-text" }, row.content || ""),
+          ]));
+        });
+        if (lines === 0) {
+          bodyEl.appendChild(h("div", { className: "rw-chat-event-line" }, t("chat.transcriptEmpty")));
+        }
+      }).catch(function () {
+        if (section.parentNode) section.parentNode.removeChild(section);
+      });
+    });
+
+    return section;
+  }
+
   // Compact reference card for an existing ticket the agent surfaced
   // (search_tickets deflection). Whole card is the click target.
   function renderChatTicketLinkCard(payload) {
@@ -5508,6 +5580,17 @@
         });
       });
       if (dupCard) scrollArea.appendChild(dupCard);
+    }
+
+    // "Created from a conversation" — when this ticket originated from the
+    // chat intake on THIS browser (reporter side), offer the transcript.
+    // Team-side transcript rendering lives in the runhq client (spec §5),
+    // not in the widget.
+    if (!loading) {
+      var chatConvId = chatConversationForTicket(ticket.id);
+      if (chatConvId) {
+        scrollArea.appendChild(renderChatTranscriptSection(chatConvId));
+      }
     }
 
     // body
