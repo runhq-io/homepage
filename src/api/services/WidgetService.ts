@@ -121,6 +121,7 @@ interface WidgetProjectContext {
   widgetAgentAssignmentEnabled: boolean;
   serverId: string;
   channelId: string | null;
+  widgetChatAgentEntityId: string | null;
 }
 
 type WidgetTicketResponse = {
@@ -276,6 +277,7 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
+      widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
@@ -304,6 +306,7 @@ async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContex
       widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
+      widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.slug, slug), eq(widgetProjects.enabled, true)))
@@ -880,6 +883,32 @@ export async function diagnoseWidgetBearerAuth(
 // Ticket Operations
 // ============================================================================
 
+export interface WidgetChatBootstrapInfo {
+  enabled: boolean;
+  agentName: string | null;
+}
+
+/**
+ * Bootstrap `chat` field for widget.js: enabled iff a support agent is
+ * configured. The display name comes from the widget_exposed_agents mirror;
+ * null when the chosen agent isn't mirrored (widget falls back to a generic
+ * label).
+ */
+async function getChatBootstrapInfo(
+  project: Pick<WidgetProjectContext, 'id' | 'widgetChatAgentEntityId'> | null,
+): Promise<WidgetChatBootstrapInfo> {
+  if (!project?.widgetChatAgentEntityId) return { enabled: false, agentName: null };
+  const [agent] = await db
+    .select({ name: widgetExposedAgents.agentName })
+    .from(widgetExposedAgents)
+    .where(and(
+      eq(widgetExposedAgents.widgetProjectId, project.id),
+      eq(widgetExposedAgents.agentId, project.widgetChatAgentEntityId),
+    ))
+    .limit(1);
+  return { enabled: true, agentName: agent?.name ?? null };
+}
+
 export async function listTickets(projectId: string, widgetUserId?: string) {
   const project = await getWidgetProjectContext(projectId);
 
@@ -930,6 +959,7 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     // projects — that's the only audience that needs it. Authed users never
     // get redirected, and non-public projects must not leak owner config.
     loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
+    chat: await getChatBootstrapInfo(project),
     tickets,
   };
 }
@@ -2276,6 +2306,8 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
       widgetAssignRoles: widgetProjects.widgetAssignRoles,
       widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
       widgetAssignRateLimitPerHour: widgetProjects.widgetAssignRateLimitPerHour,
+      widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      widgetChatInstructions: widgetProjects.widgetChatInstructions,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2299,6 +2331,8 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     widget_assign_roles: project.widgetAssignRoles,
     widget_role_claim_name: project.widgetRoleClaimName,
     widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
+    widgetChatAgentEntityId: project.widgetChatAgentEntityId,
+    widgetChatInstructions: project.widgetChatInstructions,
   };
 }
 
@@ -2337,6 +2371,9 @@ export async function updateWidgetSettings(
     widgetAssignRoles?: string[];
     widgetRoleClaimName?: string;
     widgetAssignRateLimitPerHour?: number;
+    // Chat-with-agent intake (camelCase per the widget-chat contract)
+    widgetChatAgentEntityId?: string | null;
+    widgetChatInstructions?: string | null;
   },
   opts?: WidgetLookup,
 ): Promise<UpdateWidgetSettingsResult> {
@@ -2352,6 +2389,16 @@ export async function updateWidgetSettings(
         'Cannot enable widget agent assignment: add at least one role.',
       );
     }
+  }
+
+  // Chat instructions are an instruction layer injected into agent turns —
+  // cap their size like a chat message.
+  if (
+    settings.widgetChatInstructions !== undefined &&
+    settings.widgetChatInstructions !== null &&
+    settings.widgetChatInstructions.length > 4000
+  ) {
+    throw new WidgetSettingsValidationError('Chat instructions must be 4000 characters or fewer.');
   }
 
   // Validate login_url shape on every update that touches it. The
@@ -2514,6 +2561,18 @@ export async function updateWidgetSettings(
       ...(settings.widgetAssignRoles !== undefined && { widgetAssignRoles: settings.widgetAssignRoles }),
       ...(settings.widgetRoleClaimName !== undefined && { widgetRoleClaimName: settings.widgetRoleClaimName }),
       ...(settings.widgetAssignRateLimitPerHour !== undefined && { widgetAssignRateLimitPerHour: settings.widgetAssignRateLimitPerHour }),
+      // Chat settings — empty string normalizes to null ("chat disabled" /
+      // "no extra instructions" have a single representation).
+      ...(settings.widgetChatAgentEntityId !== undefined && {
+        widgetChatAgentEntityId: settings.widgetChatAgentEntityId?.trim()
+          ? settings.widgetChatAgentEntityId.trim()
+          : null,
+      }),
+      ...(settings.widgetChatInstructions !== undefined && {
+        widgetChatInstructions: settings.widgetChatInstructions?.trim()
+          ? settings.widgetChatInstructions.trim()
+          : null,
+      }),
       updatedAt: new Date(),
     })
     .where(and(...projConds()));
