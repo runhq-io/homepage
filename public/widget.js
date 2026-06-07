@@ -741,6 +741,7 @@
         title: "Chat with {name}",
         agentDefault: "Support",
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
+        emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
         inputPlaceholder: "Type your message…",
         send: "Send",
         typing: "{name} is typing…",
@@ -920,6 +921,7 @@
         title: "{name}와의 대화",
         agentDefault: "지원 담당",
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
+        emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
         inputPlaceholder: "메시지를 입력하세요…",
         send: "보내기",
         typing: "{name} 입력 중…",
@@ -3707,13 +3709,16 @@
       ));
     } else {
       // No support agent configured — the message entry must not disappear.
-      // Same slot, neutral Intercom-style wording; opens the compose face
-      // (existing submit path: clarifier + triager untouched).
+      // Same slot, neutral Intercom-style wording; opens the CHAT view in
+      // agentless intake mode (messages accumulate, no turns dispatch, a
+      // [Submit Ticket] action files them — see updateChatActionSlot).
+      // Public posting keeps its own entry: the board's [+ New post]
+      // still opens the compose face.
       cards.appendChild(renderHomeCard(
         "💬",
         t("home.messageTitle"),
         t("home.messageSub"),
-        goCompose
+        openChat
       ));
     }
 
@@ -4247,6 +4252,36 @@
   function chatAgentName() {
     return (config.chat && config.chat.agentName) || t("chat.agentDefault");
   }
+  // Whether a support agent is configured for this widget (bootstrap
+  // `chat.enabled`). Drives the chat surface's two personalities: agent
+  // mode (turns, typing indicator, proposal flow) vs agentless intake
+  // (messages accumulate, [Submit Ticket] files them).
+  function chatAgentMode() {
+    return !!(config.chat && config.chat.enabled);
+  }
+  // Whether THIS conversation has any agent involvement. Beyond the static
+  // config gate, an agentless conversation can gain agent turns when an
+  // owner configures a support agent mid-thread: the resume payload's
+  // `hasAgentTurns` flips true, or agent rows / proposal events arrive over
+  // the live transport. Once true the agentless intake affordances
+  // (collect prompt styling, [Submit Ticket]) yield to the agent flow.
+  function chatThreadHasAgent() {
+    if (chatAgentMode()) return true;
+    if (chatConversation && chatConversation.hasAgentTurns) return true;
+    for (var i = 0; i < chatMessages.length; i++) {
+      var m = chatMessages[i];
+      if (m.role === "agent") return true;
+      if (m.role === "event" && m.payload && m.payload.kind === "proposal") return true;
+    }
+    return false;
+  }
+  // Display identity for the bot side of the thread: the agent's name when
+  // one is configured, otherwise the project name (Intercom-style company
+  // attribution for the agentless inbox).
+  function chatIdentityName() {
+    if (chatAgentMode()) return chatAgentName();
+    return config.projectName || config.project || t("chat.agentDefault");
+  }
   function chatAgentAvatarUrl() {
     return (config.chat && config.chat.agentAvatarUrl) || null;
   }
@@ -4255,11 +4290,11 @@
     if (url) {
       return h("img", {
         className: "rw-chat-agent-img",
-        src: url, alt: chatAgentName(),
+        src: url, alt: chatIdentityName(),
         style: { width: size + "px", height: size + "px" },
       });
     }
-    return renderAvatar(chatAgentName(), size);
+    return renderAvatar(chatIdentityName(), size);
   }
 
   // Entry point. Same gating as ticket submission: anonymous viewers of a
@@ -4505,7 +4540,7 @@
     return h("div", { className: "rw-chat-msg rw-chat-msg-agent" }, [
       renderChatAgentAvatar(24),
       h("div", { className: "rw-chat-agent-col" }, [
-        h("div", { className: "rw-chat-agent-name" }, chatAgentName()),
+        h("div", { className: "rw-chat-agent-name" }, chatIdentityName()),
         h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, row.content || ""),
       ]),
     ]);
@@ -4836,7 +4871,10 @@
     clearChildren(listEl);
 
     if (chatMessages.length === 0) {
-      listEl.appendChild(h("div", { className: "rw-chat-empty" }, t("chat.empty", { name: chatAgentName() })));
+      listEl.appendChild(h("div", { className: "rw-chat-empty" },
+        chatAgentMode()
+          ? t("chat.empty", { name: chatAgentName() })
+          : t("chat.emptyAgentless")));
     }
 
     var activeProposal = chatFindActiveProposal();
@@ -4987,7 +5025,10 @@
       backBtn,
       h("div", { className: "rw-chat-topbar-identity" }, [
         renderChatAgentAvatar(22),
-        h("span", { className: "rw-chat-topbar-name" }, t("chat.title", { name: chatAgentName() })),
+        // Agent mode: "Chat with {agent}". Agentless: just the project
+        // name — there is no agent to attribute the thread to.
+        h("span", { className: "rw-chat-topbar-name" },
+          chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()),
       ]),
     ]));
 
