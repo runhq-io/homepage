@@ -635,7 +635,6 @@
         failed: "Failed to submit: {msg}",
         pastedImage: "Pasted image",
       },
-      others: { label: "Recent Submissions", empty: "No tickets yet." },
       // Intercom-style home screen (landing view). The chat strings only
       // surface when the bootstrap payload carries `chat: { enabled, … }`
       // — see renderHomeView.
@@ -684,7 +683,7 @@
         signInToSeeMine: "Sign in to see your tickets",
         signedInPlaceholder: "Your submissions appear here once you're identified.",
         noMineYet: "You haven't submitted any tickets yet",
-        useComposer: "Use the composer on the left to file one.",
+        useComposer: "Tap “New post” to file one.",
         nothingShipped: "No updates yet",
         updatesWillShow: "Updates will show up here once an admin publishes them.",
       },
@@ -821,7 +820,6 @@
         failed: "제출 실패: {msg}",
         pastedImage: "붙여넣은 이미지",
       },
-      others: { label: "최근 제출 내역", empty: "아직 티켓이 없습니다." },
       home: {
         greeting: "안녕하세요 👋 무엇을 도와드릴까요?",
         chatTitle: "상담원과 채팅",
@@ -864,7 +862,7 @@
         signInToSeeMine: "내 티켓을 보려면 로그인하세요",
         signedInPlaceholder: "로그인하시면 제출한 티켓이 여기에 표시됩니다.",
         noMineYet: "아직 제출한 티켓이 없습니다",
-        useComposer: "왼쪽 입력창에서 새 티켓을 작성하세요.",
+        useComposer: "“새 글 쓰기” 버튼으로 첫 티켓을 작성해 보세요.",
         nothingShipped: "아직 업데이트가 없습니다",
         updatesWillShow: "관리자가 게시하면 여기에 표시됩니다.",
       },
@@ -1639,7 +1637,7 @@
       '  position: absolute;',
       '  top: 50%; left: 50%;',
       '  transform: translate(-50%, -50%);',
-      '  width: min(1080px, calc(100% - 56px));',
+      '  width: min(720px, calc(100% - 56px));',
       '  height: min(680px, calc(100vh - 56px));',
       '  min-height: 540px;',
       '  display: flex; flex-direction: column;',
@@ -1729,68 +1727,18 @@
       '}',
       '.rw-shell-actions .rw-icon-btn { width: 28px; height: 28px; }',
 
-      /* split (list view): asymmetric — composer left, tabs/list right */
-      '.rw-split {',
-      '  display: grid;',
-      '  grid-template-columns: 0.85fr 1fr;',
-      '  flex: 1 1 auto;',
-      '  min-height: 0;',
-      '}',
-      '.rw-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }',
-      '.rw-pane-left {',
-      /* Top padding pushes the eyebrow row down so its text center
-         lands on the same horizontal line as the tab text in the right
-         pane. (left.pad-top 30 + eyebrow text center 7 = 37) matches
-         (right.pad-top 22 + tab.pad-top 6 + tab text center 9 = 37). */
-      '  padding: 30px 28px 22px;',
-      '  background: var(--rw-panel);',
-      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 6%, transparent), transparent 70%);',
-      '  border-right: 1px solid var(--rw-line);',
-      '}',
-      '.rw-shell[data-theme="dark"] .rw-pane-left {',
-      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 14%, transparent), transparent 70%);',
-      '}',
-      '.rw-pane-right { padding: 22px 4px 0; }',
-      '@media (max-width: 880px) {',
-      '  .rw-split { grid-template-columns: 1fr; }',
-      '  .rw-pane-left { border-right: 0; border-bottom: 1px solid var(--rw-line); }',
+      /* list view: single full-width panel (tab bar + list) */
+      '.rw-list-panel {',
+      '  display: flex; flex-direction: column;',
+      '  flex: 1 1 auto; min-height: 0; min-width: 0;',
+      '  padding: 22px 4px 0;',
       '}',
 
-      /* eyebrow + headline + sub */
-      /* Eyebrow row: project name + "powered by RunHQ" packed left so the
-         line reads as a single phrase ("[name] powered by RunHQ"). They
-         share the same baseline; the small inline gap is one space-width
-         at this font size. Originally split to opposite ends of the row,
-         but on narrow widths the powered-by landed under the
-         absolutely-positioned close X. */
-      '.rw-eyebrow-row {',
-      '  display: flex; align-items: baseline; flex-wrap: wrap;',
-      '  gap: 6px; margin-bottom: 14px;',
-      '}',
-      /* Project name text — styled to match the adjacent "powered by RunHQ"
-         tag so the whole eyebrow reads as one phrase. The previous
-         uppercase + 0.22em-spaced kicker treatment broke that flow. */
-      '.rw-eyebrow {',
-      '  display: inline-flex; align-items: center; gap: 8px;',
-      '  font-size: 10.5px; letter-spacing: 0.02em;',
-      '  color: var(--rw-muted); font-weight: 600;',
-      '  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
-      '}',
-      '.rw-eyebrow-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--rw-accent); flex: 0 0 auto; }',
+      /* brand tag — used by the Home footer */
       '.rw-powered-by {',
       '  font-size: 10.5px; color: var(--rw-muted);',
       '  white-space: nowrap; flex: 0 0 auto;',
       '  letter-spacing: 0.02em;',
-      '}',
-      /* Identity indicator: pushed to the far right of the eyebrow row.
-         Truncates long names; gives ground first when the row wraps so it
-         never collides with the absolutely-positioned shell actions. */
-      '.rw-logged-in {',
-      '  margin-left: auto; min-width: 0; flex: 0 1 auto;',
-      '  font-size: 10.5px; color: var(--rw-muted); font-weight: 600;',
-      '  letter-spacing: 0.02em; white-space: nowrap;',
-      '  overflow: hidden; text-overflow: ellipsis;',
-      '  padding-right: 64px;',
       '}',
       '.rw-powered-by a {',
       '  color: var(--rw-fg-2); text-decoration: none; font-weight: 600;',
@@ -1798,18 +1746,7 @@
       '}',
       '.rw-powered-by a:hover { color: var(--rw-fg); text-decoration: underline; }',
 
-      '.rw-prompt {',
-      '  font-family: inherit;',
-      '  font-size: 22px; line-height: 1.18; letter-spacing: -0.018em; font-weight: 600;',
-      '  color: var(--rw-fg); margin: 0 0 6px;',
-      '}',
-      /* <em> in the headline + sub is now bold-not-italic — used to highlight
-         the project name or "My Submissions" without breaking line rhythm. */
-      '.rw-prompt em { font-style: normal; font-weight: 600; color: var(--rw-fg); }',
-      '.rw-prompt-sub { margin: 0 0 18px; font-size: 13px; line-height: 1.45; color: var(--rw-muted); }',
-      '.rw-prompt-sub em { font-style: normal; font-weight: 600; color: var(--rw-fg-2); }',
-
-      /* inline composer (left pane) */
+      /* inline composer (compose face) */
       /* Inline composer card — textarea + tool bar live inside one bordered
          surface so they read as a single input, the way GitHub/Linear/Notion
          render their comment boxes. focus-within lights up the border to
@@ -1882,80 +1819,24 @@
          consequence of the toggle to first-time users. */
       '.rw-priv-hint { font-size: 10.5px; color: var(--rw-muted); margin-left: 8px; letter-spacing: 0; }',
 
-      /* recent-tickets-submitted strip (left pane bottom) */
-      '.rw-others {',
-      '  display: flex; flex-direction: column;',
-      '  flex: 1 1 auto; min-height: 0;',
-      '  margin-top: 18px; padding-top: 14px;',
-      '  border-top: 1px solid var(--rw-line);',
-      '  transition: opacity 200ms ease;',
-      '}',
-      '.rw-pane-left:focus-within .rw-others { opacity: 0.32; }',
-      /* Hidden on mobile — base .rw-others sets display:flex, so this
-         override has to live AFTER that rule to win on source order. */
-      '@media (max-width: 640px) { .rw-others { display: none; } }',
-      '.rw-others-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }',
-      '.rw-others-label {',
-      '  font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em;',
-      '  text-transform: uppercase; color: var(--rw-muted);',
-      '}',
-      '.rw-others-count {',
-      '  font-size: 10.5px; font-variant-numeric: tabular-nums;',
-      '  color: var(--rw-muted-2); background: var(--rw-panel-2);',
-      '  border: 1px solid var(--rw-line);',
-      '  border-radius: 999px; padding: 1px 7px; line-height: 1.6;',
-      '}',
-      '.rw-others-list {',
-      '  flex: 1; min-height: 0; overflow-y: auto;',
-      '  margin: 0 -6px; padding: 0 6px;',
-      /* Match the right-pane list scrollbar — narrow track, muted thumb,
-         no track background. WebKit + Firefox both covered. */
-      '  scrollbar-width: thin;',
-      '  scrollbar-color: var(--rw-line-2) transparent;',
-      '}',
-      '.rw-others-list::-webkit-scrollbar { width: 6px; }',
-      '.rw-others-list::-webkit-scrollbar-track { background: transparent; }',
-      '.rw-others-list::-webkit-scrollbar-thumb { background: var(--rw-line-2); border-radius: 999px; }',
-      '.rw-others-list::-webkit-scrollbar-thumb:hover { background: var(--rw-muted-2); }',
-      '.rw-others-row {',
-      '  display: grid; grid-template-columns: 8px 1fr auto;',
-      '  align-items: center; gap: 10px; width: 100%;',
-      '  text-align: left; background: transparent; border: 0;',
-      '  border-radius: 8px; padding: 9px 8px;',
-      '  cursor: pointer; color: var(--rw-fg); font: inherit;',
-      '  transition: background 100ms;',
-      '}',
-      /* Two-line layout: title above, "{author} · {when}" below. Both clip
-         on overflow to keep the row a single physical line. */
-      '.rw-others-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }',
-      '.rw-others-sub {',
-      '  font-size: 10.5px; color: var(--rw-muted);',
-      '  letter-spacing: 0;',
-      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
-      '}',
-      '.rw-others-row + .rw-others-row {',
-      '  border-top: 1px dashed var(--rw-line);',
-      '  border-radius: 0; padding-top: 9px; margin-top: 1px;',
-      '}',
-      '.rw-others-row:hover { background: var(--rw-panel-2); border-top-color: transparent; }',
-      '.rw-others-row:hover + .rw-others-row { border-top-color: transparent; }',
-      '.rw-others-status { width: 7px; height: 7px; border-radius: 50%; background: var(--rw-muted); flex-shrink: 0; }',
-      '.rw-others-title {',
-      '  font-size: 13px; line-height: 1.35; color: var(--rw-fg);',
-      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
-      '  letter-spacing: -0.005em;',
-      '}',
-      '.rw-others-meta {',
-      '  display: inline-flex; align-items: center; gap: 3px;',
-      '  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--rw-muted);',
-      '}',
-
-      /* dashboard tab row (right pane) — underline-active, no background pill */
+      /* dashboard tab row — underline-active tabs left, [+ New post] right */
       '.rw-dash-tabs {',
       '  display: flex; align-items: center; gap: 0;',
       '  padding: 0 22px 10px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '}',
+      '.rw-dash-tabs-row { display: flex; align-items: center; gap: 0; }',
+      '.rw-new-post-btn {',
+      '  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 6px 12px 6px 10px;',
+      '  background: var(--rw-accent); border: 1px solid var(--rw-accent);',
+      '  border-radius: 999px;',
+      '  color: var(--rw-accent-ink); font: inherit; font-size: 12px; font-weight: 500;',
+      '  cursor: pointer; flex: 0 0 auto;',
+      '  transition: filter .12s, transform .12s;',
+      '}',
+      '.rw-new-post-btn:hover { filter: brightness(1.06); }',
+      '.rw-new-post-btn:active { transform: translateY(1px); }',
       '.rw-dash-tab {',
       '  position: relative; display: inline-flex; align-items: center; gap: 7px;',
       /* Top/bottom padding tuned so the tab text center is at y = 37
@@ -2694,20 +2575,6 @@
       /* Triager badge — shown in the eyebrow row when the authenticated user has
          the assign_agent permission. Intentionally subdued (small, blue pill) so
          it doesn't compete with the composer. */
-      '.rw-triager-badge {',
-      '  display: inline-block;',
-      '  padding: 1px 6px;',
-      '  border-radius: 8px;',
-      '  background: #2d6cdf;',
-      '  color: #fff;',
-      '  font-size: 10px;',
-      '  font-weight: 600;',
-      '  margin-left: 6px;',
-      '  vertical-align: middle;',
-      '  letter-spacing: 0.04em;',
-      '  flex: 0 0 auto;',
-      '}',
-
       /* Assign-agent button — appears in the ticket detail head when the
          triager is viewing an unassigned, actionable ticket. */
       '.rw-assign-btn {',
@@ -3451,7 +3318,18 @@
       return btn;
     });
 
-    return h("div", { className: "rw-dash-tabs", role: "tablist" }, tabButtons);
+    // [+ New post] sits on the tab row's right — the single message-entry
+    // affordance now that the inline composer left the list view.
+    var newPostBtn = h("button", { className: "rw-new-post-btn", type: "button" }, [
+      Icons.plus(13),
+      h("span", null, t("compose.newPost")),
+    ]);
+    newPostBtn.addEventListener("click", goCompose);
+
+    return h("div", { className: "rw-dash-tabs" }, [
+      h("div", { className: "rw-dash-tabs-row", role: "tablist" }, tabButtons),
+      newPostBtn,
+    ]);
   }
 
   function renderList() {
@@ -3483,14 +3361,14 @@
   }
 
   // -----------------------------------------------------------------------
-  // Inline composer (left pane)
+  // Inline composer (compose face)
   //
-  // Replaces the old "+ New ticket" button → modal flow. Always visible at the
-  // top of the dashboard so writing feedback is one click rather than two.
-  // Reuses the same createTicket + uploadTicketAttachment APIs and the same
-  // staged-files semantics as the old modal composer (the file-staging pattern
-  // — append before submit, upload after — is identical, only the chrome
-  // changed).
+  // The message-entry surface, rendered inside the compose view (reached
+  // from Home's "Send us a message" card, the list's [+ New post] button,
+  // or a submit-ticket login-restore intent). Reuses the same createTicket
+  // + uploadTicketAttachment APIs and the same staged-files semantics as
+  // the old modal composer (the file-staging pattern — append before
+  // submit, upload after — is identical, only the chrome changed).
   // -----------------------------------------------------------------------
 
   function renderInlineComposer() {
@@ -3749,54 +3627,15 @@
     ]);
   }
 
-  // -----------------------------------------------------------------------
-  // Recent tickets submitted (left pane bottom)
-  // -----------------------------------------------------------------------
-
-  function renderOthersList() {
-    var items = (topTicketsCache || []).slice(0, 5);
-    var head = h("div", { className: "rw-others-head" }, [
-      h("span", { className: "rw-others-label" }, t("others.label")),
-      h("span", { className: "rw-others-count" }, String(items.length)),
-    ]);
-    var list = h("div", { className: "rw-others-list" });
-    if (items.length === 0) {
-      list.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "10px 0", fontSize: "11.5px" } }, t("others.empty")));
-    } else {
-      // Use `tk` for ticket — `t` is the i18n function.
-      items.forEach(function (tk) {
-        var author = displayNameFromTicket(tk);
-        var when = timeAgo(tk.completedAt || tk.createdAt);
-        var sub = author + " · " + when;
-        var row = h("button", {
-          className: "rw-others-row", type: "button",
-          "aria-label": t("aria.openTicket", { title: tk.title }),
-        }, [
-          h("span", { className: "rw-others-status", "data-status": tk.status, style: { background: statusMeta(tk.status).dot } }),
-          // Two-line content cell: title above, author/when below.
-          h("span", { className: "rw-others-main" }, [
-            h("span", { className: "rw-others-title" }, tk.title),
-            h("span", { className: "rw-others-sub" }, sub),
-          ]),
-          h("span", { className: "rw-others-meta" }, [Icons.arrowUp(9), String(tk.yesVotes || 0)]),
-        ]);
-        row.addEventListener("click", function () { openDetailModal(tk); });
-        list.appendChild(row);
-      });
-    }
-    return h("div", { className: "rw-others" }, [head, list]);
-  }
-
   // ===========================================================================
   // Home view (Intercom-style landing)
   //
   // Opening the widget lands here: a localized greeting plus navigation
   // cards into the existing faces — chat (only when the bootstrap payload
-  // says a support agent is configured), the Hot discussion list (composer
-  // included — it always renders in the list view's left pane), and the
-  // Latest Updates list. The shell actions (theme + close) are pinned
-  // top-right of the card outside scrollEl, so Home inherits its close
-  // button without rendering one.
+  // says a support agent is configured) or the compose face when it isn't,
+  // the Hot discussion list, and the Latest Updates list. The shell actions
+  // (theme + close) are pinned top-right of the card outside scrollEl, so
+  // Home inherits its close button without rendering one.
   // ===========================================================================
 
   // Centralized home/list navigation. Both stop any running detail poll —
@@ -4023,84 +3862,14 @@
       listHomeBtn.addEventListener("click", goHome);
       scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [listHomeBtn]));
 
-      // Split layout: composer + others on the left, tabbed activity on the right.
-      var split = h("div", { className: "rw-split" });
-
-      var projectName = config.projectName || t("header.thisProduct");
-
-      // "powered by RunHQ" tag — brand-locked, always English regardless
-      // of locale. Sits next to the project name in the eyebrow row so
-      // the line reads as a single phrase: "[project name] powered by RunHQ".
-      var poweredLink = h("a", {
-        href: "https://www.runhq.io", target: "_blank",
-        rel: "noopener noreferrer",
-        "aria-label": "Visit RunHQ",
-      }, "RunHQ");
-      var poweredBy = h("div", { className: "rw-powered-by" }, [
-        document.createTextNode("powered by "),
-        poweredLink,
-      ]);
-
-      var leftPane = h("div", { className: "rw-pane rw-pane-left" }, [
-        // Eyebrow row: project name + brand-locked "powered by RunHQ" tag,
-        // packed left so the line reads as one phrase. Both sit on the
-        // left so they stay clear of the absolutely-positioned
-        // shell-actions (theme + close). The big H1 headline was removed
-        // — at small sizes it competed for visual weight with the
-        // composer placeholder, which is the actual hero.
-        h("div", { className: "rw-eyebrow-row" }, [
-          h("div", { className: "rw-eyebrow" }, (function () {
-            var eyebrowNodes = [
-              h("span", { className: "rw-eyebrow-dot" }),
-              h("span", null, t("header.headline", { name: projectName })),
-            ];
-            if (currentUser.isTriager) {
-              var badge = h("span", {
-                className: "rw-triager-badge",
-                title: "You can assign agents to tickets from this widget.",
-              }, "Triager");
-              eyebrowNodes.push(badge);
-            }
-            return eyebrowNodes;
-          })()),
-          poweredBy,
-          // Right-aligned identity indicator on the same eyebrow row.
-          // Gate STRICTLY on config.isIdentified — the exact signal the
-          // submit lock uses. Keying this off identitySource instead let
-          // the header say "Logged in as X" while the composer said "not
-          // signed in" for an authenticated-but-unidentified token
-          // (e.g. a non-string `sub`): a self-contradicting UI. One
-          // source of truth: if you can't act, you're not "logged in".
-          (function () {
-            if (!config.isIdentified) return null;
-            var nm = config.identityName;
-            return h("div", {
-              className: "rw-logged-in",
-              title: nm ? t("header.loggedInAs", { name: nm }) : t("header.loggedIn"),
-            }, nm ? t("header.loggedInAs", { name: nm }) : t("header.loggedIn"));
-          })(),
-        ]),
-        // Sub-text is the product-value pitch: explains WHY the widget
-        // exists. Prose composes as [subBefore]<em>{subEm}</em>[subAfter];
-        // empty em / after segments yield a plain sentence. The {name}
-        // placeholder in subBefore interpolates the project name.
-        h("p", { className: "rw-prompt-sub" }, [
-          document.createTextNode(t("header.subBefore", { name: projectName })),
-          h("em", null, t("header.subEm")),
-          document.createTextNode(t("header.subAfter")),
-        ]),
-        renderInlineComposer(),
-        renderOthersList(),
-      ]);
-
-      var rightPane = h("div", { className: "rw-pane rw-pane-right" }, [
+      // Single full-width panel: tab bar (with [+ New post] on its right)
+      // + list. The old left pane (intro copy, inline composer, Recent
+      // Submissions) is gone — Home's "Send us a message" card and the
+      // [+ New post] button open the compose face instead.
+      scrollEl.appendChild(h("div", { className: "rw-list-panel" }, [
         renderTabsBar(),
         renderList(),
-      ]);
-
-      split.appendChild(leftPane);
-      split.appendChild(rightPane);
-      scrollEl.appendChild(split);
+      ]));
     }
   }
 
