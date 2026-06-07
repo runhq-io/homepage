@@ -2977,6 +2977,37 @@
       '  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;',
       '}',
       '.rw-chat-newconv-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
+
+      /* Chat ticket cards: compact reference cards rendered inline in the
+         conversation (existing-ticket deflection links and the created-
+         ticket confirmation). Idiom matches rw-pr-card. */
+      '.rw-chat-ticket-card {',
+      '  align-self: stretch;',
+      '  display: flex; align-items: center; justify-content: space-between; gap: 10px;',
+      '  padding: 9px 12px; border-radius: 8px;',
+      '  border: 1px solid var(--rw-line-2); border-left: 3px solid var(--rw-accent);',
+      '  background: var(--rw-panel); font: inherit; text-align: left;',
+      '}',
+      'button.rw-chat-ticket-card { cursor: pointer; width: 100%; }',
+      'button.rw-chat-ticket-card:hover { border-color: var(--rw-muted); }',
+      '.rw-chat-ticket-card-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }',
+      '.rw-chat-ticket-title {',
+      '  font-size: 13px; font-weight: 600; color: var(--rw-fg);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;',
+      '}',
+      '.rw-chat-ticket-label {',
+      '  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;',
+      '  color: var(--rw-muted); flex: 0 0 auto;',
+      '}',
+      '.rw-chat-ticket-ref { font-size: 13px; font-weight: 600; color: var(--rw-fg); }',
+      '.rw-chat-ticket-open {',
+      '  flex: 0 0 auto; display: inline-flex; align-items: center; height: 26px; padding: 0 10px;',
+      '  border-radius: 999px; border: 1px solid var(--rw-line-2);',
+      '  background: transparent; color: var(--rw-fg-2);',
+      '  font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;',
+      '}',
+      '.rw-chat-ticket-open:hover { border-color: var(--rw-muted); color: var(--rw-fg); }',
+      '.rw-chat-assigned-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -3617,6 +3648,9 @@
     stopDetailPoll();
     view = "home";
     currentDetailTicket = null;
+    // A detail opened FROM chat must not leave its return-to-chat marker
+    // behind once the user jumps home instead.
+    detailReturnView = null;
     renderPanelBody();
   }
 
@@ -3625,6 +3659,7 @@
     view = "list";
     if (tab) activeTab = tab;
     currentDetailTicket = null;
+    detailReturnView = null;
     renderPanelBody();
   }
 
@@ -3714,14 +3749,17 @@
       // here too but it duplicated the #refId chip in the head below and
       // collided with the absolute-positioned shell actions on narrow
       // viewports — gone.
+      var backLabel = detailReturnView === "chat" ? t("chat.backToChat") : t("detail.back");
       var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
         Icons.arrowLeft(13),
-        h("span", null, t("detail.back")),
+        h("span", null, backLabel),
       ]);
       backBtn.addEventListener("click", function () {
         stopDetailPoll();
-        view = "list";
+        var returnTo = detailReturnView;
+        detailReturnView = null;
         currentDetailTicket = null;
+        view = returnTo === "chat" ? "chat" : "list";
         renderPanelBody();
       });
       // Home control opposite the existing "Back to activity" action. Back
@@ -4517,7 +4555,41 @@
       }
       return h("div", { className: "rw-chat-event-line" }, t("chat.proposalDismissed"));
     }
+    if (kind === "ticket_link") {
+      return renderChatTicketLinkCard(payload);
+    }
     return null;
+  }
+
+  // Navigate from chat into the existing ticket detail view (deflection:
+  // vote/comment happen there). detailReturnView makes the detail's back
+  // button return to the chat instead of the list.
+  function openTicketFromChat(ticketId) {
+    loadTicketDetail(ticketId).then(function (detail) {
+      var ticket = detail && detail.ticket;
+      if (!ticket) return;
+      stopChatTransport();
+      chatUi = null;
+      detailReturnView = "chat";
+      openDetailModal(ticket);
+    }).catch(function () {
+      // Navigation failed silently — the user stays in the chat.
+    });
+  }
+
+  // Compact reference card for an existing ticket the agent surfaced
+  // (search_tickets deflection). Whole card is the click target.
+  function renderChatTicketLinkCard(payload) {
+    var card = h("button", { className: "rw-chat-ticket-card rw-chat-ticket-link", type: "button" }, [
+      h("div", { className: "rw-chat-ticket-card-main" }, [
+        h("span", { className: "rw-chat-ticket-title" }, payload.title || "Ticket"),
+        payload.status ? renderStatusChip(payload.status) : null,
+      ]),
+    ]);
+    card.addEventListener("click", function () {
+      if (payload.ticketId) openTicketFromChat(payload.ticketId);
+    });
+    return card;
   }
 
   // Full rebuild of the message list from chatMessages. Cheap at the ≤50-
