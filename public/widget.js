@@ -84,6 +84,10 @@
   // When "chat", the detail view's back button returns to the chat instead
   // of the list (set when navigating chat → ticket detail).
   var detailReturnView = null;
+  // When "compose", the compose view's back control returns to the view it
+  // was opened from (Home's message card vs the list's [+ New post]) — the
+  // same pattern as detailReturnView above.
+  var composeReturnView = "home";
 
   var CHAT_POLL_FAST_MS = 1500;    // while a turn is pending
   var CHAT_POLL_IDLE_MS = 5000;    // idle (matches DETAIL_POLL_INTERVAL_MS)
@@ -649,6 +653,11 @@
         updatesSub: "See what shipped recently",
         back: "Home",
       },
+      compose: {
+        newPost: "New post",
+        title: "Send us a message",
+        back: "Back",
+      },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
@@ -826,6 +835,11 @@
         updatesTitle: "최신 업데이트 보기",
         updatesSub: "최근 배포된 내용을 확인하세요",
         back: "홈",
+      },
+      compose: {
+        newPost: "새 글 쓰기",
+        title: "메시지 보내기",
+        back: "뒤로",
       },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
       status: {
@@ -2098,6 +2112,30 @@
       '.rw-home-card-chev { color: var(--rw-muted); flex: 0 0 auto; display: inline-flex; }',
       '.rw-home-powered { margin-top: auto; padding-top: 18px; }',
       '@media (max-width: 640px) { .rw-home { padding: 64px 20px 20px; } }',
+
+      /* Compose face — compact like home/chat, same warm panel treatment as
+         Home so the message flow reads as one surface. Topbar right padding
+         clears the absolute-positioned shell actions (theme + close). */
+      '.rw-compose {',
+      '  flex: 1 1 auto; min-height: 0; overflow-y: auto;',
+      '  display: flex; flex-direction: column;',
+      '  padding: 0 20px 20px;',
+      '  background: var(--rw-panel);',
+      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 6%, transparent), transparent 70%);',
+      '}',
+      '.rw-shell[data-theme="dark"] .rw-compose {',
+      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 14%, transparent), transparent 70%);',
+      '}',
+      '.rw-compose-topbar {',
+      '  display: flex; align-items: center;',
+      '  padding: 14px 64px 12px 0;',
+      '  flex: 0 0 auto;',
+      '}',
+      '.rw-compose-title {',
+      '  font-family: var(--rw-serif);',
+      '  font-size: 18px; font-weight: 500; letter-spacing: -0.01em;',
+      '  color: var(--rw-fg); margin: 6px 0 12px;',
+      '}',
 
       /* Compact back-to-home control shared by the list + detail headers.
          Quiet outline styling so it never competes with the accent-filled
@@ -3666,9 +3704,14 @@
         privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
-        // Refresh data + the panel body. The composer instance is replaced
-        // along with the rest of the left pane on re-render, so we don't
-        // need to reset state on the same DOM node.
+        // Land the author on their post: flip state to the list's
+        // My Submissions tab, then refresh — refreshAll re-renders the panel
+        // body for the new view once data arrives. State is set directly
+        // (not via goList) so the stale pre-submit caches never paint
+        // before the loading frame.
+        view = "list";
+        activeTab = "mine";
+        composeReturnView = "home";
         return refreshAll();
       }).catch(function (err) {
         submitBtn.disabled = false;
@@ -3777,6 +3820,18 @@
     renderPanelBody();
   }
 
+  // Compose face. Records the view it was opened from so its back control
+  // returns there (Home's "Send us a message" card keeps home, the list's
+  // [+ New post] keeps list). Like goHome/goList, kills any running detail poll.
+  function goCompose() {
+    stopDetailPoll();
+    composeReturnView = view === "list" ? "list" : "home";
+    view = "compose";
+    currentDetailTicket = null;
+    detailReturnView = null;
+    renderPanelBody();
+  }
+
   function renderHomeCard(emoji, title, sub, onClick) {
     var btn = h("button", { className: "rw-home-card", type: "button" }, [
       h("span", { className: "rw-home-card-emoji", "aria-hidden": "true" }, emoji),
@@ -3813,21 +3868,13 @@
       ));
     } else {
       // No support agent configured — the message entry must not disappear.
-      // Same slot, neutral Intercom-style wording; lands on the classic
-      // composer (existing submit path: clarifier + triager untouched).
+      // Same slot, neutral Intercom-style wording; opens the compose face
+      // (existing submit path: clarifier + triager untouched).
       cards.appendChild(renderHomeCard(
         "💬",
         t("home.messageTitle"),
         t("home.messageSub"),
-        function () {
-          goList("hot");
-          // Focus the composer after the list view paints so the user can
-          // type immediately — the card promised "send us a message".
-          requestAnimationFrame(function () {
-            var ta = scrollEl && scrollEl.querySelector(".rw-inline-composer-ta");
-            if (ta) ta.focus();
-          });
-        }
+        goCompose
       ));
     }
 
@@ -3861,8 +3908,8 @@
   }
 
   // -----------------------------------------------------------------------
-  // Shell mode. Home + chat live in a compact corner panel (Intercom-style);
-  // list + detail keep the large centered modal. The class lands on widgetEl
+  // Shell mode. Home, chat + compose live in a compact corner panel
+  // (Intercom-style); list + detail keep the large centered modal. The class lands on widgetEl
   // (the scrim) so one toggle drives both the scrim treatment and the panel
   // geometry. Synced from openPanel — BEFORE rw-open, so the very first
   // paint is already in the right mode, including deep-link opens that
@@ -3871,7 +3918,7 @@
   // (its view reset would snap the still-fading-out card to compact).
   // -----------------------------------------------------------------------
 
-  function isCompactView(v) { return v === "home" || v === "chat"; }
+  function isCompactView(v) { return v === "home" || v === "chat" || v === "compose"; }
 
   function applyShellMode() {
     if (!widgetEl) return;
@@ -3890,6 +3937,29 @@
 
     if (view === "home") {
       scrollEl.appendChild(renderHomeView());
+      return;
+    }
+
+    if (view === "compose") {
+      var composeFull = h("div", { className: "rw-compose" });
+      var composeBack = h("button", {
+        className: "rw-home-btn", type: "button", "aria-label": t("compose.back"),
+      }, [Icons.arrowLeft(13), h("span", null, t("compose.back"))]);
+      composeBack.addEventListener("click", function () {
+        var returnTo = composeReturnView;
+        composeReturnView = "home";
+        if (returnTo === "list") goList(); else goHome();
+      });
+      composeFull.appendChild(h("div", { className: "rw-compose-topbar" }, [composeBack]));
+      composeFull.appendChild(h("div", { className: "rw-compose-title" }, t("compose.title")));
+      composeFull.appendChild(renderInlineComposer());
+      scrollEl.appendChild(composeFull);
+      // Autofocus so typing starts immediately — every entry point (Home
+      // card, [+ New post], intent restore) funnels through this branch.
+      requestAnimationFrame(function () {
+        var composeTa = scrollEl && scrollEl.querySelector(".rw-inline-composer-ta");
+        if (composeTa) composeTa.focus();
+      });
       return;
     }
 
@@ -6131,6 +6201,14 @@
     if (!intent) return;
     try {
       if (intent.type === "submit-ticket" && intent.draft) {
+        // The draft restores into the compose face. Boot pre-sets
+        // view = "compose" for this intent type so the panel paints compact
+        // from its very first frame; this guard covers any other caller.
+        if (view !== "compose") {
+          composeReturnView = "home";
+          view = "compose";
+          renderPanelBody();
+        }
         var composerRoot = scrollEl && scrollEl.querySelector(".rw-inline-composer");
         var ta = composerRoot && composerRoot.querySelector(".rw-inline-composer-ta");
         if (!ta) return;
@@ -6212,6 +6290,7 @@
     chatUi = null;
     chatTurnPending = false;
     detailReturnView = null;
+    composeReturnView = "home";
     // Reset the shell so re-opening lands on a fresh Home rather than
     // wherever the user last left it (detail view, Hot tab, etc.).
     view = "home";
@@ -6510,9 +6589,10 @@
           clearIntent();
           // Deep-link/restore opens bypass Home: the user is mid-action
           // (draft submit, vote, comment), so land straight on the view
-          // that can receive the intent. applyIntent escalates list →
-          // detail itself for vote/comment intents.
-          view = "list";
+          // that can receive the intent. Draft restore lands on the compose
+          // face (compact from the first frame); vote/comment land on the
+          // list (expanded) and applyIntent escalates list → detail itself.
+          view = savedIntent.type === "submit-ticket" ? "compose" : "list";
           openPanel(function () { applyIntent(savedIntent); });
         }
       }).catch(function (err) {
