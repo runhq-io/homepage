@@ -1389,6 +1389,11 @@ export const widgetProjects = pgTable('widget_projects', {
   widgetAssignRoles: text('widget_assign_roles').array().notNull().default(sql`ARRAY[]::text[]`),
   widgetRoleClaimName: text('widget_role_claim_name').notNull().default('runhq_roles'),
   widgetAssignRateLimitPerHour: integer('widget_assign_rate_limit_per_hour').notNull().default(30),
+  // Chat-with-agent intake: the support agent entity handling widget chat
+  // (null = chat disabled on the widget home screen) + an optional per-widget
+  // instruction layer the workspace stacks on top of the agent's own prompt.
+  widgetChatAgentEntityId: text('widget_chat_agent_entity_id'),
+  widgetChatInstructions: text('widget_chat_instructions'),
   // Origins (e.g. https://acme.com) where the widget is allowed to use
   // cookie-based RunHQ-member auto-recognition. Required when
   // autoRecognizeRunhqMembers is true; enforced at the CORS + auth layer.
@@ -1526,6 +1531,72 @@ export type WidgetClarification = typeof widgetClarifications.$inferSelect;
 export type NewWidgetClarification = typeof widgetClarifications.$inferInsert;
 export type WidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferSelect;
 export type NewWidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferInsert;
+
+// ============================================================================
+// Widget Chat (agent intake)
+// ============================================================================
+
+/**
+ * Inline event-card payloads in the widget chat transcript. Stored verbatim
+ * in widget_chat_messages.payload; the widget renders each kind as a card.
+ */
+export type WidgetChatEventPayload =
+  | { kind: 'proposal'; title: string; description: string; toolUseId: string }
+  | { kind: 'proposal_resolved'; created: boolean; ticketId?: string }
+  | { kind: 'ticket_link'; ticketId: string; title: string; status: string }
+  | { kind: 'assigned'; ticketId: string; agentEntityId: string; agentName: string | null }
+  | { kind: 'system_notice'; code: string; text: string }
+  | { kind: 'force_proposal_requested' };
+
+// One agent-intake conversation per widget user at a time (status='active');
+// closed after ticket creation. BE Postgres is the source of truth — the
+// workspace rehydrates the transcript from here every turn.
+export const widgetChatConversations = pgTable('widget_chat_conversations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  widgetProjectId: uuid('widget_project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  status: text('status').notNull().$type<'active' | 'closed'>().default('active'),
+  /** The workspace_tasks row created from this conversation's proposal. */
+  createdTaskId: uuid('created_task_id'),
+  /** Abuse cap counter: number of user messages sent (30 max per conversation). */
+  userTurnCount: integer('user_turn_count').notNull().default(0),
+  /** The in-flight turn, if any. Cleared on turn_done / turn_error / timeout. */
+  pendingTurnId: uuid('pending_turn_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_chat_conversations_user_idx').on(t.widgetProjectId, t.widgetUserId),
+]);
+
+// Transcript rows. role='user' (widget visitor), 'agent' (model reply text),
+// 'event' (structured card — see WidgetChatEventPayload). Workspace-reported
+// rows carry (turn_id, seq) for idempotent ingestion; user rows and BE-written
+// notices leave seq null (notices keep turn_id so a late turn_done can find
+// and delete them).
+export const widgetChatMessages = pgTable('widget_chat_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id').notNull().references(() => widgetChatConversations.id, { onDelete: 'cascade' }),
+  role: text('role').notNull().$type<'user' | 'agent' | 'event'>(),
+  content: text('content').notNull().default(''),
+  payload: jsonb('payload').$type<WidgetChatEventPayload | null>(),
+  turnId: uuid('turn_id'),
+  seq: integer('seq'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_chat_messages_conversation_idx').on(t.conversationId, t.createdAt),
+  // Idempotency key for workspace event ingestion: retries upsert on
+  // (turn_id, seq) and cannot duplicate. Partial — rows without a turn_id
+  // (user messages) are exempt, and seq-null notices stay insertable because
+  // unique indexes treat NULLs as distinct.
+  uniqueIndex('widget_chat_messages_turn_seq_unique')
+    .on(t.turnId, t.seq)
+    .where(sql`${t.turnId} IS NOT NULL`),
+]);
+
+export type WidgetChatConversation = typeof widgetChatConversations.$inferSelect;
+export type NewWidgetChatConversation = typeof widgetChatConversations.$inferInsert;
+export type WidgetChatMessage = typeof widgetChatMessages.$inferSelect;
+export type NewWidgetChatMessage = typeof widgetChatMessages.$inferInsert;
 
 // Per-channel naming: the widget is now anchored to a single todo channel,
 // so the row type is named `WidgetChannel` (the underlying table keeps the
