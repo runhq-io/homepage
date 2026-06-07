@@ -87,9 +87,16 @@ async function seedMessage(conversationId: string, content: string) {
 }
 
 describe('getOrCreateActiveConversation', () => {
-  it('404s chat_not_enabled when no support agent is configured', async () => {
-    await expect(WidgetChatService.getOrCreateActiveConversation(BARE_PROJECT_ID, OWNER_ID))
-      .rejects.toMatchObject({ code: 'chat_not_enabled', status: 404 });
+  it('creates an agentless conversation when no support agent is configured', async () => {
+    // Agentless intake rides the same backbone — start succeeds; turn
+    // dispatch is skipped at send time (see WidgetChatService.agentless.test.ts).
+    const { conversation, hasAgentTurns } =
+      await WidgetChatService.getOrCreateActiveConversation(BARE_PROJECT_ID, OWNER_ID);
+    expect(conversation).toMatchObject({
+      widgetProjectId: BARE_PROJECT_ID, widgetUserId: OWNER_ID, status: 'active',
+    });
+    expect(hasAgentTurns).toBe(false);
+    await db.delete(widgetChatConversations).where(eq(widgetChatConversations.id, conversation.id));
   });
 
   it('creates a fresh active conversation with no messages', async () => {

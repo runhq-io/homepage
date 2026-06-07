@@ -203,13 +203,43 @@ async function findActiveConversation(
 export interface ConversationBundle {
   conversation: ChatConversationRow;
   messages: ChatMessageRow[];
+  /**
+   * Whether ANY agent turn has touched this conversation (a turn is pending,
+   * or a persisted row carries a turn_id / role='agent'). The widget keys the
+   * agentless collect-prompt/[Submit Ticket] affordance off this — once an
+   * agent turn occurs, the agent flow's proposal mechanism owns the
+   * conversation. Derived (never stored): the source of truth is the
+   * transcript itself.
+   */
+  hasAgentTurns: boolean;
 }
 
 /**
- * Start-or-resume: the widget's "Chat with Agent" card entry point. Chat must
- * be enabled (a support agent configured in settings). Concurrent first-opens
- * can race into two active rows; findActiveConversation picks the newest and
- * the loser simply goes unused — harmless for this surface.
+ * Whether any agent turn has touched the conversation. pending_turn_id counts
+ * (a dispatched turn that has not reported back yet is still an agent turn),
+ * as do BE-written agent_unavailable notices (they carry the turn_id).
+ */
+export async function conversationHasAgentTurns(
+  conv: Pick<ChatConversationRow, 'id' | 'pendingTurnId'>,
+): Promise<boolean> {
+  if (conv.pendingTurnId) return true;
+  const [row] = await db
+    .select({ id: widgetChatMessages.id })
+    .from(widgetChatMessages)
+    .where(and(
+      eq(widgetChatMessages.conversationId, conv.id),
+      sql`(${widgetChatMessages.turnId} IS NOT NULL OR ${widgetChatMessages.role} = 'agent')`,
+    ))
+    .limit(1);
+  return row !== undefined;
+}
+
+/**
+ * Start-or-resume: the widget's chat entry point ("Chat with Agent" card, or
+ * "Send us a message" when no agent is configured — agentless conversations
+ * ride the same backbone and simply never dispatch turns). Concurrent
+ * first-opens can race into two active rows; findActiveConversation picks the
+ * newest and the loser simply goes unused — harmless for this surface.
  */
 export async function getOrCreateActiveConversation(
   projectId: string,
@@ -217,18 +247,19 @@ export async function getOrCreateActiveConversation(
 ): Promise<ConversationBundle> {
   const project = await getChatProject(projectId);
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
-  if (!project.widgetChatAgentEntityId) {
-    throw new WidgetService.WidgetError('chat_not_enabled', 404);
-  }
   const existing = await findActiveConversation(projectId, widgetUserId);
   if (existing) {
-    return { conversation: existing, messages: await loadRecentMessages(existing.id) };
+    return {
+      conversation: existing,
+      messages: await loadRecentMessages(existing.id),
+      hasAgentTurns: await conversationHasAgentTurns(existing),
+    };
   }
   const [conversation] = await db
     .insert(widgetChatConversations)
     .values({ widgetProjectId: projectId, widgetUserId })
     .returning();
-  return { conversation: conversation!, messages: [] };
+  return { conversation: conversation!, messages: [], hasAgentTurns: false };
 }
 
 export async function getActiveConversation(
@@ -237,7 +268,11 @@ export async function getActiveConversation(
 ): Promise<ConversationBundle | null> {
   const conv = await findActiveConversation(projectId, widgetUserId);
   if (!conv) return null;
-  return { conversation: conv, messages: await loadRecentMessages(conv.id) };
+  return {
+    conversation: conv,
+    messages: await loadRecentMessages(conv.id),
+    hasAgentTurns: await conversationHasAgentTurns(conv),
+  };
 }
 
 /**
@@ -482,9 +517,36 @@ async function dispatchTurn(
 }
 
 /**
- * Append a user message and trigger a turn. Caps: 4000 chars per message,
- * 30 user turns per conversation (abuse backstop — each turn is paid model
- * time). The HTTP layer additionally rate-limits via the chat_message bucket.
+ * Idempotently append the agentless collect_prompt event ("anything more
+ * you'd like to add?" + [Submit Ticket] affordance in the widget). Added
+ * after the FIRST user message of an agentless conversation; subsequent
+ * messages find the existing row and no-op.
+ */
+async function ensureCollectPrompt(conversationId: string): Promise<void> {
+  const [existing] = await db
+    .select({ id: widgetChatMessages.id })
+    .from(widgetChatMessages)
+    .where(and(
+      eq(widgetChatMessages.conversationId, conversationId),
+      sql`${widgetChatMessages.payload}->>'kind' = 'collect_prompt'`,
+    ))
+    .limit(1);
+  if (existing) return;
+  const [prompt] = await db
+    .insert(widgetChatMessages)
+    .values({ conversationId, role: 'event', payload: { kind: 'collect_prompt' } })
+    .returning();
+  if (prompt) publish(prompt);
+}
+
+/**
+ * Append a user message and trigger a turn — or, when no support agent is
+ * configured (agentless intake), skip turn dispatch entirely and append the
+ * one-time collect_prompt event instead. The agent-configured check happens
+ * at SEND time, so an agent configured mid-conversation picks up the thread
+ * on the very next message. Caps: 4000 chars per message, 30 user turns per
+ * conversation (abuse backstop — each turn is paid model time). The HTTP
+ * layer additionally rate-limits via the chat_message bucket.
  */
 export async function sendUserMessage(
   conversationId: string,
@@ -502,6 +564,8 @@ export async function sendUserMessage(
   if (conversation.userTurnCount >= MAX_USER_TURNS) {
     throw new WidgetService.WidgetError('turn_limit_reached', 409);
   }
+  const project = await getChatProject(projectId);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
   const [message] = await db
     .insert(widgetChatMessages)
@@ -517,7 +581,11 @@ export async function sendUserMessage(
     })
     .where(eq(widgetChatConversations.id, conversationId));
 
-  await dispatchTurn(conversation);
+  if (project.widgetChatAgentEntityId) {
+    await dispatchTurn(conversation);
+  } else {
+    await ensureCollectPrompt(conversationId);
+  }
   return message!;
 }
 

@@ -1546,7 +1546,11 @@ export type WidgetChatEventPayload =
   | { kind: 'ticket_link'; ticketId: string; title: string; status: string }
   | { kind: 'assigned'; ticketId: string; agentEntityId: string; agentName: string | null }
   | { kind: 'system_notice'; code: string; text: string }
-  | { kind: 'force_proposal_requested' };
+  | { kind: 'force_proposal_requested' }
+  // Agentless intake: appended once after the first user message when no
+  // support agent is configured; the widget renders the "anything more?"
+  // bubble + persistent [Submit Ticket] affordance off it.
+  | { kind: 'collect_prompt' };
 
 // One agent-intake conversation per widget user at a time (status='active');
 // closed after ticket creation. BE Postgres is the source of truth — the

@@ -6168,13 +6168,17 @@ export function createHttpApp() {
     id: string; status: string; createdTaskId: string | null;
     userTurnCount: number; pendingTurnId: string | null;
     createdAt: Date; updatedAt: Date;
-  }) {
+  }, hasAgentTurns: boolean) {
     return {
       id: conv.id,
       status: conv.status,
       createdTaskId: conv.createdTaskId,
       userTurnCount: conv.userTurnCount,
       pendingTurnId: conv.pendingTurnId,
+      // Derived flag for the agentless affordance: true once ANY agent turn
+      // has touched the conversation (pending or persisted). The widget shows
+      // the collect-prompt/[Submit Ticket] UI only while this is false.
+      hasAgentTurns,
       createdAt: conv.createdAt.toISOString(),
       updatedAt: conv.updatedAt.toISOString(),
     };
@@ -6199,10 +6203,13 @@ export function createHttpApp() {
     if ('response' in gate) return gate.response;
     const { auth } = gate;
     try {
-      const { conversation, messages } = await WidgetChatService.getOrCreateActiveConversation(
+      const { conversation, messages, hasAgentTurns } = await WidgetChatService.getOrCreateActiveConversation(
         auth.projectId, auth.widgetUserId,
       );
-      return c.json({ conversation: chatConversationDto(conversation), messages: messages.map(chatMessageDto) });
+      return c.json({
+        conversation: chatConversationDto(conversation, hasAgentTurns),
+        messages: messages.map(chatMessageDto),
+      });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6216,7 +6223,7 @@ export function createHttpApp() {
       const bundle = await WidgetChatService.getActiveConversation(auth.projectId, auth.widgetUserId);
       if (!bundle) return c.json({ error: 'not_found' }, 404);
       return c.json({
-        conversation: chatConversationDto(bundle.conversation),
+        conversation: chatConversationDto(bundle.conversation, bundle.hasAgentTurns),
         messages: bundle.messages.map(chatMessageDto),
       });
     } catch (err) {
