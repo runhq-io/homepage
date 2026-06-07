@@ -1591,12 +1591,13 @@
       /* Open state hides the launcher; declared last so it wins over all variants */
       '.rw-tab.rw-open { display: none; }',
 
-      /* widget shell — centered modal scrim. Pinned to the top of the stage; the
-         launcher tab still sits at the screen edge as before. */
+      /* widget shell — fixed full-viewport scrim layer. Pinned to the top of
+         the stage; the launcher tab still sits at the screen edge as before.
+         The card inside is absolutely positioned (not flex-centered) so every
+         geometry property is a transitionable length — that is what lets the
+         compact↔expanded morph animate (see .rw-compact below). */
       '.rw-shell-scrim {',
       '  position: fixed; inset: 0;',
-      '  display: flex; align-items: center; justify-content: center;',
-      '  padding: 28px;',
       '  background: rgba(20,16,12,0.55);',
       '  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);',
       '  z-index: 2147483645;',
@@ -1605,29 +1606,35 @@
       '}',
       '.rw-shell-scrim.rw-open { opacity: 1; pointer-events: auto; }',
       '.rw-shell-scrim[data-theme="dark"] { background: rgba(6,5,4,0.66); }',
-      '@media (max-width: 640px) { .rw-shell-scrim { padding: 0; } }',
 
-      /* the centered card itself */
+      /* the card itself — centered via top/left 50% + translate(-50%,-50%),
+         the absolute-positioning equivalent of the old flex centering. Width
+         used to resolve against the scrim\'s 28px-padded content box; the
+         explicit calc(100% - 56px) reproduces the same result. */
       '.rw-shell {',
-      '  position: relative;',
-      '  width: min(1080px, 100%);',
+      '  position: absolute;',
+      '  top: 50%; left: 50%;',
+      '  transform: translate(-50%, -50%);',
+      '  width: min(1080px, calc(100% - 56px));',
       '  height: min(680px, calc(100vh - 56px));',
       '  min-height: 540px;',
       '  display: flex; flex-direction: column;',
-      '  transform: translateY(8px) scale(0.99);',
-      '  transition: transform .22s cubic-bezier(0.16,1,0.3,1);',
       '}',
-      '.rw-shell-scrim.rw-open .rw-shell { transform: none; }',
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
          browsers that don't parse dvh. */
       '@media (max-width: 640px) {',
-      '  .rw-shell { width: 100%; height: 100vh; height: 100dvh; min-height: 0; }',
+      '  .rw-shell { top: 0; left: 0; transform: none; width: 100%; height: 100vh; height: 100dvh; min-height: 0; }',
       '}',
 
+      /* The open "pop" (translateY + scale → none) used to live on .rw-shell,
+         but the shell\'s transform is now positional (centering / corner
+         anchoring), so the entrance animation moved one level down. */
       '.rw-card-modal {',
       '  position: relative;',
+      '  transform: translateY(8px) scale(0.99);',
+      '  transition: transform .22s cubic-bezier(0.16,1,0.3,1);',
       '  flex: 1 1 auto; min-height: 0;',
       '  display: flex; flex-direction: column;',
       '  background: var(--rw-bg);',
@@ -1640,6 +1647,7 @@
       '    0 30px 80px -30px rgba(42,37,32,0.35),',
       '    0 8px 24px -16px rgba(42,37,32,0.20);',
       '}',
+      '.rw-shell-scrim.rw-open .rw-card-modal { transform: none; }',
       '.rw-shell[data-theme="dark"] .rw-card-modal {',
       '  box-shadow:',
       '    0 1px 0 rgba(255,255,255,0.04) inset,',
