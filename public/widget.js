@@ -78,6 +78,10 @@
   // Started once a ticket has been created from this conversation; watches
   // GET /conversations/active until the BE closes the conversation.
   var chatClosedWatchTimerId = null;
+  // True while the agentless [Submit Ticket] POST is in flight — keeps the
+  // button disabled across the full list re-renders that incoming SSE rows
+  // trigger (the slot is rebuilt on every render).
+  var chatSubmitInFlight = false;
   // Element refs for the mounted chat view ({listEl, footerEl, hatchSlot,
   // inputEl}); null whenever view !== "chat".
   var chatUi = null;
@@ -280,6 +284,15 @@
   }
   function chatDismissProposal(conversationId) {
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/dismiss-proposal", {
+      method: "POST", body: {},
+    });
+  }
+  // Agentless intake: the BE derives the ticket draft server-side from the
+  // stored user messages (no body), creates it born-ready, and closes the
+  // conversation. 409 codes: agent_turns_present / conversation_closed /
+  // ticket_already_created / no_user_messages.
+  function chatSubmitTicket(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/submit-ticket", {
       method: "POST", body: {},
     });
   }
@@ -742,6 +755,12 @@
         agentDefault: "Support",
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
+        collectPrompt: "Do you have any more information you'd like to provide?",
+        submitTicket: "Submit Ticket",
+        submitFailed: "Could not submit the ticket: {msg}",
+        submitAgentActive: "An agent has joined this conversation — continue chatting to create the ticket.",
+        submitEmpty: "Write a message first — the ticket is created from what you've sent.",
+        alreadyTicketed: "A ticket was already created from this conversation.",
         inputPlaceholder: "Type your message…",
         send: "Send",
         typing: "{name} is typing…",
@@ -922,6 +941,12 @@
         agentDefault: "지원 담당",
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
+        collectPrompt: "추가로 제공해 주실 정보가 있을까요?",
+        submitTicket: "티켓 제출",
+        submitFailed: "티켓을 제출하지 못했습니다: {msg}",
+        submitAgentActive: "상담원이 대화에 참여했습니다 — 대화를 이어가며 티켓을 만들어 주세요.",
+        submitEmpty: "먼저 메시지를 작성해 주세요 — 보내신 내용으로 티켓이 생성됩니다.",
+        alreadyTicketed: "이 대화에서 이미 티켓이 생성되었습니다.",
         inputPlaceholder: "메시지를 입력하세요…",
         send: "보내기",
         typing: "{name} 입력 중…",
@@ -2912,6 +2937,9 @@
       '}',
       '.rw-chat-hatch-slot { display: flex; justify-content: center; }',
       '.rw-chat-hatch-slot:empty { display: none; }',
+      // Agentless [Submit Ticket] — proposal-card primary family, sized up
+      // to a full-width footer action above the input.
+      '.rw-chat-submit-btn { width: 100%; height: 32px; justify-content: center; font-size: 12.5px; }',
       '.rw-chat-input-row { display: flex; align-items: flex-end; gap: 8px; }',
       '.rw-chat-input {',
       '  flex: 1 1 auto; resize: none; min-height: 36px; max-height: 120px;',
@@ -4392,8 +4420,12 @@
   // settled. Needed because SSE can deliver the turn's outcome BEFORE the
   // user-action POST resolves (the BE awaits the turn dispatch) — a blind
   // `chatTurnPending = true` after the POST would wedge the typing
-  // indicator on. ticket_link / assigned arrive mid-turn and are skipped.
+  // indicator on. ticket_link / assigned arrive mid-turn and are skipped,
+  // as are 'team' rows — a human teammate replying never starts or settles
+  // an agent turn. Agentless threads short-circuit to false: nothing is
+  // ever pending when no agent dispatches turns.
   function chatTurnStillPending() {
+    if (!chatThreadHasAgent()) return false;
     for (var i = chatMessages.length - 1; i >= 0; i--) {
       var m = chatMessages[i];
       if (m.role === "agent") return false;
@@ -4586,6 +4618,14 @@
     if (kind === "assigned") {
       return renderChatAssignedLine(payload);
     }
+    if (kind === "collect_prompt") {
+      // Agentless intake's one scripted line ("anything more to add?"),
+      // styled like a bot reply so the thread reads conversationally.
+      // Hidden once an agent owns the thread — the agent's own clarifying
+      // flow supersedes the static prompt.
+      if (chatThreadHasAgent()) return null;
+      return renderChatAgentRow({ content: t("chat.collectPrompt") });
+    }
     if (kind === "system_notice") {
       return h("div", { className: "rw-chat-event-line" }, payload.text || t("chat.unavailable"));
     }
@@ -4755,16 +4795,121 @@
       "🤖 " + t("chat.assignedTo", { name: payload.agentName || "an agent" }));
   }
 
-  // Escape hatch (anti "AI jail"): after >=4 user messages with no proposal
-  // event, show a quiet link above the input that forces the agent's next
-  // turn to propose a ticket from what it has. Re-evaluated on every list
-  // render; lives in its own footer slot so the input (and any in-progress
-  // draft) is never rebuilt.
-  function updateChatEscapeHatch() {
+  // Whether a created-ticket resolution is already in the thread (local
+  // echo or the BE's authoritative row) — hides [Submit Ticket] in the
+  // window between the resolution event arriving and the conversation's
+  // closed status being observed.
+  function chatHasCreatedResolution() {
+    for (var i = 0; i < chatMessages.length; i++) {
+      var m = chatMessages[i];
+      if (m.role === "event" && m.payload
+          && m.payload.kind === "proposal_resolved" && m.payload.created) return true;
+    }
+    return false;
+  }
+
+  // Persistent [Submit Ticket] action for the agentless intake: files the
+  // accumulated user messages as a ticket (BE derives title/description).
+  // Styled from the proposal-card primary button family.
+  function renderChatSubmitTicketAction() {
+    var btn = h("button", {
+      className: "rw-clarif-send-btn rw-chat-submit-btn", type: "button",
+    }, chatSubmitInFlight ? t("chat.creating") : t("chat.submitTicket"));
+    if (chatSubmitInFlight) btn.disabled = true;
+
+    // Local notice bubble for graceful 409 handling — rides the existing
+    // system_notice event-line rendering (local-only row; a reload shows
+    // the authoritative state instead).
+    function noticeLocally(text) {
+      chatApplyMessages([{
+        id: "local-notice-" + Date.now(),
+        role: "event",
+        content: null,
+        payload: { kind: "system_notice", text: text },
+        createdAt: new Date().toISOString(),
+      }]);
+      renderChatMessageList();
+    }
+
+    btn.addEventListener("click", function () {
+      if (chatSubmitInFlight || !chatConversation) return;
+      var conv = chatConversation;
+      chatSubmitInFlight = true;
+      btn.disabled = true;
+      btn.textContent = t("chat.creating");
+      chatSubmitTicket(conv.id).then(function (data) {
+        chatSubmitInFlight = false;
+        if (view !== "chat" || chatConversation !== conv) return;
+        var ticketId = (data && data.ticketId) || null;
+        if (ticketId) {
+          chatRememberTicketConversation(ticketId, conv.id);
+          conv.createdTaskId = ticketId;
+        }
+        // The BE appended the authoritative proposal_resolved and closed
+        // the conversation before responding. SSE may have delivered the
+        // event already — only echo locally when it hasn't.
+        if (!chatHasCreatedResolution()) {
+          chatApplyMessages([{
+            id: "local-resolved-" + Date.now(),
+            role: "event",
+            content: null,
+            payload: { kind: "proposal_resolved", created: true, ticketId: ticketId },
+            createdAt: new Date().toISOString(),
+          }]);
+        }
+        // A 200 is the close confirmation (submit-ticket closes server-
+        // side synchronously) — flip straight to the closed footer with
+        // its "Start new conversation" affordance.
+        chatMarkClosed();
+      }).catch(function (err) {
+        chatSubmitInFlight = false;
+        if (view !== "chat" || chatConversation !== conv) return;
+        var code = (err && err.message) || "";
+        if (code === "agent_turns_present") {
+          // An agent joined the thread between renders — surrender the
+          // affordance to the agent flow (proposal cards take over).
+          conv.hasAgentTurns = true;
+          noticeLocally(t("chat.submitAgentActive"));
+        } else if (code === "conversation_closed") {
+          chatMarkClosed();
+        } else if (code === "ticket_already_created") {
+          noticeLocally(t("chat.alreadyTicketed"));
+        } else if (code === "no_user_messages") {
+          noticeLocally(t("chat.submitEmpty"));
+        } else if (err && err.status === 429) {
+          noticeLocally(t("chat.rateLimited"));
+        } else {
+          noticeLocally(t("chat.submitFailed", { msg: code }));
+        }
+      });
+    });
+    return btn;
+  }
+
+  // Footer action slot, re-evaluated on every list render (it lives apart
+  // from the input row so an in-progress draft is never rebuilt). Two
+  // personalities:
+  //   - agentless intake → persistent [Submit Ticket] once the user has
+  //     said anything (open + ticketless + no agent involvement);
+  //   - agent thread → the escape hatch (anti "AI jail"): after >=4 user
+  //     messages with no proposal event, a quiet link that forces the
+  //     agent's next turn to propose a ticket from what it has.
+  function updateChatActionSlot() {
     if (!chatUi || !chatUi.hatchSlot) return;
     var slot = chatUi.hatchSlot;
     clearChildren(slot);
     if (!chatConversation || chatConversation.status !== "active") return;
+
+    if (!chatThreadHasAgent()) {
+      if (chatConversation.createdTaskId || chatHasCreatedResolution()) return;
+      var hasUserMessage = false;
+      for (var u = 0; u < chatMessages.length; u++) {
+        if (chatMessages[u].role === "user") { hasUserMessage = true; break; }
+      }
+      if (!hasUserMessage) return;
+      slot.appendChild(renderChatSubmitTicketAction());
+      return;
+    }
 
     var userTurns = 0;
     var hasProposal = false;
@@ -4891,7 +5036,7 @@
       listEl.appendChild(renderChatTypingRow());
     }
 
-    updateChatEscapeHatch();
+    updateChatActionSlot();
     listEl.scrollTop = listEl.scrollHeight;
   }
 
@@ -4913,6 +5058,7 @@
           chatConversation = (data && data.conversation) || null;
           chatMessages = ((data && data.messages) || []).slice();
           chatTurnPending = false;
+          chatSubmitInFlight = false;
           renderChatMessageList();
           renderChatFooter();
           startChatTransport();
@@ -4927,8 +5073,9 @@
       return;
     }
 
-    // Escape-hatch slot — populated by updateChatEscapeHatch (collapses via
-    // CSS :empty when unpopulated).
+    // Action slot — populated by updateChatActionSlot (collapses via CSS
+    // :empty when unpopulated): [Submit Ticket] in agentless intake, the
+    // escape hatch in agent threads.
     var hatchSlot = h("div", { className: "rw-chat-hatch-slot" });
     chatUi.hatchSlot = hatchSlot;
     footerEl.appendChild(hatchSlot);
@@ -5001,6 +5148,10 @@
     footerEl.appendChild(noticeSlot);
     footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [ta, sendBtn]));
     chatUi.inputEl = ta;
+    // The slot was just (re)created empty — populate it now so a resumed
+    // agentless conversation shows [Submit Ticket] immediately instead of
+    // waiting for the next message-driven list render.
+    updateChatActionSlot();
   }
 
   // Build the chat view shell and bootstrap the conversation (POST resumes
@@ -5049,6 +5200,7 @@
       chatTurnPending = !!(chatConversation
         && chatConversation.status === "active"
         && chatConversation.pendingTurnId);
+      chatSubmitInFlight = false;
       renderChatMessageList();
       renderChatFooter();
       if (chatConversation && chatConversation.status === "active") {
@@ -6099,6 +6251,7 @@
     stopChatTransport();
     chatUi = null;
     chatTurnPending = false;
+    chatSubmitInFlight = false;
     detailReturnView = null;
     composeReturnView = "home";
     // Reset the shell so re-opening lands on a fresh Home rather than
