@@ -3610,6 +3610,9 @@
       // should disable the anon-redirect path on next refresh.
       config.isPublic = !!data.isPublic;
       config.loginUrl = data.loginUrl || null;
+      // Re-read chat config on every panel open so enabling/disabling the
+      // support agent in settings picks up without an embed reload.
+      config.chat = data.chat || null;
     });
     var updP = loadUpdates().then(function (data) {
       updatesCache = data.tickets || [];
@@ -5130,6 +5133,11 @@
         csrfToken: null,
         identityName: null,
         identityAvatar: null,
+        // Chat home-card config. Populated from the bootstrap payload
+        // (`chat: { enabled, agentName }`) once a support agent is
+        // configured in widget settings (server side ships separately).
+        // Absent ⇒ null ⇒ the home chat card stays hidden.
+        chat: null,
       };
 
       hookConsole();
@@ -5178,6 +5186,9 @@
         // Login URL is only present in the response when the caller is an
         // anonymous viewer of a public project. Authed users get null.
         config.loginUrl = data.loginUrl || null;
+        // Chat home-card gating — see renderHomeView. Absent or
+        // `enabled: false` ⇒ the card is hidden.
+        config.chat = data.chat || null;
         // language must be set BEFORE mountDOM — the launcher tab's aria-label
         // and any first-render strings read t() at construction time.
         config.language = data.language || opts.language || "en";
