@@ -6302,6 +6302,26 @@ export function createHttpApp() {
     }
   });
 
+  // Agentless [Submit Ticket]: the BE derives the draft from the stored user
+  // messages (no body), creates the ticket born-ready, and closes the
+  // conversation. 409s (distinct codes) for agent-driven / closed /
+  // already-ticketed / empty conversations.
+  app.post('/api/widget/chat/conversations/:id/submit-ticket', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
+    if (limited) return limited;
+    try {
+      const result = await WidgetChatService.submitTicketFromConversation(
+        c.req.param('id'), auth.projectId, auth.widgetUserId,
+      );
+      return c.json({ ticketId: result.ticketId });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
   app.post('/api/widget/chat/conversations/:id/dismiss-proposal', async (c) => {
     const gate = await requireChatUser(c);
     if ('response' in gate) return gate.response;

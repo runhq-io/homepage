@@ -695,6 +695,110 @@ export async function createTicketFromChat(
   return { ticketId: task.id };
 }
 
+// ---------------------------------------------------------------------------
+// Agentless [Submit Ticket]
+// ---------------------------------------------------------------------------
+
+const SUBMIT_TITLE_MAX = 80;
+
+/**
+ * Server-side draft derivation for the agentless [Submit Ticket] flow — the
+ * client never supplies the draft (the stored transcript is the source of
+ * truth). Title: the first user message, whitespace-normalized to one line,
+ * word-boundary-trimmed to ~80 chars with an ellipsis. Description: every
+ * user message in chronological order, blank-line separated.
+ */
+export function deriveTicketDraft(userMessages: string[]): { title: string; description: string } {
+  const messages = userMessages.map((m) => m.trim()).filter((m) => m.length > 0);
+  const description = messages.join('\n\n');
+  const firstLine = (messages[0] ?? '').replace(/\s+/g, ' ').trim();
+  let title = firstLine;
+  if (firstLine.length > SUBMIT_TITLE_MAX) {
+    const cut = firstLine.slice(0, SUBMIT_TITLE_MAX);
+    const lastSpace = cut.lastIndexOf(' ');
+    // Backtrack to the last word boundary unless that would gut the title
+    // (degenerate no-spaces input) — then a hard cut is the best we can do.
+    title = `${(lastSpace > SUBMIT_TITLE_MAX / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+  }
+  return { title, description };
+}
+
+/**
+ * Agentless-only ticket creation: derives the draft from the STORED user
+ * messages and creates the ticket through the same born-ready path
+ * createTicketFromChat uses (clarifier 'skipped' — the conversation was the
+ * intake). Unlike the agent flow there is no post-create turn, so the
+ * conversation closes immediately after the proposal_resolved event.
+ *
+ * 409 codes (distinct per cause): ticket_already_created, conversation_closed,
+ * agent_turns_present (the agent flow's proposal mechanism owns agent-driven
+ * conversations), no_user_messages.
+ */
+export async function submitTicketFromConversation(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+): Promise<{ ticketId: string }> {
+  const conversation = await getConversationOwned(conversationId, projectId, widgetUserId);
+  if (conversation.createdTaskId) {
+    throw new WidgetService.WidgetError('ticket_already_created', 409);
+  }
+  if (conversation.status !== 'active') {
+    throw new WidgetService.WidgetError('conversation_closed', 409);
+  }
+  if (await conversationHasAgentTurns(conversation)) {
+    throw new WidgetService.WidgetError('agent_turns_present', 409);
+  }
+
+  const rows = await loadAllMessages(conversationId);
+  const userMessages = rows
+    .filter((r) => r.role === 'user' && r.content.trim().length > 0)
+    .map((r) => r.content);
+  if (userMessages.length === 0) {
+    throw new WidgetService.WidgetError('no_user_messages', 409);
+  }
+
+  const project = await getChatProject(projectId);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
+
+  const { title, description } = deriveTicketDraft(userMessages);
+  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+
+  // Born ready: same clarifier-suppression marker createTicketFromChat writes.
+  await db.insert(widgetClarifications).values({
+    taskId: task.id,
+    serverId: project.serverId,
+    widgetUserId,
+    agentId: project.widgetChatAgentEntityId ?? 'widget_chat',
+    command: 'widget_chat',
+    status: 'skipped',
+  });
+
+  // Link first (the re-submission gate), then the visible card, then close —
+  // a crash mid-sequence leaves a resumable state, never a duplicate ticket.
+  await db
+    .update(widgetChatConversations)
+    .set({ createdTaskId: task.id, updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversationId));
+
+  const [resolvedEvent] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'event',
+      payload: { kind: 'proposal_resolved', created: true, ticketId: task.id },
+    })
+    .returning();
+  publish(resolvedEvent!);
+
+  await db
+    .update(widgetChatConversations)
+    .set({ status: 'closed', updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversationId));
+
+  return { ticketId: task.id };
+}
+
 /** The user dismissed the proposal card. The next turn synthesizes {dismissed:true}. */
 export async function dismissProposal(
   conversationId: string,

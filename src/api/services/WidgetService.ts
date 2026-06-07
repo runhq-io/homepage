@@ -2815,6 +2815,10 @@ export const WIDGET_ERROR_CODES = [
   'invalid_cursor',
   'no_pending_proposal',
   'invalid_proposal_draft',
+  // Agentless [Submit Ticket]
+  'ticket_already_created',
+  'agent_turns_present',
+  'no_user_messages',
 ] as const;
 
 export type WidgetErrorCode = typeof WIDGET_ERROR_CODES[number];
