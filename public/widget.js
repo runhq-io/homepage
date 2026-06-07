@@ -3029,6 +3029,16 @@
       '}',
       '.rw-chat-dismiss-link:hover:not(:disabled) { color: var(--rw-fg); }',
       '.rw-chat-dismiss-link:disabled { cursor: not-allowed; opacity: 0.45; }',
+
+      /* Escape hatch: quiet link above the input after >=4 user turns with
+         no proposal — the user is never trapped in a questioning loop. */
+      '.rw-chat-escape-link {',
+      '  background: none; border: none; padding: 2px 4px; font: inherit;',
+      '  font-size: 12px; color: var(--rw-muted); cursor: pointer;',
+      '  text-decoration: underline; text-underline-offset: 2px;',
+      '}',
+      '.rw-chat-escape-link:hover:not(:disabled) { color: var(--rw-fg); }',
+      '.rw-chat-escape-link:disabled { cursor: not-allowed; opacity: 0.45; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -4751,6 +4761,51 @@
       "🤖 " + t("chat.assignedTo", { name: payload.agentName || "an agent" }));
   }
 
+  // Escape hatch (anti "AI jail"): after >=4 user messages with no proposal
+  // event, show a quiet link above the input that forces the agent's next
+  // turn to propose a ticket from what it has. Re-evaluated on every list
+  // render; lives in its own footer slot so the input (and any in-progress
+  // draft) is never rebuilt.
+  function updateChatEscapeHatch() {
+    if (!chatUi || !chatUi.hatchSlot) return;
+    var slot = chatUi.hatchSlot;
+    clearChildren(slot);
+    if (!chatConversation || chatConversation.status !== "active") return;
+
+    var userTurns = 0;
+    var hasProposal = false;
+    var forceRequested = false;
+    for (var i = 0; i < chatMessages.length; i++) {
+      var m = chatMessages[i];
+      if (m.role === "user") userTurns++;
+      else if (m.role === "event" && m.payload) {
+        if (m.payload.kind === "proposal") hasProposal = true;
+        if (m.payload.kind === "force_proposal_requested") forceRequested = true;
+      }
+    }
+    if (userTurns < CHAT_ESCAPE_HATCH_MIN_TURNS || hasProposal || forceRequested) return;
+
+    var hatchLink = h("button", { className: "rw-chat-escape-link", type: "button" }, t("chat.escapeHatch"));
+    hatchLink.addEventListener("click", function () {
+      hatchLink.disabled = true;
+      chatForceProposal(chatConversation.id).then(function () {
+        chatApplyMessages([{
+          id: "local-force-" + Date.now(),
+          role: "event",
+          content: null,
+          payload: { kind: "force_proposal_requested" },
+          createdAt: new Date().toISOString(),
+        }]);
+        chatTurnPending = chatTurnStillPending();
+        if (chatPollTimerId !== null) scheduleChatPoll();
+        renderChatMessageList();
+      }).catch(function () {
+        hatchLink.disabled = false;
+      });
+    });
+    slot.appendChild(hatchLink);
+  }
+
   // Compact reference card for an existing ticket the agent surfaced
   // (search_tickets deflection). Whole card is the click target.
   function renderChatTicketLinkCard(payload) {
@@ -4792,6 +4847,7 @@
       listEl.appendChild(renderChatTypingRow());
     }
 
+    updateChatEscapeHatch();
     listEl.scrollTop = listEl.scrollHeight;
   }
 
