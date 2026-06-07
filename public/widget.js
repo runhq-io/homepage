@@ -2894,6 +2894,89 @@
       '.rw-dup-proceed-btn:hover:not(:disabled) { border-color: var(--rw-muted); color: var(--rw-fg); }',
       '.rw-dup-proceed-btn:active:not(:disabled) { opacity: 0.7; }',
       '.rw-dup-proceed-btn:disabled { cursor: not-allowed; opacity: 0.4; }',
+
+      /* -----------------------------------------------------------------------
+         Chat view (agent conversation)
+         Full-card layout: topbar / scrolling message list / pinned footer.
+         Bubbles: user right (accent), agent left (panel) with name + avatar. */
+      '.rw-chat-full { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }',
+      '.rw-chat-topbar {',
+      '  flex: 0 0 auto; display: flex; align-items: center; gap: 12px;',
+      '  padding: 12px 18px 10px; border-bottom: 1px solid var(--rw-line);',
+      '}',
+      '.rw-chat-topbar-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }',
+      '.rw-chat-topbar-name {',
+      '  font-size: 13px; font-weight: 600; color: var(--rw-fg);',
+      '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+      '}',
+      '.rw-chat-agent-img { border-radius: 50%; object-fit: cover; flex: 0 0 auto; }',
+      '.rw-chat-scroll {',
+      '  flex: 1 1 auto; overflow-y: auto; padding: 14px 18px;',
+      '  display: flex; flex-direction: column; gap: 10px;',
+      '}',
+      '.rw-chat-empty { font-size: 13px; color: var(--rw-muted); text-align: center; padding: 24px 12px; }',
+      '.rw-chat-msg { display: flex; gap: 8px; }',
+      '.rw-chat-msg-user { justify-content: flex-end; }',
+      '.rw-chat-msg-agent { justify-content: flex-start; align-items: flex-start; }',
+      '.rw-chat-agent-col { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 78%; }',
+      '.rw-chat-agent-name { font-size: 10.5px; font-weight: 600; color: var(--rw-muted); padding-left: 2px; }',
+      '.rw-chat-bubble {',
+      '  padding: 8px 12px; border-radius: 14px; font-size: 13px; line-height: 1.45;',
+      '  white-space: pre-wrap; word-break: break-word;',
+      '}',
+      '.rw-chat-bubble-user {',
+      '  max-width: 78%; background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  border-bottom-right-radius: 4px;',
+      '}',
+      '.rw-chat-bubble-agent {',
+      '  background: var(--rw-panel); border: 1px solid var(--rw-line-2); color: var(--rw-fg);',
+      '  border-bottom-left-radius: 4px; align-self: flex-start;',
+      '}',
+      '.rw-chat-typing { display: inline-flex; gap: 4px; align-items: center; padding: 11px 12px; }',
+      '.rw-chat-typing-dot {',
+      '  width: 6px; height: 6px; border-radius: 50%; background: var(--rw-muted);',
+      '  animation: rw-chat-blink 1.2s infinite ease-in-out;',
+      '}',
+      '.rw-chat-typing-dot:nth-child(2) { animation-delay: 0.15s; }',
+      '.rw-chat-typing-dot:nth-child(3) { animation-delay: 0.3s; }',
+      '@keyframes rw-chat-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }',
+      '.rw-chat-event-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
+      '.rw-chat-footer {',
+      '  flex: 0 0 auto; border-top: 1px solid var(--rw-line);',
+      '  padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px;',
+      '}',
+      '.rw-chat-hatch-slot { display: flex; justify-content: center; }',
+      '.rw-chat-hatch-slot:empty { display: none; }',
+      '.rw-chat-input-row { display: flex; align-items: flex-end; gap: 8px; }',
+      '.rw-chat-input {',
+      '  flex: 1 1 auto; resize: none; min-height: 36px; max-height: 120px;',
+      '  background: var(--rw-bg); border: 1px solid var(--rw-line-2); border-radius: 10px;',
+      '  color: var(--rw-fg); font: inherit; font-size: 13px; padding: 8px 10px;',
+      '  outline: none; box-sizing: border-box; transition: border-color .15s ease;',
+      '}',
+      '.rw-chat-input:focus { border-color: var(--rw-accent); }',
+      '.rw-chat-input:disabled { opacity: 0.6; }',
+      '.rw-chat-send-btn {',
+      '  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;',
+      '  width: 36px; height: 36px; border-radius: 50%;',
+      '  border: 1px solid var(--rw-accent); background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  cursor: pointer; transition: filter .12s ease, opacity .12s ease;',
+      '}',
+      '.rw-chat-send-btn:hover:not(:disabled) { filter: brightness(1.06); }',
+      '.rw-chat-send-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
+      '.rw-chat-inline-notice {',
+      '  font-size: 12px; color: var(--rw-muted); background: var(--rw-panel);',
+      '  border: 1px solid var(--rw-line-2); border-radius: 8px; padding: 6px 10px;',
+      '}',
+      '.rw-chat-closed-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }',
+      '.rw-chat-closed-text { font-size: 12.5px; color: var(--rw-muted); }',
+      '.rw-chat-newconv-btn {',
+      '  display: inline-flex; align-items: center; height: 28px; padding: 0 12px;',
+      '  border-radius: 999px; border: 1px solid var(--rw-accent);',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink);',
+      '  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;',
+      '}',
+      '.rw-chat-newconv-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -3545,14 +3628,6 @@
     renderPanelBody();
   }
 
-  // Chat entry point. Stub for now: the card's render + gating are real,
-  // but the conversation view ships in a follow-up plan, which replaces
-  // this body. Until then the card surfaces a quiet "coming soon" toast
-  // instead of dead-ending.
-  function openChat() {
-    showRestoreToast(t("home.chatComingSoon"));
-  }
-
   function renderHomeCard(emoji, title, sub, onClick) {
     var btn = h("button", { className: "rw-home-card", type: "button" }, [
       h("span", { className: "rw-home-card-emoji", "aria-hidden": "true" }, emoji),
@@ -3678,6 +3753,8 @@
         card.appendChild(h("div", { style: { padding: "16px" } },
           renderNotice("error", t("detail.loadFailed", { msg: err.message || "" }))));
       });
+    } else if (view === "chat") {
+      scrollEl.appendChild(renderChatViewShell());
     } else {
       // Slim topbar with the back-to-home control. Home is a layer above
       // the dashboard — the split layout below is untouched.
@@ -4123,6 +4200,335 @@
       timestamp: new Date().toISOString(),
       locale: navigator.language,
     };
+  }
+
+  // ===========================================================================
+  // Chat view (agent conversation)
+  //
+  // Message-bubble UI against the BE chat API. Bubbles: user right, agent
+  // left with name + avatar. The footer pins an input row (4000-char cap,
+  // Enter to send) or — when the conversation is closed — a "Start new
+  // conversation" bar. Card idioms (rw-clarif-*) match the clarification
+  // question cards.
+  // ===========================================================================
+
+  // Support-agent identity from the bootstrap payload (`chat: { enabled,
+  // agentName }` on GET /api/widget/tickets — captured into config.chat by
+  // refreshAll/init). Reads are defensive — chat renders with a generic
+  // "Support" identity and an initials avatar until/unless the field exists.
+  function chatAgentName() {
+    return (config.chat && config.chat.agentName) || t("chat.agentDefault");
+  }
+  function chatAgentAvatarUrl() {
+    return (config.chat && config.chat.agentAvatarUrl) || null;
+  }
+  function renderChatAgentAvatar(size) {
+    var url = chatAgentAvatarUrl();
+    if (url) {
+      return h("img", {
+        className: "rw-chat-agent-img",
+        src: url, alt: chatAgentName(),
+        style: { width: size + "px", height: size + "px" },
+      });
+    }
+    return renderAvatar(chatAgentName(), size);
+  }
+
+  // Entry point. Same gating as ticket submission: anonymous viewers of a
+  // public widget go through the login-redirect intent path (draftless
+  // "chat" intent restored by applyIntent after login); everyone else
+  // proceeds and lets the API's 403 surface misconfigurations.
+  function openChat() {
+    if (isAnonViewer()) {
+      gateWriteAction({ type: "chat" });
+      return;
+    }
+    stopDetailPoll();
+    view = "chat";
+    currentDetailTicket = null;
+    renderPanelBody();
+  }
+
+  // Tear down whatever delivery mechanism is live (SSE stream, poll timer,
+  // closed-watch). Safe to call repeatedly; the refs it clears are armed by
+  // the transport layer.
+  function stopChatTransport() {
+    if (chatEventSourceRef) {
+      try { chatEventSourceRef.close(); } catch (_) {}
+      chatEventSourceRef = null;
+    }
+    if (chatPollTimerId !== null) {
+      clearTimeout(chatPollTimerId);
+      chatPollTimerId = null;
+    }
+    if (chatClosedWatchTimerId !== null) {
+      clearInterval(chatClosedWatchTimerId);
+      chatClosedWatchTimerId = null;
+    }
+  }
+
+  // The latest 'proposal' event with no subsequent 'proposal_resolved'.
+  // Resolved proposals collapse out of the flow; their outcome renders from
+  // the 'proposal_resolved' event itself.
+  function chatFindActiveProposal() {
+    var active = null;
+    for (var i = 0; i < chatMessages.length; i++) {
+      var m = chatMessages[i];
+      if (m.role !== "event" || !m.payload) continue;
+      if (m.payload.kind === "proposal") active = m;
+      else if (m.payload.kind === "proposal_resolved") active = null;
+    }
+    return active;
+  }
+
+  function renderChatUserRow(row) {
+    return h("div", { className: "rw-chat-msg rw-chat-msg-user" },
+      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, row.content || ""));
+  }
+
+  function renderChatAgentRow(row) {
+    return h("div", { className: "rw-chat-msg rw-chat-msg-agent" }, [
+      renderChatAgentAvatar(24),
+      h("div", { className: "rw-chat-agent-col" }, [
+        h("div", { className: "rw-chat-agent-name" }, chatAgentName()),
+        h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, row.content || ""),
+      ]),
+    ]);
+  }
+
+  function renderChatTypingRow() {
+    return h("div", { className: "rw-chat-msg rw-chat-msg-agent" }, [
+      renderChatAgentAvatar(24),
+      h("div", { className: "rw-chat-agent-col" }, [
+        h("div", {
+          className: "rw-chat-bubble rw-chat-bubble-agent rw-chat-typing",
+          "aria-label": t("chat.typing", { name: chatAgentName() }),
+        }, [
+          h("span", { className: "rw-chat-typing-dot" }),
+          h("span", { className: "rw-chat-typing-dot" }),
+          h("span", { className: "rw-chat-typing-dot" }),
+        ]),
+      ]),
+    ]);
+  }
+
+  // Event rows render inline in the flow keyed on payload.kind. Proposal /
+  // ticket cards are added by later tasks; unknown kinds are ignored for
+  // forward compatibility.
+  function renderChatEventRow(row, activeProposal) {
+    var payload = row.payload || {};
+    var kind = payload.kind;
+    if (kind === "system_notice") {
+      return h("div", { className: "rw-chat-event-line" }, payload.text || t("chat.unavailable"));
+    }
+    if (kind === "force_proposal_requested") {
+      return h("div", { className: "rw-chat-event-line" }, t("chat.forceRequested"));
+    }
+    if (kind === "proposal_resolved") {
+      if (payload.created) {
+        return h("div", { className: "rw-chat-event-line" }, t("chat.ticketCreated"));
+      }
+      return h("div", { className: "rw-chat-event-line" }, t("chat.proposalDismissed"));
+    }
+    return null;
+  }
+
+  // Full rebuild of the message list from chatMessages. Cheap at the ≤50-
+  // message history scale this view operates at; guarded by chatUi so a
+  // stale async callback after navigation is a no-op.
+  function renderChatMessageList() {
+    if (!chatUi) return;
+    var listEl = chatUi.listEl;
+    clearChildren(listEl);
+
+    if (chatMessages.length === 0) {
+      listEl.appendChild(h("div", { className: "rw-chat-empty" }, t("chat.empty", { name: chatAgentName() })));
+    }
+
+    var activeProposal = chatFindActiveProposal();
+    for (var i = 0; i < chatMessages.length; i++) {
+      var row = chatMessages[i];
+      var node = null;
+      if (row.role === "user") node = renderChatUserRow(row);
+      else if (row.role === "agent") node = renderChatAgentRow(row);
+      else if (row.role === "event") node = renderChatEventRow(row, activeProposal);
+      if (node) listEl.appendChild(node);
+    }
+
+    if (chatTurnPending && chatConversation && chatConversation.status === "active") {
+      listEl.appendChild(renderChatTypingRow());
+    }
+
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+
+  // Footer: closed bar OR (hatch slot + notice slot + input row). Rebuilt
+  // only on conversation lifecycle changes — NOT per message — so an
+  // in-progress draft in the textarea survives incoming messages.
+  function renderChatFooter() {
+    if (!chatUi) return;
+    var footerEl = chatUi.footerEl;
+    clearChildren(footerEl);
+    if (!chatConversation) return;
+
+    if (chatConversation.status === "closed") {
+      var newBtn = h("button", { className: "rw-chat-newconv-btn", type: "button" }, t("chat.startNew"));
+      newBtn.addEventListener("click", function () {
+        newBtn.disabled = true;
+        chatOpenConversation().then(function (data) {
+          if (view !== "chat" || !chatUi) return;
+          chatConversation = (data && data.conversation) || null;
+          chatMessages = ((data && data.messages) || []).slice();
+          chatTurnPending = false;
+          renderChatMessageList();
+          renderChatFooter();
+        }).catch(function () {
+          newBtn.disabled = false;
+        });
+      });
+      footerEl.appendChild(h("div", { className: "rw-chat-closed-bar" }, [
+        h("span", { className: "rw-chat-closed-text" }, t("chat.closed")),
+        newBtn,
+      ]));
+      return;
+    }
+
+    // Escape-hatch slot — populated by updateChatEscapeHatch (collapses via
+    // CSS :empty when unpopulated).
+    var hatchSlot = h("div", { className: "rw-chat-hatch-slot" });
+    chatUi.hatchSlot = hatchSlot;
+    footerEl.appendChild(hatchSlot);
+
+    var noticeSlot = h("div", { className: "rw-chat-notice-slot" });
+
+    var ta = h("textarea", {
+      className: "rw-chat-input",
+      placeholder: t("chat.inputPlaceholder"),
+      maxlength: String(CHAT_INPUT_MAX),
+      rows: "1",
+      "aria-label": t("chat.inputPlaceholder"),
+    });
+    var sendBtn = h("button", {
+      className: "rw-chat-send-btn", type: "button", "aria-label": t("chat.send"),
+    }, Icons.send(14));
+
+    function showChatNotice(msg) {
+      clearChildren(noticeSlot);
+      noticeSlot.appendChild(h("div", { className: "rw-chat-inline-notice" }, msg));
+    }
+
+    function doSend() {
+      if (!chatConversation || chatConversation.status !== "active") return;
+      var content = ta.value.trim();
+      if (!content || sendBtn.disabled) return;
+      if (content.length > CHAT_INPUT_MAX) content = content.slice(0, CHAT_INPUT_MAX);
+      sendBtn.disabled = true;
+      ta.disabled = true;
+      clearChildren(noticeSlot);
+      chatSendMessage(chatConversation.id, content).then(function (data) {
+        ta.value = "";
+        // Use the server's row when returned; otherwise an optimistic echo
+        // that chatReplaceLocalEcho swaps for the authoritative row later.
+        var row = (data && data.message) || {
+          id: "local-" + Date.now(),
+          role: "user",
+          content: content,
+          payload: null,
+          createdAt: new Date().toISOString(),
+        };
+        chatMessages.push(row);
+        chatTurnPending = true;
+        renderChatMessageList();
+      }).catch(function (err) {
+        var code = err && err.status;
+        if (code === 429) showChatNotice(t("chat.rateLimited"));
+        else if (code === 409) showChatNotice(t("chat.turnCap"));
+        else showChatNotice(t("chat.sendFailed", { msg: (err && err.message) || "" }));
+      }).then(function () {
+        sendBtn.disabled = false;
+        ta.disabled = false;
+        ta.focus();
+      });
+    }
+
+    sendBtn.addEventListener("click", doSend);
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        doSend();
+      }
+    });
+
+    footerEl.appendChild(noticeSlot);
+    footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [ta, sendBtn]));
+    chatUi.inputEl = ta;
+  }
+
+  // Build the chat view shell and bootstrap the conversation (POST resumes
+  // the active conversation or creates one — this is the "resume on reopen"
+  // behavior). Called from renderPanelBody when view === "chat".
+  function renderChatViewShell() {
+    var root = h("div", { className: "rw-chat-full" });
+
+    var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
+      Icons.arrowLeft(13),
+      h("span", null, t("chat.back")),
+    ]);
+    backBtn.addEventListener("click", function () {
+      stopChatTransport();
+      chatUi = null;
+      // The Home screen (Plan 1) is live: back returns to the landing view
+      // the chat card came from.
+      goHome();
+    });
+
+    root.appendChild(h("div", { className: "rw-chat-topbar" }, [
+      backBtn,
+      h("div", { className: "rw-chat-topbar-identity" }, [
+        renderChatAgentAvatar(22),
+        h("span", { className: "rw-chat-topbar-name" }, t("chat.title", { name: chatAgentName() })),
+      ]),
+    ]));
+
+    var listEl = h("div", { className: "rw-chat-scroll" });
+    var footerEl = h("div", { className: "rw-chat-footer" });
+    root.appendChild(listEl);
+    root.appendChild(footerEl);
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
+
+    listEl.appendChild(renderLoading());
+    chatOpenConversation().then(function (data) {
+      if (view !== "chat" || !chatUi) return;
+      chatConversation = (data && data.conversation) || null;
+      chatMessages = ((data && data.messages) || []).slice();
+      // The conversation DTO carries pendingTurnId — resuming mid-turn
+      // restores the typing indicator (and the fast poll cadence) instead
+      // of silently dropping the in-flight turn.
+      chatTurnPending = !!(chatConversation
+        && chatConversation.status === "active"
+        && chatConversation.pendingTurnId);
+      renderChatMessageList();
+      renderChatFooter();
+    }).catch(function (err) {
+      if (view !== "chat" || !chatUi) return;
+      clearChildren(listEl);
+      if (err && err.status === 403) {
+        // Anonymous / unidentified caller — mirror the composer's gate: a
+        // public widget with a login URL redirects (preserving a "chat"
+        // intent); anything else shows the sign-in notice.
+        if (canAnonInteract()) {
+          gateWriteAction({ type: "chat" });
+          return;
+        }
+        listEl.appendChild(h("div", { style: { padding: "16px" } },
+          renderNotice("error", config.authErrorMessage || t("chat.signInPrompt"))));
+        return;
+      }
+      listEl.appendChild(h("div", { style: { padding: "16px" } },
+        renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
+    });
+
+    return root;
   }
 
   // ===========================================================================
@@ -5102,6 +5508,11 @@
         poll();
         return;
       }
+      if (intent.type === "chat") {
+        openChat();
+        showRestoreToast(t("restore.welcomeBack"));
+        return;
+      }
     } catch (_) {
       // Restore failures are silent — the user just sees the regular widget.
     }
@@ -5114,6 +5525,10 @@
     closeActiveModal();
     // Stop any running detail poll before resetting view state.
     stopDetailPoll();
+    stopChatTransport();
+    chatUi = null;
+    chatTurnPending = false;
+    detailReturnView = null;
     // Reset the shell so re-opening lands on a fresh Home rather than
     // wherever the user last left it (detail view, Hot tab, etc.).
     view = "home";
@@ -5420,6 +5835,16 @@
       }).catch(function (err) {
         console.error("RunHQWidget: failed to initialize", err);
       });
+    },
+    // Opens the panel directly onto the agent-chat view. Public so host
+    // pages can deep-link into chat, alongside the Home screen's "Chat
+    // with Agent" card.
+    openChat: function () {
+      if (!widgetEl) {
+        console.warn("RunHQWidget.openChat: widget is not initialized yet.");
+        return;
+      }
+      openPanel(function () { openChat(); });
     },
   };
 
