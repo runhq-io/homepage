@@ -3008,6 +3008,27 @@
       '}',
       '.rw-chat-ticket-open:hover { border-color: var(--rw-muted); color: var(--rw-fg); }',
       '.rw-chat-assigned-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
+
+      /* Chat proposal card: editable draft title + description with primary
+         Create Ticket action and a quiet dismiss link. Inputs reuse the
+         clarification-card input styling (rw-clarif-input). */
+      '.rw-chat-proposal-card {',
+      '  align-self: stretch;',
+      '  background: var(--rw-panel); border: 1px solid var(--rw-line-2);',
+      '  border-left: 3px solid var(--rw-accent); border-radius: 8px;',
+      '  padding: 12px; display: flex; flex-direction: column; gap: 8px;',
+      '}',
+      '.rw-chat-proposal-label {',
+      '  font-size: 11px; font-weight: 600; color: var(--rw-muted); margin: 2px 0 0;',
+      '}',
+      '.rw-chat-proposal-desc { resize: vertical; min-height: 84px; font-family: inherit; }',
+      '.rw-chat-dismiss-link {',
+      '  background: none; border: none; padding: 0; font: inherit;',
+      '  font-size: 12px; color: var(--rw-muted); cursor: pointer;',
+      '  text-decoration: underline; text-underline-offset: 2px;',
+      '}',
+      '.rw-chat-dismiss-link:hover:not(:disabled) { color: var(--rw-fg); }',
+      '.rw-chat-dismiss-link:disabled { cursor: not-allowed; opacity: 0.45; }',
     ].join("\n");
 
     var style = document.createElement("style");
@@ -4537,26 +4558,35 @@
     ]);
   }
 
-  // Event rows render inline in the flow keyed on payload.kind. Proposal /
-  // ticket cards are added by later tasks; unknown kinds are ignored for
-  // forward compatibility.
+  // Event rows render inline in the flow keyed on payload.kind. Unknown
+  // kinds are ignored for forward compatibility.
   function renderChatEventRow(row, activeProposal) {
     var payload = row.payload || {};
     var kind = payload.kind;
+    if (kind === "proposal") {
+      // Only the latest unresolved proposal is actionable; older / resolved
+      // proposals collapse (their outcome renders from proposal_resolved).
+      if (activeProposal && activeProposal.id === row.id
+          && chatConversation && chatConversation.status === "active") {
+        return renderChatProposalCard(row);
+      }
+      return null;
+    }
+    if (kind === "proposal_resolved") {
+      if (payload.created) return renderChatTicketCreatedCard(payload);
+      return h("div", { className: "rw-chat-event-line" }, t("chat.proposalDismissed"));
+    }
+    if (kind === "ticket_link") {
+      return renderChatTicketLinkCard(payload);
+    }
+    if (kind === "assigned") {
+      return renderChatAssignedLine(payload);
+    }
     if (kind === "system_notice") {
       return h("div", { className: "rw-chat-event-line" }, payload.text || t("chat.unavailable"));
     }
     if (kind === "force_proposal_requested") {
       return h("div", { className: "rw-chat-event-line" }, t("chat.forceRequested"));
-    }
-    if (kind === "proposal_resolved") {
-      if (payload.created) {
-        return h("div", { className: "rw-chat-event-line" }, t("chat.ticketCreated"));
-      }
-      return h("div", { className: "rw-chat-event-line" }, t("chat.proposalDismissed"));
-    }
-    if (kind === "ticket_link") {
-      return renderChatTicketLinkCard(payload);
     }
     return null;
   }
@@ -4575,6 +4605,150 @@
     }).catch(function () {
       // Navigation failed silently — the user stays in the chat.
     });
+  }
+
+  // ticketId -> conversationId, persisted so the ticket detail view can
+  // offer the reporter the originating transcript across sessions. Reporter-
+  // scoped by construction: the chat API only serves the conversation owner,
+  // so a stale/foreign entry just fails the fetch and hides the section.
+  function chatTicketMapKey() {
+    return "runhq:widget:chatTickets:" + (config.projectId || config.project || "default");
+  }
+  function chatRememberTicketConversation(ticketId, conversationId) {
+    try {
+      var raw = localStorage.getItem(chatTicketMapKey());
+      var map = raw ? JSON.parse(raw) : {};
+      map[ticketId] = conversationId;
+      localStorage.setItem(chatTicketMapKey(), JSON.stringify(map));
+    } catch (_) {}
+  }
+  function chatConversationForTicket(ticketId) {
+    try {
+      var raw = localStorage.getItem(chatTicketMapKey());
+      var map = raw ? JSON.parse(raw) : {};
+      return map[ticketId] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Editable draft card for the latest unresolved 'proposal' event. Create
+  // posts the (possibly edited) title/description; dismiss collapses the
+  // card and lets the conversation continue. Both resolutions push a local
+  // 'proposal_resolved' echo for instant feedback; the BE's authoritative
+  // event replaces it via chatReplaceLocalEcho.
+  function renderChatProposalCard(row) {
+    var payload = row.payload || {};
+
+    var titleInput = h("input", { type: "text", className: "rw-clarif-input", maxlength: "200" });
+    titleInput.value = payload.title || "";
+    var descTa = h("textarea", { className: "rw-clarif-input rw-chat-proposal-desc", rows: "5", maxlength: "5000" });
+    descTa.value = payload.description || "";
+
+    var errorEl = h("span", { className: "rw-clarif-error", style: { display: "none" } });
+    var createBtn = h("button", { className: "rw-clarif-send-btn", type: "button" }, t("chat.createTicket"));
+    var dismissBtn = h("button", { className: "rw-chat-dismiss-link", type: "button" }, t("chat.dismiss"));
+
+    function resolveLocally(created, ticketId) {
+      // SSE may have delivered the BE's authoritative proposal_resolved (and
+      // even the wrap-up turn's rows) before this POST resolved — only echo
+      // locally while the proposal is still unresolved, and recompute the
+      // pending state from the flow (see chatTurnStillPending).
+      if (chatFindActiveProposal()) {
+        chatApplyMessages([{
+          id: "local-resolved-" + Date.now(),
+          role: "event",
+          content: null,
+          payload: created
+            ? { kind: "proposal_resolved", created: true, ticketId: ticketId }
+            : { kind: "proposal_resolved", created: false },
+          createdAt: new Date().toISOString(),
+        }]);
+      }
+      // The agent reacts to either resolution (assign + wrap-up on create,
+      // a natural continuation on dismiss) — show the typing indicator
+      // while that turn is genuinely outstanding.
+      chatTurnPending = chatTurnStillPending();
+      if (chatPollTimerId !== null) scheduleChatPoll();
+      renderChatMessageList();
+    }
+
+    createBtn.addEventListener("click", function () {
+      var title = titleInput.value.trim();
+      var description = descTa.value.trim();
+      if (!title || !description) {
+        errorEl.style.display = "";
+        errorEl.textContent = t("chat.proposalIncomplete");
+        return;
+      }
+      errorEl.style.display = "none";
+      createBtn.disabled = true;
+      dismissBtn.disabled = true;
+      createBtn.textContent = t("chat.creating");
+      chatCreateTicket(chatConversation.id, title, description).then(function (data) {
+        var ticketId = (data && (data.ticketId || (data.ticket && data.ticket.id))) || null;
+        if (ticketId) {
+          chatRememberTicketConversation(ticketId, chatConversation.id);
+          chatConversation.createdTaskId = ticketId;
+        }
+        startChatClosedWatch();
+        resolveLocally(true, ticketId);
+      }).catch(function (err) {
+        createBtn.disabled = false;
+        dismissBtn.disabled = false;
+        createBtn.textContent = t("chat.createTicket");
+        errorEl.style.display = "";
+        errorEl.textContent = t("chat.createFailed", { msg: (err && err.message) || "" });
+      });
+    });
+
+    dismissBtn.addEventListener("click", function () {
+      createBtn.disabled = true;
+      dismissBtn.disabled = true;
+      chatDismissProposal(chatConversation.id).then(function () {
+        resolveLocally(false, null);
+      }).catch(function (err) {
+        createBtn.disabled = false;
+        dismissBtn.disabled = false;
+        errorEl.style.display = "";
+        errorEl.textContent = t("chat.dismissFailed", { msg: (err && err.message) || "" });
+      });
+    });
+
+    return h("div", { className: "rw-chat-proposal-card" }, [
+      h("p", { className: "rw-clarif-title" }, t("chat.proposalTitle")),
+      h("label", { className: "rw-chat-proposal-label" }, t("chat.proposalTitleLabel")),
+      titleInput,
+      h("label", { className: "rw-chat-proposal-label" }, t("chat.proposalDescLabel")),
+      descTa,
+      h("div", { className: "rw-clarif-actions" }, [createBtn, dismissBtn, errorEl]),
+    ]);
+  }
+
+  // Confirmation card rendered from 'proposal_resolved' {created:true}.
+  // Links into the existing ticket detail view.
+  function renderChatTicketCreatedCard(payload) {
+    var ticketId = payload.ticketId || null;
+    var shortRef = ticketId ? "#" + String(ticketId).slice(0, 8).toUpperCase() : "";
+    var viewBtn = null;
+    if (ticketId) {
+      viewBtn = h("button", { className: "rw-chat-ticket-open", type: "button" }, t("chat.viewTicket"));
+      viewBtn.addEventListener("click", function () { openTicketFromChat(ticketId); });
+    }
+    return h("div", { className: "rw-chat-ticket-card" }, [
+      h("div", { className: "rw-chat-ticket-card-main" }, [
+        h("span", { className: "rw-chat-ticket-label" }, t("chat.ticketCreated")),
+        shortRef ? h("span", { className: "rw-chat-ticket-ref" }, shortRef) : null,
+      ]),
+      viewBtn,
+    ]);
+  }
+
+  // Inline status line for the 'assigned' event — renders in the flow
+  // directly after the ticket-created card the agent's assignment follows.
+  function renderChatAssignedLine(payload) {
+    return h("div", { className: "rw-chat-assigned-line" },
+      "🤖 " + t("chat.assignedTo", { name: payload.agentName || "an agent" }));
   }
 
   // Compact reference card for an existing ticket the agent surfaced
