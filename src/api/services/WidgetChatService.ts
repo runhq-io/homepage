@@ -795,8 +795,20 @@ export async function ingestTurnEvents(
       const updates: Partial<typeof widgetChatConversations.$inferInsert> = { updatedAt: new Date() };
       if (current.pendingTurnId === input.turnId) updates.pendingTurnId = null;
       // Contract: turn_done after a created proposal_resolved closes the
-      // conversation (createdTaskId is set exactly then).
-      if (turnDone && current.createdTaskId) updates.status = 'closed';
+      // conversation (createdTaskId is set exactly then) — but only when the
+      // finishing turn OWNS the pending slot (or the slot was already cleared
+      // by the turn timeout; late completions still honor the close-on-done
+      // contract). Turns run concurrently (each user message dispatches one,
+      // overwriting pending_turn_id), so a STALE turn — dispatched before the
+      // ticket existed and superseded by the post-create turn — can finish
+      // right after creation. Letting it close the conversation made the
+      // widget's closed-watch kill the SSE transport before the post-create
+      // turn's assigned/wrap-up rows arrived, so the user never saw
+      // "Assigned to …" (live repro 2026-06-07).
+      if (turnDone && current.createdTaskId
+        && (current.pendingTurnId === null || current.pendingTurnId === input.turnId)) {
+        updates.status = 'closed';
+      }
       await db
         .update(widgetChatConversations)
         .set(updates)

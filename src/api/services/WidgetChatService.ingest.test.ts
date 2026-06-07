@@ -156,6 +156,46 @@ describe('ingestTurnEvents', () => {
     expect(conv).toMatchObject({ status: 'active', pendingTurnId: null });
   });
 
+  it('a stale superseded turn_done does NOT close a created conversation while the post-create turn is pending', async () => {
+    // Race (live-repro 2026-06-07): the user sends messages mid-turn, so
+    // several turns run concurrently. They click [Create Ticket] while a
+    // stale clarification turn is still in flight; createTicketFromChat sets
+    // createdTaskId and dispatches the post-create turn (pendingTurnId now
+    // points at it). The STALE turn then finishes — its turn_done must NOT
+    // close the conversation, or the post-create turn's assigned/wrap-up
+    // rows land invisibly after the widget's closed-watch kills the
+    // transport.
+    const postCreateTurnId = randomUUID();
+    await db.update(widgetChatConversations)
+      .set({ createdTaskId: TASK_ID, pendingTurnId: postCreateTurnId })
+      .where(eq(widgetChatConversations.id, CONV_ID));
+
+    // Stale turn (TURN_ID) completes — conversation must stay active.
+    const stale = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [
+        { seq: 0, kind: 'agent_message', text: 'Answering an already-superseded question.' },
+        { seq: 1, kind: 'turn_done' },
+      ],
+    });
+    expect(stale).toEqual({ inserted: 1, turnDone: true });
+    let [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
+    expect(conv).toMatchObject({ status: 'active', pendingTurnId: postCreateTurnId });
+
+    // The post-create turn completes — NOW the conversation closes.
+    const real = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: postCreateTurnId,
+      events: [
+        { seq: 0, kind: 'assigned', ticketId: TASK_ID, agentEntityId: 'ae_coder' },
+        { seq: 1, kind: 'agent_message', text: 'All done — handed off to Codey.' },
+        { seq: 2, kind: 'turn_done' },
+      ],
+    });
+    expect(real).toEqual({ inserted: 2, turnDone: true });
+    [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
+    expect(conv).toMatchObject({ status: 'closed', pendingTurnId: null });
+  });
+
   it('late turn_done replaces the agent_unavailable notice and closes a created conversation', async () => {
     // Simulate a timed-out turn the BE already noticed, on a conversation
     // whose ticket was created (close-on-turn_done contract).
