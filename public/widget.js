@@ -40,12 +40,15 @@
   // Always present as an object so reads never throw — defaults to anonymous.
   var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
 
-  // Modal-shell view state. The shell is a centered card with two faces:
+  // Modal-shell view state. The shell is a centered card with three faces:
+  //   "home"   — Intercom-style landing: greeting + navigation cards into
+  //              chat (when configured), the Hot discussion list, and the
+  //              Latest Updates list. Every open lands here (see closePanel).
   //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
   //   "detail" — full-width ticket detail with a "Back to activity" button.
-  // Switching between the two re-renders the card body in place; the launcher
+  // Switching between faces re-renders the card body in place; the launcher
   // tab and outer modal chrome stay mounted so we don't pay a remount cost.
-  var view = "list";
+  var view = "home";
   var currentDetailTicket = null;
 
   // Polling interval handle for the ticket detail view.
@@ -1857,6 +1860,47 @@
       '.rw-back-btn:hover { filter: brightness(1.06); }',
       '.rw-back-btn:active { transform: translateY(1px); }',
 
+      /* Intercom-style home view: greeting + navigation cards. Reuses the
+         left pane's warm panel treatment so Home reads as the same product
+         surface, not new chrome. Top padding clears the absolute-positioned
+         shell actions (theme + close). */
+      '.rw-home {',
+      '  flex: 1 1 auto; min-height: 0; overflow-y: auto;',
+      '  display: flex; flex-direction: column;',
+      '  padding: 58px 36px 24px;',
+      '  background: var(--rw-panel);',
+      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 6%, transparent), transparent 70%);',
+      '}',
+      '.rw-shell[data-theme="dark"] .rw-home {',
+      '  background-image: radial-gradient(420px 320px at 70% 100%, color-mix(in oklab, var(--rw-accent) 14%, transparent), transparent 70%);',
+      '}',
+      '.rw-home-greet { margin-bottom: 22px; }',
+      '.rw-home-greet-title {',
+      '  font-family: var(--rw-serif);',
+      '  font-size: 26px; font-weight: 500; letter-spacing: -0.01em;',
+      '  color: var(--rw-fg);',
+      '}',
+      '.rw-home-cards { display: flex; flex-direction: column; gap: 10px; width: min(520px, 100%); }',
+      '.rw-home-card {',
+      '  display: flex; align-items: center; gap: 14px;',
+      '  width: 100%; text-align: left;',
+      '  padding: 16px 18px;',
+      '  background: var(--rw-bg); border: 1px solid var(--rw-line-2);',
+      '  border-radius: 12px;',
+      '  color: var(--rw-fg); font: inherit;',
+      '  cursor: pointer;',
+      '  transition: border-color .12s, transform .12s, box-shadow .12s;',
+      '}',
+      '.rw-home-card:hover { border-color: var(--rw-accent); box-shadow: 0 4px 16px -10px rgba(42,37,32,0.30); }',
+      '.rw-home-card:active { transform: translateY(1px); }',
+      '.rw-home-card-emoji { font-size: 22px; line-height: 1; flex: 0 0 auto; }',
+      '.rw-home-card-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }',
+      '.rw-home-card-title { font-size: 14px; font-weight: 600; }',
+      '.rw-home-card-sub { font-size: 12px; color: var(--rw-muted); }',
+      '.rw-home-card-chev { color: var(--rw-muted); flex: 0 0 auto; display: inline-flex; }',
+      '.rw-home-powered { margin-top: auto; padding-top: 18px; }',
+      '@media (max-width: 640px) { .rw-home { padding: 64px 20px 20px; } }',
+
       /* header */
       '.rw-hdr {',
       '  display: flex; align-items: center; justify-content: space-between;',
@@ -3308,6 +3352,108 @@
     return h("div", { className: "rw-others" }, [head, list]);
   }
 
+  // ===========================================================================
+  // Home view (Intercom-style landing)
+  //
+  // Opening the widget lands here: a localized greeting plus navigation
+  // cards into the existing faces — chat (only when the bootstrap payload
+  // says a support agent is configured), the Hot discussion list (composer
+  // included — it always renders in the list view's left pane), and the
+  // Latest Updates list. The shell actions (theme + close) are pinned
+  // top-right of the card outside scrollEl, so Home inherits its close
+  // button without rendering one.
+  // ===========================================================================
+
+  // Centralized home/list navigation. Both stop any running detail poll —
+  // navigating away from a detail must never leave its 5s refresh loop alive.
+  function goHome() {
+    stopDetailPoll();
+    view = "home";
+    currentDetailTicket = null;
+    renderPanelBody();
+  }
+
+  function goList(tab) {
+    stopDetailPoll();
+    view = "list";
+    if (tab) activeTab = tab;
+    currentDetailTicket = null;
+    renderPanelBody();
+  }
+
+  // Chat entry point. Stub for now: the card's render + gating are real,
+  // but the conversation view ships in a follow-up plan, which replaces
+  // this body. Until then the card surfaces a quiet "coming soon" toast
+  // instead of dead-ending.
+  function openChat() {
+    showRestoreToast(t("home.chatComingSoon"));
+  }
+
+  function renderHomeCard(emoji, title, sub, onClick) {
+    var btn = h("button", { className: "rw-home-card", type: "button" }, [
+      h("span", { className: "rw-home-card-emoji", "aria-hidden": "true" }, emoji),
+      h("span", { className: "rw-home-card-text" }, [
+        h("span", { className: "rw-home-card-title" }, title),
+        h("span", { className: "rw-home-card-sub" }, sub),
+      ]),
+      h("span", { className: "rw-home-card-chev" }, Icons.chevRight(16)),
+    ]);
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  function renderHomeView() {
+    var root = h("div", { className: "rw-home" });
+
+    root.appendChild(h("div", { className: "rw-home-greet" },
+      h("div", { className: "rw-home-greet-title" }, t("home.greeting"))));
+
+    var cards = h("div", { className: "rw-home-cards" });
+
+    // 💬 Chat with Agent — rendered ONLY when the bootstrap payload carries
+    // `chat: { enabled: true, agentName }` (served once a support agent is
+    // picked in widget settings; separate plan). Absent field ⇒ falsy ⇒
+    // hidden, so existing embeds are bit-for-bit unaffected until then.
+    if (config.chat && config.chat.enabled) {
+      cards.appendChild(renderHomeCard(
+        "💬",
+        t("home.chatTitle"),
+        config.chat.agentName
+          ? t("home.chatSub", { name: config.chat.agentName })
+          : t("home.chatSubGeneric"),
+        openChat
+      ));
+    }
+
+    cards.appendChild(renderHomeCard(
+      "🗳",
+      t("home.discussTitle"),
+      t("home.discussSub"),
+      function () { goList("hot"); }
+    ));
+
+    cards.appendChild(renderHomeCard(
+      "📣",
+      t("home.updatesTitle"),
+      t("home.updatesSub"),
+      function () { goList("updates"); }
+    ));
+
+    root.appendChild(cards);
+
+    // Brand-locked footer tag — same composition as the list view's
+    // eyebrow "powered by RunHQ" (always English regardless of locale).
+    root.appendChild(h("div", { className: "rw-powered-by rw-home-powered" }, [
+      document.createTextNode("powered by "),
+      h("a", {
+        href: "https://www.runhq.io", target: "_blank",
+        rel: "noopener noreferrer", "aria-label": "Visit RunHQ",
+      }, "RunHQ"),
+    ]));
+
+    return root;
+  }
+
   // -----------------------------------------------------------------------
   // Top-level body renderer — builds either the split (list) view or the
   // full-width detail view, depending on `view` state.
@@ -3316,6 +3462,11 @@
   function renderPanelBody() {
     if (!scrollEl) return;
     clearChildren(scrollEl);
+
+    if (view === "home") {
+      scrollEl.appendChild(renderHomeView());
+      return;
+    }
 
     if (view === "detail" && currentDetailTicket) {
       var detailFull = h("div", { className: "rw-detail-full" });
@@ -4780,9 +4931,9 @@
     closeActiveModal();
     // Stop any running detail poll before resetting view state.
     stopDetailPoll();
-    // Reset the dashboard so re-opening lands on a fresh state rather
-    // than wherever the user last left it (detail view, Hot tab, etc.).
-    view = "list";
+    // Reset the shell so re-opening lands on a fresh Home rather than
+    // wherever the user last left it (detail view, Hot tab, etc.).
+    view = "home";
     currentDetailTicket = null;
     activeTab = "updates";
   }
@@ -5068,6 +5219,11 @@
         if (savedIntent && config.isIdentified
             && savedIntent.projectSlug === (config.projectId || config.project)) {
           clearIntent();
+          // Deep-link/restore opens bypass Home: the user is mid-action
+          // (draft submit, vote, comment), so land straight on the view
+          // that can receive the intent. applyIntent escalates list →
+          // detail itself for vote/comment intents.
+          view = "list";
           openPanel(function () { applyIntent(savedIntent); });
         }
       }).catch(function (err) {
