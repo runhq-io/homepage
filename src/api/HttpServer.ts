@@ -39,6 +39,8 @@ import * as WidgetService from './services/WidgetService';
 import * as ClarifierService from './services/ClarifierService';
 import * as DedupService from './services/DedupService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
+import * as WidgetChatService from './services/WidgetChatService';
+import { streamSSE } from 'hono/streaming';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -3816,6 +3818,48 @@ export function createHttpApp() {
     }
   });
 
+  /**
+   * Workspace → BE turn-event callback for widget chat.
+   * Auth: X-Server-Token (same as the widget-agents sync); body.serverId must
+   * match the token's server, and WidgetChatService re-checks that the
+   * conversation's project belongs to that server (cross-tenant guard).
+   * Events upsert idempotently on (turn_id, seq) — retries are safe.
+   */
+  app.post('/api/internal/widget-chat/events', async (c) => {
+    try {
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+      const body = await c.req.json().catch(() => null) as {
+        serverId?: unknown; conversationId?: unknown; turnId?: unknown; events?: unknown;
+      } | null;
+      if (
+        !body ||
+        typeof body.serverId !== 'string' ||
+        typeof body.conversationId !== 'string' ||
+        typeof body.turnId !== 'string' ||
+        !Array.isArray(body.events) ||
+        body.events.length > 200
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+      if (body.serverId !== server.id) return c.json({ error: 'serverId mismatch' }, 403);
+
+      const result = await WidgetChatService.ingestTurnEvents(server.id, {
+        conversationId: body.conversationId,
+        turnId: body.turnId,
+        events: body.events as WidgetChatService.TurnEventInput[],
+      });
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetError) return c.json({ error: err.code }, err.status as any);
+      console.error('[HttpServer] widget-chat events error:', err);
+      return c.json({ error: 'ingest failed' }, 500);
+    }
+  });
+
   // Get server info for a server (called by client)
   app.get('/api/servers/:serverId/server', async (c) => {
     try {
@@ -6095,6 +6139,228 @@ export function createHttpApp() {
       jobId: finalizeResult.jobId,
       agentId: clar.agentId,
       clarification: { clarificationId: body.clarificationId, status: 'started' as const },
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Widget Chat — agent-intake conversations ("Chat with Agent" home card).
+  // Same auth/CSRF/rate-limit middleware as ticket routes (authenticateWidget
+  // enforces CSRF on cookie-auth writes). All conversation routes are
+  // privacy-scoped: WidgetChatService verifies ownership and answers
+  // conversation_not_found for non-owners (existence never leaks).
+  // Anonymous gating mirrors ticket submission; per the chat contract anon
+  // gets 403 (the widget shows its login-prompt path).
+  // ---------------------------------------------------------------------------
+
+  function chatMessageDto(m: WidgetChatService.ChatMessageRow) {
+    return {
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      payload: m.payload ?? null,
+      turnId: m.turnId ?? null,
+      seq: m.seq ?? null,
+      createdAt: m.createdAt.toISOString(),
+    };
+  }
+
+  function chatConversationDto(conv: {
+    id: string; status: string; createdTaskId: string | null;
+    userTurnCount: number; pendingTurnId: string | null;
+    createdAt: Date; updatedAt: Date;
+  }) {
+    return {
+      id: conv.id,
+      status: conv.status,
+      createdTaskId: conv.createdTaskId,
+      userTurnCount: conv.userTurnCount,
+      pendingTurnId: conv.pendingTurnId,
+      createdAt: conv.createdAt.toISOString(),
+      updatedAt: conv.updatedAt.toISOString(),
+    };
+  }
+
+  /** Shared gate: identified widget user required (403 for anon per chat contract). */
+  async function requireChatUser(c: any): Promise<
+    | { auth: Awaited<ReturnType<typeof WidgetService.authenticateWidget>> & { widgetUserId: string } }
+    | { response: Response }
+  > {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return { response: c.json({ error: 'Unauthorized' }, 401) };
+    if (!auth.authenticated || !auth.widgetUserId) {
+      return { response: c.json({ error: 'identified_user_required' }, 403) };
+    }
+    return { auth: auth as any };
+  }
+
+  // Start-or-resume the user's active conversation (+ last 50 messages).
+  app.post('/api/widget/chat/conversations', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const { conversation, messages } = await WidgetChatService.getOrCreateActiveConversation(
+        auth.projectId, auth.widgetUserId,
+      );
+      return c.json({ conversation: chatConversationDto(conversation), messages: messages.map(chatMessageDto) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  app.get('/api/widget/chat/conversations/active', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const bundle = await WidgetChatService.getActiveConversation(auth.projectId, auth.widgetUserId);
+      if (!bundle) return c.json({ error: 'not_found' }, 404);
+      return c.json({
+        conversation: chatConversationDto(bundle.conversation),
+        messages: bundle.messages.map(chatMessageDto),
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Polling fallback: ?after=<message id> returns strictly newer rows.
+  app.get('/api/widget/chat/conversations/:id/messages', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const messages = await WidgetChatService.listMessages(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, c.req.query('after') || undefined,
+      );
+      return c.json({ messages: messages.map(chatMessageDto) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Send a user message → triggers a workspace turn.
+  app.post('/api/widget/chat/conversations/:id/messages', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'chat_message');
+    if (limited) return limited;
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'content required' }, 400);
+    try {
+      const message = await WidgetChatService.sendUserMessage(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, body.content,
+      );
+      return c.json({ message: chatMessageDto(message) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Anti-AI-jail escape hatch: force the next turn to propose a ticket.
+  app.post('/api/widget/chat/conversations/:id/force-proposal', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'chat_message');
+    if (limited) return limited;
+    try {
+      await WidgetChatService.forceProposal(c.req.param('id'), auth.projectId, auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // User confirmed the proposal card (possibly edited).
+  app.post('/api/widget/chat/conversations/:id/create-ticket', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
+    if (limited) return limited;
+    const body = await c.req.json().catch(() => null) as { title?: unknown; description?: unknown } | null;
+    if (!body || typeof body.title !== 'string' || typeof body.description !== 'string') {
+      return c.json({ error: 'title and description required' }, 400);
+    }
+    try {
+      const result = await WidgetChatService.createTicketFromChat(
+        c.req.param('id'), auth.projectId, auth.widgetUserId,
+        { title: body.title, description: body.description },
+      );
+      return c.json({ ticketId: result.ticketId });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  app.post('/api/widget/chat/conversations/:id/dismiss-proposal', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      await WidgetChatService.dismissProposal(c.req.param('id'), auth.projectId, auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // SSE stream of new messages. EventSource cannot set headers, so app-JWT
+  // embeds pass ?token=<widget JWT> (shimmed into Authorization below);
+  // runhq cookie auth works natively (withCredentials). Heartbeat comment
+  // every 25s. ?after=<message id> replays rows the client may have missed
+  // between its last fetch and this subscription (clients dedupe by id).
+  app.get('/api/widget/chat/conversations/:id/events', async (c) => {
+    const tokenQ = c.req.query('token');
+    const reqForAuth = tokenQ && !c.req.header('Authorization')
+      ? {
+          header: (name: string) =>
+            name.toLowerCase() === 'authorization' ? `Bearer ${tokenQ}` : c.req.header(name),
+          method: 'GET',
+          raw: c.req.raw,
+        }
+      : c.req;
+    const auth = await WidgetService.authenticateWidget(reqForAuth as any);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.authenticated || !auth.widgetUserId) {
+      return c.json({ error: 'identified_user_required' }, 403);
+    }
+    const conversationId = c.req.param('id');
+    try {
+      await WidgetChatService.getConversationOwned(conversationId, auth.projectId, auth.widgetUserId);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+    const after = c.req.query('after') || undefined;
+    const widgetUserId = auth.widgetUserId;
+    const projectId = auth.projectId;
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      const unsubscribe = WidgetChatService.subscribeToConversation(conversationId, (row) => {
+        void stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row)) });
+      });
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+      if (after) {
+        try {
+          const missed = await WidgetChatService.listMessages(conversationId, projectId, widgetUserId, after);
+          for (const m of missed) {
+            await stream.writeSSE({ event: 'message', id: m.id, data: JSON.stringify(chatMessageDto(m)) });
+          }
+        } catch {
+          // invalid cursor → client falls back to a full refetch via the messages endpoint
+        }
+      }
+      while (open) {
+        await stream.sleep(25_000);
+        if (!open) break;
+        await stream.write(': hb\n\n');
+      }
     });
   });
 

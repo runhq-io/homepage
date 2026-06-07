@@ -326,8 +326,15 @@ export function computePendingProposal(
         resolution: { noAction: true },
       };
     } else if (p.kind === 'proposal_resolved' && pending) {
+      // Constructed explicitly (no `...pending` spread): spreading the
+      // mutated loop variable creates a control-flow back-edge cycle in
+      // TS 5.9's inference (the reassignment's type depends on the spread,
+      // which depends on the variable's narrowed type, which depends on the
+      // reassignment) and fails with TS2698.
       pending = {
-        ...pending,
+        toolUseId: pending.toolUseId,
+        title: pending.title,
+        description: pending.description,
         resolution: p.created && p.ticketId
           ? { created: true, ticketId: p.ticketId }
           : { dismissed: true },
