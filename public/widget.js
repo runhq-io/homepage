@@ -641,6 +641,8 @@
         chatSub: "{name} is ready to help",
         chatSubGeneric: "Tell us what's going on",
         chatComingSoon: "Chat is coming soon.",
+        messageTitle: "Send us a message",
+        messageSub: "Questions, feedback, ideas — we read everything",
         discussTitle: "Join Open Discussion",
         discussSub: "Vote and weigh in on what gets built next",
         updatesTitle: "View Latest Updates",
@@ -817,6 +819,8 @@
         chatSub: "{name} 님이 도와드릴 준비가 되어 있어요",
         chatSubGeneric: "어떤 일인지 알려주세요",
         chatComingSoon: "채팅 기능이 곧 제공될 예정입니다.",
+        messageTitle: "메시지 보내기",
+        messageSub: "질문, 피드백, 아이디어 — 무엇이든 환영해요",
         discussTitle: "공개 토론 참여",
         discussSub: "투표와 의견으로 개발 방향에 참여하세요",
         updatesTitle: "최신 업데이트 보기",
@@ -3806,6 +3810,24 @@
           ? t("home.chatSub", { name: config.chat.agentName })
           : t("home.chatSubGeneric"),
         openChat
+      ));
+    } else {
+      // No support agent configured — the message entry must not disappear.
+      // Same slot, neutral Intercom-style wording; lands on the classic
+      // composer (existing submit path: clarifier + triager untouched).
+      cards.appendChild(renderHomeCard(
+        "💬",
+        t("home.messageTitle"),
+        t("home.messageSub"),
+        function () {
+          goList("hot");
+          // Focus the composer after the list view paints so the user can
+          // type immediately — the card promised "send us a message".
+          requestAnimationFrame(function () {
+            var ta = scrollEl && scrollEl.querySelector(".rw-inline-composer-ta");
+            if (ta) ta.focus();
+          });
+        }
       ));
     }
 
