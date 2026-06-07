@@ -880,6 +880,23 @@ async function getConversationForServer(
   return found.conversation;
 }
 
+/**
+ * Resolve which server a conversation belongs to (route-layer auth helper:
+ * the /api/widget/team/:id routes must know the server BEFORE they can check
+ * the session member's membership). Returns null for unknown/invalid ids so
+ * the route can 404 without an existence oracle for non-members.
+ */
+export async function getTeamConversationServerId(conversationId: string): Promise<string | null> {
+  if (!UUID_RE.test(conversationId)) return null;
+  const [found] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetChatConversations)
+    .innerJoin(widgetProjects, eq(widgetChatConversations.widgetProjectId, widgetProjects.id))
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  return found?.serverId ?? null;
+}
+
 /** Joined select shape shared by the list + detail summary queries. */
 function teamSummaryColumns() {
   return {

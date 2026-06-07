@@ -28,6 +28,7 @@ vi.mock('./services/WidgetChatService', () => ({
   sendUserMessage: vi.fn(),
   forceProposal: vi.fn(),
   createTicketFromChat: vi.fn(),
+  submitTicketFromConversation: vi.fn(),
   dismissProposal: vi.fn(),
   ingestTurnEvents: vi.fn(),
   subscribeToConversation: vi.fn(() => () => {}),
@@ -185,6 +186,42 @@ describe('POST /api/widget/chat/conversations/:id/create-ticket', () => {
       CONV.id, 'proj-1', 'wu-1', { title: 'T', description: 'D' },
     );
     expect((await res.json()).ticketId).toBe('tk-9');
+  });
+});
+
+describe('POST /api/widget/chat/conversations/:id/submit-ticket', () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it('403 for anonymous viewers (same gate as the other chat routes)', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(ANON as any);
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/submit-ticket`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(403);
+    expect(WidgetChatService.submitTicketFromConversation).not.toHaveBeenCalled();
+  });
+
+  it('takes NO body — the draft is derived server-side — and returns the ticketId', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.submitTicketFromConversation).mockResolvedValue({ ticketId: 'tk-7' });
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/submit-ticket`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.submitTicketFromConversation).toHaveBeenCalledWith(CONV.id, 'proj-1', 'wu-1');
+    expect((await res.json()).ticketId).toBe('tk-7');
+  });
+
+  it('maps the distinct 409 codes (agent_turns_present)', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.submitTicketFromConversation).mockRejectedValue(
+      new WidgetService.WidgetError('agent_turns_present', 409),
+    );
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/submit-ticket`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('agent_turns_present');
   });
 });
 

@@ -6857,6 +6857,96 @@ export function createHttpApp() {
     return c.json({ success: true });
   });
 
+  // ---------------------------------------------------------------------------
+  // Widget Chat — team Conversations inbox (workspace-member surface).
+  // Auth mirrors the widget settings routes: runhq session Bearer token →
+  // extractUserIdFromToken, then server membership (ANY member — replying to
+  // visitors is support work, not admin work; checkServerPermission falls
+  // back to servers.ownerId like the settings path). Cross-tenant requests
+  // 403; unknown conversations 404 via the service's *_not_found mapping.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve the calling workspace member for a team-inbox route: 401 without
+   * a valid session token, 403 when not a member of `serverId`. Returns the
+   * member's display name (users.name, falling back to email) for team-reply
+   * attribution.
+   */
+  async function requireTeamMember(
+    c: any,
+    serverId: string,
+  ): Promise<{ userId: string; displayName: string } | { response: Response }> {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return { response: c.json({ error: 'Unauthorized' }, 401) };
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return { response: c.json({ error: 'Invalid token' }, 401) };
+    const isMember = await ServerService.checkServerPermission(serverId, userId, ['owner', 'member']);
+    if (!isMember) return { response: c.json({ error: 'Forbidden' }, 403) };
+    const [user] = await db
+      .select({ name: users.name, email: users.email })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return { userId, displayName: user?.name || user?.email || 'Team' };
+  }
+
+  // Inbox list: every conversation for the widget project (agent-driven
+  // included), newest activity first. projectId = the WORKSPACE project id
+  // (same vocabulary as GET /api/widget/settings); serverId pins the tenant.
+  app.get('/api/widget/team/conversations', async (c) => {
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const projectId = c.req.query('projectId');
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const gate = await requireTeamMember(c, serverId);
+    if ('response' in gate) return gate.response;
+    try {
+      const conversations = await WidgetChatService.listTeamConversations(serverId, projectId);
+      return c.json({ conversations });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Full thread: summary header + every message row (all roles + events).
+  app.get('/api/widget/team/conversations/:id', async (c) => {
+    const conversationId = c.req.param('id');
+    const serverId = await WidgetChatService.getTeamConversationServerId(conversationId);
+    if (!serverId) return c.json({ error: 'conversation_not_found' }, 404);
+    const gate = await requireTeamMember(c, serverId);
+    if ('response' in gate) return gate.response;
+    try {
+      const detail = await WidgetChatService.getTeamConversation(serverId, conversationId);
+      return c.json({
+        conversation: detail.conversation,
+        messages: detail.messages.map(chatMessageDto),
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Team reply: appends a role='team' message attributed to the session
+  // member and pushes it onto the conversation's SSE stream. NEVER
+  // dispatches an agent turn.
+  app.post('/api/widget/team/conversations/:id/reply', async (c) => {
+    const conversationId = c.req.param('id');
+    const serverId = await WidgetChatService.getTeamConversationServerId(conversationId);
+    if (!serverId) return c.json({ error: 'conversation_not_found' }, 404);
+    const gate = await requireTeamMember(c, serverId);
+    if ('response' in gate) return gate.response;
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'content required' }, 400);
+    try {
+      const message = await WidgetChatService.sendTeamReply(
+        serverId, conversationId, gate.displayName, body.content,
+      );
+      return c.json({ message: chatMessageDto(message) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
   // Legacy sync endpoints (unsynced, mark-synced, status) removed —
   // workspace_tasks is now the single source of truth.
 
