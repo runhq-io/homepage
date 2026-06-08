@@ -1636,6 +1636,19 @@ export async function fetchFromServer<T = unknown>(
  * URL routing mirrors fetchFromServer: Fly machine routing header is added when
  * machineId is present so requests reach the correct machine.
  */
+/**
+ * Thrown by serverTokenFetch when the workspace was reached but answered with a
+ * non-2xx status. Distinct from connection/timeout failures (plain Error /
+ * AbortError) so callers can tell "workspace rejected the request" apart from
+ * "workspace unreachable".
+ */
+export class ServerResponseError extends Error {
+  constructor(public readonly status: number, public readonly body: string) {
+    super(`Workspace responded HTTP ${status}`);
+    this.name = 'ServerResponseError';
+  }
+}
+
 export async function serverTokenFetch<T = unknown>(
   server: Server,
   path: string,
@@ -1685,7 +1698,13 @@ export async function serverTokenFetch<T = unknown>(
   });
 
   if (!res.ok) {
-    throw new Error(`Workspace responded HTTP ${res.status}`);
+    // The workspace was reached but returned a non-2xx. Carry the status + a
+    // body snippet so callers can distinguish "reached but rejected" (e.g. a
+    // 4xx bad-request) from "could not reach the workspace at all", and so the
+    // real reason is logged instead of collapsed into an opaque error.
+    let body = '';
+    try { body = (await res.text()).slice(0, 500); } catch { /* ignore */ }
+    throw new ServerResponseError(res.status, body);
   }
 
   return res.json() as Promise<T>;

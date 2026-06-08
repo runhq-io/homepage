@@ -2959,9 +2959,33 @@ export async function assignAgent(
       },
     );
   } catch (err) {
+    // Distinguish "workspace reached but rejected the request" from "workspace
+    // unreachable" — collapsing both into a 503 hid real bad-request bugs (e.g.
+    // an empty command failing the workspace's validator surfaced as an opaque
+    // gateway 503). Always log the real reason so it is diagnosable.
+    if (err instanceof ServerService.ServerResponseError) {
+      console.error(
+        `[WidgetService] widget-triager-assign rejected by workspace ${serverId} ` +
+          `(ticket=${ticketId}, agent=${req.agentId}): HTTP ${err.status} ${err.body}`,
+      );
+      // The workspace was reachable and answered — this is an upstream error,
+      // not "unreachable". 502 (bad gateway) is accurate and non-retryable.
+      throw new WidgetAssignError('workspace_error', 502, err);
+    }
+    console.error(
+      `[WidgetService] widget-triager-assign could not reach workspace ${serverId} ` +
+        `(ticket=${ticketId}, agent=${req.agentId}):`,
+      err,
+    );
     throw new WidgetAssignError('workspace_unreachable', 503, err);
   }
-  if (!res?.jobId) throw new WidgetAssignError('workspace_error', 502, res);
+  if (!res?.jobId) {
+    console.error(
+      `[WidgetService] widget-triager-assign returned no jobId from workspace ${serverId} ` +
+        `(ticket=${ticketId}, agent=${req.agentId})`,
+    );
+    throw new WidgetAssignError('workspace_error', 502, res);
+  }
 
   // Audit row — best-effort; do not fail the request if this errors.
   try {

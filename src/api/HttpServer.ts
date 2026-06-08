@@ -5796,11 +5796,18 @@ export function createHttpApp() {
     // Gate 3: identified user required (widgetUserId only present for JWT-signed requests with sub)
     if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
 
-    // Gate 4: body validation
+    // Gate 4: body validation. `command` is OPTIONAL — the ticket's own
+    // title/description is the primary instruction; a command is an extra
+    // steer the assigner may add. (Accepting only a string but allowing it to
+    // be absent/empty keeps an empty command from later failing the workspace.)
     const body = await c.req.json().catch(() => null) as { agentId?: unknown; command?: unknown } | null;
-    if (!body || typeof body.agentId !== 'string' || typeof body.command !== 'string') {
-      return c.json({ error: 'agentId and command required' }, 400);
+    if (!body || typeof body.agentId !== 'string') {
+      return c.json({ error: 'agentId required' }, 400);
     }
+    if (body.command !== undefined && typeof body.command !== 'string') {
+      return c.json({ error: 'command must be a string' }, 400);
+    }
+    const command = typeof body.command === 'string' ? body.command : '';
 
     // Gate 5: re-validate agent exposure
     const exposed = await WidgetService.listExposedAgents(auth.projectId);
@@ -5834,7 +5841,7 @@ export function createHttpApp() {
         taskId: ticketId,
         widgetUserId: auth.widgetUserId,
         agentId: body.agentId,
-        command: body.command,
+        command,
         ticket: { title: ticketInfo.title, description: ticketInfo.description },
       });
     } catch (err) {
@@ -5862,7 +5869,7 @@ export function createHttpApp() {
           id: clarStep.clarificationId,
           serverId: ticketInfo.serverId,
           agentId: body.agentId,
-          command: body.command,
+          command,
           taskId: ticketId,
           candidate: { title: ticketInfo.title, description: ticketInfo.description },
         },

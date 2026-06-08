@@ -157,15 +157,26 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     const res = await postAssign(app, 'ticket-abc', JSON.stringify({ command: 'Do it' }));
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toBe('agentId and command required');
+    expect(body.error).toBe('agentId required');
   });
 
-  it('400 when body lacks command', async () => {
+  it('accepts a missing command (command is optional; defaults to empty)', async () => {
     const app = makeApp();
     const res = await postAssign(app, 'ticket-abc', JSON.stringify({ agentId: 'agent-99' }));
+    expect(res.status).toBe(200);
+    // The clarifier (and ultimately the workspace) receives an empty command —
+    // the ticket content is the instruction.
+    expect(ClarifierService.startClarification).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'agent-99', command: '' }),
+    );
+  });
+
+  it('400 when command is present but not a string', async () => {
+    const app = makeApp();
+    const res = await postAssign(app, 'ticket-abc', JSON.stringify({ agentId: 'agent-99', command: 123 }));
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toBe('agentId and command required');
+    expect(body.error).toBe('command must be a string');
   });
 
   it('400 when body is not valid JSON', async () => {
@@ -173,7 +184,7 @@ describe('POST /api/widget/tickets/:id/assign', () => {
     const res = await postAssign(app, 'ticket-abc', 'not-json');
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error).toBe('agentId and command required');
+    expect(body.error).toBe('agentId required');
   });
 
   it('403 when agentId not in listExposedAgents result', async () => {
