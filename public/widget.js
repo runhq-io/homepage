@@ -3641,23 +3641,10 @@
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
         composeReturnView = "home";
 
-        // Triager fast-path: a viewer who can hand tickets to agents jumps
-        // straight into the freshly-filed ticket with the "Hand to agent"
-        // prompt already open — pick an agent + Start, or Cancel to decline.
-        // Non-triagers fall through to the My Submissions list as before.
-        if (createdTicket && createdTicket.id && currentUser.isTriager) {
-          // Detail view; Back returns to the list (not chat).
-          view = "detail";
-          activeTab = "mine";
-          currentDetailTicket = createdTicket;
-          detailReturnView = null;
-          // The assign modal mounts in modalMountEl (a layer above the panel
-          // body), so the refreshAll re-render beneath it is harmless. The
-          // refresh repopulates the list caches so a later Back shows the new
-          // ticket, and renderPanelBody paints the detail body once data lands.
-          openAssignModal(createdTicket.id);
-          return refreshAll();
-        }
+        // Assignment is now fully automatic and server-side (identity +
+        // injection guard + agent picker run after creation). There is no
+        // manual "hand to agent" step — every author simply lands on their
+        // My Submissions list.
 
         // Land the author on their post: flip state to the list's
         // My Submissions tab, then refresh — refreshAll re-renders the panel
@@ -3995,286 +3982,6 @@
     }).catch(function (err) {
       clearChildren(scrollEl);
       scrollEl.appendChild(renderNotice("error", t("list.loadFailed", { msg: err.message || "" })));
-    });
-  }
-
-  // ===========================================================================
-  // Assign-agent modal
-  // ===========================================================================
-
-  function submitAssign(ticketId, agentId, command, callback) {
-    // Match the api() helper: pass {method: 'POST'} so authHeaders attaches
-    // X-RunHQ-CSRF on the cookie path, and send credentials when the cookie
-    // path is in play. Without these, an admin under cookie auth sees the
-    // triager controls but the POST 401s or CSRF-rejects.
-    var init = {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }, { method: 'POST' }),
-      body: JSON.stringify({ agentId: agentId, command: command }),
-    };
-    if (wantsCookieAuth()) init.credentials = 'include';
-    fetch(RUNHQ_API + '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/assign', init).then(function (res) {
-      return res.json().then(function (body) {
-        return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: body };
-      }, function () {
-        return { status: res.status, retryAfter: res.headers.get('Retry-After'), body: null };
-      });
-    }).then(function (r) {
-      if (r.status === 200) return callback(null, r.body);
-      if (r.status === 429) {
-        var seconds = parseInt(r.retryAfter || '0', 10);
-        var minutes = Math.max(1, Math.ceil(seconds / 60));
-        return callback("You've assigned the max number of agents this hour. Try again in " + minutes + ' minutes.');
-      }
-      if (r.status === 403) return callback('That agent is no longer available — please pick another.');
-      if (r.status === 503) return callback('Workspace is starting up — try again in a moment.');
-      if (r.status === 409) return callback('This ticket was just assigned by someone else. Refreshing.');
-      callback((r.body && r.body.error) || 'Could not assign agent.');
-    }).catch(function () {
-      callback('Network error — try again.');
-    });
-  }
-
-  function onAssignSuccess(ticketId, data) {
-    // /assign returns one of: {jobId} (assigned & started), {clarification:
-    // {status:'asking'}} (needs a quick clarification round first, no job yet),
-    // or {clarification:{status:'duplicate'}} (possible duplicate to review).
-    // The detail modal opens in every case; only a real start says "started".
-    var clar = data && data.clarification;
-    var started = !!(data && data.jobId);
-    function toastFor(ticket) {
-      if (started) {
-        var agentName = ticket && ticket.assignedAgentName;
-        return agentName ? agentName + ' started.' : 'Agent started.';
-      }
-      if (clar && clar.status === 'duplicate') return 'Possible duplicate — please review.';
-      return 'A few quick questions first.';
-    }
-    loadTicketDetail(ticketId).then(function (detail) {
-      var ticket = detail && detail.ticket;
-      if (ticket) {
-        openDetailModal(ticket);
-      }
-      showAssignToast(toastFor(ticket));
-    }).catch(function () {
-      showAssignToast(toastFor(null));
-    });
-  }
-
-  // Show a temporary toast inside the shadow root.
-  function showAssignToast(msg) {
-    var toast = h('div', {
-      style: {
-        position: 'fixed',
-        bottom: '20px',
-        left: '50%',
-        transform: 'translateX(-50%)',
-        background: '#1a1a1a',
-        color: '#fff',
-        padding: '8px 16px',
-        borderRadius: '6px',
-        fontSize: '13px',
-        zIndex: '2000000',
-        whiteSpace: 'nowrap',
-        boxShadow: '0 4px 16px rgba(0,0,0,0.25)',
-      },
-    }, msg);
-    modalMountEl.appendChild(toast);
-    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3000);
-  }
-
-  function openAssignModal(ticketId) {
-    // Tear down any existing assign modal.
-    var existing = modalMountEl.querySelector('.rw-assign-modal-overlay');
-    if (existing) existing.parentNode.removeChild(existing);
-
-    // --- Build modal skeleton ---
-
-    var suggestedLabel = h('span', null, '');
-    var suggestedSpinner = h('span', { className: 'rw-assign-inline-spinner' });
-    var suggestedRow = h('div', { className: 'rw-suggested-row' }, [
-      h('strong', null, 'Suggested:'),
-      suggestedSpinner,
-      suggestedLabel,
-    ]);
-
-    var listEl = h('ul', { className: 'rw-agent-list' });
-
-    var cmdLabel = h('label', { className: 'rw-cmd-label' }, 'Command');
-    var cmdEl = h('textarea', { placeholder: 'What should the agent do?' });
-
-    var errEl = h('div', { className: 'rw-modal-error', style: { display: 'none' } });
-
-    var cancelBtn = h('button', {
-      className: 'rw-assign-modal-btn rw-assign-modal-btn--cancel',
-      type: 'button',
-    }, 'Cancel');
-
-    var confirmBtn = h('button', {
-      className: 'rw-assign-modal-btn rw-assign-modal-btn--confirm',
-      type: 'button',
-      disabled: true,
-    }, 'Start agent');
-
-    var actionsRow = h('div', { className: 'rw-modal-actions' }, [cancelBtn, confirmBtn]);
-
-    var modal = h('div', { className: 'rw-assign-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Hand to agent' }, [
-      h('h3', null, 'Hand to agent'),
-      suggestedRow,
-      listEl,
-      cmdLabel,
-      cmdEl,
-      errEl,
-      actionsRow,
-    ]);
-
-    var overlay = h('div', { className: 'rw-assign-modal-overlay' }, modal);
-
-    modalMountEl.appendChild(overlay);
-
-    // --- State ---
-    var selectedAgentId = null;
-
-    function setError(msg) {
-      if (msg) {
-        errEl.textContent = msg;
-        errEl.style.display = 'block';
-      } else {
-        errEl.textContent = '';
-        errEl.style.display = 'none';
-      }
-    }
-
-    function pickAgent(id) {
-      selectedAgentId = id;
-      confirmBtn.disabled = false;
-      // Sync all radio inputs.
-      var radios = listEl.querySelectorAll('input[type="radio"]');
-      for (var i = 0; i < radios.length; i++) {
-        radios[i].checked = (radios[i].value === String(id));
-      }
-    }
-
-    function buildAgentList(agents, suggestedAgentId) {
-      clearChildren(listEl);
-      agents.forEach(function (agent) {
-        var isRecommended = suggestedAgentId && String(agent.id) === String(suggestedAgentId);
-        var radio = h('input', { type: 'radio', name: 'rw-agent-pick', value: String(agent.id) });
-        var nameSpan = h('span', null, agent.name || agent.id);
-        var children = [radio, nameSpan];
-        if (isRecommended) {
-          children.push(h('span', { className: 'rw-recommended' }, 'Recommended'));
-        }
-        var li = h('li', null, children);
-        li.addEventListener('click', function () { pickAgent(agent.id); });
-        listEl.appendChild(li);
-      });
-    }
-
-    // --- Load agents + suggestion in parallel ---
-    Promise.all([
-      api('/api/widget/agents'),
-      api(
-        '/api/widget/tickets/' + encodeURIComponent(ticketId) + '/suggest-assignment',
-        { method: 'POST', body: {} }
-      ).catch(function () { return null; }),
-    ]).then(function (results) {
-      var agentsRes = results[0];
-      var suggestion = results[1];
-      var agents = (agentsRes && agentsRes.agents) || [];
-
-      // Remove spinner; update suggested label.
-      if (suggestedSpinner.parentNode) suggestedSpinner.parentNode.removeChild(suggestedSpinner);
-      var suggestedAgentId = suggestion && suggestion.agentId ? suggestion.agentId : null;
-      var suggestedName = null;
-      if (suggestedAgentId) {
-        // Find name from agent list.
-        for (var i = 0; i < agents.length; i++) {
-          if (String(agents[i].id) === String(suggestedAgentId)) {
-            suggestedName = agents[i].name || agents[i].id;
-            break;
-          }
-        }
-      }
-      suggestedLabel.textContent = suggestedName || '(none)';
-
-      if (agents.length === 0) {
-        // Empty state: replace list + actions.
-        clearChildren(listEl);
-        listEl.appendChild(
-          h('li', { style: { padding: '0' } },
-            h('p', { className: 'rw-empty-agents' },
-              'No agents are available — ask a workspace admin to expose one.'
-            )
-          )
-        );
-        clearChildren(actionsRow);
-        var closeOnlyBtn = h('button', {
-          className: 'rw-assign-modal-btn rw-assign-modal-btn--cancel',
-          type: 'button',
-        }, 'Close');
-        closeOnlyBtn.addEventListener('click', function () {
-          if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-        });
-        actionsRow.appendChild(closeOnlyBtn);
-        return;
-      }
-
-      buildAgentList(agents, suggestedAgentId);
-
-      if (suggestedAgentId) {
-        pickAgent(suggestedAgentId);
-        cmdEl.value = (suggestion && suggestion.command) || '';
-      }
-    }).catch(function () {
-      if (suggestedSpinner.parentNode) suggestedSpinner.parentNode.removeChild(suggestedSpinner);
-      suggestedLabel.textContent = '(none)';
-      setError('Failed to load agents. Try again.');
-    });
-
-    // --- Close handlers ---
-    function closeModal() {
-      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    }
-
-    cancelBtn.addEventListener('click', closeModal);
-    overlay.addEventListener('click', function (e) {
-      if (e.target === overlay) closeModal();
-    });
-
-    var onKey = function (e) {
-      if (e.key === 'Escape') {
-        e.stopImmediatePropagation();
-        closeModal();
-        document.removeEventListener('keydown', onKey, true);
-      }
-    };
-    document.addEventListener('keydown', onKey, true);
-    // Clean up key listener when overlay is removed via any path.
-    var observer = new MutationObserver(function () {
-      if (!overlay.parentNode) {
-        document.removeEventListener('keydown', onKey, true);
-        observer.disconnect();
-      }
-    });
-    observer.observe(modalMountEl, { childList: true });
-
-    // --- Confirm ---
-    confirmBtn.addEventListener('click', function () {
-      if (!selectedAgentId) return;
-      setError('');
-      confirmBtn.disabled = true;
-      confirmBtn.textContent = 'Starting…';
-      submitAssign(ticketId, selectedAgentId, cmdEl.value, function (err, assignData) {
-        if (err) {
-          confirmBtn.disabled = false;
-          confirmBtn.textContent = 'Start agent';
-          setError(err);
-          return;
-        }
-        overlay.remove();
-        onAssignSuccess(ticketId, assignData);
-      });
     });
   }
 
@@ -4854,16 +4561,7 @@
       viewBtn.addEventListener("click", function () { openTicketFromChat(ticketId); });
     }
 
-    // Surface assignment right where the ticket is born — only for permitted
-    // users (triagers), and only while the ticket is still unassigned. Opens
-    // the shared assign modal pre-filled with the suggested agent (one-tap
-    // confirm). For an already-clarified ticket the assign runs immediately;
-    // a thin one falls through to the clarification cards in the detail view.
-    var assignBtn = null;
-    if (ticketId && currentUser.isTriager && !chatHasAssignedEvent()) {
-      assignBtn = h("button", { className: "rw-assign-btn rw-chat-ticket-assign", type: "button" }, t("chat.assignAgent"));
-      assignBtn.addEventListener("click", function () { openAssignModal(ticketId); });
-    }
+    // Assignment is fully automatic and server-side now — no manual button.
 
     var cardChildren = [
       h("div", { className: "rw-chat-ticket-card-main" }, [
@@ -4871,8 +4569,8 @@
         shortRef ? h("span", { className: "rw-chat-ticket-ref" }, shortRef) : null,
       ]),
     ];
-    if (viewBtn || assignBtn) {
-      cardChildren.push(h("div", { className: "rw-chat-ticket-actions" }, [viewBtn, assignBtn]));
+    if (viewBtn) {
+      cardChildren.push(h("div", { className: "rw-chat-ticket-actions" }, [viewBtn]));
     }
 
     return h("div", { className: "rw-chat-ticket-card rw-chat-ticket-created" }, cardChildren);
@@ -4881,14 +4579,6 @@
   // Whether the current chat thread already shows an 'assigned' event — used to
   // hide the inline assign affordance once the ticket has an agent (e.g. the
   // chat agent auto-assigned, or a triager just assigned it).
-  function chatHasAssignedEvent() {
-    for (var i = 0; i < chatMessages.length; i++) {
-      var m = chatMessages[i];
-      if (m.role === "event" && m.payload && m.payload.kind === "assigned") return true;
-    }
-    return false;
-  }
-
   // Inline status line for the 'assigned' event — renders in the flow
   // directly after the ticket-created card the agent's assignment follows.
   function renderChatAssignedLine(payload) {
@@ -5688,23 +5378,9 @@
     var headRefChildren = [renderStatusChip(ticket.status)];
     if (visChip) headRefChildren.push(visChip);
 
-    // "Assign agent" button — visible only to triagers on tickets that are
-    // actionable (not yet in progress / done / deployed) and not yet assigned.
-    var TERMINAL_STATUSES = { in_progress: true, done: true, deployed: true };
-    var canAssign = currentUser.isTriager
-      && !TERMINAL_STATUSES[ticket.status]
-      && !ticket.assignedAgentName;
-    var assignBtn = null;
-    if (canAssign) {
-      assignBtn = h("button", {
-        className: "rw-assign-btn",
-        type: "button",
-        title: "Assign an AI agent to work on this ticket",
-      }, "Assign agent");
-      assignBtn.addEventListener("click", function () {
-        openAssignModal(ticket.id);
-      });
-    }
+    // Manual "Assign agent" button removed — assignment is automatic and
+    // server-side. The assigned-agent attribution line below still shows once
+    // an agent has been auto-started.
 
     // Attribution line — visible when an agent is assigned and the assignment
     // was triggered by an external user (lastTriager is non-null).
@@ -5735,7 +5411,6 @@
       titleRow,
     ];
     if (attributionEl) headChildren.push(attributionEl);
-    if (assignBtn) headChildren.push(assignBtn);
 
     var head = h("div", { className: "rw-td-head" }, headChildren);
     // Head + body share one scroll area so the entire ticket content
