@@ -3611,12 +3611,17 @@
       submitBtn.firstChild.textContent = t("composer.posting");
       clearChildren(noticeSlot);
 
+      // Captured across the upload .then so the post-submit branch can route
+      // the author straight into the ticket they just filed.
+      var createdTicket = null;
+
       createTicket({
         description: description,
         isPrivate: isPrivate,
         context: collectContext(),
       }).then(function (data) {
-        var ticketId = data && data.ticket && data.ticket.id;
+        createdTicket = (data && data.ticket) || null;
+        var ticketId = createdTicket && createdTicket.id;
         if (!ticketId || entries.length === 0) return null;
         submitBtn.firstChild.textContent = t("composer.uploading");
         return Promise.all(entries.map(function (e) {
@@ -3634,6 +3639,26 @@
         privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
+        composeReturnView = "home";
+
+        // Triager fast-path: a viewer who can hand tickets to agents jumps
+        // straight into the freshly-filed ticket with the "Hand to agent"
+        // prompt already open — pick an agent + Start, or Cancel to decline.
+        // Non-triagers fall through to the My Submissions list as before.
+        if (createdTicket && createdTicket.id && currentUser.isTriager) {
+          // Detail view; Back returns to the list (not chat).
+          view = "detail";
+          activeTab = "mine";
+          currentDetailTicket = createdTicket;
+          detailReturnView = null;
+          // The assign modal mounts in modalMountEl (a layer above the panel
+          // body), so the refreshAll re-render beneath it is harmless. The
+          // refresh repopulates the list caches so a later Back shows the new
+          // ticket, and renderPanelBody paints the detail body once data lands.
+          openAssignModal(createdTicket.id);
+          return refreshAll();
+        }
+
         // Land the author on their post: flip state to the list's
         // My Submissions tab, then refresh — refreshAll re-renders the panel
         // body for the new view once data arrives. State is set directly
@@ -3641,7 +3666,6 @@
         // before the loading frame.
         view = "list";
         activeTab = "mine";
-        composeReturnView = "home";
         return refreshAll();
       }).catch(function (err) {
         submitBtn.disabled = false;
