@@ -183,3 +183,19 @@ describe('dismissProposal', () => {
       .rejects.toMatchObject({ code: 'no_pending_proposal' });
   });
 });
+
+describe('createTicketFromChat auto-assign hook', () => {
+  it('fires the server-side auto-assign hook with the new ticket id', async () => {
+    const spy = vi.fn();
+    const restore = WidgetChatService.__setAutoAssignForTests(spy);
+    try {
+      await seedProposal('tu_autoassign');
+      const { ticketId } = await WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
+        title: 'Hook title', description: 'Hook description',
+      });
+      expect(spy).toHaveBeenCalledWith(PROJECT_ID, ticketId, WIDGET_USER_ID);
+    } finally {
+      restore();
+    }
+  });
+});

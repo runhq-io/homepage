@@ -28,6 +28,37 @@ import {
 } from '../../db/schema';
 import * as ServerService from './ServerService';
 import * as WidgetService from './WidgetService';
+import { autoAssignTicket as autoAssignTicketDefault } from './WidgetAutoAssign';
+
+/**
+ * Fire-and-forget auto-assign hook, invoked after a widget ticket is created
+ * from a conversation. Indirected through a module-level binding so tests can
+ * install a spy (and avoid touching the real orchestrator). Production wiring is
+ * the real, self-contained `autoAssignTicket` (resolves its own deps, never
+ * throws). Callers MUST invoke as `void triggerAutoAssign(...)`.
+ */
+let autoAssignImpl: (projectId: string, ticketId: string, widgetUserId: string | undefined) => void = (
+  projectId,
+  ticketId,
+  widgetUserId,
+) => {
+  void autoAssignTicketDefault(projectId, ticketId, widgetUserId);
+};
+
+/** Test seam: override the auto-assign hook. Returns a restore function. */
+export function __setAutoAssignForTests(
+  fn: (projectId: string, ticketId: string, widgetUserId: string | undefined) => void,
+): () => void {
+  const prev = autoAssignImpl;
+  autoAssignImpl = fn;
+  return () => {
+    autoAssignImpl = prev;
+  };
+}
+
+function triggerAutoAssign(projectId: string, ticketId: string, widgetUserId: string | undefined): void {
+  autoAssignImpl(projectId, ticketId, widgetUserId);
+}
 
 export type ChatConversationRow = typeof widgetChatConversations.$inferSelect;
 export type ChatMessageRow = typeof widgetChatMessages.$inferSelect;
@@ -694,6 +725,12 @@ export async function createTicketFromChat(
     .returning();
   publish(resolvedEvent!);
 
+  // Fire-and-forget auto-assign: the single server-side authority decides
+  // whether to start a coding agent (identity + injection guard + agent
+  // picker). Independent of the post-creation turn, which now only
+  // acknowledges/closes — it no longer assigns.
+  triggerAutoAssign(projectId, task.id, widgetUserId);
+
   // Post-creation turn: computePendingProposal now derives
   // {created:true, ticketId} from the row just written.
   await dispatchTurn({ ...fresh, createdTaskId: task.id });
@@ -801,6 +838,9 @@ export async function submitTicketFromConversation(
     .update(widgetChatConversations)
     .set({ status: 'closed', updatedAt: new Date() })
     .where(eq(widgetChatConversations.id, conversationId));
+
+  // Fire-and-forget auto-assign (same authority as the agent-chat path).
+  triggerAutoAssign(projectId, task.id, widgetUserId);
 
   return { ticketId: task.id };
 }

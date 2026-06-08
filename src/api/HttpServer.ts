@@ -38,6 +38,7 @@ import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
 import * as ClarifierService from './services/ClarifierService';
 import * as DedupService from './services/DedupService';
+import * as WidgetAutoAssign from './services/WidgetAutoAssign';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WidgetChatService from './services/WidgetChatService';
 import { streamSSE } from 'hono/streaming';
@@ -6522,6 +6523,9 @@ export function createHttpApp() {
     try {
       const body = await c.req.json();
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
+      // Fire-and-forget auto-assign: identified-user feedback can spawn an agent
+      // (gated by injection guard + project config inside the orchestrator).
+      void WidgetAutoAssign.autoAssignTicket(auth.projectId, ticket.id, auth.widgetUserId);
       return c.json({ ticket }, 201);
     } catch (err) {
       return widgetErrorResponse(c, err);
