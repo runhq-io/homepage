@@ -497,16 +497,15 @@ interface PermissionDerivation {
 
 function derivePermissions(
   policy: PermissionPolicyRow,
-  jwtPayload: jose.JWTPayload,
+  _jwtPayload: jose.JWTPayload,
 ): PermissionDerivation {
+  // Role-gating removed: a valid backend-issued widget token already proves the
+  // app trusts this (identified, non-anonymous) user. Identity alone authorizes
+  // agent work — there is no per-role check anymore. The only remaining axis is
+  // the project's master on/off switch. (Auto-assignment is server-driven; this
+  // permission is now only a capability hint surfaced by /me and /identity.)
   if (!policy.widgetAgentAssignmentEnabled) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
-  if (policy.widgetAssignRoles.length === 0) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
-  const claim = jwtPayload[policy.widgetRoleClaimName];
-  if (!Array.isArray(claim)) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
-  const userRoles = claim.filter((r): r is string => typeof r === 'string');
-  const matchedRoles = userRoles.filter(r => policy.widgetAssignRoles.includes(r));
-  if (matchedRoles.length === 0) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
-  return { permissions: new Set<WidgetPermission>(['assign_agent']), matchedRoles };
+  return { permissions: new Set<WidgetPermission>(['assign_agent']), matchedRoles: [] };
 }
 
 /**
@@ -2061,20 +2060,9 @@ export async function signWidgetUserJwt(params: {
   apiKey: string;
   userId: string;
   userName?: string;
-  /**
-   * Role claim to embed, using the project's configured claim name —
-   * exactly the shape derivePermissions reads at auth time. Set by the
-   * BE's own mint paths (dogfood feedback embed, preview auto-inject)
-   * after verifying the user is an owner/admin of the widget's workspace.
-   */
-  roleClaim?: { name: string; roles: string[] };
 }): Promise<string> {
   const signingKey = new TextEncoder().encode(params.apiSecretHash);
   return await new jose.SignJWT({
-    // Role claim is spread FIRST so a claim name colliding with a reserved
-    // claim (fp/type/name — and sub/iat/exp via the setters below) can
-    // never clobber it: the reserved value always wins.
-    ...(params.roleClaim ? { [params.roleClaim.name]: params.roleClaim.roles } : {}),
     fp: params.apiKey,
     type: 'widget_user',
     ...(params.userName ? { name: params.userName } : {}),
@@ -2087,36 +2075,11 @@ export async function signWidgetUserJwt(params: {
 }
 
 /**
- * Mint-time role resolution for BE-issued widget tokens.
- *
- * The widget key (`fp`) identifies the project, the project identifies the
- * workspace (`server_id`). When the authenticated RunHQ user is an
- * owner/admin of that workspace and the project has triager assignment
- * enabled, return the project's configured role claim — the exact shape
- * derivePermissions reads at auth time, so the minted token grants
- * assign_agent through the same single code path customer JWTs use.
- *
- * Returns undefined otherwise: the token mints with no role claim and the
- * viewer is a regular identified widget user.
- */
-async function workspaceRoleClaimFor(
-  project: {
-    serverId: string;
-    widgetAgentAssignmentEnabled: boolean;
-    widgetAssignRoles: string[];
-    widgetRoleClaimName: string;
-  },
-  userId: string,
-): Promise<{ name: string; roles: string[] } | undefined> {
-  if (!project.widgetAgentAssignmentEnabled) return undefined;
-  if (project.widgetAssignRoles.length === 0) return undefined;
-  const membership = await getServerMembership(project.serverId, userId);
-  if (!membership || !isOwnerOrAdmin(membership)) return undefined;
-  return { name: project.widgetRoleClaimName, roles: project.widgetAssignRoles };
-}
-
-/**
  * Generate a signed widget JWT for an identified user, given the API secret.
+ *
+ * Role-gating removed: the token only IDENTIFIES the user. Whether that user can
+ * drive an agent is decided at auth time by the project's master switch alone
+ * (derivePermissions), so no workspace roles are baked in here.
  */
 export async function generateUserTokenBySecret(
   secret: string,
@@ -2129,10 +2092,6 @@ export async function generateUserTokenBySecret(
       apiKey: widgetProjects.apiKey,
       apiSecretHash: widgetProjects.apiSecretHash,
       enabled: widgetProjects.enabled,
-      serverId: widgetProjects.serverId,
-      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
-      widgetAssignRoles: widgetProjects.widgetAssignRoles,
-      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.apiKey, fingerprint), eq(widgetProjects.enabled, true)))
@@ -2145,9 +2104,6 @@ export async function generateUserTokenBySecret(
     apiKey: project.apiKey,
     userId,
     userName,
-    // userId is console-verified — workspace owners/admins get the project's
-    // triager role claim baked in at mint time.
-    roleClaim: await workspaceRoleClaimFor(project, userId),
   });
 
   return { token };
@@ -2211,9 +2167,6 @@ export async function generatePreviewWidgetBootstrap(
       channelId: widgetProjects.channelId,
       autoApprove: widgetProjects.autoApprove,
       serverId: widgetProjects.serverId,
-      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
-      widgetAssignRoles: widgetProjects.widgetAssignRoles,
-      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2228,9 +2181,6 @@ export async function generatePreviewWidgetBootstrap(
     apiKey: project.apiKey,
     userId,
     userName,
-    // userId is workspace-verified — owners/admins get the project's
-    // triager role claim baked in at mint time.
-    roleClaim: await workspaceRoleClaimFor(project, userId),
   });
 
   return {
