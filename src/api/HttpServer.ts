@@ -5644,6 +5644,42 @@ export function createHttpApp() {
     | { kind: 'duplicate'; clarificationId: string; duplicateOf: string }
     | { kind: 'started'; clarificationId: string; jobId: string; agentId: string };
 
+  async function startAgentWithoutClarifier(input: {
+    projectId: string;
+    ticketId: string;
+    widgetUserId: string;
+    externalUserId: string;
+    name: string | null;
+    matchedRoles: string[];
+    agentId: string;
+    command: string;
+    qa?: Array<{ question: string; answer: string }>;
+    clarificationId?: string;
+  }): Promise<{ jobId: string; agentId: string }> {
+    const exposed = await WidgetService.listExposedAgents(input.projectId);
+    if (!exposed.some((a) => a.id === input.agentId)) {
+      throw Object.assign(new Error('Agent not available'), { _agentNotAvailable: true });
+    }
+
+    const result = await WidgetService.assignAgent(input.projectId, input.ticketId, {
+      agentId: input.agentId,
+      command: input.command,
+      actor: {
+        widgetUserId: input.widgetUserId,
+        externalUserId: input.externalUserId,
+        name: input.name,
+        matchedRoles: input.matchedRoles,
+      },
+      ...(input.qa && input.qa.length > 0 ? { qa: input.qa } : {}),
+    });
+
+    if (input.clarificationId) {
+      await ClarifierService.markClarificationStarted(input.clarificationId);
+    }
+
+    return { jobId: result.jobId, agentId: input.agentId };
+  }
+
   async function finalizeReadyClarification(
     clar: {
       id: string;
@@ -5833,7 +5869,9 @@ export function createHttpApp() {
     const ticketInfo = await WidgetService.getTicketForAssign(auth.projectId, ticketId);
     if (!ticketInfo) return c.json({ error: 'ticket_not_found' }, 404);
 
-    // Start clarification; only proceed to assignAgent when the model returns 'ready'.
+    // Start clarification; normally only proceed to assignAgent when the model
+    // returns 'ready'. If the clarifier provider is unavailable, fail open so
+    // triagers can still start the selected agent from the ticket itself.
     let clarStep: Awaited<ReturnType<typeof ClarifierService.startClarification>>;
     try {
       clarStep = await ClarifierService.startClarification({
@@ -5845,8 +5883,23 @@ export function createHttpApp() {
         ticket: { title: ticketInfo.title, description: ticketInfo.description },
       });
     } catch (err) {
-      console.error('[widget] clarifier failed:', err);
-      return c.json({ error: 'clarifier_unavailable' }, 503);
+      console.warn('[widget] clarifier failed; assigning without clarification:', err);
+      try {
+        const started = await startAgentWithoutClarifier({
+          projectId: auth.projectId,
+          ticketId,
+          widgetUserId: auth.widgetUserId,
+          externalUserId: wu.externalUserId,
+          name: wu.name,
+          matchedRoles: auth.matchedRoles,
+          agentId: body.agentId,
+          command,
+        });
+        return c.json({ jobId: started.jobId, agentId: started.agentId });
+      } catch (assignErr: any) {
+        if (assignErr?._agentNotAvailable) return c.json({ error: 'Agent not available' }, 403);
+        return widgetErrorResponse(c, assignErr);
+      }
     }
 
     if (clarStep.status === 'asking') {
@@ -5910,7 +5963,7 @@ export function createHttpApp() {
   //
   // Error conventions mirror the assign route:
   //   ClarifierAnswerError → 400 invalid_answers
-  //   Any other LLM/infra error → 503 clarifier_unavailable (fail-closed)
+  //   Any other LLM/provider error → fail-open assignment with stored agent+command
   // ---------------------------------------------------------------------------
   app.post('/api/widget/tickets/:id/clarify-answer', async (c) => {
     // Gate 1: JWT auth
@@ -5979,8 +6032,35 @@ export function createHttpApp() {
       if (err instanceof ClarifierService.ClarifierAnswerError) {
         return c.json({ error: 'invalid_answers' }, 400);
       }
-      console.error('[widget] clarifier answer failed:', err);
-      return c.json({ error: 'clarifier_unavailable' }, 503);
+      console.warn('[widget] clarifier answer failed; assigning without further clarification:', err);
+
+      const wu = await WidgetService.getWidgetUserAuditInfo(auth.widgetUserId);
+      if (!wu) return c.json({ error: 'widget_user_not_found' }, 404);
+
+      const qa = await ClarifierService.getAnsweredQa(body.clarificationId);
+
+      try {
+        const started = await startAgentWithoutClarifier({
+          projectId: auth.projectId,
+          ticketId,
+          widgetUserId: auth.widgetUserId,
+          externalUserId: wu.externalUserId,
+          name: wu.name,
+          matchedRoles: auth.matchedRoles,
+          agentId: clar.agentId,
+          command: clar.command,
+          qa,
+          clarificationId: clar.id,
+        });
+        return c.json({
+          jobId: started.jobId,
+          agentId: started.agentId,
+          clarification: { clarificationId: body.clarificationId, status: 'started' as const },
+        });
+      } catch (assignErr: any) {
+        if (assignErr?._agentNotAvailable) return c.json({ error: 'Agent not available' }, 403);
+        return widgetErrorResponse(c, assignErr);
+      }
     }
 
     if (step.status === 'asking') {

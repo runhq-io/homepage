@@ -473,18 +473,38 @@ describe('POST /api/widget/tickets/:id/clarify-answer', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Clarifier infra failure → 503 (fail-closed)
+  // Clarifier provider failure → fail-open assignment
   // ---------------------------------------------------------------------------
 
-  it('503 clarifier_unavailable when answerClarification throws a non-ClarifierAnswerError; assignAgent NOT called', async () => {
+  it('fail-opens to assignment when answerClarification throws a non-ClarifierAnswerError', async () => {
     (ClarifierService.answerClarification as any).mockRejectedValue(new Error('LLM timeout'));
 
     const app = makeApp();
     const res = await postClarifyAnswer(app);
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toBe('clarifier_unavailable');
-    expect(WidgetService.assignAgent).not.toHaveBeenCalled();
+    expect(body).toEqual({
+      jobId: 'job-001',
+      agentId: 'a1',
+      clarification: { clarificationId: CLARIFICATION_ID, status: 'started' },
+    });
+    expect(WidgetService.assignAgent).toHaveBeenCalledWith(
+      'proj-1',
+      TICKET_ID,
+      {
+        agentId: 'a1',
+        command: 'do it',
+        actor: {
+          widgetUserId: 'wu-123',
+          externalUserId: 'ext-user-1',
+          name: 'Alice',
+          matchedRoles: ['triager'],
+        },
+        qa: [{ question: 'Which browser?', answer: 'Chrome' }],
+      },
+    );
+    expect(ClarifierService.markClarificationStarted).toHaveBeenCalledWith(CLARIFICATION_ID);
+    expect(DedupService.findLikelyDuplicate).not.toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------

@@ -2990,6 +2990,8 @@
       'button.rw-chat-ticket-card { cursor: pointer; width: 100%; }',
       'button.rw-chat-ticket-card:hover { border-color: var(--rw-muted); }',
       '.rw-chat-ticket-card-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }',
+      '.rw-chat-ticket-created { align-items: stretch; flex-direction: column; justify-content: flex-start; }',
+      '.rw-chat-ticket-created .rw-chat-ticket-card-main { flex: 0 1 auto; width: 100%; flex-wrap: wrap; }',
       '.rw-chat-ticket-title {',
       '  font-size: 13px; font-weight: 600; color: var(--rw-fg);',
       '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;',
@@ -3007,7 +3009,8 @@
       '}',
       '.rw-chat-ticket-open:hover { border-color: var(--rw-muted); color: var(--rw-fg); }',
       '.rw-chat-ticket-actions { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }',
-      '.rw-chat-ticket-assign { height: 26px; }',
+      '.rw-chat-ticket-created .rw-chat-ticket-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }',
+      '.rw-chat-ticket-assign { height: 26px; margin-top: 0; }',
       '.rw-chat-assigned-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
 
       /* Chat proposal card: editable draft title + description with primary
@@ -4827,13 +4830,17 @@
       assignBtn.addEventListener("click", function () { openAssignModal(ticketId); });
     }
 
-    return h("div", { className: "rw-chat-ticket-card" }, [
+    var cardChildren = [
       h("div", { className: "rw-chat-ticket-card-main" }, [
         h("span", { className: "rw-chat-ticket-label" }, t("chat.ticketCreated")),
         shortRef ? h("span", { className: "rw-chat-ticket-ref" }, shortRef) : null,
       ]),
-      h("div", { className: "rw-chat-ticket-actions" }, [viewBtn, assignBtn]),
-    ]);
+    ];
+    if (viewBtn || assignBtn) {
+      cardChildren.push(h("div", { className: "rw-chat-ticket-actions" }, [viewBtn, assignBtn]));
+    }
+
+    return h("div", { className: "rw-chat-ticket-card rw-chat-ticket-created" }, cardChildren);
   }
 
   // Whether the current chat thread already shows an 'assigned' event — used to
