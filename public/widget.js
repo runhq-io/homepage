@@ -784,6 +784,7 @@
         proposalDismissed: "Ticket draft dismissed — the conversation continues.",
         ticketCreated: "Ticket created",
         viewTicket: "View ticket",
+        assignAgent: "Assign agent",
         assignedTo: "Assigned to {name}",
         escapeHatch: "Create ticket from this conversation",
         forceRequested: "Preparing a ticket draft from this conversation…",
@@ -972,6 +973,7 @@
         proposalDismissed: "티켓 초안을 닫았습니다 — 대화를 계속할 수 있어요.",
         ticketCreated: "티켓이 생성되었습니다",
         viewTicket: "티켓 보기",
+        assignAgent: "에이전트 배정",
         assignedTo: "{name}에게 할당됨",
         escapeHatch: "이 대화로 티켓 만들기",
         forceRequested: "대화 내용으로 티켓 초안을 준비하고 있습니다…",
@@ -3004,6 +3006,8 @@
       '  font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;',
       '}',
       '.rw-chat-ticket-open:hover { border-color: var(--rw-muted); color: var(--rw-fg); }',
+      '.rw-chat-ticket-actions { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }',
+      '.rw-chat-ticket-assign { height: 26px; }',
       '.rw-chat-assigned-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
 
       /* Chat proposal card: editable draft title + description with primary
@@ -3994,15 +3998,28 @@
   }
 
   function onAssignSuccess(ticketId, data) {
+    // /assign returns one of: {jobId} (assigned & started), {clarification:
+    // {status:'asking'}} (needs a quick clarification round first, no job yet),
+    // or {clarification:{status:'duplicate'}} (possible duplicate to review).
+    // The detail modal opens in every case; only a real start says "started".
+    var clar = data && data.clarification;
+    var started = !!(data && data.jobId);
+    function toastFor(ticket) {
+      if (started) {
+        var agentName = ticket && ticket.assignedAgentName;
+        return agentName ? agentName + ' started.' : 'Agent started.';
+      }
+      if (clar && clar.status === 'duplicate') return 'Possible duplicate — please review.';
+      return 'A few quick questions first.';
+    }
     loadTicketDetail(ticketId).then(function (detail) {
       var ticket = detail && detail.ticket;
       if (ticket) {
         openDetailModal(ticket);
       }
-      var agentName = ticket && ticket.assignedAgentName;
-      showAssignToast(agentName ? agentName + ' started.' : 'Agent started.');
+      showAssignToast(toastFor(ticket));
     }).catch(function () {
-      showAssignToast('Agent started.');
+      showAssignToast(toastFor(null));
     });
   }
 
@@ -4798,13 +4815,36 @@
       viewBtn = h("button", { className: "rw-chat-ticket-open", type: "button" }, t("chat.viewTicket"));
       viewBtn.addEventListener("click", function () { openTicketFromChat(ticketId); });
     }
+
+    // Surface assignment right where the ticket is born — only for permitted
+    // users (triagers), and only while the ticket is still unassigned. Opens
+    // the shared assign modal pre-filled with the suggested agent (one-tap
+    // confirm). For an already-clarified ticket the assign runs immediately;
+    // a thin one falls through to the clarification cards in the detail view.
+    var assignBtn = null;
+    if (ticketId && currentUser.isTriager && !chatHasAssignedEvent()) {
+      assignBtn = h("button", { className: "rw-assign-btn rw-chat-ticket-assign", type: "button" }, t("chat.assignAgent"));
+      assignBtn.addEventListener("click", function () { openAssignModal(ticketId); });
+    }
+
     return h("div", { className: "rw-chat-ticket-card" }, [
       h("div", { className: "rw-chat-ticket-card-main" }, [
         h("span", { className: "rw-chat-ticket-label" }, t("chat.ticketCreated")),
         shortRef ? h("span", { className: "rw-chat-ticket-ref" }, shortRef) : null,
       ]),
-      viewBtn,
+      h("div", { className: "rw-chat-ticket-actions" }, [viewBtn, assignBtn]),
     ]);
+  }
+
+  // Whether the current chat thread already shows an 'assigned' event — used to
+  // hide the inline assign affordance once the ticket has an agent (e.g. the
+  // chat agent auto-assigned, or a triager just assigned it).
+  function chatHasAssignedEvent() {
+    for (var i = 0; i < chatMessages.length; i++) {
+      var m = chatMessages[i];
+      if (m.role === "event" && m.payload && m.payload.kind === "assigned") return true;
+    }
+    return false;
   }
 
   // Inline status line for the 'assigned' event — renders in the flow
