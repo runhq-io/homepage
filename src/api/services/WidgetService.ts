@@ -2907,6 +2907,35 @@ async function getWidgetTaskRow(
 }
 
 /**
+ * Exported wrapper around getWidgetTaskRow for the auto-assign orchestrator.
+ * Returns the widget ticket's title/description scoped to a server, or null.
+ */
+export async function getWidgetTaskForServer(
+  serverId: string,
+  ticketId: string,
+): Promise<{ title: string; description: string | null } | null> {
+  return getWidgetTaskRow(serverId, ticketId);
+}
+
+/**
+ * Resolve a widget project's server + whether agent auto-assignment is enabled
+ * for it. Used by the auto-assign orchestrator's feature/identity gates.
+ */
+export async function getAutoAssignProject(
+  widgetProjectId: string,
+): Promise<{ serverId: string; agentAssignmentEnabled: boolean } | null> {
+  const [proj] = await db
+    .select({
+      serverId: widgetProjects.serverId,
+      agentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  return proj ?? null;
+}
+
+/**
  * Resolve the serverId + ticket title/description for an assign or clarification request.
  * Returns null if the project or ticket cannot be found (caller should treat as 404).
  */
