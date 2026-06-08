@@ -3,6 +3,7 @@ import {
   parseVerdict,
   resolveClarifierAction,
   buildClarifierMessages,
+  extractIntakeQa,
   ClarifierParseError,
   MAX_CLARIFICATION_ROUNDS,
   type ClarifierVerdict,
@@ -208,5 +209,95 @@ describe('buildClarifierMessages', () => {
     for (const m of messages) {
       expect(m.role).toBe('user');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractIntakeQa
+// ---------------------------------------------------------------------------
+
+describe('extractIntakeQa', () => {
+  it('returns [] for an empty transcript', () => {
+    expect(extractIntakeQa([])).toEqual([]);
+  });
+
+  it('skips the leading user problem statement (no preceding question)', () => {
+    const qa = extractIntakeQa([
+      { role: 'user', content: 'The dashboard is broken' },
+    ]);
+    expect(qa).toEqual([]);
+  });
+
+  it('pairs an agent question with the following user answer', () => {
+    const qa = extractIntakeQa([
+      { role: 'user', content: 'The dashboard is broken' },
+      { role: 'agent', content: 'Which browser are you using?' },
+      { role: 'user', content: 'Chrome 120' },
+    ]);
+    expect(qa).toEqual([{ question: 'Which browser are you using?', answer: 'Chrome 120' }]);
+  });
+
+  it('handles multiple Q&A rounds in order', () => {
+    const qa = extractIntakeQa([
+      { role: 'user', content: 'Broken thing' },
+      { role: 'agent', content: 'Which browser?' },
+      { role: 'user', content: 'Chrome' },
+      { role: 'agent', content: 'What did you expect?' },
+      { role: 'user', content: 'It should load' },
+    ]);
+    expect(qa).toEqual([
+      { question: 'Which browser?', answer: 'Chrome' },
+      { question: 'What did you expect?', answer: 'It should load' },
+    ]);
+  });
+
+  it('accumulates consecutive agent messages into one question', () => {
+    const qa = extractIntakeQa([
+      { role: 'agent', content: 'Hi! A couple questions.' },
+      { role: 'agent', content: 'Which browser?' },
+      { role: 'user', content: 'Firefox' },
+    ]);
+    expect(qa).toEqual([
+      { question: 'Hi! A couple questions.\nWhich browser?', answer: 'Firefox' },
+    ]);
+  });
+
+  it('accumulates consecutive user replies into one answer', () => {
+    const qa = extractIntakeQa([
+      { role: 'agent', content: 'Tell me more.' },
+      { role: 'user', content: 'It crashes' },
+      { role: 'user', content: 'on save' },
+    ]);
+    expect(qa).toEqual([{ question: 'Tell me more.', answer: 'It crashes\non save' }]);
+  });
+
+  it('drops a trailing agent question with no answer', () => {
+    const qa = extractIntakeQa([
+      { role: 'agent', content: 'Which browser?' },
+      { role: 'user', content: 'Chrome' },
+      { role: 'agent', content: 'Anything else?' },
+    ]);
+    expect(qa).toEqual([{ question: 'Which browser?', answer: 'Chrome' }]);
+  });
+
+  it('ignores non user/agent rows (event, team) and blank content', () => {
+    const qa = extractIntakeQa([
+      { role: 'event', content: '' },
+      { role: 'agent', content: 'Which browser?' },
+      { role: 'event', content: 'proposal' },
+      { role: 'user', content: '  Chrome  ' },
+      { role: 'team', content: 'internal note' },
+      { role: 'user', content: '   ' },
+    ]);
+    expect(qa).toEqual([{ question: 'Which browser?', answer: 'Chrome' }]);
+  });
+
+  it('tolerates a null content field', () => {
+    const qa = extractIntakeQa([
+      { role: 'agent', content: null },
+      { role: 'agent', content: 'Which browser?' },
+      { role: 'user', content: 'Chrome' },
+    ]);
+    expect(qa).toEqual([{ question: 'Which browser?', answer: 'Chrome' }]);
   });
 });

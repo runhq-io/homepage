@@ -17,6 +17,8 @@ import {
   workspaceTasks,
   widgetClarifications,
   widgetClarificationQuestions,
+  widgetChatConversations,
+  widgetChatMessages,
 } from '../../db/schema';
 import {
   startClarification,
@@ -25,6 +27,7 @@ import {
   markClarificationStarted,
   getTicketClarification,
   getAnsweredQa,
+  defaultLoadIntakeQa,
   ClarifierAnswerError,
   type CallModel,
 } from './ClarifierService';
@@ -50,6 +53,7 @@ beforeAll(async () => {
     slug: `clarif-${RUN_HEX}`,
     apiKey: `apikey-${RUN_HEX}`,
     apiSecretHash: `secret-${RUN_HEX}`,
+    channelId: `ch_clarif_${RUN_HEX}`,
     enabled: true,
     isPublic: true,
   }).returning({ id: widgetProjects.id });
@@ -597,5 +601,106 @@ describe('markClarificationStarted', () => {
       .from(widgetClarifications)
       .where(eq(widgetClarifications.id, started.clarificationId));
     expect(afterRow!.status).toBe('started');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Intake Q&A threading — the chat-intake conversation must reach the clarifier
+// so an already-clarified ticket short-circuits to 'ready' instead of being
+// re-interrogated from scratch (the redundant-clarification fix).
+// ---------------------------------------------------------------------------
+describe('intake Q&A threading', () => {
+  it('startClarification feeds injected intake Q&A into the model prompt', async () => {
+    const taskId = await makeTask('Dark mode', 'Add a dark theme');
+
+    let seenContent = '';
+    const stub: CallModel = vi.fn().mockImplementation(async (args) => {
+      seenContent = args.messages.map((m) => m.content).join('\n');
+      return JSON.stringify({ ready: true });
+    });
+
+    const result = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'a1', command: 'do it', ticket: { title: 'Dark mode', description: 'Add a dark theme' } },
+      {
+        callModel: stub,
+        loadIntakeQa: async () => [
+          { question: 'Which screens need it?', answer: 'All of them' },
+          { question: 'Follow system setting?', answer: 'Yes' },
+        ],
+      },
+    );
+
+    expect(result.status).toBe('ready');
+    expect(seenContent).toContain('Which screens need it?');
+    expect(seenContent).toContain('All of them');
+    expect(seenContent).toContain('Follow system setting?');
+  });
+
+  it('answerClarification prepends intake Q&A to the answered-round Q&A', async () => {
+    const taskId = await makeTask('Thin ticket', 'vague');
+
+    // Round 0: ask one question (no intake yet for this leg)
+    const askStub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'What exactly is broken?' }] }),
+    );
+    const start = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'a1', command: 'do it', ticket: { title: 'Thin ticket', description: 'vague' } },
+      { callModel: askStub, loadIntakeQa: async () => [] },
+    );
+    if (start.status !== 'asking') throw new Error('expected asking');
+
+    // Round 1: answer it; assert the model sees BOTH the intake Q&A and the answer.
+    let seenContent = '';
+    const proceedStub: CallModel = vi.fn().mockImplementation(async (args) => {
+      seenContent = args.messages.map((m) => m.content).join('\n');
+      return JSON.stringify({ ready: true });
+    });
+    const step = await answerClarification(
+      start.clarificationId,
+      [{ questionId: start.questions[0]!.id, answer: 'the export button' }],
+      {
+        callModel: proceedStub,
+        loadIntakeQa: async () => [{ question: 'From the chat: which page?', answer: 'Reports page' }],
+      },
+    );
+
+    expect(step.status).toBe('ready');
+    expect(seenContent).toContain('From the chat: which page?'); // intake Q&A
+    expect(seenContent).toContain('Reports page');
+    expect(seenContent).toContain('What exactly is broken?'); // answered round
+    expect(seenContent).toContain('the export button');
+  });
+
+  it('defaultLoadIntakeQa reconstructs Q&A from the ticket\'s originating chat conversation', async () => {
+    const taskId = await makeTask('From chat', 'created via chat');
+
+    const [conv] = await db.insert(widgetChatConversations).values({
+      widgetProjectId: PROJECT_ID,
+      widgetUserId: WIDGET_USER_ID,
+      status: 'closed',
+      createdTaskId: taskId,
+    }).returning({ id: widgetChatConversations.id });
+
+    // Ordered transcript: leading user statement, agent question, user answer,
+    // an interleaved event row (must be ignored), agent question, user answer.
+    await db.insert(widgetChatMessages).values([
+      { conversationId: conv!.id, role: 'user', content: 'The report export fails' },
+      { conversationId: conv!.id, role: 'agent', content: 'Which format?' },
+      { conversationId: conv!.id, role: 'user', content: 'PDF' },
+      { conversationId: conv!.id, role: 'event', content: '', payload: { kind: 'collect_prompt' } as any },
+      { conversationId: conv!.id, role: 'agent', content: 'How many rows?' },
+      { conversationId: conv!.id, role: 'user', content: 'About 5000' },
+    ]);
+
+    const qa = await defaultLoadIntakeQa(taskId);
+    expect(qa).toEqual([
+      { question: 'Which format?', answer: 'PDF' },
+      { question: 'How many rows?', answer: 'About 5000' },
+    ]);
+  });
+
+  it('defaultLoadIntakeQa returns [] for a ticket with no originating conversation', async () => {
+    const taskId = await makeTask('Native ticket', 'no chat');
+    expect(await defaultLoadIntakeQa(taskId)).toEqual([]);
   });
 });

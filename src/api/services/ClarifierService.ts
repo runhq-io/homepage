@@ -18,6 +18,8 @@ import { db } from '../../db/index';
 import {
   widgetClarifications,
   widgetClarificationQuestions,
+  widgetChatConversations,
+  widgetChatMessages,
   workspaceTasks,
   type WidgetClarification,
 } from '../../db/schema';
@@ -26,6 +28,7 @@ import {
   buildClarifierMessages,
   parseVerdict,
   resolveClarifierAction,
+  extractIntakeQa,
   ClarifierParseError,
   type ClarifierQuestion,
 } from './clarifierCore';
@@ -85,6 +88,27 @@ export class ClarifierAnswerError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Inline model-call bounds (shared with DedupService)
+// ---------------------------------------------------------------------------
+
+/**
+ * The clarifier and dedup Haiku calls run *synchronously inside* the widget
+ * `POST /api/widget/tickets/:id/{assign,clarify-answer}` HTTP handlers, which
+ * sit behind Cloudflare's ~100s origin-timeout window. The Anthropic SDK
+ * otherwise defaults to a 10-minute request timeout with 2 retries — so a
+ * single slow or overloaded model call hangs the request until the gateway
+ * gives up and returns an opaque 504 (with no application error to diagnose).
+ *
+ * Bounding each call well under the gateway window means transient Anthropic
+ * slowness surfaces as a fast, retryable `clarifier_unavailable` (503) — or a
+ * fail-open dedup — instead of a 504. Worst-case inline budget on the assign
+ * path is up to two clarifier calls (parse retry) + one dedup call, i.e.
+ * 3 × (MODEL_CALL_MAX_RETRIES + 1) × MODEL_CALL_TIMEOUT_MS, kept under 100s.
+ */
+export const MODEL_CALL_TIMEOUT_MS = 15_000;
+export const MODEL_CALL_MAX_RETRIES = 1;
+
+// ---------------------------------------------------------------------------
 // Default real model call (Haiku)
 // ---------------------------------------------------------------------------
 
@@ -97,7 +121,11 @@ async function defaultCallModel(args: {
   const apiKey = settings.claudeApiKey;
   if (!apiKey) throw new Error('No claudeApiKey configured');
 
-  const anthropic = new (await import('@anthropic-ai/sdk')).default({ apiKey });
+  const anthropic = new (await import('@anthropic-ai/sdk')).default({
+    apiKey,
+    timeout: MODEL_CALL_TIMEOUT_MS,
+    maxRetries: MODEL_CALL_MAX_RETRIES,
+  });
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 1024,
@@ -108,6 +136,40 @@ async function defaultCallModel(args: {
   if (!t || t.type !== 'text') throw new Error('No text block in model response');
   return t.text;
 }
+
+// ---------------------------------------------------------------------------
+// Intake Q&A (prior conversation context)
+// ---------------------------------------------------------------------------
+
+/**
+ * Injectable loader for the intake Q&A of a ticket's originating widget-chat
+ * conversation. Returns [] when the ticket was not created from a chat
+ * conversation, or the conversation had no agent turns (agentless intake).
+ */
+export type LoadIntakeQa = (taskId: string) => Promise<Array<{ question: string; answer: string }>>;
+
+/**
+ * Real DB implementation: resolve the conversation that created this ticket
+ * (widget_chat_conversations.created_task_id), load its transcript in order,
+ * and collapse it into Q&A pairs the clarifier can read. Feeding this to the
+ * clarifier is what stops an assignment from re-asking what intake covered.
+ */
+export const defaultLoadIntakeQa: LoadIntakeQa = async (taskId) => {
+  const [conv] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, taskId))
+    .limit(1);
+  if (!conv) return [];
+
+  const rows = await db
+    .select({ role: widgetChatMessages.role, content: widgetChatMessages.content })
+    .from(widgetChatMessages)
+    .where(eq(widgetChatMessages.conversationId, conv.id))
+    .orderBy(asc(widgetChatMessages.createdAt));
+
+  return extractIntakeQa(rows);
+};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -189,12 +251,18 @@ async function insertQuestions(
 
 export async function startClarification(
   input: StartClarificationInput,
-  deps?: { callModel?: CallModel },
+  deps?: { callModel?: CallModel; loadIntakeQa?: LoadIntakeQa },
 ): Promise<ClarifierStep> {
   const callModel = deps?.callModel ?? defaultCallModel;
+  const loadIntakeQa = deps?.loadIntakeQa ?? defaultLoadIntakeQa;
+
+  // Prior conversation Q&A (from the chat intake that created this ticket) is
+  // fed to the clarifier so an already-clarified ticket resolves to 'ready'
+  // instead of being re-interrogated from scratch.
+  const intakeQa = await loadIntakeQa(input.taskId);
 
   // 1. Call model FIRST — if this throws (non-parse error) no DB row is written.
-  const { system, messages } = buildClarifierMessages(input.ticket, []);
+  const { system, messages } = buildClarifierMessages(input.ticket, intakeQa);
   const { verdict } = await callModelWithFallback({ system, messages }, callModel);
 
   // 2. Resolve action before touching the DB
@@ -235,9 +303,10 @@ export async function startClarification(
 export async function answerClarification(
   clarificationId: string,
   answers: Array<{ questionId: string; answer: string | string[] }>,
-  deps?: { callModel?: CallModel },
+  deps?: { callModel?: CallModel; loadIntakeQa?: LoadIntakeQa },
 ): Promise<ClarifierStep> {
   const callModel = deps?.callModel ?? defaultCallModel;
+  const loadIntakeQa = deps?.loadIntakeQa ?? defaultLoadIntakeQa;
 
   // 1. Load the clarification row
   const [clarRow] = await db
@@ -320,10 +389,15 @@ export async function answerClarification(
     )
     .orderBy(asc(widgetClarificationQuestions.createdAt));
 
-  const qa = answeredRows.map((r) => ({
+  const answeredQa = answeredRows.map((r) => ({
     question: r.prompt,
     answer: Array.isArray(r.answer) ? (r.answer as string[]).join(', ') : String(r.answer ?? ''),
   }));
+
+  // Prepend the intake conversation Q&A so later rounds keep the full context
+  // the chat agent already gathered (mirrors startClarification).
+  const intakeQa = await loadIntakeQa(clarRow.taskId);
+  const qa = [...intakeQa, ...answeredQa];
 
   // Load the ticket title/description from workspaceTasks
   const [taskRow] = await db

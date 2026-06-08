@@ -243,3 +243,63 @@ export function buildClarifierMessages(
     messages: [{ role: 'user', content: lines.join('\n') }],
   };
 }
+
+// ---------------------------------------------------------------------------
+// extractIntakeQa
+// ---------------------------------------------------------------------------
+
+/** A single chat transcript row, as far as Q&A extraction is concerned. */
+export interface IntakeMessage {
+  role: 'user' | 'agent' | string;
+  content: string | null;
+}
+
+/**
+ * Collapse an intake chat transcript into the `{question, answer}` pairs the
+ * clarifier consumes, so an assignment never re-asks what the intake agent
+ * already covered.
+ *
+ * Pairing rules:
+ *   - Only 'agent' (the question) and 'user' (the answer) rows with non-empty
+ *     content participate; 'event'/'team'/blank rows are ignored.
+ *   - Consecutive agent messages accumulate into one question (the agent asked
+ *     several things before the user replied).
+ *   - Consecutive user replies to a pending question accumulate into one answer.
+ *   - Leading user messages with no preceding agent question are skipped — they
+ *     are the visitor's initial problem statement, which already lives in the
+ *     ticket description.
+ *   - A trailing agent question with no answer is dropped (nothing to send).
+ *
+ * Pure and deterministic — no I/O.
+ */
+export function extractIntakeQa(
+  messages: IntakeMessage[],
+): Array<{ question: string; answer: string }> {
+  const qa: Array<{ question: string; answer: string }> = [];
+  let question: string | null = null;
+  let answer: string[] = [];
+
+  const flush = () => {
+    if (question !== null && answer.length > 0) {
+      qa.push({ question, answer: answer.join('\n') });
+    }
+    question = null;
+    answer = [];
+  };
+
+  for (const m of messages) {
+    const content = (m.content ?? '').trim();
+    if (!content) continue;
+    if (m.role === 'agent') {
+      // A new agent turn after a completed answer closes the prior pair.
+      if (answer.length > 0) flush();
+      question = question ? question + '\n' + content : content;
+    } else if (m.role === 'user') {
+      if (question !== null) answer.push(content);
+      // else: leading problem statement — already captured in the description.
+    }
+  }
+  flush();
+
+  return qa;
+}
