@@ -228,6 +228,13 @@ describe('assignAgent — qa forwarding to serverTokenFetch', () => {
     const [, , body] = vi.mocked(ServerService.serverTokenFetch).mock.calls[0]!;
     expect((body as any).clarification).toBeUndefined();
   });
+
+  it('sends a ticket-title fallback command when the triager command is empty', async () => {
+    await assignAgent(PROJECT_A_ID, TASK_A_ID, { ...BASE_REQ, command: '' });
+
+    const [, , body] = vi.mocked(ServerService.serverTokenFetch).mock.calls[0]!;
+    expect((body as any).command).toBe('Work on this ticket: Widget Ticket A');
+  });
 });
 
 // ---------------------------------------------------------------------------

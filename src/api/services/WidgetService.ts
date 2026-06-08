@@ -2933,6 +2933,9 @@ export async function assignAgent(
 
   const task = await getWidgetTaskRow(serverId, ticketId);
   if (!task) throw new WidgetAssignError('ticket_not_found', 404);
+  const workspaceCommand = req.command.trim()
+    ? req.command
+    : `Work on this ticket: ${task.title}`;
 
   const [server] = await db
     .select()
@@ -2949,7 +2952,7 @@ export async function assignAgent(
       {
         ticketId,
         agentId: req.agentId,
-        command: req.command,
+        command: workspaceCommand,
         actor: {
           externalUserId: req.actor.externalUserId,
           name: req.actor.name,
