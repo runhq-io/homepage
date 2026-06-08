@@ -2511,6 +2511,17 @@
       '  display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap;',
       '}',
       '.rw-event-text b { color: var(--rw-fg-2); font-weight: 600; }',
+      '.rw-event-message { min-width: 0; }',
+      '.rw-event-message code {',
+      '  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;',
+      '  font-size: 0.92em;',
+      '  padding: 1px 4px;',
+      '  border-radius: 4px;',
+      '  background: var(--rw-panel-2);',
+      '  color: var(--rw-fg-2);',
+      '  border: 1px solid var(--rw-line);',
+      '}',
+      '.rw-event-message strong { color: var(--rw-fg-2); font-weight: 600; }',
       '.rw-event-arrow { color: var(--rw-muted-2); padding: 0 2px; }',
       '.rw-event-when { color: var(--rw-muted-2); font-size: 11px; flex: 0 0 auto; }',
 
@@ -5887,6 +5898,7 @@
 
   function mergeThread(comments, activity) {
     var nodes = [];
+    var seenActivity = {};
     for (var i = 0; i < comments.length; i++) {
       nodes.push({ kind: "comment", comment: comments[i], at: new Date(comments[i].createdAt).getTime() });
     }
@@ -5895,10 +5907,53 @@
       var e = activity[j];
       if (e.type === "comment_added" || e.type === "comment_edited" || e.type === "comment_deleted") continue;
       if (e.type === "attachment_added") continue;
+      if (isDuplicateActivityEvent(e, seenActivity)) continue;
       nodes.push({ kind: "event", event: e, at: new Date(e.createdAt).getTime() });
     }
     nodes.sort(function (a, b) { return a.at - b.at; });
     return nodes;
+  }
+
+  function activityDedupeKey(e) {
+    if (!e || e.type !== "agent_assigned") return null;
+    var m = e.metadata || {};
+    var agentId = m.agent_id || m.agentId || "";
+    var actor = e.createdByName || e.createdBy || m.external_user_id || m.externalUserId || "";
+    var command = m.command || "";
+    return [e.type, actor, agentId, command].join("|");
+  }
+
+  function isDuplicateActivityEvent(e, seen) {
+    var key = activityDedupeKey(e);
+    if (!key) return false;
+    var at = new Date(e.createdAt).getTime();
+    if (!Number.isFinite(at)) at = 0;
+    if (seen[key] != null && Math.abs(at - seen[key]) <= 15000) {
+      // BE writes the widget audit row and older workspace builds also wrote a
+      // matching assignment row. Collapse those near-simultaneous duplicates.
+      return true;
+    }
+    seen[key] = at;
+    return false;
+  }
+
+  function renderInlineMarkdown(text) {
+    var src = String(text == null ? "" : text);
+    var out = [];
+    var re = /(`([^`]+)`|\*\*([^*]+)\*\*)/g;
+    var last = 0;
+    var match;
+    while ((match = re.exec(src)) !== null) {
+      if (match.index > last) out.push(document.createTextNode(src.slice(last, match.index)));
+      if (match[2] != null) {
+        out.push(h("code", null, match[2]));
+      } else {
+        out.push(h("strong", null, match[3]));
+      }
+      last = match.index + match[0].length;
+    }
+    if (last < src.length) out.push(document.createTextNode(src.slice(last)));
+    return out.length ? out : [document.createTextNode(src)];
   }
 
   function describeEvent(e) {
@@ -5936,7 +5991,7 @@
       textChildren.push(h("span", { className: "rw-event-arrow" }, " → "));
       if (m.to) textChildren.push(renderStatusChip(m.to));
     } else {
-      textChildren.push(document.createTextNode(" " + describeEvent(e)));
+      textChildren.push(h("span", { className: "rw-event-message" }, renderInlineMarkdown(describeEvent(e))));
     }
 
     return h("div", { className: "rw-event" }, [
