@@ -13,6 +13,7 @@ import { db } from '../../db/index';
 import { workspaceTasks } from '../../db/schema';
 import { eq, and, ne, isNull, notInArray, desc } from 'drizzle-orm';
 import type { CallModel } from './ClarifierService';
+import { MODEL_CALL_TIMEOUT_MS, MODEL_CALL_MAX_RETRIES } from './ClarifierService';
 import { buildDedupMessages, parseDedupVerdict, DedupParseError } from './dedupCore';
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,11 @@ async function defaultCallModel(args: {
   const apiKey = settings.claudeApiKey;
   if (!apiKey) throw new Error('No claudeApiKey configured');
 
-  const anthropic = new (await import('@anthropic-ai/sdk')).default({ apiKey });
+  const anthropic = new (await import('@anthropic-ai/sdk')).default({
+    apiKey,
+    timeout: MODEL_CALL_TIMEOUT_MS,
+    maxRetries: MODEL_CALL_MAX_RETRIES,
+  });
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 256,
