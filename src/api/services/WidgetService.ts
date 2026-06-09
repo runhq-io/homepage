@@ -2329,14 +2329,10 @@ export async function updateWidgetSettings(
   // `workspaceProjectId` lookup forms have been removed.
   const key = opts;
 
-  // Empty-roles guard: enabling assignment without roles is a configuration error.
-  if (settings.widgetAgentAssignmentEnabled === true) {
-    if (!settings.widgetAssignRoles || settings.widgetAssignRoles.length === 0) {
-      throw new WidgetSettingsValidationError(
-        'Cannot enable widget agent assignment: add at least one role.',
-      );
-    }
-  }
+  // Role-gating removed: enabling agent assignment no longer requires any role.
+  // The master switch alone authorizes auto-assign for identified (non-anon)
+  // widget users — see derivePermissions. (The legacy empty-roles guard here
+  // blocked enabling it now that the roles UI is gone.)
 
   // Validate login_url shape on every update that touches it. The
   // "required when public" check happens after we read existing state below.

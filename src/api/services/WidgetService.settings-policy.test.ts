@@ -40,11 +40,15 @@ describe('updateWidgetSettings — policy fields', () => {
     expect(row.widgetAssignRateLimitPerHour).toBe(60);
   });
 
-  it('rejects empty roles when assignment is enabled', async () => {
-    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
+  it('allows enabling assignment WITHOUT any roles (role-gating removed)', async () => {
+    // The master switch alone authorizes auto-assign for identified users now;
+    // roles are no longer required (and the roles UI is gone), so this must not throw.
+    await WidgetService.updateWidgetSettings(SERVER_ID, {
       widgetAgentAssignmentEnabled: true,
       widgetAssignRoles: [],
-    }, LOOKUP)).rejects.toThrow(/at least one role/i);
+    }, LOOKUP);
+    const [row] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId));
+    expect(row.widgetAgentAssignmentEnabled).toBe(true);
   });
 
   it('allows empty roles when assignment is disabled', async () => {
