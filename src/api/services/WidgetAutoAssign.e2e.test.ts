@@ -36,7 +36,14 @@ import {
 } from '../../db/schema';
 import * as WidgetChatService from './WidgetChatService';
 import * as WidgetAutoAssign from './WidgetAutoAssign';
+import * as ClarifierService from './ClarifierService';
 import * as ServerService from './ServerService';
+import { widgetClarificationQuestions } from '../../db/schema';
+
+// Deterministic clarifier model: a clear ticket → ready; a thin one → one question.
+const READY_MODEL = async () => '{"ready": true}';
+const ASK_MODEL = async () =>
+  '{"ready": false, "questions": [{"prompt": "What exactly would you like, and why?", "options": null, "multiselect": false}]}';
 
 vi.mock('./ServerService', () => ({
   serverTokenFetch: vi.fn(),
@@ -58,6 +65,8 @@ let WIDGET_USER_ID: string;
 // await completion before asserting (the production hook is fire-and-forget).
 let pendingAutoAssign: Promise<void> | null = null;
 let stubbedGuard: () => Promise<{ safe: boolean; reasons: string[]; unavailable?: boolean }>;
+// Per-test: does the (real) clarifier gate find the ticket clear or thin?
+let clarifyMode: 'ready' | 'ask';
 
 beforeAll(async () => {
   await db.insert(users).values({ id: USER_ID, email: `e2eaa+${RUN_HEX}@test.invalid`, name: 'U' }).onConflictDoNothing();
@@ -91,6 +100,16 @@ beforeAll(async () => {
       await WidgetAutoAssign.maybeAutoAssign(projectId, ticketId, widgetUserId, {
         ...deps,
         guard: () => stubbedGuard(),
+        // Real clarifier gate (real DB rows + questions) with a deterministic model.
+        clarify: async (serverId, tid, wuid, ticket) => {
+          const step = await ClarifierService.startClarification(
+            { serverId, taskId: tid, widgetUserId: wuid, ticket, agentId: WidgetAutoAssign.AUTO_ASSIGN_SENTINEL_AGENT, command: '' },
+            { callModel: clarifyMode === 'ask' ? ASK_MODEL : READY_MODEL, loadIntakeQa: async () => [] },
+          );
+          return step.status === 'asking'
+            ? { status: 'asking', clarificationId: step.clarificationId }
+            : { status: 'ready' };
+        },
         findDuplicate: async () => ({ duplicateOf: null }),
       });
     })();
@@ -112,6 +131,7 @@ let CONV_ID: string;
 beforeEach(async () => {
   pendingAutoAssign = null;
   stubbedGuard = async () => ({ safe: true, reasons: [] });
+  clarifyMode = 'ready';
 
   // Route workspace calls by path: suggest → pick the exposed agent,
   // assign → return a jobId, anything else (chat turn) → ack.
@@ -179,5 +199,61 @@ describe('widget feedback → automatic server-side agent assign (e2e)', () => {
     const meta = (task!.metadata ?? {}) as any;
     expect(meta.autoAssign).toMatchObject({ status: 'skipped_unsafe' });
     expect(meta.autoAssign.reasons).toContain('asks for the production API key');
+  });
+
+  it('a THIN ticket is held for clarification — questions asked, NO agent assigned', async () => {
+    clarifyMode = 'ask';
+    await seedUserMessage('hi');
+
+    const { ticketId } = await WidgetChatService.submitTicketFromConversation(CONV_ID, PROJECT_ID, WIDGET_USER_ID);
+    await pendingAutoAssign;
+
+    // Not assigned — held for clarification.
+    expect(assignCalls()).toHaveLength(0);
+    const [task] = await db.select().from(workspaceTasks).where(eq(workspaceTasks.id, ticketId));
+    const meta = (task!.metadata ?? {}) as any;
+    expect(meta.autoAssign.status).toBe('needs_clarification');
+    expect(meta.autoAssign.clarificationId).toBeTruthy();
+
+    // The clarifier wrote real open questions for the widget to render.
+    const clar = await ClarifierService.getTicketClarification(ticketId);
+    expect(clar?.status).toBe('asking');
+    const questions = await db
+      .select()
+      .from(widgetClarificationQuestions)
+      .where(eq(widgetClarificationQuestions.clarificationId, clar!.id));
+    expect(questions.length).toBeGreaterThan(0);
+  });
+
+  it('answering the clarification makes it ready → the agent is then auto-assigned (no manual step)', async () => {
+    clarifyMode = 'ask';
+    await seedUserMessage('hi');
+    const { ticketId } = await WidgetChatService.submitTicketFromConversation(CONV_ID, PROJECT_ID, WIDGET_USER_ID);
+    await pendingAutoAssign;
+
+    const clar = await ClarifierService.getTicketClarification(ticketId);
+    expect(clar?.status).toBe('asking');
+    const [q] = await db
+      .select()
+      .from(widgetClarificationQuestions)
+      .where(eq(widgetClarificationQuestions.clarificationId, clar!.id));
+
+    // This mirrors the clarify-answer route: answerClarification → (ready) → finalize tail.
+    const step = await ClarifierService.answerClarification(
+      clar!.id,
+      [{ questionId: q!.id, answer: 'I want a dark-mode toggle in Settings so night use is easier.' }],
+      { callModel: READY_MODEL, loadIntakeQa: async () => [] },
+    );
+    expect(step.status).toBe('ready');
+
+    const deps = await WidgetAutoAssign.defaultAutoAssignDeps();
+    const ticket = await deps.getTicket(SERVER_ID, ticketId);
+    const outcome = await WidgetAutoAssign.finalizeAutoAssign(
+      PROJECT_ID, ticketId, WIDGET_USER_ID, SERVER_ID, ticket!,
+      { ...deps, findDuplicate: async () => ({ duplicateOf: null }) },
+    );
+
+    expect(outcome).toMatchObject({ status: 'assigned', agentId: AGENT_ID });
+    expect(assignCalls().length).toBeGreaterThanOrEqual(1);
   });
 });

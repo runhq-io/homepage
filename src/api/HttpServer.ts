@@ -37,6 +37,7 @@ import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
 import * as WidgetAutoAssign from './services/WidgetAutoAssign';
+import * as ClarifierService from './services/ClarifierService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WidgetChatService from './services/WidgetChatService';
 import { streamSSE } from 'hono/streaming';
@@ -5981,6 +5982,68 @@ export function createHttpApp() {
       return c.json({ ticket }, 201);
     } catch (err) {
       return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/clarify-answer
+  //
+  // The auto-assign clarifier gate (WidgetAutoAssign) holds a thin ticket in a
+  // `needs_clarification` state with open questions. The identified reporter
+  // answers them here. When the clarifier then resolves to READY, we run the
+  // assign tail (dedup -> pick agent -> assign) — so a clarified ticket starts
+  // its agent automatically, with no separate "assign" step.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/clarify-answer', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    const ticketId = c.req.param('id');
+    const body = await c.req.json().catch(() => null) as
+      | { clarificationId?: unknown; answers?: unknown }
+      | null;
+    if (!body || typeof body.clarificationId !== 'string' || !Array.isArray(body.answers)) {
+      return c.json({ error: 'clarificationId and answers[] required' }, 400);
+    }
+    const answers = body.answers as Array<{ questionId: string; answer: string | string[] }>;
+
+    // Ownership: the clarification must belong to THIS ticket + THIS reporter.
+    const owned = await ClarifierService.getOwnedClarification(body.clarificationId, {
+      taskId: ticketId,
+      widgetUserId: auth.widgetUserId,
+    });
+    if (!owned) return c.json({ error: 'clarification_not_found' }, 404);
+
+    let step: Awaited<ReturnType<typeof ClarifierService.answerClarification>>;
+    try {
+      step = await ClarifierService.answerClarification(body.clarificationId, answers);
+    } catch (err) {
+      if (err instanceof ClarifierService.ClarifierAnswerError) {
+        return c.json({ error: 'invalid_answers' }, 400);
+      }
+      console.error('[widget] clarify-answer failed:', err);
+      return c.json({ error: 'clarifier_unavailable' }, 503);
+    }
+
+    if (step.status === 'asking') {
+      return c.json({
+        clarification: { status: 'asking' as const, round: step.round, questions: step.questions },
+      });
+    }
+
+    // Ready — start the agent automatically via the shared assign tail.
+    try {
+      const outcome = await WidgetAutoAssign.finalizeAutoAssignTicket(
+        auth.projectId,
+        ticketId,
+        auth.widgetUserId,
+      );
+      return c.json({ clarification: { status: 'started' as const }, outcome });
+    } catch (err) {
+      console.error('[widget] clarify-answer finalize/assign failed:', err);
+      // The clarification IS resolved; the assign tail can be retried later.
+      return c.json({ clarification: { status: 'started' as const }, outcome: { status: 'failed' as const } });
     }
   });
 

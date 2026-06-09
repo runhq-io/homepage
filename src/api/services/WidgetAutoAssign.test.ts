@@ -11,6 +11,7 @@ function makeDeps(over: Partial<AutoAssignDeps> = {}): AutoAssignDeps {
     getProject: vi.fn().mockResolvedValue({ serverId: SERVER, agentAssignmentEnabled: true }),
     getTicket: vi.fn().mockResolvedValue({ title: 'Add dark mode', description: 'toggle please' }),
     guard: vi.fn().mockResolvedValue({ safe: true, reasons: [] }),
+    clarify: vi.fn().mockResolvedValue({ status: 'ready' }),
     findDuplicate: vi.fn().mockResolvedValue({ duplicateOf: null }),
     suggest: vi.fn().mockResolvedValue({ agentId: 'agent_a', command: 'Implement dark mode' }),
     loadIntakeQa: vi.fn().mockResolvedValue([{ question: 'q', answer: 'a' }]),
@@ -76,6 +77,39 @@ describe('maybeAutoAssign', () => {
       TICKET,
       expect.objectContaining({ status: 'failed' }),
     );
+  });
+
+  it('does NOT assign a thin ticket that needs clarification — asks first (needs_clarification)', async () => {
+    const deps = makeDeps({
+      clarify: vi.fn().mockResolvedValue({ status: 'asking', clarificationId: 'clar_1' }),
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.findDuplicate).not.toHaveBeenCalled();
+    expect(deps.suggest).not.toHaveBeenCalled();
+    expect(deps.assign).not.toHaveBeenCalled();
+    expect(deps.recordOutcome).toHaveBeenCalledWith(
+      SERVER,
+      TICKET,
+      expect.objectContaining({ status: 'needs_clarification', clarificationId: 'clar_1' }),
+    );
+  });
+
+  it('runs the clarify gate AFTER the injection guard (skips clarify on unsafe content)', async () => {
+    const clarify = vi.fn().mockResolvedValue({ status: 'ready' });
+    const deps = makeDeps({
+      guard: vi.fn().mockResolvedValue({ safe: false, reasons: ['asks for secrets'] }),
+      clarify,
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(clarify).not.toHaveBeenCalled();
+    expect(deps.assign).not.toHaveBeenCalled();
+  });
+
+  it('proceeds to dedup/suggest/assign when the clarifier says ready', async () => {
+    const deps = makeDeps({ clarify: vi.fn().mockResolvedValue({ status: 'ready' }) });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.clarify).toHaveBeenCalledOnce();
+    expect(deps.assign).toHaveBeenCalledOnce();
   });
 
   it('does not assign when a duplicate is found — skipped_duplicate', async () => {

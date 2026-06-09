@@ -24,6 +24,7 @@ import type { InjectionGuardResult } from './InjectionGuardService';
 
 export type AutoAssignStatus =
   | 'assigned'
+  | 'needs_clarification'
   | 'skipped_unsafe'
   | 'skipped_no_agent'
   | 'skipped_duplicate'
@@ -36,7 +37,19 @@ export interface AutoAssignOutcome {
   agentId?: string;
   jobId?: string;
   duplicateOf?: string;
+  /** Set when status === 'needs_clarification' — the open clarification the widget renders. */
+  clarificationId?: string;
 }
+
+/** Result of the clarifier gate: a clear ticket is `ready`; a thin one `asking`. */
+export type ClarifyGateResult = { status: 'ready' } | { status: 'asking'; clarificationId: string };
+
+/**
+ * Placeholder agent stored on the auto-flow clarification row. The real agent is
+ * picked by the LLM suggester after the ticket is ready, so this is never used
+ * to assign — it only satisfies the not-null column.
+ */
+export const AUTO_ASSIGN_SENTINEL_AGENT = '__auto__';
 
 /** Request shape forwarded to the existing WidgetService.assignAgent. */
 export interface AutoAssignRequest {
@@ -50,6 +63,19 @@ export interface AutoAssignDeps {
   getProject(projectId: string): Promise<{ serverId: string; agentAssignmentEnabled: boolean } | null>;
   getTicket(serverId: string, ticketId: string): Promise<{ title: string; description: string | null } | null>;
   guard(ticket: { title: string; description: string | null }): Promise<InjectionGuardResult>;
+  /**
+   * Quality gate: decide whether the ticket has enough detail to act on. A clear
+   * ticket resolves `ready` (assign proceeds); a thin/vague one resolves `asking`
+   * (questions are persisted + shown in the widget; NO agent is started until the
+   * user answers and it becomes ready). Fed the chat-intake Q&A, so a ticket the
+   * chat agent already fleshed out resolves `ready` without re-interrogation.
+   */
+  clarify(
+    serverId: string,
+    ticketId: string,
+    widgetUserId: string,
+    ticket: { title: string; description: string | null },
+  ): Promise<ClarifyGateResult>;
   findDuplicate(
     serverId: string,
     ticketId: string,
@@ -104,50 +130,20 @@ export async function maybeAutoAssign(
       return;
     }
 
-    // Dedup: a likely duplicate is created but not assigned (avoids N duplicate
-    // agent runs from N similar reports).
-    const dup = await deps.findDuplicate(serverId, ticketId, ticket);
-    if (dup.duplicateOf) {
+    // Quality gate — clarify BEFORE committing an agent. A thin ticket (e.g.
+    // "hi") is held for the user to flesh out instead of spawning a job from
+    // nothing; a clear ticket (or one the chat agent already fleshed out)
+    // passes straight through.
+    const clar = await deps.clarify(serverId, ticketId, widgetUserId, ticket);
+    if (clar.status === 'asking') {
       await deps.recordOutcome(serverId, ticketId, {
-        status: 'skipped_duplicate',
-        duplicateOf: dup.duplicateOf,
+        status: 'needs_clarification',
+        clarificationId: clar.clarificationId,
       });
       return;
     }
 
-    // Agent selection — the existing LLM picker over the project's exposed agents.
-    const suggestion = await deps.suggest(projectId, ticketId);
-    if (!suggestion.agentId) {
-      await deps.recordOutcome(serverId, ticketId, { status: 'skipped_no_agent' });
-      return;
-    }
-
-    const [actor, qa] = await Promise.all([
-      deps.getActor(widgetUserId),
-      deps.loadIntakeQa(ticketId),
-    ]);
-    if (!actor) {
-      await deps.recordOutcome(serverId, ticketId, { status: 'failed' });
-      return;
-    }
-
-    const { jobId } = await deps.assign(projectId, ticketId, {
-      agentId: suggestion.agentId,
-      command: suggestion.command,
-      actor: {
-        widgetUserId,
-        externalUserId: actor.externalUserId,
-        name: actor.name,
-        matchedRoles: [], // role-gating removed — identity alone authorizes
-      },
-      ...(qa.length > 0 ? { qa } : {}),
-    });
-
-    await deps.recordOutcome(serverId, ticketId, {
-      status: 'assigned',
-      agentId: suggestion.agentId,
-      jobId,
-    });
+    await finalizeAutoAssign(projectId, ticketId, widgetUserId, serverId, ticket, deps);
   } catch (err) {
     console.error(`[WidgetAutoAssign] auto-assign failed for ticket ${ticketId}:`, err);
     if (serverId) {
@@ -158,6 +154,64 @@ export async function maybeAutoAssign(
       }
     }
   }
+}
+
+/**
+ * The post-clarification tail: dedup → pick agent → assign → record. Shared by
+ * `maybeAutoAssign` (when the clarifier is ready up-front) and the
+ * clarify-answer route (when the user's answers make it ready). Throws on
+ * failure — callers wrap it (maybeAutoAssign's try/catch; the route's handler).
+ */
+export async function finalizeAutoAssign(
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string,
+  serverId: string,
+  ticket: { title: string; description: string | null },
+  deps: AutoAssignDeps,
+): Promise<AutoAssignOutcome> {
+  // Dedup: a likely duplicate is created but not assigned (avoids N duplicate
+  // agent runs from N similar reports).
+  const dup = await deps.findDuplicate(serverId, ticketId, ticket);
+  if (dup.duplicateOf) {
+    const outcome: AutoAssignOutcome = { status: 'skipped_duplicate', duplicateOf: dup.duplicateOf };
+    await deps.recordOutcome(serverId, ticketId, outcome);
+    return outcome;
+  }
+
+  // Agent selection — the existing LLM picker over the project's exposed agents.
+  const suggestion = await deps.suggest(projectId, ticketId);
+  if (!suggestion.agentId) {
+    const outcome: AutoAssignOutcome = { status: 'skipped_no_agent' };
+    await deps.recordOutcome(serverId, ticketId, outcome);
+    return outcome;
+  }
+
+  const [actor, qa] = await Promise.all([
+    deps.getActor(widgetUserId),
+    deps.loadIntakeQa(ticketId),
+  ]);
+  if (!actor) {
+    const outcome: AutoAssignOutcome = { status: 'failed' };
+    await deps.recordOutcome(serverId, ticketId, outcome);
+    return outcome;
+  }
+
+  const { jobId } = await deps.assign(projectId, ticketId, {
+    agentId: suggestion.agentId,
+    command: suggestion.command,
+    actor: {
+      widgetUserId,
+      externalUserId: actor.externalUserId,
+      name: actor.name,
+      matchedRoles: [], // role-gating removed — identity alone authorizes
+    },
+    ...(qa.length > 0 ? { qa } : {}),
+  });
+
+  const outcome: AutoAssignOutcome = { status: 'assigned', agentId: suggestion.agentId, jobId };
+  await deps.recordOutcome(serverId, ticketId, outcome);
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +251,28 @@ export async function defaultAutoAssignDeps(): Promise<AutoAssignDeps> {
     getProject: (projectId) => WidgetService.getAutoAssignProject(projectId),
     getTicket: (serverId, ticketId) => WidgetService.getWidgetTaskForServer(serverId, ticketId),
     guard: (ticket) => InjectionGuardService.checkTicket(ticket),
+    clarify: async (serverId, ticketId, widgetUserId, ticket) => {
+      // The agent is chosen AFTER clarification (by the picker), so the
+      // clarification row stores a sentinel agent — vestigial for this path.
+      // Quality gate fails OPEN: a clarifier outage must not block legit
+      // tickets, so any error resolves to `ready` (assign proceeds).
+      try {
+        const step = await ClarifierService.startClarification({
+          serverId,
+          taskId: ticketId,
+          widgetUserId,
+          ticket,
+          agentId: AUTO_ASSIGN_SENTINEL_AGENT,
+          command: '',
+        });
+        return step.status === 'asking'
+          ? { status: 'asking', clarificationId: step.clarificationId }
+          : { status: 'ready' };
+      } catch (err) {
+        console.warn('[WidgetAutoAssign] clarifier unavailable; proceeding without clarification:', err);
+        return { status: 'ready' };
+      }
+    },
     findDuplicate: (serverId, ticketId, ticket) =>
       DedupService.findLikelyDuplicate({ serverId, ticketId, candidate: ticket }),
     suggest: (projectId, ticketId) => WidgetService.suggestAssignment(projectId, ticketId),
@@ -222,4 +298,23 @@ export async function autoAssignTicket(
   } catch (err) {
     console.error('[WidgetAutoAssign] autoAssignTicket failed to run:', err);
   }
+}
+
+/**
+ * Run the assign tail (dedup → pick agent → assign) for a ticket whose
+ * clarification just became ready. Used by the clarify-answer route after the
+ * user's answers resolve the clarifier. Resolves real deps; returns the outcome
+ * so the route can report it. Throws on hard failure (the route maps it).
+ */
+export async function finalizeAutoAssignTicket(
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string,
+): Promise<AutoAssignOutcome> {
+  const deps = await defaultAutoAssignDeps();
+  const project = await deps.getProject(projectId);
+  if (!project) return { status: 'failed' };
+  const ticket = await deps.getTicket(project.serverId, ticketId);
+  if (!ticket) return { status: 'failed' };
+  return finalizeAutoAssign(projectId, ticketId, widgetUserId, project.serverId, ticket, deps);
 }
