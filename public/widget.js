@@ -3670,18 +3670,20 @@
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
         composeReturnView = "home";
 
-        // Assignment is now fully automatic and server-side (identity +
-        // injection guard + agent picker run after creation). There is no
-        // manual "hand to agent" step — every author simply lands on their
-        // My Submissions list.
-
-        // Land the author on their post: flip state to the list's
-        // My Submissions tab, then refresh — refreshAll re-renders the panel
-        // body for the new view once data arrives. State is set directly
-        // (not via goList) so the stale pre-submit caches never paint
-        // before the loading frame.
-        view = "list";
+        // Take the author straight into the ticket they just filed. Assignment
+        // is automatic + server-side, but a thin ticket is held for one round
+        // of clarifying questions — the detail view polls and surfaces those
+        // within a few seconds, so the author can answer and unblock the agent.
+        // Back from here lands on the My Submissions list (activeTab = 'mine').
         activeTab = "mine";
+        if (createdTicket && createdTicket.id) {
+          detailReturnView = null;
+          openDetailModal(createdTicket);
+          return;
+        }
+
+        // Fallback (no ticket id returned): land on the My Submissions list.
+        view = "list";
         return refreshAll();
       }).catch(function (err) {
         submitBtn.disabled = false;
