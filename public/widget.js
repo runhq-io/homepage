@@ -1283,8 +1283,24 @@
       // Toggle the rendered state. If a badge is forcing the pill open we
       // still flip the underlying preference; the next render that lacks
       // a badge will honor it.
-      setCollapsed(!shouldRenderCollapsed());
+      var nowCollapsed = !shouldRenderCollapsed();
+      setCollapsed(nowCollapsed);
       refreshTabLabel();
+      if (!tabEl) return;
+      if (nowCollapsed) {
+        // The pointer is still over the pill right after this click, so the
+        // `.rw-tab--collapsed:hover` peek rule would immediately un-tuck it
+        // and the collapse would appear to do nothing. Suppress the peek
+        // until the pointer leaves the pill once, so the tuck is visible
+        // right away; afterwards hovering peeks the sliver back as usual.
+        tabEl.classList.add("rw-tab--peek-suppressed");
+        tabEl.addEventListener("mouseleave", function onLeave() {
+          tabEl.classList.remove("rw-tab--peek-suppressed");
+          tabEl.removeEventListener("mouseleave", onLeave);
+        });
+      } else {
+        tabEl.classList.remove("rw-tab--peek-suppressed");
+      }
     });
     return btn;
   }
@@ -1498,6 +1514,19 @@
       '.rw-tab--collapsed:hover { transform: translateY(-50%); }',
       '.rw-tab--top.rw-tab--collapsed:hover,',
       '.rw-tab--bottom.rw-tab--collapsed:hover { transform: none; }',
+      /* Immediately after an explicit collapse (chevron click) the pointer is
+         still over the pill, which would trigger the peek rules above and
+         leave it un-tucked. This transient class — set on the collapse click,
+         cleared on the next pointer-leave — re-asserts the tucked transform so
+         the collapse is visible right away. Higher specificity than the
+         :hover peek rules, so it wins while present. */
+      '.rw-tab--collapsed.rw-tab--peek-suppressed:hover {',
+      '  transform: translate(' + (isRight ? "calc(100% - 5px)" : "calc(-100% + 5px)") + ', -50%);',
+      '}',
+      '.rw-tab--top.rw-tab--collapsed.rw-tab--peek-suppressed:hover,',
+      '.rw-tab--bottom.rw-tab--collapsed.rw-tab--peek-suppressed:hover {',
+      '  transform: translateX(' + (isRight ? "calc(100% - 5px)" : "calc(-100% + 5px)") + ');',
+      '}',
       /* Enlarged invisible hit zone — extends ~22px into the screen
          interior so users can find and hover the 5px sliver without
          pixel-perfect aim. Only active in the collapsed state; in normal
