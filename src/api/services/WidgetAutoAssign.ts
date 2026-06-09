@@ -274,7 +274,12 @@ export async function defaultAutoAssignDeps(): Promise<AutoAssignDeps> {
       }
     },
     findDuplicate: (serverId, ticketId, ticket) =>
-      DedupService.findLikelyDuplicate({ serverId, ticketId, candidate: ticket }),
+      // Dev escape hatch: WIDGET_AUTOASSIGN_DISABLE_DEDUP=true skips dedup so the
+      // same test ticket can be filed repeatedly without being blocked. NEVER
+      // set in production — dedup is what prevents N agents on N copies.
+      process.env.WIDGET_AUTOASSIGN_DISABLE_DEDUP === 'true'
+        ? Promise.resolve({ duplicateOf: null })
+        : DedupService.findLikelyDuplicate({ serverId, ticketId, candidate: ticket }),
     suggest: (projectId, ticketId) => WidgetService.suggestAssignment(projectId, ticketId),
     loadIntakeQa: (ticketId) => ClarifierService.defaultLoadIntakeQa(ticketId),
     getActor: (widgetUserId) => WidgetService.getWidgetUserAuditInfo(widgetUserId),
