@@ -6359,7 +6359,6 @@ export function createHttpApp() {
       widgetRoleClaimName,
       widgetAssignRateLimitPerHour,
       widgetChatAgentEntityId,
-      widgetChatInstructions,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const lookup = parseWidgetLookup(projectId);
@@ -6376,7 +6375,6 @@ export function createHttpApp() {
         widgetRoleClaimName,
         widgetAssignRateLimitPerHour,
         widgetChatAgentEntityId,
-        widgetChatInstructions,
       }, lookup);
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {
