@@ -548,6 +548,139 @@
 
   function clearChildren(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
 
+  function markdownSafeUrl(raw) {
+    var url = String(raw || "").trim();
+    if (!url) return null;
+    if (/^(https?:|mailto:|tel:)/i.test(url)) return url;
+    if (url.charAt(0) === "/" && url.charAt(1) !== "/") return url;
+    return null;
+  }
+
+  function findMarkdownClose(text, delimiter, start) {
+    for (var i = start; i < text.length; i++) {
+      if (text.charAt(i) === "\\") {
+        i++;
+        continue;
+      }
+      if (text.slice(i, i + delimiter.length) === delimiter) return i;
+    }
+    return -1;
+  }
+
+  function isWordChar(ch) {
+    return !!ch && /[A-Za-z0-9]/.test(ch);
+  }
+
+  function appendMarkdownInline(parent, text, depth) {
+    text = String(text || "");
+    depth = depth || 0;
+    if (depth > 8) {
+      parent.appendChild(document.createTextNode(text));
+      return;
+    }
+
+    var i = 0;
+    var plainStart = 0;
+    function flushPlain(until) {
+      if (until > plainStart) parent.appendChild(document.createTextNode(text.slice(plainStart, until)));
+    }
+    function appendWrapped(tag, className, delimiter, closeAt) {
+      flushPlain(i);
+      var el = h(tag, className ? { className: className } : null);
+      appendMarkdownInline(el, text.slice(i + delimiter.length, closeAt), depth + 1);
+      parent.appendChild(el);
+      i = closeAt + delimiter.length;
+      plainStart = i;
+    }
+
+    while (i < text.length) {
+      var ch = text.charAt(i);
+
+      if (ch === "\\" && i + 1 < text.length && "\\`*_~[]()".indexOf(text.charAt(i + 1)) !== -1) {
+        flushPlain(i);
+        parent.appendChild(document.createTextNode(text.charAt(i + 1)));
+        i += 2;
+        plainStart = i;
+        continue;
+      }
+
+      if (ch === "`") {
+        var codeClose = findMarkdownClose(text, "`", i + 1);
+        if (codeClose !== -1) {
+          flushPlain(i);
+          parent.appendChild(h("code", null, text.slice(i + 1, codeClose)));
+          i = codeClose + 1;
+          plainStart = i;
+          continue;
+        }
+      }
+
+      if (ch === "[") {
+        var labelClose = text.indexOf("](", i + 1);
+        var urlClose = labelClose === -1 ? -1 : text.indexOf(")", labelClose + 2);
+        if (labelClose !== -1 && urlClose !== -1) {
+          var href = markdownSafeUrl(text.slice(labelClose + 2, urlClose));
+          if (href) {
+            flushPlain(i);
+            var a = h("a", { href: href, target: "_blank", rel: "noopener noreferrer" });
+            appendMarkdownInline(a, text.slice(i + 1, labelClose), depth + 1);
+            parent.appendChild(a);
+            i = urlClose + 1;
+            plainStart = i;
+            continue;
+          }
+        }
+      }
+
+      var close = -1;
+      if (text.slice(i, i + 2) === "**") {
+        close = findMarkdownClose(text, "**", i + 2);
+        if (close !== -1) {
+          appendWrapped("strong", null, "**", close);
+          continue;
+        }
+      }
+      if (text.slice(i, i + 2) === "__") {
+        close = findMarkdownClose(text, "__", i + 2);
+        if (close !== -1) {
+          appendWrapped("strong", null, "__", close);
+          continue;
+        }
+      }
+      if (text.slice(i, i + 2) === "~~") {
+        close = findMarkdownClose(text, "~~", i + 2);
+        if (close !== -1) {
+          appendWrapped("s", null, "~~", close);
+          continue;
+        }
+      }
+
+      if (ch === "*" && text.charAt(i + 1) !== "*") {
+        close = findMarkdownClose(text, "*", i + 1);
+        if (close !== -1 && text.charAt(close - 1) !== "*") {
+          appendWrapped("em", null, "*", close);
+          continue;
+        }
+      }
+      if (ch === "_" && text.charAt(i + 1) !== "_" && !isWordChar(text.charAt(i - 1))) {
+        close = findMarkdownClose(text, "_", i + 1);
+        if (close !== -1 && !isWordChar(text.charAt(close + 1))) {
+          appendWrapped("em", null, "_", close);
+          continue;
+        }
+      }
+
+      i++;
+    }
+    flushPlain(text.length);
+  }
+
+  function renderMarkdownText(content, className) {
+    var root = h("span", { className: className ? "rw-chat-markdown " + className : "rw-chat-markdown" });
+    appendMarkdownInline(root, content || "");
+    return root;
+  }
+
   function icon(paths, size, stroke) {
     size = size || 16;
     stroke = stroke || 1.6;
@@ -2960,6 +3093,14 @@
       '  padding: 8px 12px; border-radius: 14px; font-size: 13px; line-height: 1.45;',
       '  white-space: pre-wrap; word-break: break-word;',
       '}',
+      '.rw-chat-markdown strong { font-weight: 700; }',
+      '.rw-chat-markdown em { font-style: italic; }',
+      '.rw-chat-markdown code {',
+      '  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;',
+      '  font-size: 0.92em; padding: 1px 4px; border-radius: 4px;',
+      '  background: rgba(15, 23, 42, 0.08);',
+      '}',
+      '.rw-chat-markdown a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }',
       '.rw-chat-bubble-user {',
       '  max-width: 78%; background: var(--rw-accent); color: var(--rw-accent-ink);',
       '  border-bottom-right-radius: 4px;',
@@ -4362,7 +4503,7 @@
 
   function renderChatUserRow(row) {
     return h("div", { className: "rw-chat-msg rw-chat-msg-user" },
-      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, row.content || ""));
+      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, renderMarkdownText(row.content || "")));
   }
 
   function renderChatAgentRow(row) {
@@ -4370,7 +4511,7 @@
       renderChatAgentAvatar(24),
       h("div", { className: "rw-chat-agent-col" }, [
         h("div", { className: "rw-chat-agent-name" }, chatIdentityName()),
-        h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, row.content || ""),
+        h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, renderMarkdownText(row.content || "")),
       ]),
     ]);
   }
@@ -4385,7 +4526,7 @@
       renderAvatar(name, 24),
       h("div", { className: "rw-chat-agent-col" }, [
         h("div", { className: "rw-chat-agent-name" }, name),
-        h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, row.content || ""),
+        h("div", { className: "rw-chat-bubble rw-chat-bubble-agent" }, renderMarkdownText(row.content || "")),
       ]),
     ]);
   }
@@ -4800,7 +4941,7 @@
           bodyEl.appendChild(h("div", { className: "rw-chat-transcript-line" }, [
             h("span", { className: "rw-chat-transcript-who" },
               row.role === "user" ? t("chat.transcriptYou") : chatAgentName()),
-            h("span", { className: "rw-chat-transcript-text" }, row.content || ""),
+            renderMarkdownText(row.content || "", "rw-chat-transcript-text"),
           ]));
         });
         if (lines === 0) {
