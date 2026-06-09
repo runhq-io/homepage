@@ -46,7 +46,6 @@ beforeAll(async () => {
     apiSecretHash: `secret-ct-${RUN_HEX}`,
     channelId: `ch_ct_${RUN_HEX}`,
     widgetChatAgentEntityId: 'ae_support',
-    widgetChatInstructions: 'Ask for the plan tier.',
   }).returning({ id: widgetProjects.id });
   PROJECT_ID = project!.id;
   const [owner] = await db.insert(widgetUsers).values({
@@ -101,7 +100,7 @@ describe('sendUserMessage', () => {
       serverId: SERVER_ID,
       projectId: WSP_ID,
       agentEntityId: 'ae_support',
-      chatInstructions: 'Ask for the plan tier.',
+      chatInstructions: null,
       forceProposal: false,
       pendingProposal: null,
     });

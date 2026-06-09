@@ -140,7 +140,6 @@ interface ChatProject {
   serverId: string;
   workspaceProjectId: string | null;
   widgetChatAgentEntityId: string | null;
-  widgetChatInstructions: string | null;
 }
 
 async function getChatProject(projectId: string): Promise<ChatProject | null> {
@@ -150,7 +149,6 @@ async function getChatProject(projectId: string): Promise<ChatProject | null> {
       serverId: widgetProjects.serverId,
       workspaceProjectId: widgetProjects.workspaceProjectId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
-      widgetChatInstructions: widgetProjects.widgetChatInstructions,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
@@ -536,7 +534,7 @@ async function dispatchTurn(
         serverId: project.serverId,
         projectId: project.workspaceProjectId,
         agentEntityId: project.widgetChatAgentEntityId,
-        chatInstructions: project.widgetChatInstructions,
+        chatInstructions: null,
         forceProposal: opts.forceProposal === true,
         transcript: buildTranscript(rows),
         pendingProposal: pending
