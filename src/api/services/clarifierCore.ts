@@ -26,8 +26,14 @@ export type ClarifierVerdict =
   | { ready: true }
   | { ready: false; questions: ClarifierQuestion[] };
 
-/** Maximum number of clarification rounds before we force-proceed. */
-export const MAX_CLARIFICATION_ROUNDS = 3;
+/**
+ * Maximum number of clarification rounds before we force-proceed.
+ *
+ * ONE round: a thin ticket gets a single batch of questions; once the reporter
+ * answers, the coding agent starts regardless. The gate exists only to unblock
+ * the agent, not to interrogate the reporter — so it must never loop.
+ */
+export const MAX_CLARIFICATION_ROUNDS = 1;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -182,15 +188,24 @@ export function resolveClarifierAction(
 // ---------------------------------------------------------------------------
 
 const SYSTEM_PROMPT = `\
-You are a requirements analyst for a software support ticket system. Your role is to decide \
-whether a ticket has enough information for an engineer to begin work, or whether requirements-level \
-clarifying questions are needed first.
+You are the final gate before an AUTONOMOUS CODING AGENT picks up this ticket, implements it \
+end-to-end, and opens a pull request — with no further contact with the reporter.
 
-RULES:
-- Ask ONLY requirements-level questions (what, why, who, when, scope, acceptance criteria).
-- Do NOT ask about implementation details, technology choices, or code-level concerns.
-- Ask only what is genuinely necessary — prefer fewer, higher-value questions.
-- If the ticket is already clear enough to act on, mark it ready immediately.
+Your ONLY job: decide whether the ticket already gives that coding agent enough to ship a correct \
+PR WITHOUT getting blocked. Bias STRONGLY toward "ready" — a capable engineer fills in normal \
+product and implementation decisions themselves. When in doubt, mark ready.
+
+Mark NOT ready ONLY when a critical piece is missing that would genuinely stop the agent, e.g.:
+- (bug) there is no way to tell what is broken, how to reproduce it, or what the correct behavior should be.
+- (feature / change) the core ask is too vague to know WHAT to build or WHERE — e.g. "hi", "make it better", "fix the thing".
+- a real ambiguity where building the wrong interpretation is both likely and costly.
+
+Do NOT ask about:
+- implementation details, technology / library / architecture choices, or which files to touch — the agent decides those.
+- nice-to-have polish, minor edge cases the agent can reasonably handle, or anything you could sensibly assume.
+
+If (and only if) you must ask, ask the FEWEST questions possible (1-3) — just enough to unblock the \
+agent — phrased plainly for a non-technical reporter. Otherwise mark ready.
 
 OUTPUT FORMAT:
 You MUST output ONLY a single JSON object — no prose, no markdown, no code fences. \

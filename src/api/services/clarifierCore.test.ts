@@ -149,12 +149,13 @@ describe('buildClarifierMessages', () => {
     expect(result.messages.length).toBeGreaterThan(0);
   });
 
-  it('system prompt mentions requirements-level questions only', () => {
-    const { system } = buildClarifierMessages(ticket, []);
-    expect(system.toLowerCase()).toMatch(/requirement/);
-    // Must NOT encourage code-level questions
-    const lowerSystem = system.toLowerCase();
-    expect(lowerSystem).toMatch(/requirements.level|requirements level/);
+  it('system prompt frames the gate around unblocking the coding agent / PR, biased toward ready', () => {
+    const lowerSystem = buildClarifierMessages(ticket, []).system.toLowerCase();
+    // Objective: enough for the autonomous coding agent to ship a PR unblocked.
+    expect(lowerSystem).toMatch(/coding agent|pull request|\bpr\b/);
+    expect(lowerSystem).toMatch(/ready/);
+    // Must steer AWAY from interrogating implementation/tech choices.
+    expect(lowerSystem).toMatch(/implementation|architecture|technology|library/);
   });
 
   it('system prompt instructs to output strict JSON of the verdict shape', () => {
