@@ -126,6 +126,32 @@ export class GitHubAppService {
     return { merged: !!data.merged, message: data.message ?? '' };
   }
 
+  /** Open a pull request from `head` into `base`. Throws on API error (e.g. 422 no-commits). */
+  async createPullRequest(
+    installationId: number,
+    owner: string,
+    repo: string,
+    args: { title: string; head: string; base: string; body?: string },
+  ): Promise<{ number: number; url: string; headRef: string }> {
+    const okit = await this.octokitFor(installationId);
+    const { data } = await okit.request('POST /repos/{owner}/{repo}/pulls', {
+      owner, repo, title: args.title, head: args.head, base: args.base, body: args.body ?? '',
+    });
+    return { number: data.number, url: data.html_url, headRef: data.head?.ref ?? args.head };
+  }
+
+  /** Find an OPEN PR whose head branch is `head`, or null. Used for idempotency before creating one. */
+  async findOpenPullRequestByHead(
+    installationId: number,
+    owner: string,
+    repo: string,
+    head: string,
+  ): Promise<{ number: number; url: string } | null> {
+    const prs = await this.listPullRequests(installationId, owner, repo, 'open');
+    const match = prs.find((p) => p.headRef === head);
+    return match ? { number: match.number, url: match.url } : null;
+  }
+
   async createOrgRepo(installationId: number, org: string, name: string, isPrivate: boolean): Promise<InstallationRepo> {
     const okit = await this.octokitFor(installationId);
     const { data } = await okit.request('POST /orgs/{org}/repos', { org, name, private: isPrivate });

@@ -55,6 +55,8 @@ export interface GithubRoutesDeps {
   }>;
   /** PR-linking dependencies (optional — if absent, pull_request events are no-op'd). */
   prLinked?: PrLinkedDeps;
+  /** Auto-open-PR-on-push dependencies (optional — if absent, push events are no-op'd). */
+  pushHandling?: PushEventDeps;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +233,93 @@ export async function handlePullRequestEvent(
   return 'skipped';
 }
 
+// ---------------------------------------------------------------------------
+// Push → auto-open PR
+// ---------------------------------------------------------------------------
+
+export interface PushPayload {
+  /** e.g. "refs/heads/session/job_x/ticket-abcd1234" */
+  ref: string;
+  /** GitHub sets this true when the ref was deleted by the push. */
+  deleted?: boolean;
+  repository: {
+    name: string;
+    owner: { login: string };
+    default_branch: string;
+  };
+}
+
+export interface PushEventDeps {
+  findByOwnerRepo: (owner: string, repo: string) => Promise<Array<{ serverId: string; projectId: string; installationId: number }>>;
+  parseTaskShareId: (input: string) => TaskShareIdQuery | null;
+  resolveTaskCandidates: (query: TaskShareIdQuery) => Promise<TaskCandidate[]>;
+  /** Find an OPEN PR whose head branch is `head`, or null (idempotency). */
+  findOpenPullRequestByHead: (installationId: number, owner: string, repo: string, head: string) => Promise<{ number: number; url: string } | null>;
+  /** Open a PR. Throws on API error (e.g. 422 when the branch has no commits ahead of base). */
+  createPullRequest: (installationId: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string }) => Promise<{ number: number; url: string }>;
+}
+
+/**
+ * Handle a GitHub `push` webhook by auto-opening a PR for a freshly-pushed
+ * ticket branch. This is the server-side half of the widget coder→PR flow: the
+ * coder commits + pushes its `ticket-<shortId>` branch (git auth via the
+ * credential helper), and RunHQ opens the PR via the GitHub App so the agent
+ * never needs `gh`/a token. The resulting `pull_request` (opened) webhook then
+ * links the PR to the ticket through the existing handler.
+ *
+ * Returns `'created'`, `'skipped'` (intentional no-op), or `'error'` (creation
+ * failed — caller still returns 200 to GitHub). NEVER throws.
+ */
+export async function handlePushEvent(
+  payload: PushPayload,
+  deps: PushEventDeps,
+): Promise<'created' | 'skipped' | 'error'> {
+  const PREFIX = 'refs/heads/';
+  if (!payload.ref || !payload.ref.startsWith(PREFIX)) return 'skipped'; // tags / non-branch refs
+  if (payload.deleted) return 'skipped'; // branch deletion
+  const branch = payload.ref.slice(PREFIX.length);
+
+  const shortId = extractTicketShortId(branch);
+  if (!shortId) return 'skipped';
+
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
+  const base = payload.repository.default_branch;
+  if (!base || branch === base) return 'skipped'; // never PR the base into itself
+
+  const repoCandidates = await deps.findByOwnerRepo(owner, repo);
+  if (repoCandidates.length === 0) return 'skipped';
+  const repoServerIds = new Set(repoCandidates.map((r) => r.serverId));
+
+  const query = deps.parseTaskShareId(shortId);
+  if (!query) return 'skipped';
+  const taskCandidates = await deps.resolveTaskCandidates(query);
+  const matching = taskCandidates.filter((c) => repoServerIds.has(c.serverId));
+  if (matching.length !== 1) return 'skipped'; // no match, or ambiguous
+
+  const task = matching[0]!;
+  const installationId = repoCandidates.find((r) => r.serverId === task.serverId)!.installationId;
+
+  // Idempotency: the coder may push several times — only the first opens a PR.
+  const existing = await deps.findOpenPullRequestByHead(installationId, owner, repo, branch);
+  if (existing) return 'skipped';
+
+  try {
+    const pr = await deps.createPullRequest(installationId, owner, repo, {
+      title: task.title,
+      head: branch,
+      base,
+      body: `Automated pull request for widget ticket \`${shortId}\`: ${task.title}\n\nOpened by RunHQ when the coding agent pushed its ticket branch. Review and merge when ready.`,
+    });
+    console.info('[github/push] auto-opened PR for ticket branch', { owner, repo, branch, taskId: task.taskId, pr: pr.number });
+    return 'created';
+  } catch (err) {
+    // Most commonly a 422 when the branch has no commits ahead of base yet.
+    console.warn('[github/push] failed to auto-open PR (often: no commits ahead of base)', { owner, repo, branch, err: (err as Error)?.message });
+    return 'error';
+  }
+}
+
 export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
   app.get('/api/github/setup', async (c) => {
     const installationId = Number(c.req.query('installation_id'));
@@ -295,6 +384,13 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
       } catch (err) {
         // Always 200 to GitHub; log the error but don't surface it.
         console.error('[github/pull_request] unexpected error in handler', err);
+      }
+    } else if (event === 'push' && deps.pushHandling) {
+      try {
+        await handlePushEvent(payload as PushPayload, deps.pushHandling);
+      } catch (err) {
+        // handlePushEvent never throws, but keep the route bulletproof → always 200.
+        console.error('[github/push] unexpected error in handler', err);
       }
     }
     return c.json({ ok: true });

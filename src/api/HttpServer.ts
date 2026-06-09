@@ -6906,6 +6906,15 @@ export function createHttpApp() {
         },
         updateActivityMetadata: WorkspaceTaskService.updateActivityMetadata,
       },
+      pushHandling: {
+        findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,
+        parseTaskShareId: WorkspaceTaskService.parseTaskShareId,
+        resolveTaskCandidates: WorkspaceTaskService.resolveTaskCandidates,
+        findOpenPullRequestByHead: (id, owner, repo, head) =>
+          getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
+        createPullRequest: (id, owner, repo, args) =>
+          getGitHubAppService().createPullRequest(id, owner, repo, args),
+      },
     });
     registerInternalGithubRoutes(app, {
       stateSecret: getGithubAppConfig().stateSecret,
