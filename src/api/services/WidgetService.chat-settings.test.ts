@@ -42,30 +42,23 @@ afterAll(async () => {
 });
 
 describe('chat settings round-trip', () => {
-  it('persists and returns widgetChatAgentEntityId + widgetChatInstructions', async () => {
+  it('persists widgetChatAgentEntityId and accept-ignores widgetChatInstructions', async () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
       widgetChatAgentEntityId: 'ae_support',
+      // sent by a stale client — must be ignored without error
       widgetChatInstructions: 'Ask for the plan tier.',
-    }, LOOKUP);
+    } as any, LOOKUP);
     const settings = await WidgetService.getWidgetSettings(SERVER_ID, LOOKUP);
     expect(settings!.widgetChatAgentEntityId).toBe('ae_support');
-    expect(settings!.widgetChatInstructions).toBe('Ask for the plan tier.');
+    expect('widgetChatInstructions' in settings!).toBe(false);
   });
 
   it('clears with null / empty string', async () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, {
       widgetChatAgentEntityId: '',
-      widgetChatInstructions: null,
     }, LOOKUP);
     const settings = await WidgetService.getWidgetSettings(SERVER_ID, LOOKUP);
     expect(settings!.widgetChatAgentEntityId).toBeNull();
-    expect(settings!.widgetChatInstructions).toBeNull();
-  });
-
-  it('rejects over-long chat instructions', async () => {
-    await expect(WidgetService.updateWidgetSettings(SERVER_ID, {
-      widgetChatInstructions: 'x'.repeat(4001),
-    }, LOOKUP)).rejects.toThrow(/4000/);
   });
 
   it('leaves chat fields untouched when not supplied', async () => {

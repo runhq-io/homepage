@@ -2257,7 +2257,6 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
       widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
       widgetAssignRateLimitPerHour: widgetProjects.widgetAssignRateLimitPerHour,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
-      widgetChatInstructions: widgetProjects.widgetChatInstructions,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2282,7 +2281,6 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     widget_role_claim_name: project.widgetRoleClaimName,
     widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
     widgetChatAgentEntityId: project.widgetChatAgentEntityId,
-    widgetChatInstructions: project.widgetChatInstructions,
   };
 }
 
@@ -2323,7 +2321,6 @@ export async function updateWidgetSettings(
     widgetAssignRateLimitPerHour?: number;
     // Chat-with-agent intake (camelCase per the widget-chat contract)
     widgetChatAgentEntityId?: string | null;
-    widgetChatInstructions?: string | null;
   },
   opts?: WidgetLookup,
 ): Promise<UpdateWidgetSettingsResult> {
@@ -2339,16 +2336,6 @@ export async function updateWidgetSettings(
         'Cannot enable widget agent assignment: add at least one role.',
       );
     }
-  }
-
-  // Chat instructions are an instruction layer injected into agent turns —
-  // cap their size like a chat message.
-  if (
-    settings.widgetChatInstructions !== undefined &&
-    settings.widgetChatInstructions !== null &&
-    settings.widgetChatInstructions.length > 4000
-  ) {
-    throw new WidgetSettingsValidationError('Chat instructions must be 4000 characters or fewer.');
   }
 
   // Validate login_url shape on every update that touches it. The
@@ -2516,11 +2503,6 @@ export async function updateWidgetSettings(
       ...(settings.widgetChatAgentEntityId !== undefined && {
         widgetChatAgentEntityId: settings.widgetChatAgentEntityId?.trim()
           ? settings.widgetChatAgentEntityId.trim()
-          : null,
-      }),
-      ...(settings.widgetChatInstructions !== undefined && {
-        widgetChatInstructions: settings.widgetChatInstructions?.trim()
-          ? settings.widgetChatInstructions.trim()
           : null,
       }),
       updatedAt: new Date(),
