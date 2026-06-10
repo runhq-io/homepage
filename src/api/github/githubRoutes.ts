@@ -55,7 +55,7 @@ export interface GithubRoutesDeps {
   }>;
   /** PR-linking dependencies (optional — if absent, pull_request events are no-op'd). */
   prLinked?: PrLinkedDeps;
-  /** Auto-open-PR-on-push dependencies (optional — if absent, push events are no-op'd). */
+  /** Branch-recording dependencies for push events (optional — if absent, push events are no-op'd). */
   pushHandling?: PushEventDeps;
 }
 
@@ -234,7 +234,7 @@ export async function handlePullRequestEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Push → auto-open PR
+// Push → record ticket branch
 // ---------------------------------------------------------------------------
 
 export interface PushPayload {
@@ -253,27 +253,32 @@ export interface PushEventDeps {
   findByOwnerRepo: (owner: string, repo: string) => Promise<Array<{ serverId: string; projectId: string; installationId: number }>>;
   parseTaskShareId: (input: string) => TaskShareIdQuery | null;
   resolveTaskCandidates: (query: TaskShareIdQuery) => Promise<TaskCandidate[]>;
-  /** Find an OPEN PR whose head branch is `head`, or null (idempotency). */
-  findOpenPullRequestByHead: (installationId: number, owner: string, repo: string, head: string) => Promise<{ number: number; url: string } | null>;
-  /** Open a PR. Throws on API error (e.g. 422 when the branch has no commits ahead of base). */
-  createPullRequest: (installationId: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string }) => Promise<{ number: number; url: string }>;
+  /** List activity entries for a task (used for idempotency). */
+  listActivity: (taskId: string) => Promise<Array<{ id: string; type: ActivityType; metadata?: Record<string, any> | null }>>;
+  /** Append an activity entry to a task. */
+  addActivity: (serverId: string, taskId: string, input: {
+    type: ActivityType;
+    content?: string | null;
+    metadata?: Record<string, unknown> | null;
+    createdByType?: 'member' | 'external' | 'system' | 'agent';
+    createdById?: string | null;
+    createdByName?: string | null;
+  }) => Promise<void>;
 }
 
 /**
- * Handle a GitHub `push` webhook by auto-opening a PR for a freshly-pushed
- * ticket branch. This is the server-side half of the widget coder→PR flow: the
- * coder commits + pushes its `ticket-<shortId>` branch (git auth via the
- * credential helper), and RunHQ opens the PR via the GitHub App so the agent
- * never needs `gh`/a token. The resulting `pull_request` (opened) webhook then
- * links the PR to the ticket through the existing handler.
+ * Handle a GitHub `push` webhook by recording the latest pushed ticket branch.
+ * Push is progress, not readiness: the coding agent can push multiple times
+ * before it is done. RunHQ opens the PR later, when the task is explicitly
+ * marked ready by the workspace server.
  *
- * Returns `'created'`, `'skipped'` (intentional no-op), or `'error'` (creation
- * failed — caller still returns 200 to GitHub). NEVER throws.
+ * Returns `'recorded'`, `'skipped'` (intentional no-op), or `'error'`.
+ * NEVER throws.
  */
 export async function handlePushEvent(
   payload: PushPayload,
   deps: PushEventDeps,
-): Promise<'created' | 'skipped' | 'error'> {
+): Promise<'recorded' | 'skipped' | 'error'> {
   const PREFIX = 'refs/heads/';
   if (!payload.ref || !payload.ref.startsWith(PREFIX)) return 'skipped'; // tags / non-branch refs
   if (payload.deleted) return 'skipped'; // branch deletion
@@ -299,23 +304,128 @@ export async function handlePushEvent(
 
   const task = matching[0]!;
   const installationId = repoCandidates.find((r) => r.serverId === task.serverId)!.installationId;
+  const projectId = repoCandidates.find((r) => r.serverId === task.serverId)?.projectId ?? null;
 
-  // Idempotency: the coder may push several times — only the first opens a PR.
-  const existing = await deps.findOpenPullRequestByHead(installationId, owner, repo, branch);
-  if (existing) return 'skipped';
+  const activity = await deps.listActivity(task.taskId);
+  const alreadyLinked = activity.some((a) =>
+    a.type === 'pr_linked' && a.metadata?.repoBranch === branch);
+  if (alreadyLinked) return 'skipped';
+
+  const alreadyRecorded = activity.some((a) =>
+    a.type === 'branch_pushed' && a.metadata?.branch === branch);
+  if (alreadyRecorded) return 'skipped';
 
   try {
-    const pr = await deps.createPullRequest(installationId, owner, repo, {
-      title: task.title,
+    await deps.addActivity(task.serverId, task.taskId, {
+      type: 'branch_pushed',
+      content: `Branch ${branch} pushed`,
+      metadata: {
+        shortId,
+        owner,
+        repo,
+        branch,
+        base,
+        installationId,
+        projectId,
+        title: task.title,
+      },
+      createdByType: 'system',
+    });
+    console.info('[github/push] recorded pushed ticket branch', { owner, repo, branch, taskId: task.taskId });
+    return 'recorded';
+  } catch (err) {
+    console.warn('[github/push] failed to record pushed ticket branch', { owner, repo, branch, err: (err as Error)?.message });
+    return 'error';
+  }
+}
+
+export interface ReadyPullRequestDeps {
+  listActivity: (taskId: string) => Promise<Array<{ id: string; type: ActivityType; metadata?: Record<string, any> | null }>>;
+  addActivity: (serverId: string, taskId: string, input: {
+    type: ActivityType;
+    content?: string | null;
+    metadata?: Record<string, unknown> | null;
+    createdByType?: 'member' | 'external' | 'system' | 'agent';
+    createdById?: string | null;
+    createdByName?: string | null;
+  }) => Promise<void>;
+  updateTask: (serverId: string, taskId: string, input: { status: CanonicalTaskStatus }) => Promise<void>;
+  findOpenPullRequestByHead: (installationId: number, owner: string, repo: string, head: string) => Promise<{ number: number; url: string } | null>;
+  createPullRequest: (installationId: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string }) => Promise<{ number: number; url: string }>;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function readNumber(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Open/link a PR for a task that has been explicitly marked ready. This uses
+ * the latest branch recorded by the push webhook, so repeated pushes before
+ * readiness do not create noisy under-progress PRs.
+ */
+export async function openPullRequestForReadyTask(
+  serverId: string,
+  taskId: string,
+  deps: ReadyPullRequestDeps,
+): Promise<'opened' | 'linked_existing' | 'skipped' | 'error'> {
+  const activity = await deps.listActivity(taskId);
+  const existingLinked = activity.find((a) => a.type === 'pr_linked' && typeof a.metadata?.number === 'number');
+  if (existingLinked) return 'skipped';
+
+  const branchActivity = [...activity].reverse().find((a) => a.type === 'branch_pushed' && a.metadata);
+  const metadata = branchActivity?.metadata ?? null;
+  if (!metadata) return 'skipped';
+
+  const owner = readString(metadata.owner);
+  const repo = readString(metadata.repo);
+  const branch = readString(metadata.branch);
+  const base = readString(metadata.base);
+  const title = readString(metadata.title) ?? 'RunHQ ticket';
+  const shortId = readString(metadata.shortId) ?? taskId.slice(0, 8);
+  const installationId = readNumber(metadata.installationId);
+  if (!owner || !repo || !branch || !base || !installationId || branch === base) return 'skipped';
+
+  try {
+    const existing = await deps.findOpenPullRequestByHead(installationId, owner, repo, branch);
+    const pr = existing ?? await deps.createPullRequest(installationId, owner, repo, {
+      title,
       head: branch,
       base,
-      body: `Automated pull request for widget ticket \`${shortId}\`: ${task.title}\n\nOpened by RunHQ when the coding agent pushed its ticket branch. Review and merge when ready.`,
+      body: `Automated pull request for widget ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ after the coding agent marked its ticket branch ready for review.`,
     });
-    console.info('[github/push] auto-opened PR for ticket branch', { owner, repo, branch, taskId: task.taskId, pr: pr.number });
-    return 'created';
+
+    const latestActivity = await deps.listActivity(taskId);
+    const alreadyLinked = latestActivity.some((a) => a.type === 'pr_linked' && a.metadata?.number === pr.number);
+    if (!alreadyLinked) {
+      await deps.addActivity(serverId, taskId, {
+        type: 'pr_linked',
+        content: `Pull request #${pr.number} opened`,
+        metadata: {
+          number: pr.number,
+          url: pr.url,
+          state: 'open',
+          repoBranch: branch,
+        },
+        createdByType: 'system',
+      });
+    }
+
+    await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+    console.info(existing ? '[github/ready] linked existing PR for ready ticket branch' : '[github/ready] opened PR for ready ticket branch', {
+      owner,
+      repo,
+      branch,
+      taskId,
+      pr: pr.number,
+    });
+    return existing ? 'linked_existing' : 'opened';
   } catch (err) {
-    // Most commonly a 422 when the branch has no commits ahead of base yet.
-    console.warn('[github/push] failed to auto-open PR (often: no commits ahead of base)', { owner, repo, branch, err: (err as Error)?.message });
+    console.warn('[github/ready] failed to open PR for ready ticket branch', { owner, repo, branch, taskId, err: (err as Error)?.message });
     return 'error';
   }
 }

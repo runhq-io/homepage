@@ -22,7 +22,7 @@ import * as InviteService from './services/InviteService';
 import { assertActivated } from '../lib/signupGating';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
-import { registerGithubRoutes } from './github/githubRoutes';
+import { openPullRequestForReadyTask, registerGithubRoutes } from './github/githubRoutes';
 import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
 import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
 import * as GithubInstallationsService from './services/GithubInstallationsService';
@@ -5259,6 +5259,23 @@ export function createHttpApp() {
       actor,
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
+    if (isGithubAppConfigured() && body?.status === 'done') {
+      void openPullRequestForReadyTask(server.id, task.id, {
+        listActivity: WorkspaceTaskService.listActivity,
+        addActivity: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
+        updateTask: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.updateTask(serverId, taskId, input);
+        },
+        findOpenPullRequestByHead: (id, owner, repo, head) =>
+          getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
+        createPullRequest: (id, owner, repo, args) =>
+          getGitHubAppService().createPullRequest(id, owner, repo, args),
+      }).catch((err) => {
+        console.warn('[HttpServer] ready PR creation failed', err);
+      });
+    }
     // Ship the emitted notification (if any) back to the calling per-server
     // so it can push to its connected WS clients.
     return c.json({ success: true, data: task, notification });
@@ -6910,10 +6927,10 @@ export function createHttpApp() {
         findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,
         parseTaskShareId: WorkspaceTaskService.parseTaskShareId,
         resolveTaskCandidates: WorkspaceTaskService.resolveTaskCandidates,
-        findOpenPullRequestByHead: (id, owner, repo, head) =>
-          getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
-        createPullRequest: (id, owner, repo, args) =>
-          getGitHubAppService().createPullRequest(id, owner, repo, args),
+        listActivity: WorkspaceTaskService.listActivity,
+        addActivity: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
       },
     });
     registerInternalGithubRoutes(app, {

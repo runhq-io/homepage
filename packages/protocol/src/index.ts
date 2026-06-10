@@ -309,6 +309,7 @@ export type ActivityType =
   | 'task_archived'
   | 'task_unarchived'
   | 'task_deleted'
+  | 'branch_pushed'
   | 'pr_linked';
 
 export interface ActivityLogEntry {
