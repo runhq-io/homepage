@@ -15,6 +15,7 @@ function makeApp(over: Partial<InternalGithubDeps> = {}) {
     listPullRequests: vi.fn(async () => [{ number: 7, title: 'PR' }]),
     getPullRequestDiff: vi.fn(async () => ({ sha: '7', files: [], patch: '' })),
     mergePullRequest: vi.fn(async () => ({ merged: true, message: 'ok' })),
+    closePullRequest: vi.fn(async () => ({ closed: true, message: '' })),
     upsertProjectRepo: vi.fn(async () => {}),
     removeProjectRepo: vi.fn(async () => {}),
     ...over,
@@ -47,6 +48,16 @@ describe('internal github PR routes', () => {
     expect(res.status).toBe(200);
     expect((await res.json()).merged).toBe(true);
     expect(deps.mergePullRequest).toHaveBeenCalledWith(5, 'octo', 'app', 7, 'squash');
+  });
+  it('closes a PR', async () => {
+    const { app, deps } = makeApp();
+    const res = await app.request('/api/internal/servers/ws_a/github/installations/5/pulls/7/close', {
+      method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ owner: 'octo', repo: 'app' }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).closed).toBe(true);
+    expect(deps.closePullRequest).toHaveBeenCalledWith(5, 'octo', 'app', 7);
   });
   it('rejects an installation not associated with the workspace', async () => {
     const { app } = makeApp({ isAssociatedWithWorkspace: async () => false });

@@ -22,6 +22,7 @@ export interface InternalGithubDeps {
   listPullRequests: (installationId: number, owner: string, repo: string, state: 'open' | 'closed' | 'all') => Promise<unknown[]>;
   getPullRequestDiff: (installationId: number, owner: string, repo: string, number: number) => Promise<unknown>;
   mergePullRequest: (installationId: number, owner: string, repo: string, number: number, method: 'merge' | 'squash' | 'rebase') => Promise<{ merged: boolean; message: string }>;
+  closePullRequest: (installationId: number, owner: string, repo: string, number: number) => Promise<{ closed: boolean; message: string }>;
   /** Mirror a project -> repo link up from the server machine (for cross-server PR aggregation). */
   upsertProjectRepo: (input: {
     serverId: string; projectId: string; installationId: number; owner: string; repo: string; projectName?: string | null;
@@ -150,6 +151,16 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json().catch(() => ({}));
     const result = await deps.mergePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')), (body.method as any) || 'merge');
+    return c.json(result);
+  });
+
+  app.post('/api/internal/servers/:serverId/github/installations/:installationId/pulls/:number/close', async (c) => {
+    const server = await authServer(c);
+    if (server instanceof Response) return server;
+    const installationId = await associatedInstall(c, server);
+    if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json().catch(() => ({}));
+    const result = await deps.closePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')));
     return c.json(result);
   });
 

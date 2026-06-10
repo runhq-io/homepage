@@ -6929,6 +6929,7 @@ export function createHttpApp() {
       listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
       getPullRequestDiff: (id, owner, repo, n) => getGitHubAppService().getPullRequestDiff(id, owner, repo, n),
       mergePullRequest: (id, owner, repo, n, method) => getGitHubAppService().mergePullRequest(id, owner, repo, n, method),
+      closePullRequest: (id, owner, repo, n) => getGitHubAppService().closePullRequest(id, owner, repo, n),
       upsertProjectRepo: GithubProjectReposService.upsertProjectRepo,
       removeProjectRepo: GithubProjectReposService.removeProjectRepo,
       backfillInstallationAccount: async (id) => {

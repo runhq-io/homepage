@@ -126,6 +126,13 @@ export class GitHubAppService {
     return { merged: !!data.merged, message: data.message ?? '' };
   }
 
+  /** Close a pull request without merging (GitHub has no "reject" — closed is the terminal decline state). */
+  async closePullRequest(installationId: number, owner: string, repo: string, pull_number: number) {
+    const okit = await this.octokitFor(installationId);
+    const { data } = await okit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', { owner, repo, pull_number, state: 'closed' });
+    return { closed: data.state === 'closed', message: '' };
+  }
+
   /** Open a pull request from `head` into `base`. Throws on API error (e.g. 422 no-commits). */
   async createPullRequest(
     installationId: number,
