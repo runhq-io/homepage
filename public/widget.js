@@ -322,6 +322,20 @@
       + "/comments/" + encodeURIComponent(commentId) + "/attachments", init).then(readJsonOrThrow);
   }
 
+  // Map the BE's attachment error codes (thrown by readJsonOrThrow as err.message)
+  // to a localized, human sentence. Falls back to the raw code so an unmapped
+  // failure is still surfaced rather than silently swallowed.
+  function friendlyAttachError(err) {
+    var code = (err && err.message) || "";
+    switch (code) {
+      case "attachment_storage_unconfigured": return t("attachErr.unconfigured");
+      case "attachment_too_large":            return t("attachErr.tooLarge");
+      case "attachment_unsupported_type":     return t("attachErr.unsupported");
+      case "attachment_count_exceeded":       return t("attachErr.tooMany");
+      default:                                return code;
+    }
+  }
+
   function readJsonOrThrow(r) {
     return r.json().catch(function () { return {}; }).then(function (data) {
       if (!r.ok) {
@@ -779,6 +793,7 @@
         disabledEmpty: "Write something before you submit.",
         disabledLocked: "You're not signed in to this feedback board, so the widget can't submit on your behalf. Sign in on this site and reload — if you already are, the site isn't passing your identity to the widget.",
         failed: "Failed to submit: {msg}",
+        attachFailed: "Your report was posted, but {n} image(s) couldn't be attached. {msg}",
         pastedImage: "Pasted image",
       },
       // Intercom-style home screen (landing view). The chat strings only
@@ -855,8 +870,15 @@
         uploading: "Uploading…",
         savingDraft: "Redirecting to log in…",
         failed: "Failed to post: {msg}",
+        attachFailed: "Your comment was posted, but {n} image(s) couldn't be attached. {msg}",
         signInPrompt: "Sign in to post a comment.",
         disabledPrompt: "Comments are disabled on this ticket.",
+      },
+      attachErr: {
+        unconfigured: "Image storage isn't configured on the server yet.",
+        tooLarge: "The image is too large (max 5 MB).",
+        unsupported: "That image type isn't supported (use PNG, JPG, GIF, or WebP).",
+        tooMany: "You've reached the attachment limit for this item.",
       },
       restore: {
         welcomeBack: "Welcome back — your draft is ready to submit.",
@@ -974,6 +996,7 @@
         disabledEmpty: "제출하기 전에 내용을 입력해 주세요.",
         disabledLocked: "이 피드백 보드에 로그인되어 있지 않아 위젯이 대신 제출할 수 없습니다. 이 사이트에서 로그인한 뒤 새로고침하세요 — 이미 로그인했다면 사이트가 위젯에 사용자 인증을 전달하지 않고 있는 것입니다.",
         failed: "제출 실패: {msg}",
+        attachFailed: "신고는 등록되었지만 이미지 {n}개를 첨부하지 못했습니다. {msg}",
         pastedImage: "붙여넣은 이미지",
       },
       home: {
@@ -1044,8 +1067,15 @@
         uploading: "업로드 중…",
         savingDraft: "로그인 페이지로 이동 중…",
         failed: "게시 실패: {msg}",
+        attachFailed: "댓글은 등록되었지만 이미지 {n}개를 첨부하지 못했습니다. {msg}",
         signInPrompt: "댓글을 작성하려면 로그인하세요.",
         disabledPrompt: "이 티켓의 댓글이 비활성화되었습니다.",
+      },
+      attachErr: {
+        unconfigured: "서버에 이미지 저장소가 아직 설정되지 않았습니다.",
+        tooLarge: "이미지가 너무 큽니다 (최대 5MB).",
+        unsupported: "지원하지 않는 이미지 형식입니다 (PNG, JPG, GIF, WebP 사용).",
+        tooMany: "이 항목의 첨부 한도에 도달했습니다.",
       },
       restore: {
         welcomeBack: "다시 오셨네요 — 작성 중이던 내용을 그대로 제출할 수 있어요.",
@@ -3784,6 +3814,10 @@
       // Captured across the upload .then so the post-submit branch can route
       // the author straight into the ticket they just filed.
       var createdTicket = null;
+      // Collects human-readable reasons for any attachment that failed to
+      // upload, so the post-submit branch can surface them instead of
+      // silently dropping the image (the bug this fixes).
+      var attachErrors = [];
 
       createTicket({
         description: description,
@@ -3797,6 +3831,7 @@
         return Promise.all(entries.map(function (e) {
           return uploadTicketAttachment(ticketId, e.file).catch(function (err) {
             console.warn("Attachment failed:", err && err.message);
+            attachErrors.push(friendlyAttachError(err));
             return null;
           });
         }));
@@ -3810,13 +3845,28 @@
         submitBtn.firstChild.textContent = t("composer.submit");
         topTicketsCache = null; updatesCache = null; myTicketsCache = null;
         composeReturnView = "home";
+        activeTab = "mine";
+
+        // The report itself posted, but one or more images failed to attach.
+        // Keep the user on the composer and show why — navigating to the detail
+        // would discard the notice, and re-submitting would duplicate the
+        // already-created ticket (the empty textarea now blocks that anyway).
+        if (attachErrors.length > 0) {
+          submitBtn.disabled = false;
+          clearChildren(noticeSlot);
+          noticeSlot.appendChild(renderNotice("error", t("composer.attachFailed", {
+            n: String(attachErrors.length),
+            msg: attachErrors[0] || "",
+          })));
+          return;
+        }
 
         // Take the author straight into the ticket they just filed. Assignment
         // is automatic + server-side, but a thin ticket is held for one round
         // of clarifying questions — the detail view polls and surfaces those
         // within a few seconds, so the author can answer and unblock the agent.
-        // Back from here lands on the My Submissions list (activeTab = 'mine').
-        activeTab = "mine";
+        // Back from here lands on the My Submissions list (activeTab = 'mine',
+        // set above before the attachment-failure gate).
         if (createdTicket && createdTicket.id) {
           detailReturnView = null;
           openDetailModal(createdTicket);
@@ -6025,6 +6075,7 @@
       submitBtn.disabled = true;
       submitBtn.firstChild.textContent = t("reply.posting");
       clearChildren(noticeSlot);
+      var attachErrors = [];
       postComment(ticket.id, text || "").then(function (data) {
         var newComment = data && data.comment;
         if (!newComment) throw new Error("Malformed response");
@@ -6033,7 +6084,11 @@
         return Promise.all(entries.map(function (e) {
           return uploadCommentAttachment(ticket.id, newComment.id, e.file)
             .then(function (r) { return r && r.attachment; })
-            .catch(function (err) { console.warn("Comment attach failed:", err && err.message); return null; });
+            .catch(function (err) {
+              console.warn("Comment attach failed:", err && err.message);
+              attachErrors.push(friendlyAttachError(err));
+              return null;
+            });
         })).then(function (attachments) {
           var real = attachments.filter(function (a) { return !!a; });
           newComment.attachments = (newComment.attachments || []).concat(real);
@@ -6049,6 +6104,15 @@
         // now governs only the soft-locked (aria-disabled) state.
         submitBtn.disabled = false;
         updateSubmitEnabled();
+        // Comment posted, but one or more images failed to attach — surface it
+        // rather than dropping the image silently. The comment still appears.
+        if (attachErrors.length > 0) {
+          clearChildren(noticeSlot);
+          noticeSlot.appendChild(renderNotice("error", t("reply.attachFailed", {
+            n: String(attachErrors.length),
+            msg: attachErrors[0] || "",
+          })));
+        }
         if (onPosted) onPosted(newComment);
       }).catch(function (err) {
         submitBtn.firstChild.textContent = t("reply.submit");
