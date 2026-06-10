@@ -81,6 +81,25 @@ type BuildInfo = {
   builtAt?: string;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function prepareServerWorkspaceTaskPatchBody(input: unknown): {
+  body: unknown;
+  readyForReview: boolean;
+} {
+  if (!isRecord(input)) {
+    return { body: input, readyForReview: false };
+  }
+
+  const body = { ...input };
+  const readyForReview = body.readyForReview === true;
+  delete body.readyForReview;
+  delete body.actingUserId;
+  return { body, readyForReview };
+}
+
 let cachedBuildInfo: BuildInfo | null | undefined;
 
 // Latest server version — persisted in system_settings, cached in memory
@@ -5242,24 +5261,27 @@ export function createHttpApp() {
     const server = await ServerService.getServerByToken(serverToken);
     if (!server) return c.json({ error: 'Invalid server token' }, 401);
 
-    const body = await c.req.json();
+    const rawBody = await c.req.json();
     // The workspace server proxies user-initiated updates via this route (it's
     // the broker between the browser and the BE). When the user triggers the
     // change it includes `actingUserId` so we can build a user actor and
     // self-suppression fires — without this the user gets a notification for
     // their own action. Without `actingUserId` the call is autonomous (agent
     // loop / job archival sweeper / etc.) and actor = agent.
-    const actor = deriveServerTokenActor(body);
-    // Strip the wire-only field so it doesn't leak into the service input.
-    if (body && typeof body === 'object') delete (body as Record<string, unknown>).actingUserId;
+    const actor = deriveServerTokenActor(rawBody);
+    // Strip wire-only fields so they don't leak into the task update input.
+    // `readyForReview` is an explicit command signal from the workspace server;
+    // plain status=done can be produced by heuristic job completion and must not
+    // open a PR by itself.
+    const { body, readyForReview } = prepareServerWorkspaceTaskPatchBody(rawBody);
     const { task, notification } = await WorkspaceTaskService.updateTask(
       server.id,
       c.req.param('taskId'),
-      body,
+      body as Parameters<typeof WorkspaceTaskService.updateTask>[2],
       actor,
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    if (isGithubAppConfigured() && body?.status === 'done') {
+    if (isGithubAppConfigured() && readyForReview && isRecord(body) && body.status === 'done') {
       void openPullRequestForReadyTask(server.id, task.id, {
         listActivity: WorkspaceTaskService.listActivity,
         addActivity: async (serverId, taskId, input) => {
