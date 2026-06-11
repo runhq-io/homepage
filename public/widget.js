@@ -332,6 +332,7 @@
       case "attachment_too_large":            return t("attachErr.tooLarge");
       case "attachment_unsupported_type":     return t("attachErr.unsupported");
       case "attachment_count_exceeded":       return t("attachErr.tooMany");
+      case "attachments_disabled":            return t("attachErr.disabled");
       default:                                return code;
     }
   }
@@ -864,6 +865,7 @@
         signInPlaceholder: "Sign in to reply",
         disabledPlaceholder: "Comments are disabled",
         placeholder: "Write a comment…  (⌘V to paste a screenshot)",
+        placeholderNoAttach: "Write a comment…",
         hint: "Paste screenshots with ⌘V",
         submit: "Comment",
         posting: "Posting…",
@@ -876,6 +878,7 @@
       },
       attachErr: {
         unconfigured: "Image storage isn't configured on the server yet.",
+        disabled: "Image uploads are currently turned off.",
         tooLarge: "The image is too large (max 5 MB).",
         unsupported: "That image type isn't supported (use PNG, JPG, GIF, or WebP).",
         tooMany: "You've reached the attachment limit for this item.",
@@ -1061,6 +1064,7 @@
         signInPlaceholder: "답글을 달려면 로그인하세요",
         disabledPlaceholder: "댓글이 비활성화되었습니다",
         placeholder: "댓글을 작성하세요…  (⌘V로 스크린샷 붙여넣기)",
+        placeholderNoAttach: "댓글을 작성하세요…",
         hint: "⌘V로 스크린샷 붙여넣기",
         submit: "댓글",
         posting: "게시 중…",
@@ -1073,6 +1077,7 @@
       },
       attachErr: {
         unconfigured: "서버에 이미지 저장소가 아직 설정되지 않았습니다.",
+        disabled: "이미지 업로드가 현재 비활성화되어 있습니다.",
         tooLarge: "이미지가 너무 큽니다 (최대 5MB).",
         unsupported: "지원하지 않는 이미지 형식입니다 (PNG, JPG, GIF, WebP 사용).",
         tooMany: "이 항목의 첨부 한도에 도달했습니다.",
@@ -3665,11 +3670,15 @@
       renderChips(); updateSubmitEnabled();
     }
     fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
-    ta.addEventListener("paste", function (e) {
-      if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
-        e.preventDefault(); addFiles(e.clipboardData.files);
-      }
-    });
+    // Paste-to-attach is only wired when image attachments are enabled
+    // server-side; otherwise a pasted screenshot must not queue an upload.
+    if (config.attachmentsEnabled) {
+      ta.addEventListener("paste", function (e) {
+        if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+          e.preventDefault(); addFiles(e.clipboardData.files);
+        }
+      });
+    }
 
     var submitBtn = h("button", { className: "rw-inline-submit", type: "button" }, [
       h("span", null, t("composer.submit")),
@@ -3904,11 +3913,13 @@
       ta,
       chipsEl,
       h("div", { className: "rw-inline-composer-bar" }, [
-        h("div", { className: "rw-inline-tools" }, [attachBtn, privateBtn, privHint]),
+        h("div", { className: "rw-inline-tools" }, [
+          config.attachmentsEnabled ? attachBtn : null, privateBtn, privHint,
+        ]),
         submitBtn,
       ]),
       noticeSlot,
-      fileInput,
+      config.attachmentsEnabled ? fileInput : null,
     ]);
   }
 
@@ -4186,6 +4197,9 @@
       // Re-read chat config on every panel open so enabling/disabling the
       // support agent in settings picks up without an embed reload.
       config.chat = data.chat || null;
+      // Image-attach affordances are gated server-side (currently off). Absent
+      // ⇒ false ⇒ hidden, which is the safe default against an older server.
+      config.attachmentsEnabled = !!data.attachmentsEnabled;
     });
     var updP = loadUpdates().then(function (data) {
       updatesCache = data.tickets || [];
@@ -5950,7 +5964,8 @@
     var disabled = !canPostComment || !!ticket.commentsDisabled;
     var placeholder = !canPostComment ? t("reply.signInPlaceholder")
                     : ticket.commentsDisabled ? t("reply.disabledPlaceholder")
-                    : t("reply.placeholder");
+                    : config.attachmentsEnabled ? t("reply.placeholder")
+                    : t("reply.placeholderNoAttach");
 
     var ta = h("textarea", { className: "rw-td-composer-ta", placeholder: placeholder, disabled: disabled });
 
@@ -6023,11 +6038,14 @@
       renderChips(); updateSubmitEnabled();
     }
     fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
-    ta.addEventListener("paste", function (e) {
-      if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
-        e.preventDefault(); addFiles(e.clipboardData.files);
-      }
-    });
+    // Paste-to-attach only when image attachments are enabled server-side.
+    if (config.attachmentsEnabled) {
+      ta.addEventListener("paste", function (e) {
+        if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+          e.preventDefault(); addFiles(e.clipboardData.files);
+        }
+      });
+    }
     ta.addEventListener("input", function () {
       ta.style.height = "auto";
       ta.style.height = Math.min(200, Math.max(56, ta.scrollHeight)) + "px";
@@ -6127,8 +6145,10 @@
       chipsEl,
       h("div", { className: "rw-td-composer-bar" }, [
         h("div", { className: "rw-td-composer-bar-l" }, [
-          attachBtn,
-          h("span", { className: "rw-td-composer-hint" }, t("reply.hint")),
+          config.attachmentsEnabled ? attachBtn : null,
+          config.attachmentsEnabled
+            ? h("span", { className: "rw-td-composer-hint" }, t("reply.hint"))
+            : null,
         ]),
         submitBtn,
       ]),
@@ -6144,7 +6164,7 @@
     composer.appendChild(h("div", { className: "rw-td-composer-row" }, [
       renderAvatar("You", 26),
       composerCard,
-      fileInput,
+      config.attachmentsEnabled ? fileInput : null,
     ]));
     return composer;
   }
@@ -6574,6 +6594,8 @@
         // Chat home-card gating — see renderHomeView. Absent or
         // `enabled: false` ⇒ the card is hidden.
         config.chat = data.chat || null;
+        // Image-attach affordances are gated server-side (currently off).
+        config.attachmentsEnabled = !!data.attachmentsEnabled;
         // language must be set BEFORE mountDOM — the launcher tab's aria-label
         // and any first-render strings read t() at construction time.
         config.language = data.language || opts.language || "en";

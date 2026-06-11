@@ -959,6 +959,10 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     // get redirected, and non-public projects must not leak owner config.
     loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     chat: await getChatBootstrapInfo(project),
+    // Drives whether the client shows image-attach affordances. Currently
+    // false (see attachmentsEnabled) — kept in the bootstrap so re-enabling is
+    // a single env flip with no client redeploy.
+    attachmentsEnabled: attachmentsEnabled(),
     tickets,
   };
 }
@@ -1538,6 +1542,18 @@ export async function deleteTicket(
     .where(eq(workspaceTasks.id, ticketId));
 }
 
+// Widget image attachments are gated behind an env flag and DISABLED by
+// default. They were turned off (2026-06-11) over a prompt-injection concern:
+// an uploaded image can carry hidden instructions that the lightweight
+// widget-verification model may not catch, and the coder agent that later
+// works the ticket would "see" them. Re-enable only alongside a vetting
+// pipeline (e.g. a two-tier flow that doesn't process the image unless the
+// ticket genuinely needs it). One env knob drives both the server-side
+// rejection and the client's UI (surfaced via listTickets → bootstrap).
+export function attachmentsEnabled(): boolean {
+  return process.env.WIDGET_ATTACHMENTS_ENABLED === 'true';
+}
+
 const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
 const MAX_ATTACHMENTS_PER_TICKET = 5;
 // SVG is intentionally excluded: SVG is XML and can carry inline <script>,
@@ -1551,6 +1567,8 @@ export async function uploadTicketAttachment(
   widgetUserId: string,
   file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
 ) {
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+
   const project = await getWidgetProjectContext(projectId);
   if (!project) throw new WidgetError('project_not_found', 404);
 
@@ -1646,6 +1664,8 @@ export async function addWidgetCommentAttachment(
   widgetUserId: string,
   file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
 ) {
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+
   const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
 
   if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
@@ -2732,6 +2752,7 @@ export const WIDGET_ERROR_CODES = [
   'attachment_too_large',
   'attachment_count_exceeded',
   'attachment_storage_unconfigured',
+  'attachments_disabled',
   'rate_limited',
   // Widget chat (agent intake)
   'chat_not_enabled',

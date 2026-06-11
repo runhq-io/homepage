@@ -6141,6 +6141,10 @@ export function createHttpApp() {
   });
 
   app.post('/api/widget/tickets/:id/attachments', async (c) => {
+    // Image attachments are disabled (prompt-injection hardening) — reject
+    // before reading the multipart body so the surface is fully closed, not
+    // just hidden in the client. See WidgetService.attachmentsEnabled.
+    if (!WidgetService.attachmentsEnabled()) return c.json({ error: 'attachments_disabled' }, 403);
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
@@ -6231,6 +6235,8 @@ export function createHttpApp() {
   });
 
   app.post('/api/widget/tickets/:id/comments/:commentId/attachments', async (c) => {
+    // See ticket-attachment route above — disabled for prompt-injection hardening.
+    if (!WidgetService.attachmentsEnabled()) return c.json({ error: 'attachments_disabled' }, 403);
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
