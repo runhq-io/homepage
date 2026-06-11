@@ -5330,6 +5330,8 @@ export function createHttpApp() {
           getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
         createPullRequest: (id, owner, repo, args) =>
           getGitHubAppService().createPullRequest(id, owner, repo, args),
+        notifyPrLinked: (input) =>
+          ServerService.serverTokenFetch(server, '/api/internal/pr-linked', input).then(() => undefined),
       }).catch((err) => {
         console.warn('[HttpServer] ready PR creation failed', err);
       });

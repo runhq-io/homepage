@@ -352,6 +352,10 @@ export interface ReadyPullRequestDeps {
   updateTask: (serverId: string, taskId: string, input: { status: CanonicalTaskStatus }) => Promise<void>;
   findOpenPullRequestByHead: (installationId: number, owner: string, repo: string, head: string) => Promise<{ number: number; url: string } | null>;
   createPullRequest: (installationId: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string }) => Promise<{ number: number; url: string }>;
+  /** Optional — push a live `pr:linked` notification to the workspace server so
+   *  its "PR #N" chip updates without a page refresh. Best-effort; failures must
+   *  never break PR creation. */
+  notifyPrLinked?: (input: { branch: string; number: number; url: string; state: 'open' | 'closed' | 'merged' }) => Promise<void>;
 }
 
 function readString(value: unknown): string | null {
@@ -416,6 +420,17 @@ export async function openPullRequestForReadyTask(
     }
 
     await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+
+    // Push a live notification to the workspace so the PR chip updates without a
+    // refresh. Best-effort — must never fail the PR flow.
+    if (deps.notifyPrLinked) {
+      try {
+        await deps.notifyPrLinked({ branch, number: pr.number, url: pr.url, state: 'open' });
+      } catch (err) {
+        console.warn('[github/ready] pr-linked workspace notify failed', { taskId, branch, err: (err as Error)?.message });
+      }
+    }
+
     console.info(existing ? '[github/ready] linked existing PR for ready ticket branch' : '[github/ready] opened PR for ready ticket branch', {
       owner,
       repo,
