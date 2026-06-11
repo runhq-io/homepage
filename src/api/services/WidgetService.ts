@@ -889,9 +889,11 @@ export interface WidgetChatBootstrapInfo {
 
 /**
  * Bootstrap `chat` field for widget.js: enabled iff a support agent is
- * configured. The display name comes from the widget_exposed_agents mirror;
- * null when the chosen agent isn't mirrored (widget falls back to a generic
- * label).
+ * configured. The display name comes from the agent mirror REGARDLESS of the
+ * `exposed` flag — chat naming is independent of the "Hand to agent" roster,
+ * so a support agent can be named without widget-user assignment enabled.
+ * Null only when the agent isn't mirrored at all (widget falls back to a
+ * generic label).
  */
 async function getChatBootstrapInfo(
   project: Pick<WidgetProjectContext, 'id' | 'widgetChatAgentEntityId'> | null,
@@ -2683,6 +2685,11 @@ export interface ExposedAgentSummary {
   description: string | null;
 }
 
+/**
+ * Agents in the widget's "Hand to agent" roster. The mirror table carries ALL
+ * workspace agents (so names resolve for e.g. the chat support agent); only
+ * rows flagged `exposed` are assignable by widget users.
+ */
 export async function listExposedAgents(widgetProjectId: string): Promise<ExposedAgentSummary[]> {
   return await db
     .select({
@@ -2691,7 +2698,10 @@ export async function listExposedAgents(widgetProjectId: string): Promise<Expose
       description: widgetExposedAgents.agentDescription,
     })
     .from(widgetExposedAgents)
-    .where(eq(widgetExposedAgents.widgetProjectId, widgetProjectId))
+    .where(and(
+      eq(widgetExposedAgents.widgetProjectId, widgetProjectId),
+      eq(widgetExposedAgents.exposed, true),
+    ))
     .orderBy(widgetExposedAgents.agentName);
 }
 
@@ -3064,12 +3074,15 @@ export async function suggestAssignment(
 }
 
 // ============================================================================
-// Exposed-Agent Mirror (pushed by workspace on every toggle and on boot)
+// Agent Mirror (pushed by workspace on every agent mutation and on boot).
+// Carries ALL agents; `exposed` marks the "Hand to agent" roster subset.
 // ============================================================================
 
 export interface SyncWidgetExposedAgentsInput {
   workspaceProjectId: string;
-  agents: Array<{ id: string; name: string; description: string | null }>;
+  // `exposed` is optional for back-compat: workspace servers predating the
+  // flag only pushed widget_exposed=true agents, so a missing value means true.
+  agents: Array<{ id: string; name: string; description: string | null; exposed?: boolean }>;
 }
 
 export interface SyncWidgetExposedAgentsResult {
@@ -3115,6 +3128,7 @@ export async function syncWidgetExposedAgents(
           agentId: a.id,
           agentName: a.name,
           agentDescription: a.description ?? null,
+          exposed: a.exposed ?? true,
         })));
       }
       upserted += proj.agents.length;

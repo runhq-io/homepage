@@ -3794,10 +3794,13 @@ export function createHttpApp() {
   });
 
   /**
-   * Workspace → BE mirror push for `agent_entities.widget_exposed`.
-   * Called by WidgetAgentMirrorPush on every toggle and on boot.
+   * Workspace → BE agent-mirror push (ALL agents, with per-agent `exposed`
+   * marking the "Hand to agent" roster). Called by WidgetAgentMirrorPush on
+   * every agent mutation and on boot.
    * Auth: X-Server-Token; serverId in URL must match the token's server.
-   * Body: { projects: [{ workspaceProjectId, agents: [{ id, name, description }] }] }
+   * Body: { projects: [{ workspaceProjectId, agents: [{ id, name, description, exposed? }] }] }
+   * `exposed` is optional for back-compat: pre-flag workspace servers only
+   * pushed widget_exposed=true agents, so a missing value means true.
    * Semantics: full-replace per workspaceProjectId.
    */
   app.post('/api/internal/servers/:serverId/widget-agents/sync', async (c) => {
@@ -3819,7 +3822,8 @@ export function createHttpApp() {
           (p.agents as unknown[]).every((a: any) =>
             typeof a?.id === 'string' &&
             typeof a?.name === 'string' &&
-            (a?.description === null || a?.description === undefined || typeof a?.description === 'string')
+            (a?.description === null || a?.description === undefined || typeof a?.description === 'string') &&
+            (a?.exposed === undefined || typeof a?.exposed === 'boolean')
           )
         )
       ) {

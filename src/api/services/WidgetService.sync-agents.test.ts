@@ -9,7 +9,7 @@ import {
   widgetProjects,
   widgetExposedAgents,
 } from '../../db/schema';
-import { syncWidgetExposedAgents } from './WidgetService';
+import { syncWidgetExposedAgents, listExposedAgents } from './WidgetService';
 
 const RUN = randomBytes(6).toString('hex');
 // Use a separate 12-char hex suffix for the UUID fields (must be valid hex)
@@ -57,6 +57,7 @@ beforeAll(async () => {
         slug: `sync-a-${RUN}`,
         apiKey: `apikey-sync-a-${RUN}`,
         apiSecretHash: `secret-sync-a-${RUN}`,
+        channelId: `ch_sync_a_${RUN}`,
         enabled: true,
       },
       {
@@ -66,6 +67,7 @@ beforeAll(async () => {
         slug: `sync-b-${RUN}`,
         apiKey: `apikey-sync-b-${RUN}`,
         apiSecretHash: `secret-sync-b-${RUN}`,
+        channelId: `ch_sync_b_${RUN}`,
         enabled: true,
       },
     ])
@@ -240,5 +242,48 @@ describe('syncWidgetExposedAgents', () => {
     for (const a of agents) {
       expect(a.agentDescription).toBeNull();
     }
+  });
+
+  it('stores the exposed flag, defaulting to true when omitted (pre-flag servers)', async () => {
+    await clearAgents(WP_ROW_A);
+
+    await syncWidgetExposedAgents(SERVER_A, [
+      {
+        workspaceProjectId: WP_ID_A,
+        agents: [
+          { id: 'agt-exposed', name: 'Exposed', description: null, exposed: true },
+          { id: 'agt-hidden', name: 'Hidden', description: null, exposed: false },
+          { id: 'agt-legacy', name: 'Legacy', description: null }, // omitted → true
+        ],
+      },
+    ]);
+
+    const rows = await db
+      .select({ agentId: widgetExposedAgents.agentId, exposed: widgetExposedAgents.exposed })
+      .from(widgetExposedAgents)
+      .where(eq(widgetExposedAgents.widgetProjectId, WP_ROW_A))
+      .orderBy(widgetExposedAgents.agentId);
+    expect(rows).toEqual([
+      { agentId: 'agt-exposed', exposed: true },
+      { agentId: 'agt-hidden', exposed: false },
+      { agentId: 'agt-legacy', exposed: true },
+    ]);
+  });
+
+  it('listExposedAgents returns only exposed=true rows (the Hand-to-agent roster)', async () => {
+    await clearAgents(WP_ROW_A);
+
+    await syncWidgetExposedAgents(SERVER_A, [
+      {
+        workspaceProjectId: WP_ID_A,
+        agents: [
+          { id: 'roster-1', name: 'Assignable', description: null, exposed: true },
+          { id: 'chat-only', name: 'Support', description: null, exposed: false },
+        ],
+      },
+    ]);
+
+    const roster = await listExposedAgents(WP_ROW_A);
+    expect(roster.map((a) => a.id)).toEqual(['roster-1']);
   });
 });

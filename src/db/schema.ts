@@ -1433,14 +1433,22 @@ export const widgetUsers = pgTable('widget_users', {
   { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
 ]);
 
-// Mirror of workspace agent_entities rows where widget_exposed=true.
-// Source of truth lives in workspace SQLite; BE caches for fast modal open.
+// Mirror of workspace agent_entities rows (ALL agents, not just exposed ones).
+// Source of truth lives in workspace SQLite; BE caches for fast modal open and
+// for resolving agent display names (e.g. the chat support agent's header name)
+// without round-tripping a possibly-cold workspace machine.
 // Written only by /api/internal/servers/:serverId/widget-agents/sync.
+// `exposed` marks membership in the widget's "Hand to agent" roster — name
+// lookups (chat header, assigned events) intentionally ignore it so a support
+// agent can be named in chat without being assignable by widget users.
 export const widgetExposedAgents = pgTable('widget_exposed_agents', {
   widgetProjectId: uuid('widget_project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   agentId: text('agent_id').notNull(),
   agentName: text('agent_name').notNull(),
   agentDescription: text('agent_description'),
+  // Defaults true: rows synced by pre-flag workspace servers were exposed by
+  // definition (those servers only pushed widget_exposed=true agents).
+  exposed: boolean('exposed').default(true).notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [
   primaryKey({ columns: [t.widgetProjectId, t.agentId] }),

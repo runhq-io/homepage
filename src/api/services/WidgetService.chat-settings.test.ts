@@ -2,8 +2,8 @@
  * Chat settings persistence (widget_chat_agent_entity_id +
  * widget_chat_instructions) through get/updateWidgetSettings, and the
  * widget bootstrap `chat: { enabled, agentName }` field on listTickets
- * (agentName resolved from the widget_exposed_agents mirror; null when the
- * chosen agent isn't mirrored).
+ * (agentName resolved from the widget_exposed_agents mirror regardless of the
+ * `exposed` flag; null only when the chosen agent isn't mirrored at all).
  */
 import 'dotenv/config';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -89,5 +89,22 @@ describe('bootstrap chat field on listTickets', () => {
     await WidgetService.updateWidgetSettings(SERVER_ID, { widgetChatAgentEntityId: 'ae_ghost' }, LOOKUP);
     const result = await WidgetService.listTickets(PROJECT_ID);
     expect(result.chat).toEqual({ enabled: true, agentName: null });
+  });
+
+  it('resolves the name of a mirrored but NOT exposed agent (chat ⊥ assignment)', async () => {
+    // The support agent is mirrored with exposed=false — i.e. NOT in the
+    // "Hand to agent" roster. Its chat header name must still resolve:
+    // naming the chat agent is independent of widget-user assignment.
+    await WidgetService.updateWidgetSettings(SERVER_ID, { widgetChatAgentEntityId: 'ae_chat_only' }, LOOKUP);
+    await db.insert(widgetExposedAgents).values({
+      widgetProjectId: PROJECT_ID, agentId: 'ae_chat_only', agentName: 'Suha', agentDescription: null,
+      exposed: false,
+    }).onConflictDoNothing();
+    const result = await WidgetService.listTickets(PROJECT_ID);
+    expect(result.chat).toEqual({ enabled: true, agentName: 'Suha' });
+
+    // ...and it must NOT appear in the assignable roster.
+    const roster = await WidgetService.listExposedAgents(PROJECT_ID);
+    expect(roster.find(a => a.id === 'ae_chat_only')).toBeUndefined();
   });
 });
