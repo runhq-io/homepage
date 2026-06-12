@@ -13,8 +13,19 @@ export interface InternalGithubDeps {
   listInstallationsForUser: (userId: string) => Promise<Array<{
     installationId: number; accountLogin: string; accountType: string; repositorySelection: string | null;
   }>>;
-  getInstallation: (installationId: number) => Promise<{ installationId: number; connectedByUserId: string | null } | null>;
+  getInstallation: (installationId: number) => Promise<{
+    installationId: number; connectedByUserId: string | null; repositorySelection: 'all' | 'selected' | null;
+  } | null>;
   isAssociatedWithWorkspace: (installationId: number, serverId: string) => Promise<boolean>;
+  /**
+   * Resolve the acting RunHQ user from a Bearer token (null if missing/invalid).
+   * Endpoints that act on a specific user's behalf derive identity from this —
+   * NEVER from a client-supplied userId field — so a leaked workspace server
+   * token cannot be used to impersonate another user.
+   */
+  authenticateUser: (bearerToken: string | null) => Promise<string | null>;
+  /** Whether the user is a member of (or owns) the server. */
+  canAccessServer: (serverId: string, userId: string) => Promise<boolean>;
   associateWithWorkspace: (installationId: number, serverId: string, addedByUserId: string | null) => Promise<void>;
   listInstallationRepos: (installationId: number) => Promise<Array<{
     name: string; full_name: string; owner: string; clone_url: string; default_branch: string; private: boolean;
@@ -47,11 +58,27 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     return server;
   };
 
+  // Resolve the acting user for endpoints that act on a specific user's behalf.
+  // The X-Server-Token (authServer) authenticates the TRANSPORT — that a
+  // workspace server is calling — but it is reachable to anyone who can read it
+  // from a workspace container, so it must not be trusted to assert WHICH user
+  // is acting. The acting identity is therefore taken from the verified Bearer
+  // and checked against server membership; a self-asserted userId field is
+  // ignored entirely.
+  const authUser = async (c: any, server: { id: string }): Promise<string | Response> => {
+    const header = c.req.header('Authorization');
+    const bearer = header?.startsWith('Bearer ') ? header.slice(7) : null;
+    const userId = await deps.authenticateUser(bearer);
+    if (!userId) return c.json({ error: 'User authentication required' }, 401);
+    if (!(await deps.canAccessServer(server.id, userId))) return c.json({ error: 'Forbidden' }, 403);
+    return userId;
+  };
+
   app.post('/api/internal/servers/:serverId/github/install-url', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    const body = await c.req.json().catch(() => ({}));
-    const userId = typeof body.userId === 'string' ? body.userId : null;
+    const userId = await authUser(c, server);
+    if (userId instanceof Response) return userId;
     const state = signInstallState(server.id, userId, deps.stateSecret);
     return c.json({ url: `https://github.com/apps/${deps.appSlug}/installations/new?state=${encodeURIComponent(state)}` });
   });
@@ -80,8 +107,8 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
   app.get('/api/internal/servers/:serverId/github/user-installations', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
-    const userId = c.req.query('userId');
-    if (!userId) return c.json({ error: 'userId required' }, 400);
+    const userId = await authUser(c, server);
+    if (userId instanceof Response) return userId;
     const [connected, associated] = await Promise.all([
       deps.listInstallationsForUser(userId),
       deps.listInstallationsForServer(server.id),
@@ -95,15 +122,17 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
   app.post('/api/internal/servers/:serverId/github/installations/:installationId/associate', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
+    const userId = await authUser(c, server);
+    if (userId instanceof Response) return userId;
     const installationId = Number(c.req.param('installationId'));
-    const body = await c.req.json().catch(() => ({}));
-    const userId = typeof body.userId === 'string' ? body.userId : null;
     if (await deps.isAssociatedWithWorkspace(installationId, server.id)) {
       return c.json({ ok: true });
     }
     const install = await deps.getInstallation(installationId);
     if (!install) return c.json({ error: 'Installation not found' }, 404);
-    if (!userId || install.connectedByUserId !== userId) return c.json({ error: 'Forbidden' }, 403);
+    // Proof of control: the acting user (from the Bearer) must be the one who
+    // connected this installation on GitHub.
+    if (install.connectedByUserId !== userId) return c.json({ error: 'Forbidden' }, 403);
     await deps.associateWithWorkspace(installationId, server.id, userId);
     return c.json({ ok: true });
   });
@@ -115,11 +144,41 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     return installationId;
   };
 
+  // Finding 2: an installation scoped to ALL repositories exposes the connector's
+  // entire GitHub account. Only the connector may browse/link from such an
+  // installation; other members must rely on what the connector explicitly
+  // scoped on GitHub ('selected'). A 'selected' installation is already curated
+  // by the connector, so any member may browse it. Returns a Response when the
+  // browse is denied, else null.
+  const repoBrowseGate = async (c: any, installationId: number, userId: string): Promise<Response | null> => {
+    const install = await deps.getInstallation(installationId);
+    let selection: 'all' | 'selected' | null = install?.repositorySelection ?? null;
+    // Legacy rows may predate recording the selection — resolve it from GitHub
+    // before deciding, so we neither leak ('all' treated as 'selected') nor
+    // wrongly lock out a 'selected' account.
+    if (selection == null && deps.backfillInstallationAccount) {
+      const healed = await deps.backfillInstallationAccount(installationId).catch(() => null);
+      if (healed) selection = healed.repositorySelection === 'selected' ? 'selected' : healed.repositorySelection === 'all' ? 'all' : null;
+    }
+    const isConnector = !!install?.connectedByUserId && install.connectedByUserId === userId;
+    if (selection !== 'selected' && !isConnector) {
+      return c.json({
+        error: 'This GitHub account is connected with access to all repositories, so only the person who connected it can browse or link its repos. Ask them to re-scope the GitHub App to selected repositories to share specific repos.',
+        code: 'all_repos_connector_only',
+      }, 403);
+    }
+    return null;
+  };
+
   app.get('/api/internal/servers/:serverId/github/installations/:installationId/repos', async (c) => {
     const server = await authServer(c);
     if (server instanceof Response) return server;
+    const userId = await authUser(c, server);
+    if (userId instanceof Response) return userId;
     const installationId = await associatedInstall(c, server);
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
+    const denied = await repoBrowseGate(c, installationId, userId);
+    if (denied) return denied;
     return c.json({ repos: await deps.listInstallationRepos(installationId) });
   });
 

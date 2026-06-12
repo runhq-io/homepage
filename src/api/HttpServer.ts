@@ -7001,6 +7001,12 @@ export function createHttpApp() {
       stateSecret: getGithubAppConfig().stateSecret,
       appSlug: getGithubAppConfig().appSlug,
       getServerByToken: (t) => ServerService.getServerByToken(t),
+      // Identity for user-acting endpoints comes from the verified Bearer, not a
+      // request field — a leaked workspace server token must not be usable to
+      // impersonate another user (the container runs as root, so the token is
+      // reachable from a member's terminal).
+      authenticateUser: (bearer) => (bearer ? extractUserIdFromToken(bearer) : Promise.resolve(null)),
+      canAccessServer: (serverId, userId) => ServerService.canAccessServer(serverId, userId),
       listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
       listInstallationsForUser: GithubInstallationsService.listInstallationsForUser,
       getInstallation: GithubInstallationsService.getInstallation,

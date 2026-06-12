@@ -6,6 +6,8 @@ function makeApp(over: Partial<InternalGithubDeps> = {}) {
   const deps: InternalGithubDeps = {
     stateSecret: 'st', appSlug: 'runhq',
     getServerByToken: async (t) => (t === 'wst_good' ? ({ id: 'ws_a' } as any) : null),
+    authenticateUser: async () => 'user_1',
+    canAccessServer: async () => true,
     listInstallationsForServer: async () => [],
     listInstallationsForUser: async () => [],
     getInstallation: async (id) => (id === 5 ? ({ installationId: 5, connectedByUserId: 'user_1' } as any) : null),
