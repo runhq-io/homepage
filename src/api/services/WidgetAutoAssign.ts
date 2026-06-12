@@ -85,6 +85,13 @@ export interface AutoAssignDeps {
   loadIntakeQa(ticketId: string): Promise<Array<{ question: string; answer: string }>>;
   getActor(widgetUserId: string): Promise<{ externalUserId: string; name: string | null } | null>;
   assign(projectId: string, ticketId: string, req: AutoAssignRequest): Promise<{ jobId: string }>;
+  /**
+   * Flag the ticket's clarification as 'duplicate' (creating one if the gate
+   * never wrote a row) so the widget renders the duplicate-notice card with
+   * the matched ticket + "Not a duplicate — start anyway" override. Advisory:
+   * a failure here must not block recording the skipped_duplicate outcome.
+   */
+  markDuplicate(serverId: string, ticketId: string, widgetUserId: string, duplicateOfTaskId: string): Promise<void>;
   recordOutcome(serverId: string, ticketId: string, outcome: AutoAssignOutcome): Promise<void>;
 }
 
@@ -169,14 +176,32 @@ export async function finalizeAutoAssign(
   serverId: string,
   ticket: { title: string; description: string | null },
   deps: AutoAssignDeps,
+  opts?: {
+    /**
+     * Skip the dedup check. Set by the clarify-proceed route after the
+     * reporter overrides a duplicate verdict ("Not a duplicate — start
+     * anyway") — re-running dedup would just re-flag the same ticket.
+     */
+    skipDedup?: boolean;
+  },
 ): Promise<AutoAssignOutcome> {
   // Dedup: a likely duplicate is created but not assigned (avoids N duplicate
   // agent runs from N similar reports).
-  const dup = await deps.findDuplicate(serverId, ticketId, ticket);
-  if (dup.duplicateOf) {
-    const outcome: AutoAssignOutcome = { status: 'skipped_duplicate', duplicateOf: dup.duplicateOf };
-    await deps.recordOutcome(serverId, ticketId, outcome);
-    return outcome;
+  if (!opts?.skipDedup) {
+    const dup = await deps.findDuplicate(serverId, ticketId, ticket);
+    if (dup.duplicateOf) {
+      // Make the verdict visible to the reporter — the widget renders the
+      // duplicate card off the clarification row. Advisory: the outcome is
+      // recorded either way.
+      try {
+        await deps.markDuplicate(serverId, ticketId, widgetUserId, dup.duplicateOf);
+      } catch (err) {
+        console.warn('[WidgetAutoAssign] could not mark clarification duplicate:', err);
+      }
+      const outcome: AutoAssignOutcome = { status: 'skipped_duplicate', duplicateOf: dup.duplicateOf };
+      await deps.recordOutcome(serverId, ticketId, outcome);
+      return outcome;
+    }
   }
 
   // Agent selection — the existing LLM picker over the project's exposed agents.
@@ -284,6 +309,14 @@ export async function defaultAutoAssignDeps(): Promise<AutoAssignDeps> {
     loadIntakeQa: (ticketId) => ClarifierService.defaultLoadIntakeQa(ticketId),
     getActor: (widgetUserId) => WidgetService.getWidgetUserAuditInfo(widgetUserId),
     assign: (projectId, ticketId, req) => WidgetService.assignAgent(projectId, ticketId, req),
+    markDuplicate: (serverId, ticketId, widgetUserId, duplicateOfTaskId) =>
+      ClarifierService.markTicketDuplicate({
+        serverId,
+        taskId: ticketId,
+        widgetUserId,
+        duplicateOfTaskId,
+        agentId: AUTO_ASSIGN_SENTINEL_AGENT,
+      }).then(() => undefined),
     recordOutcome,
   };
 }
@@ -315,11 +348,12 @@ export async function finalizeAutoAssignTicket(
   projectId: string,
   ticketId: string,
   widgetUserId: string,
+  opts?: { skipDedup?: boolean },
 ): Promise<AutoAssignOutcome> {
   const deps = await defaultAutoAssignDeps();
   const project = await deps.getProject(projectId);
   if (!project) return { status: 'failed' };
   const ticket = await deps.getTicket(project.serverId, ticketId);
   if (!ticket) return { status: 'failed' };
-  return finalizeAutoAssign(projectId, ticketId, widgetUserId, project.serverId, ticket, deps);
+  return finalizeAutoAssign(projectId, ticketId, widgetUserId, project.serverId, ticket, deps, opts);
 }

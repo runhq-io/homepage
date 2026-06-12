@@ -256,10 +256,29 @@ export async function startClarification(
   const callModel = deps?.callModel ?? defaultCallModel;
   const loadIntakeQa = deps?.loadIntakeQa ?? defaultLoadIntakeQa;
 
-  // Prior conversation Q&A (from the chat intake that created this ticket) is
-  // fed to the clarifier so an already-clarified ticket resolves to 'ready'
-  // instead of being re-interrogated from scratch.
+  // One conversation, one interrogator: a ticket born from an agent chat
+  // conversation was already fleshed out there — and the visitor explicitly
+  // confirmed the drafted ticket. Re-asking on the ticket page after that
+  // conversation is the double-interrogation UX we must never produce, so a
+  // non-empty intake transcript resolves 'ready' without consulting the model.
+  // The row is still written: downstream plumbing (duplicate card, 'started'
+  // transition) keys off an existing clarification.
   const intakeQa = await loadIntakeQa(input.taskId);
+  if (intakeQa.length > 0) {
+    const [clarRow] = await db
+      .insert(widgetClarifications)
+      .values({
+        taskId: input.taskId,
+        serverId: input.serverId,
+        widgetUserId: input.widgetUserId,
+        agentId: input.agentId,
+        command: input.command,
+        status: 'ready',
+        round: 0,
+      })
+      .returning({ id: widgetClarifications.id });
+    return { status: 'ready', clarificationId: clarRow!.id };
+  }
 
   // 1. Call model FIRST — if this throws (non-parse error) no DB row is written.
   const { system, messages } = buildClarifierMessages(input.ticket, intakeQa);
@@ -512,6 +531,58 @@ export async function markDuplicate(
   await db
     .update(widgetClarifications)
     .set({ status: 'duplicate', duplicateOfTaskId, updatedAt: new Date() })
+    .where(eq(widgetClarifications.id, clarificationId));
+}
+
+/**
+ * Flag a TICKET as a duplicate (by taskId, not clarificationId) — the shape
+ * the auto-assign tail needs, since it never holds a clarification id.
+ *
+ * Updates the ticket's latest clarification row to 'duplicate'; when no row
+ * exists (the clarify gate failed open, or legacy tickets), inserts one so the
+ * widget's duplicate card always has a clarification to render and override.
+ * Returns the clarification id.
+ */
+export async function markTicketDuplicate(args: {
+  serverId: string;
+  taskId: string;
+  widgetUserId: string;
+  duplicateOfTaskId: string;
+  /** Stored only when a row must be created (auto-flow sentinel agent). */
+  agentId: string;
+}): Promise<string> {
+  const existing = await getTicketClarification(args.taskId);
+  if (existing) {
+    await markDuplicate(existing.id, args.duplicateOfTaskId);
+    return existing.id;
+  }
+
+  const [clarRow] = await db
+    .insert(widgetClarifications)
+    .values({
+      taskId: args.taskId,
+      serverId: args.serverId,
+      widgetUserId: args.widgetUserId,
+      agentId: args.agentId,
+      command: '',
+      status: 'duplicate',
+      duplicateOfTaskId: args.duplicateOfTaskId,
+      round: 0,
+    })
+    .returning({ id: widgetClarifications.id });
+  return clarRow!.id;
+}
+
+/**
+ * Reporter override: "Not a duplicate — start anyway". Returns the
+ * clarification to 'ready' so the widget's duplicate card disappears and the
+ * assign tail can run. `duplicateOfTaskId` is intentionally retained for
+ * audit (the widget only renders the card while status === 'duplicate').
+ */
+export async function overrideDuplicate(clarificationId: string): Promise<void> {
+  await db
+    .update(widgetClarifications)
+    .set({ status: 'ready', updatedAt: new Date() })
     .where(eq(widgetClarifications.id, clarificationId));
 }
 

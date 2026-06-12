@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { maybeAutoAssign, type AutoAssignDeps } from './WidgetAutoAssign';
+import { maybeAutoAssign, finalizeAutoAssign, type AutoAssignDeps } from './WidgetAutoAssign';
 
 const PROJECT = 'proj_1';
 const TICKET = 'task_1';
@@ -17,6 +17,7 @@ function makeDeps(over: Partial<AutoAssignDeps> = {}): AutoAssignDeps {
     loadIntakeQa: vi.fn().mockResolvedValue([{ question: 'q', answer: 'a' }]),
     getActor: vi.fn().mockResolvedValue({ externalUserId: 'ext_1', name: 'Jane' }),
     assign: vi.fn().mockResolvedValue({ jobId: 'job_99' }),
+    markDuplicate: vi.fn().mockResolvedValue(undefined),
     recordOutcome: vi.fn().mockResolvedValue(undefined),
     ...over,
   };
@@ -126,6 +127,27 @@ describe('maybeAutoAssign', () => {
     );
   });
 
+  it('marks the clarification duplicate so the widget renders the duplicate card', async () => {
+    const deps = makeDeps({
+      findDuplicate: vi.fn().mockResolvedValue({ duplicateOf: 'task_other' }),
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.markDuplicate).toHaveBeenCalledWith(SERVER, TICKET, USER, 'task_other');
+  });
+
+  it('still records skipped_duplicate when marking the clarification fails (advisory)', async () => {
+    const deps = makeDeps({
+      findDuplicate: vi.fn().mockResolvedValue({ duplicateOf: 'task_other' }),
+      markDuplicate: vi.fn().mockRejectedValue(new Error('db hiccup')),
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.recordOutcome).toHaveBeenCalledWith(
+      SERVER,
+      TICKET,
+      expect.objectContaining({ status: 'skipped_duplicate', duplicateOf: 'task_other' }),
+    );
+  });
+
   it('does not assign when no agent is confidently selected — skipped_no_agent', async () => {
     const deps = makeDeps({
       suggest: vi.fn().mockResolvedValue({ agentId: null, command: '' }),
@@ -177,5 +199,29 @@ describe('maybeAutoAssign', () => {
       getTicket: vi.fn().mockRejectedValue(new Error('db down')),
     });
     await expect(maybeAutoAssign(PROJECT, TICKET, USER, deps)).resolves.toBeUndefined();
+  });
+});
+
+describe('finalizeAutoAssign — skipDedup (clarify-proceed override)', () => {
+  const ticket = { title: 'Add dark mode', description: 'toggle please' };
+
+  it('skips the dedup check entirely and assigns when skipDedup is set', async () => {
+    const deps = makeDeps({
+      // Would re-flag the same duplicate if consulted — it must not be.
+      findDuplicate: vi.fn().mockResolvedValue({ duplicateOf: 'task_other' }),
+    });
+    const outcome = await finalizeAutoAssign(PROJECT, TICKET, USER, SERVER, ticket, deps, { skipDedup: true });
+    expect(deps.findDuplicate).not.toHaveBeenCalled();
+    expect(deps.assign).toHaveBeenCalledOnce();
+    expect(outcome.status).toBe('assigned');
+  });
+
+  it('still dedups by default (no opts)', async () => {
+    const deps = makeDeps({
+      findDuplicate: vi.fn().mockResolvedValue({ duplicateOf: 'task_other' }),
+    });
+    const outcome = await finalizeAutoAssign(PROJECT, TICKET, USER, SERVER, ticket, deps);
+    expect(outcome.status).toBe('skipped_duplicate');
+    expect(deps.assign).not.toHaveBeenCalled();
   });
 });

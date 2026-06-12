@@ -6122,6 +6122,52 @@ export function createHttpApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/clarify-proceed
+  //
+  // Duplicate override. The dedup gate flagged this ticket as a duplicate of an
+  // existing one (clarification.status='duplicate', rendered by the widget as
+  // the duplicate-notice card). The reporter disagrees — "Not a duplicate —
+  // start anyway". Clear the flag and run the assign tail with dedup skipped:
+  // re-running dedup would just re-flag the same ticket.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/clarify-proceed', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    const ticketId = c.req.param('id');
+    const body = await c.req.json().catch(() => null) as { clarificationId?: unknown } | null;
+    if (!body || typeof body.clarificationId !== 'string') {
+      return c.json({ error: 'clarificationId required' }, 400);
+    }
+
+    // Ownership: the clarification must belong to THIS ticket + THIS reporter.
+    const owned = await ClarifierService.getOwnedClarification(body.clarificationId, {
+      taskId: ticketId,
+      widgetUserId: auth.widgetUserId,
+    });
+    if (!owned) return c.json({ error: 'clarification_not_found' }, 404);
+    // 409 = already processed (the widget shows "already been processed").
+    if (owned.status !== 'duplicate') return c.json({ error: 'not_flagged_duplicate' }, 409);
+
+    await ClarifierService.overrideDuplicate(body.clarificationId);
+
+    try {
+      const outcome = await WidgetAutoAssign.finalizeAutoAssignTicket(
+        auth.projectId,
+        ticketId,
+        auth.widgetUserId,
+        { skipDedup: true },
+      );
+      return c.json({ clarification: { status: 'started' as const }, outcome });
+    } catch (err) {
+      console.error('[widget] clarify-proceed finalize/assign failed:', err);
+      // The override IS recorded; the assign tail can be retried later.
+      return c.json({ clarification: { status: 'started' as const }, outcome: { status: 'failed' as const } });
+    }
+  });
+
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);

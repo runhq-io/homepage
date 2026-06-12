@@ -25,6 +25,8 @@ import {
   answerClarification,
   getOwnedClarification,
   markClarificationStarted,
+  markTicketDuplicate,
+  overrideDuplicate,
   getTicketClarification,
   getAnsweredQa,
   defaultLoadIntakeQa,
@@ -610,14 +612,13 @@ describe('markClarificationStarted', () => {
 // re-interrogated from scratch (the redundant-clarification fix).
 // ---------------------------------------------------------------------------
 describe('intake Q&A threading', () => {
-  it('startClarification feeds injected intake Q&A into the model prompt', async () => {
+  it('startClarification resolves ready WITHOUT a model call when intake Q&A exists (one conversation, one interrogator)', async () => {
     const taskId = await makeTask('Dark mode', 'Add a dark theme');
 
-    let seenContent = '';
-    const stub: CallModel = vi.fn().mockImplementation(async (args) => {
-      seenContent = args.messages.map((m) => m.content).join('\n');
-      return JSON.stringify({ ready: true });
-    });
+    const stub: CallModel = vi.fn().mockResolvedValue(
+      // Would ask a question if it were ever consulted — it must not be.
+      JSON.stringify({ ready: false, questions: [{ prompt: 'Should never be asked' }] }),
+    );
 
     const result = await startClarification(
       { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'a1', command: 'do it', ticket: { title: 'Dark mode', description: 'Add a dark theme' } },
@@ -631,9 +632,15 @@ describe('intake Q&A threading', () => {
     );
 
     expect(result.status).toBe('ready');
-    expect(seenContent).toContain('Which screens need it?');
-    expect(seenContent).toContain('All of them');
-    expect(seenContent).toContain('Follow system setting?');
+    expect(stub).not.toHaveBeenCalled();
+
+    // The row still exists (status 'ready') so downstream plumbing — the
+    // duplicate card, started transitions — has a clarification to act on.
+    const [row] = await db
+      .select({ status: widgetClarifications.status })
+      .from(widgetClarifications)
+      .where(eq(widgetClarifications.id, result.clarificationId));
+    expect(row!.status).toBe('ready');
   });
 
   it('answerClarification prepends intake Q&A to the answered-round Q&A', async () => {
@@ -702,5 +709,65 @@ describe('intake Q&A threading', () => {
   it('defaultLoadIntakeQa returns [] for a ticket with no originating conversation', async () => {
     const taskId = await makeTask('Native ticket', 'no chat');
     expect(await defaultLoadIntakeQa(taskId)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// markTicketDuplicate / overrideDuplicate — duplicate-card plumbing
+// ---------------------------------------------------------------------------
+describe('markTicketDuplicate', () => {
+  it('updates the existing clarification row to duplicate with the matched ticket id', async () => {
+    const taskId = await makeTask('Dup w/ row', 'has a clarification row');
+    const dupOfId = await makeTask('The original', 'original report');
+
+    const start = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: '__auto__', command: '', ticket: { title: 'Dup w/ row', description: null } },
+      { callModel: async () => JSON.stringify({ ready: true }), loadIntakeQa: async () => [] },
+    );
+
+    await markTicketDuplicate({
+      serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID,
+      duplicateOfTaskId: dupOfId, agentId: '__auto__',
+    });
+
+    const clar = await getTicketClarification(taskId);
+    expect(clar!.id).toBe(start.clarificationId); // updated, not duplicated
+    expect(clar!.status).toBe('duplicate');
+    expect(clar!.duplicateOfTaskId).toBe(dupOfId);
+  });
+
+  it('inserts a duplicate clarification row when none exists (fail-open gate path)', async () => {
+    const taskId = await makeTask('Dup w/o row', 'gate failed open, no row');
+    const dupOfId = await makeTask('The original 2', 'original report');
+
+    await markTicketDuplicate({
+      serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID,
+      duplicateOfTaskId: dupOfId, agentId: '__auto__',
+    });
+
+    const clar = await getTicketClarification(taskId);
+    expect(clar).not.toBeNull();
+    expect(clar!.status).toBe('duplicate');
+    expect(clar!.duplicateOfTaskId).toBe(dupOfId);
+    expect(clar!.widgetUserId).toBe(WIDGET_USER_ID);
+  });
+});
+
+describe('overrideDuplicate', () => {
+  it('returns the clarification to ready so the widget card disappears and assign can proceed', async () => {
+    const taskId = await makeTask('Overridden dup', 'reporter says not a duplicate');
+    const dupOfId = await makeTask('The original 3', 'original report');
+
+    await markTicketDuplicate({
+      serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID,
+      duplicateOfTaskId: dupOfId, agentId: '__auto__',
+    });
+    const clar = await getTicketClarification(taskId);
+
+    await overrideDuplicate(clar!.id);
+
+    const after = await getTicketClarification(taskId);
+    expect(after!.id).toBe(clar!.id);
+    expect(after!.status).toBe('ready');
   });
 });
