@@ -28,6 +28,7 @@ const USER_ID = `00000000-000f-4000-a000-${RUN_HEX.padStart(12, '0')}`;
 let PROJECT_ID: string;
 let WIDGET_USER_ID: string;
 let TASK_ID: string;
+let PRIVATE_TASK_ID: string;
 
 beforeAll(async () => {
   await db.insert(users).values({ id: USER_ID, email: `ci+${RUN_HEX}@test.invalid`, name: 'U' }).onConflictDoNothing();
@@ -49,8 +50,14 @@ beforeAll(async () => {
   WIDGET_USER_ID = wu!.id;
   const [task] = await db.insert(workspaceTasks).values({
     serverId: SERVER_ID, title: 'Linked task', sourceType: 'widget', createdByType: 'external',
+    visibility: 'public',
   }).returning({ id: workspaceTasks.id });
   TASK_ID = task!.id;
+  const [privateTask] = await db.insert(workspaceTasks).values({
+    serverId: SERVER_ID, title: 'Internal security task', sourceType: 'workspace', createdByType: 'member',
+    visibility: 'private',
+  }).returning({ id: workspaceTasks.id });
+  PRIVATE_TASK_ID = privateTask!.id;
   await db.insert(widgetExposedAgents).values({
     widgetProjectId: PROJECT_ID, agentId: 'ae_coder', agentName: 'Codey', agentDescription: null,
   }).onConflictDoNothing();
@@ -122,6 +129,7 @@ describe('ingestTurnEvents', () => {
         { seq: 0, kind: 'ticket_link', ticketId: TASK_ID },
         { seq: 1, kind: 'ticket_link', ticketId: randomUUID() }, // not a known task → dropped
         { seq: 2, kind: 'ticket_link', ticketId: 'not-a-uuid' }, // malformed → dropped
+        { seq: 3, kind: 'ticket_link', ticketId: PRIVATE_TASK_ID }, // private → dropped, never leak titles to visitors
       ],
     });
     expect(res.inserted).toBe(1);

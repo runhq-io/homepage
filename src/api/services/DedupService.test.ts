@@ -262,3 +262,39 @@ describe('DedupService.findLikelyDuplicate', () => {
     }
   });
 });
+
+describe('DedupService.findLikelyDuplicate — visibility gate', () => {
+  it('never includes private tickets in the candidate set sent to the model', async () => {
+    const VIS_SERVER = `ws_dedup_vis_${RUN_HEX}`;
+    await db.insert(servers).values({ id: VIS_SERVER, name: `Vis ${RUN_HEX}`, ownerId: USER_ID }).onConflictDoNothing();
+
+    const [pub] = await db.insert(workspaceTasks).values({
+      serverId: VIS_SERVER, title: 'Public login bug', status: 'pending', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+    const [priv] = await db.insert(workspaceTasks).values({
+      serverId: VIS_SERVER, title: 'Internal security login task', status: 'pending', visibility: 'private',
+    }).returning({ id: workspaceTasks.id });
+    const [candidate] = await db.insert(workspaceTasks).values({
+      serverId: VIS_SERVER, title: 'Login bug report', status: 'pending', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    let capturedContent = '';
+    const capturingModel: CallModel = async ({ messages }) => {
+      capturedContent = messages.find((m) => m.role === 'user')?.content ?? '';
+      return JSON.stringify({ duplicateOf: null });
+    };
+
+    try {
+      await findLikelyDuplicate(
+        { serverId: VIS_SERVER, ticketId: candidate!.id, candidate: { title: 'Login bug report' } },
+        { callModel: capturingModel },
+      );
+      expect(capturedContent).toContain(pub!.id);
+      expect(capturedContent).not.toContain(priv!.id);
+      expect(capturedContent).not.toContain('Internal security login task');
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, VIS_SERVER));
+      await db.delete(servers).where(eq(servers.id, VIS_SERVER));
+    }
+  });
+});

@@ -101,6 +101,11 @@ export async function findLikelyDuplicate(
       // status IN (...open statuses) — drizzle doesn't have inArray for enum unions,
       // but notInArray with the closed statuses is equivalent and simpler:
       notInArray(workspaceTasks.status, ['done', 'deployed', 'cancelled'] as any[]),
+      // Public only: the verdict serves widget flows, where `duplicateOf` is
+      // surfaced to an anonymous visitor (duplicate card links to the ticket).
+      // A private ticket can neither be shown nor opened by them, and its
+      // title/description must not enter the model prompt for their request.
+      eq(workspaceTasks.visibility, 'public'),
     ];
 
     const existing = await db

@@ -1143,14 +1143,21 @@ export async function ingestTurnEvents(
       case 'ticket_link': {
         if (typeof ev.ticketId !== 'string' || !UUID_RE.test(ev.ticketId)) break;
         // Enrich from the synced task store, scoped to this server — a bogus
-        // or cross-tenant ticketId silently drops the event.
+        // or cross-tenant ticketId silently drops the event. Gating on
+        // visibility='public' is defense-in-depth: the workspace-side search
+        // already filters private tickets, but a link card renders the title
+        // to an anonymous visitor, so the gate must also hold here.
         const [task] = await db
           .select({ title: workspaceTasks.title, status: workspaceTasks.status })
           .from(workspaceTasks)
-          .where(and(eq(workspaceTasks.id, ev.ticketId), eq(workspaceTasks.serverId, serverId)))
+          .where(and(
+            eq(workspaceTasks.id, ev.ticketId),
+            eq(workspaceTasks.serverId, serverId),
+            eq(workspaceTasks.visibility, 'public'),
+          ))
           .limit(1);
         if (!task) {
-          console.warn('[WidgetChatService] ticket_link to unknown task dropped:', ev.ticketId);
+          console.warn('[WidgetChatService] ticket_link to unknown or non-public task dropped:', ev.ticketId);
           break;
         }
         row = {
