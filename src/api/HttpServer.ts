@@ -780,6 +780,22 @@ export function createHttpApp() {
         if (error.message.includes('rate_limit')) {
           return c.json({ error: 'Rate limit exceeded - please wait before trying again' }, 429);
         }
+        // Anthropic org-level credit exhaustion: the PLATFORM key is out of
+        // prepaid credits. This is distinct from a user's own RunHQ balance
+        // (which surfaces as a 402 CreditLimitError) and from a rate limit.
+        // Anthropic returns a 400 invalid_request with this message; passing it
+        // through as a raw 400 reached agents as a cryptic error. Surface it as
+        // a clear, correctly-categorized 503 so callers can tell "platform out
+        // of AI credits" apart from user billing and rate limits.
+        if (error.message.includes('credit balance is too low')) {
+          return c.json(
+            {
+              error: 'AI provider temporarily unavailable: the platform AI credit balance is exhausted. Please top up the Anthropic key or contact support.',
+              code: 'PLATFORM_CREDITS_EXHAUSTED',
+            },
+            503,
+          );
+        }
         if (error.message.includes('invalid_api_key')) {
           return c.json({ error: 'Server configuration error' }, 500);
         }
@@ -1130,6 +1146,22 @@ export function createHttpApp() {
       if (error instanceof Error) {
         if (error.message.includes('rate_limit')) {
           return c.json({ error: 'Rate limit exceeded - please wait before trying again' }, 429);
+        }
+        // Anthropic org-level credit exhaustion: the PLATFORM key is out of
+        // prepaid credits. This is distinct from a user's own RunHQ balance
+        // (which surfaces as a 402 CreditLimitError) and from a rate limit.
+        // Anthropic returns a 400 invalid_request with this message; passing it
+        // through as a raw 400 reached agents as a cryptic error. Surface it as
+        // a clear, correctly-categorized 503 so callers can tell "platform out
+        // of AI credits" apart from user billing and rate limits.
+        if (error.message.includes('credit balance is too low')) {
+          return c.json(
+            {
+              error: 'AI provider temporarily unavailable: the platform AI credit balance is exhausted. Please top up the Anthropic key or contact support.',
+              code: 'PLATFORM_CREDITS_EXHAUSTED',
+            },
+            503,
+          );
         }
         if (error.message.includes('invalid_api_key')) {
           return c.json({ error: 'Server configuration error' }, 500);
