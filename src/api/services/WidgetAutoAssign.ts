@@ -81,7 +81,20 @@ export interface AutoAssignDeps {
     ticketId: string,
     ticket: { title: string; description: string | null },
   ): Promise<{ duplicateOf: string | null }>;
-  suggest(projectId: string, ticketId: string): Promise<{ agentId: string | null; command: string }>;
+  /**
+   * Ensure the workspace machine is awake before the suggest + assign forwards
+   * (both hit the workspace over HTTP). Widget servers auto-suspend on idle, so
+   * a fire-and-forget auto-assign frequently fires against a cold machine; an
+   * unreachable workspace must NOT be mistaken for "no agent". Returns
+   * `reachable:false` when the machine could not be woken — the orchestrator
+   * records a transient `failed` and stops before forwarding.
+   */
+  wakeWorkspace(serverId: string): Promise<{ reachable: boolean }>;
+  /**
+   * `unavailable:true` means the workspace could not be reached for a verdict
+   * (transient) — distinct from a genuine `agentId:null` "no agent" answer.
+   */
+  suggest(projectId: string, ticketId: string): Promise<{ agentId: string | null; command: string; unavailable?: boolean }>;
   loadIntakeQa(ticketId: string): Promise<Array<{ question: string; answer: string }>>;
   getActor(widgetUserId: string): Promise<{ externalUserId: string; name: string | null } | null>;
   assign(projectId: string, ticketId: string, req: AutoAssignRequest): Promise<{ jobId: string }>;
@@ -204,8 +217,25 @@ export async function finalizeAutoAssign(
     }
   }
 
+  // Wake the workspace before the suggest + assign forwards — both reach the
+  // workspace over HTTP, and a suspended/cold machine would fail the one-shot
+  // call and be mis-recorded as `skipped_no_agent`. We can afford the wait:
+  // this whole path is fire-and-forget, off the user's request.
+  const awake = await deps.wakeWorkspace(serverId);
+  if (!awake.reachable) {
+    const outcome: AutoAssignOutcome = { status: 'failed', reasons: ['workspace_unreachable'] };
+    await deps.recordOutcome(serverId, ticketId, outcome);
+    return outcome;
+  }
+
   // Agent selection — the existing LLM picker over the project's exposed agents.
   const suggestion = await deps.suggest(projectId, ticketId);
+  if (suggestion.unavailable) {
+    // Could not reach the workspace for a verdict — transient, not "no agent".
+    const outcome: AutoAssignOutcome = { status: 'failed', reasons: ['suggest_unreachable'] };
+    await deps.recordOutcome(serverId, ticketId, outcome);
+    return outcome;
+  }
   if (!suggestion.agentId) {
     const outcome: AutoAssignOutcome = { status: 'skipped_no_agent' };
     await deps.recordOutcome(serverId, ticketId, outcome);
@@ -298,6 +328,7 @@ export async function defaultAutoAssignDeps(): Promise<AutoAssignDeps> {
         return { status: 'ready' };
       }
     },
+    wakeWorkspace: (serverId) => WidgetService.ensureWorkspaceAwake(serverId),
     findDuplicate: (serverId, ticketId, ticket) =>
       // Dev escape hatch: WIDGET_AUTOASSIGN_DISABLE_DEDUP=true skips dedup so the
       // same test ticket can be filed repeatedly without being blocked. NEVER

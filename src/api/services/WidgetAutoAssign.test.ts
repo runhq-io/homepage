@@ -13,6 +13,7 @@ function makeDeps(over: Partial<AutoAssignDeps> = {}): AutoAssignDeps {
     guard: vi.fn().mockResolvedValue({ safe: true, reasons: [] }),
     clarify: vi.fn().mockResolvedValue({ status: 'ready' }),
     findDuplicate: vi.fn().mockResolvedValue({ duplicateOf: null }),
+    wakeWorkspace: vi.fn().mockResolvedValue({ reachable: true }),
     suggest: vi.fn().mockResolvedValue({ agentId: 'agent_a', command: 'Implement dark mode' }),
     loadIntakeQa: vi.fn().mockResolvedValue([{ question: 'q', answer: 'a' }]),
     getActor: vi.fn().mockResolvedValue({ externalUserId: 'ext_1', name: 'Jane' }),
@@ -158,6 +159,42 @@ describe('maybeAutoAssign', () => {
       SERVER,
       TICKET,
       expect.objectContaining({ status: 'skipped_no_agent' }),
+    );
+  });
+
+  it('wakes the workspace before suggesting (warms a suspended machine)', async () => {
+    const deps = makeDeps();
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.wakeWorkspace).toHaveBeenCalledWith(SERVER);
+    const wakeOrder = vi.mocked(deps.wakeWorkspace).mock.invocationCallOrder[0];
+    const suggestOrder = vi.mocked(deps.suggest).mock.invocationCallOrder[0];
+    expect(wakeOrder).toBeLessThan(suggestOrder);
+  });
+
+  it('records failed (transient), not skipped_no_agent, when the workspace is unreachable', async () => {
+    const deps = makeDeps({
+      wakeWorkspace: vi.fn().mockResolvedValue({ reachable: false }),
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.suggest).not.toHaveBeenCalled();
+    expect(deps.assign).not.toHaveBeenCalled();
+    expect(deps.recordOutcome).toHaveBeenCalledWith(
+      SERVER,
+      TICKET,
+      expect.objectContaining({ status: 'failed', reasons: ['workspace_unreachable'] }),
+    );
+  });
+
+  it('records failed (transient), not skipped_no_agent, when the suggest forward could not reach the workspace', async () => {
+    const deps = makeDeps({
+      suggest: vi.fn().mockResolvedValue({ agentId: null, command: '', unavailable: true }),
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.assign).not.toHaveBeenCalled();
+    expect(deps.recordOutcome).toHaveBeenCalledWith(
+      SERVER,
+      TICKET,
+      expect.objectContaining({ status: 'failed', reasons: ['suggest_unreachable'] }),
     );
   });
 

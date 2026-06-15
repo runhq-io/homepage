@@ -3010,6 +3010,14 @@ export async function assignAgent(
 export interface SuggestAssignmentResult {
   agentId: string | null;
   command: string;
+  /**
+   * Set when the suggestion could not be obtained because the workspace was
+   * unreachable (suspended/cold/timeout/5xx) — i.e. we never got a verdict, as
+   * opposed to a genuine "no agent" answer (agentId:null, unavailable falsy).
+   * The auto-assign orchestrator records this as a transient `failed` outcome
+   * instead of the terminal, misleading `skipped_no_agent`.
+   */
+  unavailable?: boolean;
 }
 
 /**
@@ -3068,8 +3076,45 @@ export async function suggestAssignment(
       command: typeof res?.command === 'string' ? res.command : '',
     };
   } catch (err) {
+    // Could not reach the workspace (suspended/cold/timeout/5xx). This is NOT a
+    // genuine "no agent" answer — flag it `unavailable` so the orchestrator
+    // records a transient `failed` rather than the terminal `skipped_no_agent`.
     console.warn('[WidgetService] suggestAssignment forward failed:', err);
-    return { agentId: null, command: '' };
+    return { agentId: null, command: '', unavailable: true };
+  }
+}
+
+/**
+ * Ensure the workspace machine backing `serverId` is awake before the
+ * auto-assign tail forwards the suggest + assign calls to it.
+ *
+ * Widget servers auto-suspend on idle (Fly machines), so a fire-and-forget
+ * auto-assign — which fires seconds after a ticket is created — routinely hits
+ * a cold machine. A single `serverTokenFetch` against a suspended machine
+ * exceeds its short timeout and fails, which previously surfaced as the
+ * terminal, misleading `skipped_no_agent` ("no matching agent for this
+ * request") even though the agent was exposed and mirrored. Waking first (and
+ * waiting until healthy) lets the suggestion actually reach a live triager.
+ *
+ * Local / self-hosted (Docker) servers are not Fly machines and are reachable
+ * whenever the BE can sign a request to them — nothing to wake, so they report
+ * reachable immediately.
+ */
+export async function ensureWorkspaceAwake(serverId: string): Promise<{ reachable: boolean }> {
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  if (!server) return { reachable: false };
+  if (server.deploymentType !== 'remote') return { reachable: true };
+
+  try {
+    const res = await ServerService.wakeRemoteServerInternal(server);
+    return { reachable: res.success === true || res.wasAlreadyRunning === true };
+  } catch (err) {
+    console.warn(`[WidgetService] ensureWorkspaceAwake failed for ${serverId}:`, err);
+    return { reachable: false };
   }
 }
 
