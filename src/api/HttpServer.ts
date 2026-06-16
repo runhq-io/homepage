@@ -621,6 +621,29 @@ export function createHttpApp() {
         return c.json(errorResponse, 402);
       }
 
+      // Per-server spend cap (test guardrail). When SettingsService.spendCapCents
+      // > 0, reject once the server's usage cost since spendCapResetTs reaches the
+      // cap — stops runaway spend during testing without touching real credits.
+      {
+        const capSettings = await getSettings();
+        if (capSettings.spendCapCents > 0) {
+          const spentCents = await UsageService.getServerSpendSinceCents(
+            readContextHeaders(c).serverId,
+            capSettings.spendCapResetTs,
+          );
+          if (spentCents >= capSettings.spendCapCents) {
+            console.warn(`[HttpServer] spend cap reached: server spent ${spentCents}¢ ≥ cap ${capSettings.spendCapCents}¢`);
+            return c.json({
+              error: `Spend cap reached: $${(spentCents / 100).toFixed(2)} spent ≥ $${(capSettings.spendCapCents / 100).toFixed(2)} cap. Raise or reset the cap to continue.`,
+              code: 'SPEND_CAP_REACHED',
+              reason: 'spend_cap_reached',
+              spentCents,
+              capCents: capSettings.spendCapCents,
+            }, 402);
+          }
+        }
+      }
+
       // Parse request body
       const body = await c.req.json() as ClaudeAnalyzeRequest;
 

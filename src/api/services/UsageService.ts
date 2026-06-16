@@ -382,6 +382,21 @@ export async function resolveBilledUserId(serverId: string | null, actorUserId: 
 }
 
 /**
+ * Total usage cost (cents) recorded for a server since `sinceMs` (epoch ms).
+ * Backs the per-server spend cap (SettingsService.spendCapCents): a guardrail
+ * that stops runaway spend during testing. Returns 0 for a null/sentinel
+ * serverId or when no events exist in the window.
+ */
+export async function getServerSpendSinceCents(serverId: string | null, sinceMs: number): Promise<number> {
+  if (!serverId) return 0;
+  const rows = await db
+    .select({ total: sql<string>`coalesce(sum(${usageEvents.costCents}), 0)` })
+    .from(usageEvents)
+    .where(and(eq(usageEvents.serverId, serverId), gte(usageEvents.ts, new Date(sinceMs))));
+  return Number(rows[0]?.total ?? 0);
+}
+
+/**
  * Persist one Claude-call event and deduct the cost from the BILLED user's
  * balance. Both operations happen in one DB transaction — either both succeed
  * or neither.

@@ -8,6 +8,15 @@ export interface SystemSettings {
   systemPrompt: string;
   serverCreationDisabled: boolean;
   serverCreationDisabledMessage: string;
+  /**
+   * Per-server rolling spend cap in cents (0 = disabled). When > 0, the
+   * /api/claude/tools proxy rejects inference for a server once its summed
+   * usage cost since `spendCapResetTs` reaches this value — a guardrail to
+   * stop runaway spend during testing without touching the real credit balance.
+   */
+  spendCapCents: number;
+  /** Epoch ms; only usage at/after this instant counts toward `spendCapCents`. */
+  spendCapResetTs: number;
 }
 
 export const DEFAULT_SERVER_CREATION_DISABLED_MESSAGE =
@@ -29,6 +38,8 @@ function getDefaults(): SystemSettings {
     systemPrompt: DEFAULT_GLOBAL_SYSTEM_PROMPT,
     serverCreationDisabled: false,
     serverCreationDisabledMessage: DEFAULT_SERVER_CREATION_DISABLED_MESSAGE,
+    spendCapCents: 0,
+    spendCapResetTs: 0,
   };
 }
 
@@ -54,6 +65,8 @@ export async function getSettings(): Promise<SystemSettings> {
       serverCreationDisabled: settingsMap.get('server_creation_disabled') === 'true',
       serverCreationDisabledMessage:
         settingsMap.get('server_creation_disabled_message') || defaults.serverCreationDisabledMessage,
+      spendCapCents: Number(settingsMap.get('spend_cap_cents') ?? '') || 0,
+      spendCapResetTs: Number(settingsMap.get('spend_cap_reset_ts') ?? '') || 0,
     };
     cacheTime = Date.now();
 
