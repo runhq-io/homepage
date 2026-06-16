@@ -958,6 +958,31 @@ export function createHttpApp() {
         console.log('[HttpServer] Dev mode: allowing unauthenticated Claude tools request');
       }
 
+      // Per-server spend cap (test guardrail). Applies in BOTH dev and prod —
+      // testing happens in dev, and this exists to stop runaway spend during
+      // tests without touching the real credit balance. When
+      // SettingsService.spendCapCents > 0, reject once the server's usage cost
+      // since spendCapResetTs reaches the cap.
+      {
+        const capSettings = await getSettings();
+        if (capSettings.spendCapCents > 0) {
+          const spentCents = await UsageService.getServerSpendSinceCents(
+            readContextHeaders(c).serverId,
+            capSettings.spendCapResetTs,
+          );
+          if (spentCents >= capSettings.spendCapCents) {
+            console.warn(`[HttpServer] spend cap reached (tools): server spent ${spentCents}¢ ≥ cap ${capSettings.spendCapCents}¢`);
+            return c.json({
+              error: `Spend cap reached: $${(spentCents / 100).toFixed(2)} spent ≥ $${(capSettings.spendCapCents / 100).toFixed(2)} cap. Raise or reset the cap to continue.`,
+              code: 'SPEND_CAP_REACHED',
+              reason: 'spend_cap_reached',
+              spentCents,
+              capCents: capSettings.spendCapCents,
+            }, 402);
+          }
+        }
+      }
+
       // Parse request body
       const body = await c.req.json() as {
         system: string;
