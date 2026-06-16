@@ -23,6 +23,17 @@ describe('checkTicket', () => {
     expect(res.reasons).toEqual(['asks for an API key']);
   });
 
+  it('passes image attachments through to the model call', async () => {
+    const callModel = vi.fn().mockResolvedValue('{"safe":true,"reasons":[]}');
+    await checkTicket(ticket, {
+      callModel,
+      images: [{ mimeType: 'image/png', dataBase64: 'abc123', filename: 'screen.png' }],
+    });
+    const arg = callModel.mock.calls[0]![0];
+    expect(Array.isArray(arg.messages[0]!.content)).toBe(true);
+    expect((arg.messages[0]!.content as any[]).some((b) => b.type === 'image')).toBe(true);
+  });
+
   it('fails SAFE-for-security (unavailable) when the model call throws', async () => {
     const callModel = vi.fn().mockRejectedValue(new Error('network down'));
     const res = await checkTicket(ticket, { callModel });

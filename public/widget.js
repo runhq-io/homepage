@@ -237,6 +237,25 @@
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
+  function createTicketWithAttachments(data, files) {
+    var fd = new FormData();
+    if (data.title) fd.append("title", data.title);
+    if (data.description) fd.append("description", data.description);
+    fd.append("isPrivate", data.isPrivate ? "true" : "false");
+    if (data.context) {
+      try { fd.append("context", JSON.stringify(data.context)); } catch (_) {}
+    }
+    Array.prototype.forEach.call(files || [], function (file) {
+      fd.append("files", file, file.name || "upload");
+    });
+    var init = {
+      method: "POST",
+      headers: authHeaders({}, { method: "POST" }),
+      body: fd,
+    };
+    if (wantsCookieAuth()) init.credentials = "include";
+    return fetch(RUNHQ_API + "/api/widget/tickets", init).then(readJsonOrThrow);
+  }
   function updateTicket(ticketId, data) { return api("/api/widget/tickets/" + encodeURIComponent(ticketId), { method: "PATCH", body: data }); }
   function castUpvote(ticketId)   { return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/vote", { method: "POST", body: { value: true } }); }
   function retractVote(ticketId)  { return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/vote", { method: "DELETE" }); }
@@ -332,6 +351,8 @@
       case "attachment_too_large":            return t("attachErr.tooLarge");
       case "attachment_unsupported_type":     return t("attachErr.unsupported");
       case "attachment_count_exceeded":       return t("attachErr.tooMany");
+      case "attachment_rejected":             return t("attachErr.rejected");
+      case "attachment_review_unavailable":   return t("attachErr.reviewUnavailable");
       case "attachments_disabled":            return t("attachErr.disabled");
       default:                                return code;
     }
@@ -882,6 +903,8 @@
         tooLarge: "The image is too large (max 5 MB).",
         unsupported: "That image type isn't supported (use PNG, JPG, GIF, or WebP).",
         tooMany: "You've reached the attachment limit for this item.",
+        rejected: "That image couldn't be attached because it appears to contain unsafe instructions.",
+        reviewUnavailable: "We couldn't review the image right now. Try again shortly.",
       },
       restore: {
         welcomeBack: "Welcome back — your draft is ready to submit.",
@@ -1081,6 +1104,8 @@
         tooLarge: "이미지가 너무 큽니다 (최대 5MB).",
         unsupported: "지원하지 않는 이미지 형식입니다 (PNG, JPG, GIF, WebP 사용).",
         tooMany: "이 항목의 첨부 한도에 도달했습니다.",
+        rejected: "안전하지 않은 지시가 포함된 것으로 보여 이미지를 첨부할 수 없습니다.",
+        reviewUnavailable: "지금 이미지를 검토할 수 없습니다. 잠시 후 다시 시도해 주세요.",
       },
       restore: {
         welcomeBack: "다시 오셨네요 — 작성 중이던 내용을 그대로 제출할 수 있어요.",
@@ -3622,10 +3647,9 @@
   //
   // The message-entry surface, rendered inside the compose view (reached
   // from Home's "Send us a message" card, the list's [+ New post] button,
-  // or a submit-ticket login-restore intent). Reuses the same createTicket
-  // + uploadTicketAttachment APIs and the same staged-files semantics as
-  // the old modal composer (the file-staging pattern — append before
-  // submit, upload after — is identical, only the chrome changed).
+  // or a submit-ticket login-restore intent). Stages files locally, then sends
+  // a single multipart create request so the backend reviews ticket text and
+  // images together before auto-assignment can start.
   // -----------------------------------------------------------------------
 
   function renderInlineComposer() {
@@ -3823,28 +3847,21 @@
       // Captured across the upload .then so the post-submit branch can route
       // the author straight into the ticket they just filed.
       var createdTicket = null;
-      // Collects human-readable reasons for any attachment that failed to
-      // upload, so the post-submit branch can surface them instead of
-      // silently dropping the image (the bug this fixes).
-      var attachErrors = [];
-
-      createTicket({
+      var payload = {
         description: description,
         isPrivate: isPrivate,
         context: collectContext(),
-      }).then(function (data) {
-        createdTicket = (data && data.ticket) || null;
-        var ticketId = createdTicket && createdTicket.id;
-        if (!ticketId || entries.length === 0) return null;
+      };
+      var request;
+      if (entries.length > 0) {
         submitBtn.firstChild.textContent = t("composer.uploading");
-        return Promise.all(entries.map(function (e) {
-          return uploadTicketAttachment(ticketId, e.file).catch(function (err) {
-            console.warn("Attachment failed:", err && err.message);
-            attachErrors.push(friendlyAttachError(err));
-            return null;
-          });
-        }));
-      }).then(function () {
+        request = createTicketWithAttachments(payload, entries.map(function (e) { return e.file; }));
+      } else {
+        request = createTicket(payload);
+      }
+
+      request.then(function (data) {
+        createdTicket = (data && data.ticket) || null;
         ta.value = "";
         entries.length = 0;
         renderChips();
@@ -3856,26 +3873,11 @@
         composeReturnView = "home";
         activeTab = "mine";
 
-        // The report itself posted, but one or more images failed to attach.
-        // Keep the user on the composer and show why — navigating to the detail
-        // would discard the notice, and re-submitting would duplicate the
-        // already-created ticket (the empty textarea now blocks that anyway).
-        if (attachErrors.length > 0) {
-          submitBtn.disabled = false;
-          clearChildren(noticeSlot);
-          noticeSlot.appendChild(renderNotice("error", t("composer.attachFailed", {
-            n: String(attachErrors.length),
-            msg: attachErrors[0] || "",
-          })));
-          return;
-        }
-
         // Take the author straight into the ticket they just filed. Assignment
         // is automatic + server-side, but a thin ticket is held for one round
         // of clarifying questions — the detail view polls and surfaces those
         // within a few seconds, so the author can answer and unblock the agent.
-        // Back from here lands on the My Submissions list (activeTab = 'mine',
-        // set above before the attachment-failure gate).
+        // Back from here lands on the My Submissions list (activeTab = 'mine').
         if (createdTicket && createdTicket.id) {
           detailReturnView = null;
           openDetailModal(createdTicket);
@@ -3889,7 +3891,8 @@
         submitBtn.disabled = false;
         submitBtn.firstChild.textContent = t("composer.submit");
         clearChildren(noticeSlot);
-        noticeSlot.appendChild(renderNotice("error", t("composer.failed", { msg: err.message || "" })));
+        var msg = entries.length > 0 ? friendlyAttachError(err) : (err.message || "");
+        noticeSlot.appendChild(renderNotice("error", t("composer.failed", { msg: msg })));
       });
     });
 

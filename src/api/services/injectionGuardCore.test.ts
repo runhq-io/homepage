@@ -79,4 +79,16 @@ describe('buildInjectionGuardMessages', () => {
     const { messages } = buildInjectionGuardMessages({ title: 'Bug', description: null });
     expect(messages[0]!.content).toContain('Bug');
   });
+
+  it('builds multimodal content when images are provided', () => {
+    const { messages } = buildInjectionGuardMessages(
+      { title: 'Broken checkout', description: 'Screenshot attached.' },
+      [{ mimeType: 'image/png', dataBase64: 'abc123', filename: 'checkout.png' }],
+    );
+    expect(Array.isArray(messages[0]!.content)).toBe(true);
+    const blocks = messages[0]!.content as Array<any>;
+    expect(blocks[0]).toMatchObject({ type: 'text' });
+    expect(blocks.some((b) => b.type === 'text' && b.text.includes('checkout.png'))).toBe(true);
+    expect(blocks.some((b) => b.type === 'image' && b.source.media_type === 'image/png')).toBe(true);
+  });
 });

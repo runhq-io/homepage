@@ -31,6 +31,8 @@ import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
 import * as ClarifierService from './ClarifierService';
 import type { ClarificationQuestion } from './ClarifierService';
+import * as InjectionGuardService from './InjectionGuardService';
+import type { InjectionGuardImage, InjectionGuardImageMime } from './injectionGuardCore';
 import {
   RW_SESSION_COOKIE,
   verifyRwSession,
@@ -221,6 +223,20 @@ type PublicAttachmentLike = {
   originalName?: string | null;
   mimeType: string;
   url?: string | null;
+};
+
+export type CreateWidgetTicketInput = {
+  title?: string;
+  description?: string;
+  isPrivate?: boolean;
+  context?: unknown;
+};
+
+export type WidgetUploadFile = {
+  buffer: Buffer;
+  mimeType: string;
+  filename: string;
+  originalName?: string;
 };
 
 function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmentSummary {
@@ -961,10 +977,10 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     // get redirected, and non-public projects must not leak owner config.
     loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     chat: await getChatBootstrapInfo(project),
-    // Drives whether the client shows image-attach affordances. Currently
-    // false (see attachmentsEnabled) — kept in the bootstrap so re-enabling is
-    // a single env flip with no client redeploy.
-    attachmentsEnabled: attachmentsEnabled(),
+    // Drives whether the client shows image-attach affordances. The upload
+    // routes still return explicit errors, but bootstrap hides controls when
+    // storage is absent or the kill switch is off.
+    attachmentsEnabled: attachmentUploadsAvailable(),
     tickets,
   };
 }
@@ -1364,16 +1380,27 @@ function sanitizeWidgetMetadata(raw: unknown): Record<string, unknown> | null {
   return Object.keys(result).length > 0 ? result : null;
 }
 
-export async function createTicket(
+type WidgetTicketCreateProject = {
+  serverId: string;
+  channelId: string | null;
+  votingPeriodHours: number | null;
+};
+
+type PreparedWidgetTicketCreate = {
+  project: WidgetTicketCreateProject;
+  values: typeof workspaceTasks.$inferInsert;
+  reviewTicket: { title: string; description: string | null };
+};
+
+async function prepareWidgetTicketCreate(
   projectId: string,
   widgetUserId: string | undefined,
-  opts: { title?: string; description?: string; isPrivate?: boolean; context?: unknown }
-) {
+  opts: CreateWidgetTicketInput,
+): Promise<PreparedWidgetTicketCreate> {
   const [project] = await db
     .select({
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
-      autoApprove: widgetProjects.autoApprove,
       votingPeriodHours: widgetProjects.votingPeriodHours,
     })
     .from(widgetProjects)
@@ -1413,9 +1440,10 @@ export async function createTicket(
 
   const metadata = sanitizeWidgetMetadata(opts.context);
 
-  const [task] = await db
-    .insert(workspaceTasks)
-    .values({
+  return {
+    project,
+    reviewTicket: { title, description: opts.description ?? null },
+    values: {
       serverId: project.serverId,
       workspaceChannelId: project.channelId,
       title,
@@ -1433,10 +1461,26 @@ export async function createTicket(
       moderationStatus,
       votingEndsAt,
       metadata,
-    })
+    },
+  };
+}
+
+async function insertPreparedWidgetTicket(prepared: PreparedWidgetTicketCreate) {
+  const [task] = await db
+    .insert(workspaceTasks)
+    .values(prepared.values)
     .returning();
 
   return task;
+}
+
+export async function createTicket(
+  projectId: string,
+  widgetUserId: string | undefined,
+  opts: CreateWidgetTicketInput,
+) {
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  return insertPreparedWidgetTicket(prepared);
 }
 
 /**
@@ -1544,16 +1588,16 @@ export async function deleteTicket(
     .where(eq(workspaceTasks.id, ticketId));
 }
 
-// Widget image attachments are gated behind an env flag and DISABLED by
-// default. They were turned off (2026-06-11) over a prompt-injection concern:
-// an uploaded image can carry hidden instructions that the lightweight
-// widget-verification model may not catch, and the coder agent that later
-// works the ticket would "see" them. Re-enable only alongside a vetting
-// pipeline (e.g. a two-tier flow that doesn't process the image unless the
-// ticket genuinely needs it). One env knob drives both the server-side
-// rejection and the client's UI (surfaced via listTickets → bootstrap).
+// Widget image attachments are enabled by default now that uploads are reviewed
+// by the same fail-closed injection guard before the image is stored or exposed
+// to an auto-assigned coding agent. Keep the env flag as an emergency kill
+// switch: WIDGET_ATTACHMENTS_ENABLED=false fully closes upload routes.
 export function attachmentsEnabled(): boolean {
-  return process.env.WIDGET_ATTACHMENTS_ENABLED === 'true';
+  return process.env.WIDGET_ATTACHMENTS_ENABLED !== 'false';
+}
+
+export function attachmentUploadsAvailable(): boolean {
+  return attachmentsEnabled() && attachmentStorage.isConfigured();
 }
 
 const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
@@ -1562,12 +1606,154 @@ const MAX_ATTACHMENTS_PER_TICKET = 5;
 // which becomes stored XSS if the asset is ever opened directly or rendered
 // via <object>/<iframe>. Re-enabling requires server-side sanitization.
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+const ALLOWED_IMAGE_TYPE_SET = new Set<string>(ALLOWED_IMAGE_TYPES);
+
+function assertWidgetImageFile(file: WidgetUploadFile): asserts file is WidgetUploadFile & { mimeType: InjectionGuardImageMime } {
+  if (!ALLOWED_IMAGE_TYPE_SET.has(file.mimeType)) {
+    throw new WidgetError('attachment_unsupported_type', 400);
+  }
+  if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
+    throw new WidgetError('attachment_too_large', 413);
+  }
+}
+
+function assertWidgetImageFiles(files: WidgetUploadFile[], maxCount: number): asserts files is Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }> {
+  if (files.length > maxCount) {
+    throw new WidgetError('attachment_count_exceeded', 400);
+  }
+  for (const file of files) assertWidgetImageFile(file);
+}
+
+function toGuardImages(files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>): InjectionGuardImage[] {
+  return files.map((file) => ({
+    mimeType: file.mimeType,
+    dataBase64: file.buffer.toString('base64'),
+    filename: file.originalName ?? file.filename,
+  }));
+}
+
+async function requireSafeTicketAndImages(
+  ticket: { title: string; description: string | null },
+  files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>,
+): Promise<void> {
+  const verdict = await InjectionGuardService.checkTicket(ticket, { images: toGuardImages(files) });
+  if (verdict.safe) return;
+  throw new WidgetError(
+    verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
+    verdict.unavailable ? 503 : 400,
+    verdict.reasons,
+  );
+}
+
+async function storeTaskAttachment(input: {
+  serverId: string;
+  ticketId: string;
+  file: WidgetUploadFile & { mimeType: InjectionGuardImageMime };
+}): Promise<PublicAttachmentSummary & { storageProvider: 'r2' | 's3'; storageKey: string }> {
+  const stored = await attachmentStorage.storeUpload({
+    serverId: input.serverId,
+    body: input.file.buffer,
+    mimeType: input.file.mimeType,
+    filename: input.file.filename,
+    originalName: input.file.originalName ?? input.file.filename,
+    ownerType: 'task',
+  });
+
+  let attachment: typeof workspaceTaskAttachments.$inferSelect;
+  try {
+    [attachment] = await db
+      .insert(workspaceTaskAttachments)
+      .values({
+        serverId: input.serverId,
+        taskId: input.ticketId,
+        ownerType: 'task',
+        ownerId: input.ticketId,
+        storageProvider: stored.storageProvider,
+        storageKey: stored.storageKey,
+        mimeType: stored.mimeType,
+        originalName: stored.originalName ?? null,
+      })
+      .returning();
+  } catch (err) {
+    await attachmentStorage.deleteStoredObject({
+      storageProvider: stored.storageProvider,
+      storageKey: stored.storageKey,
+    }).catch((deleteErr) => {
+      console.warn('[WidgetService] failed to clean up stored attachment after DB insert failure:', deleteErr);
+    });
+    throw err;
+  }
+
+  const url = await attachmentStorage.createDownloadUrl({
+    storageProvider: stored.storageProvider,
+    storageKey: stored.storageKey,
+    originalName: stored.originalName,
+  });
+
+  return {
+    id: attachment.id,
+    filename: stored.storageKey.split('/').pop(),
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    url,
+    storageProvider: stored.storageProvider,
+    storageKey: stored.storageKey,
+  };
+}
+
+export async function createTicketWithAttachments(
+  projectId: string,
+  widgetUserId: string,
+  opts: CreateWidgetTicketInput,
+  files: WidgetUploadFile[],
+) {
+  if (files.length === 0) {
+    const ticket = await createTicket(projectId, widgetUserId, opts);
+    return { ticket, attachments: [] as PublicAttachmentSummary[] };
+  }
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+  if (!attachmentStorage.isConfigured()) throw new WidgetError('attachment_storage_unconfigured', 500);
+
+  assertWidgetImageFiles(files, MAX_ATTACHMENTS_PER_TICKET);
+
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  await requireSafeTicketAndImages(prepared.reviewTicket, files);
+
+  const ticket = await insertPreparedWidgetTicket(prepared);
+  const storedAttachments: Array<{ storageProvider: 'r2' | 's3'; storageKey: string }> = [];
+  try {
+    const attachments: Array<PublicAttachmentSummary & { storageProvider: 'r2' | 's3'; storageKey: string }> = [];
+    for (const file of files) {
+      const attachment = await storeTaskAttachment({
+        serverId: prepared.project.serverId,
+        ticketId: ticket.id,
+        file,
+      });
+      attachments.push(attachment);
+      storedAttachments.push({ storageProvider: attachment.storageProvider, storageKey: attachment.storageKey });
+    }
+    return {
+      ticket,
+      attachments: attachments.map(({ storageProvider: _storageProvider, storageKey: _storageKey, ...attachment }) => attachment),
+    };
+  } catch (err) {
+    for (const stored of storedAttachments) {
+      try {
+        await attachmentStorage.deleteStoredObject(stored);
+      } catch (deleteErr) {
+        console.warn('[WidgetService] failed to clean up stored attachment after create failure:', deleteErr);
+      }
+    }
+    await db.delete(workspaceTasks).where(eq(workspaceTasks.id, ticket.id)).catch(() => undefined);
+    throw err;
+  }
+}
 
 export async function uploadTicketAttachment(
   ticketId: string,
   projectId: string,
   widgetUserId: string,
-  file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
+  file: WidgetUploadFile,
 ) {
   if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
 
@@ -1578,15 +1764,7 @@ export async function uploadTicketAttachment(
     throw new WidgetError('attachment_storage_unconfigured', 500);
   }
 
-  // Validate image type
-  if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
-    throw new WidgetError('attachment_unsupported_type', 400);
-  }
-
-  // Validate file size
-  if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
-    throw new WidgetError('attachment_too_large', 413);
-  }
+  assertWidgetImageFile(file);
 
   // Verify ownership — task must exist, belong to this user, and be on this server
   const [task] = await db
@@ -1604,6 +1782,14 @@ export async function uploadTicketAttachment(
     throw new WidgetError('ticket_owner_only', 403);
   }
 
+  const [activityCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskActivity)
+    .where(eq(workspaceTaskActivity.taskId, ticketId));
+  if (Number(activityCount.count) > 0) {
+    throw new WidgetError('ticket_has_activity', 409);
+  }
+
   // Check attachment count limit
   const [countRow] = await db
     .select({ count: sql<number>`count(*)` })
@@ -1616,45 +1802,17 @@ export async function uploadTicketAttachment(
     throw new WidgetError('attachment_count_exceeded', 400);
   }
 
-  // Upload to R2
-  const stored = await attachmentStorage.storeUpload({
+  await requireSafeTicketAndImages(
+    { title: task.title, description: task.description ?? null },
+    [file],
+  );
+
+  const { storageProvider: _storageProvider, storageKey: _storageKey, ...attachment } = await storeTaskAttachment({
     serverId: project.serverId,
-    body: file.buffer,
-    mimeType: file.mimeType,
-    filename: file.filename,
-    originalName: file.originalName ?? file.filename,
-    ownerType: 'task',
+    ticketId,
+    file,
   });
-
-  // Insert attachment record
-  const [attachment] = await db
-    .insert(workspaceTaskAttachments)
-    .values({
-      serverId: project.serverId,
-      taskId: ticketId,
-      ownerType: 'task',
-      ownerId: ticketId,
-      storageProvider: stored.storageProvider,
-      storageKey: stored.storageKey,
-      mimeType: stored.mimeType,
-      originalName: stored.originalName ?? null,
-    })
-    .returning();
-
-  // Generate download URL
-  const url = await attachmentStorage.createDownloadUrl({
-    storageProvider: stored.storageProvider,
-    storageKey: stored.storageKey,
-    originalName: stored.originalName,
-  });
-
-  return {
-    id: attachment.id,
-    filename: stored.storageKey.split('/').pop(),
-    originalName: attachment.originalName,
-    mimeType: attachment.mimeType,
-    url,
-  };
+  return attachment;
 }
 
 const MAX_ATTACHMENTS_PER_COMMENT = 5;
@@ -1664,18 +1822,13 @@ export async function addWidgetCommentAttachment(
   ticketId: string,
   commentId: string,
   widgetUserId: string,
-  file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
+  file: WidgetUploadFile,
 ) {
   if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
 
   const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
 
-  if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
-    throw new WidgetError('attachment_unsupported_type', 400);
-  }
-  if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
-    throw new WidgetError('attachment_too_large', 413);
-  }
+  assertWidgetImageFile(file);
   if (!attachmentStorage.isConfigured()) {
     throw new WidgetError('attachment_storage_unconfigured', 500);
   }
@@ -1691,6 +1844,34 @@ export async function addWidgetCommentAttachment(
     throw new WidgetError('attachment_count_exceeded', 400);
   }
 
+  const [reviewContext] = await db
+    .select({
+      title: workspaceTasks.title,
+      description: workspaceTasks.description,
+      commentContent: workspaceTaskComments.content,
+    })
+    .from(workspaceTaskComments)
+    .innerJoin(workspaceTasks, eq(workspaceTaskComments.taskId, workspaceTasks.id))
+    .where(and(
+      eq(workspaceTaskComments.id, commentId),
+      eq(workspaceTaskComments.taskId, ticketId),
+      eq(workspaceTaskComments.serverId, serverId),
+      isNull(workspaceTaskComments.deletedAt),
+    ))
+    .limit(1);
+  if (!reviewContext) throw new WidgetError('comment_not_found', 404);
+
+  await requireSafeTicketAndImages(
+    {
+      title: reviewContext.title,
+      description: [
+        reviewContext.description,
+        `Comment being attached to:\n${reviewContext.commentContent}`,
+      ].filter(Boolean).join('\n\n') || null,
+    },
+    [file],
+  );
+
   const stored = await attachmentStorage.storeUpload({
     serverId,
     body: file.buffer,
@@ -1700,19 +1881,30 @@ export async function addWidgetCommentAttachment(
     ownerType: 'comment',
   });
 
-  const [attachment] = await db
-    .insert(workspaceTaskAttachments)
-    .values({
-      serverId,
-      taskId: ticketId,
-      ownerType: 'comment',
-      ownerId: commentId,
+  let attachment: typeof workspaceTaskAttachments.$inferSelect;
+  try {
+    [attachment] = await db
+      .insert(workspaceTaskAttachments)
+      .values({
+        serverId,
+        taskId: ticketId,
+        ownerType: 'comment',
+        ownerId: commentId,
+        storageProvider: stored.storageProvider,
+        storageKey: stored.storageKey,
+        mimeType: stored.mimeType,
+        originalName: stored.originalName ?? null,
+      })
+      .returning();
+  } catch (err) {
+    await attachmentStorage.deleteStoredObject({
       storageProvider: stored.storageProvider,
       storageKey: stored.storageKey,
-      mimeType: stored.mimeType,
-      originalName: stored.originalName ?? null,
-    })
-    .returning();
+    }).catch((deleteErr) => {
+      console.warn('[WidgetService] failed to clean up stored comment attachment after DB insert failure:', deleteErr);
+    });
+    throw err;
+  }
 
   const url = await attachmentStorage.createDownloadUrl({
     storageProvider: stored.storageProvider,
@@ -2762,6 +2954,8 @@ export const WIDGET_ERROR_CODES = [
   'attachment_too_large',
   'attachment_count_exceeded',
   'attachment_storage_unconfigured',
+  'attachment_rejected',
+  'attachment_review_unavailable',
   'attachments_disabled',
   'rate_limited',
   // Widget chat (agent intake)

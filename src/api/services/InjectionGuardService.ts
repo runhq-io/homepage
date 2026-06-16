@@ -2,7 +2,8 @@
  * InjectionGuardService.ts — LLM orchestration for the widget ticket injection
  * guard (pure logic in injectionGuardCore).
  *
- * Screens a widget ticket before any coding agent is auto-assigned. Mirrors the
+ * Screens a widget ticket (and, when present, uploaded images) before any
+ * coding agent is auto-assigned or any widget image is stored. Mirrors the
  * ClarifierService / DedupService pattern: injectable CallModel for tests, real
  * Haiku default in production, bounded timeout/retries.
  *
@@ -15,17 +16,23 @@
  * diagnosability.
  */
 
-import type { CallModel } from './ClarifierService';
 import { MODEL_CALL_TIMEOUT_MS, MODEL_CALL_MAX_RETRIES } from './ClarifierService';
 import {
   buildInjectionGuardMessages,
   parseInjectionVerdict,
+  type InjectionGuardImage,
+  type InjectionGuardMessage,
   type InjectionVerdict,
 } from './injectionGuardCore';
 
+export type InjectionGuardCallModel = (args: {
+  system: string;
+  messages: InjectionGuardMessage[];
+}) => Promise<string>;
+
 async function defaultCallModel(args: {
   system: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: InjectionGuardMessage[];
 }): Promise<string> {
   const { getSettings } = await import('./SettingsService');
   const settings = await getSettings();
@@ -55,11 +62,11 @@ export interface InjectionGuardResult extends InjectionVerdict {
 
 export async function checkTicket(
   ticket: { title: string; description: string | null },
-  deps?: { callModel?: CallModel },
+  deps?: { callModel?: InjectionGuardCallModel; images?: InjectionGuardImage[] },
 ): Promise<InjectionGuardResult> {
   const callModel = deps?.callModel ?? defaultCallModel;
   try {
-    const { system, messages } = buildInjectionGuardMessages(ticket);
+    const { system, messages } = buildInjectionGuardMessages(ticket, deps?.images ?? []);
     const text = await callModel({ system, messages });
     return parseInjectionVerdict(text);
   } catch (err) {

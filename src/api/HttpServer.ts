@@ -6099,6 +6099,54 @@ export function createHttpApp() {
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
     if (limited) return limited;
     try {
+      const contentType = c.req.header('content-type') || '';
+      if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+        if (!WidgetService.attachmentsEnabled()) return c.json({ error: 'attachments_disabled' }, 403);
+
+        const formData = await c.req.raw.formData();
+        const field = (name: string): string | undefined => {
+          const value = formData.get(name);
+          return typeof value === 'string' ? value : undefined;
+        };
+        const parseContext = (): unknown => {
+          const raw = field('context');
+          if (!raw) return undefined;
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return undefined;
+          }
+        };
+        const rawFiles = [
+          ...formData.getAll('files'),
+          ...formData.getAll('file'),
+        ];
+        const files: WidgetService.WidgetUploadFile[] = [];
+        for (const rawFile of rawFiles) {
+          if (!rawFile || typeof (rawFile as any).arrayBuffer !== 'function') continue;
+          const inputFile = rawFile as globalThis.File;
+          files.push({
+            buffer: Buffer.from(await inputFile.arrayBuffer()),
+            mimeType: inputFile.type || 'application/octet-stream',
+            filename: inputFile.name || 'attachment',
+            originalName: inputFile.name,
+          });
+        }
+        const result = await WidgetService.createTicketWithAttachments(
+          auth.projectId,
+          auth.widgetUserId,
+          {
+            title: field('title'),
+            description: field('description'),
+            isPrivate: field('isPrivate') === 'true',
+            context: parseContext(),
+          },
+          files,
+        );
+        void WidgetAutoAssign.autoAssignTicket(auth.projectId, result.ticket.id, auth.widgetUserId);
+        return c.json(result, 201);
+      }
+
       const body = await c.req.json();
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
       // Fire-and-forget auto-assign: identified-user feedback can spawn an agent
