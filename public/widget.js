@@ -358,6 +358,15 @@
     }
   }
 
+  function friendlySubmitError(err) {
+    var code = (err && err.message) || "";
+    switch (code) {
+      case "ticket_rejected":                 return t("composer.reviewRejected");
+      case "ticket_review_unavailable":       return t("composer.reviewUnavailable");
+      default:                                return code;
+    }
+  }
+
   function readJsonOrThrow(r) {
     return r.json().catch(function () { return {}; }).then(function (data) {
       if (!r.ok) {
@@ -815,6 +824,8 @@
         disabledEmpty: "Write something before you submit.",
         disabledLocked: "You're not signed in to this feedback board, so the widget can't submit on your behalf. Sign in on this site and reload — if you already are, the site isn't passing your identity to the widget.",
         failed: "Failed to submit: {msg}",
+        reviewRejected: "We couldn't submit this because it appears to contain unsafe instructions.",
+        reviewUnavailable: "We couldn't review this right now. Try again shortly.",
         attachFailed: "Your report was posted, but {n} image(s) couldn't be attached. {msg}",
         pastedImage: "Pasted image",
       },
@@ -1022,6 +1033,8 @@
         disabledEmpty: "제출하기 전에 내용을 입력해 주세요.",
         disabledLocked: "이 피드백 보드에 로그인되어 있지 않아 위젯이 대신 제출할 수 없습니다. 이 사이트에서 로그인한 뒤 새로고침하세요 — 이미 로그인했다면 사이트가 위젯에 사용자 인증을 전달하지 않고 있는 것입니다.",
         failed: "제출 실패: {msg}",
+        reviewRejected: "안전하지 않은 지시가 포함된 것으로 보여 제출할 수 없습니다.",
+        reviewUnavailable: "지금 내용을 검토할 수 없습니다. 잠시 후 다시 시도해 주세요.",
         attachFailed: "신고는 등록되었지만 이미지 {n}개를 첨부하지 못했습니다. {msg}",
         pastedImage: "붙여넣은 이미지",
       },
@@ -3891,7 +3904,7 @@
         submitBtn.disabled = false;
         submitBtn.firstChild.textContent = t("composer.submit");
         clearChildren(noticeSlot);
-        var msg = entries.length > 0 ? friendlyAttachError(err) : (err.message || "");
+        var msg = entries.length > 0 ? friendlyAttachError(err) : friendlySubmitError(err);
         noticeSlot.appendChild(renderNotice("error", t("composer.failed", { msg: msg })));
       });
     });

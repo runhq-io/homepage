@@ -3,17 +3,20 @@
  * guard (pure logic in injectionGuardCore).
  *
  * Screens a widget ticket (and, when present, uploaded images) before any
- * coding agent is auto-assigned or any widget image is stored. Mirrors the
- * ClarifierService / DedupService pattern: injectable CallModel for tests, real
- * Haiku default in production, bounded timeout/retries.
+ * coding agent is auto-assigned. Image uploads are also reviewed before
+ * storage when the guard is available; if the guard is unavailable, callers may
+ * allow storage only for projects where auto-assignment is disabled and a human
+ * will review the ticket. Mirrors the ClarifierService / DedupService pattern:
+ * injectable CallModel for tests, real Haiku default in production, bounded
+ * timeout/retries.
  *
- * SECURITY POSTURE — fail SAFE, not fail-open. Unlike DedupService (advisory,
- * fails open so it never blocks a real ticket), this guard is a security gate.
+ * SECURITY POSTURE — fail SAFE for agent handoff. Unlike DedupService
+ * (advisory, fails open so it never blocks a real ticket), this guard is a
+ * security gate for any ticket that could start an autonomous coding agent.
  * Any model error or unparseable output resolves to `{ safe: false,
- * unavailable: true }` so the caller SKIPS auto-assignment. The ticket is still
- * created; it just isn't handed to an agent. `unavailable` lets the caller
- * record the outcome as `failed` (infra) vs `skipped_unsafe` (content) for
- * diagnosability.
+ * unavailable: true }` so the caller can block auto-assigned creation or skip
+ * auto-assignment. Projects without auto-assignment can still allow ticket
+ * creation because a human will review the ticket.
  */
 
 import { MODEL_CALL_TIMEOUT_MS, MODEL_CALL_MAX_RETRIES } from './ClarifierService';

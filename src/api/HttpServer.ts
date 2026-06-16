@@ -6143,15 +6143,18 @@ export function createHttpApp() {
           },
           files,
         );
-        void WidgetAutoAssign.autoAssignTicket(auth.projectId, result.ticket.id, auth.widgetUserId);
+        // WidgetService reviewed text + images before insert when project
+        // auto-assignment is enabled, so avoid a duplicate guard call here.
+        void WidgetAutoAssign.autoAssignTicket(auth.projectId, result.ticket.id, auth.widgetUserId, { skipGuard: true });
         return c.json(result, 201);
       }
 
       const body = await c.req.json();
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
-      // Fire-and-forget auto-assign: identified-user feedback can spawn an agent
-      // (gated by injection guard + project config inside the orchestrator).
-      void WidgetAutoAssign.autoAssignTicket(auth.projectId, ticket.id, auth.widgetUserId);
+      // Fire-and-forget auto-assign: WidgetService already ran the creation-time
+      // injection guard when project auto-assignment is enabled, so the
+      // orchestrator can skip its duplicate guard call here.
+      void WidgetAutoAssign.autoAssignTicket(auth.projectId, ticket.id, auth.widgetUserId, { skipGuard: true });
       return c.json({ ticket }, 201);
     } catch (err) {
       return widgetErrorResponse(c, err);

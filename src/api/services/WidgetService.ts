@@ -1196,7 +1196,7 @@ async function resolveTicketVisibleToWidget(
   projectId: string,
   ticketId: string,
   widgetUserId: string,
-): Promise<{ serverId: string; commentsDisabled: boolean } | null> {
+): Promise<{ serverId: string; commentsDisabled: boolean; agentAssignmentEnabled: boolean } | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
@@ -1226,12 +1226,20 @@ async function resolveTicketVisibleToWidget(
 
   // Public → anyone identified can comment.
   if (task.visibility === 'public') {
-    return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
+    return {
+      serverId: task.serverId,
+      commentsDisabled: task.commentsDisabled,
+      agentAssignmentEnabled: project.widgetAgentAssignmentEnabled,
+    };
   }
 
   // Private → owner only.
   if (isOwner) {
-    return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
+    return {
+      serverId: task.serverId,
+      commentsDisabled: task.commentsDisabled,
+      agentAssignmentEnabled: project.widgetAgentAssignmentEnabled,
+    };
   }
 
   return null;
@@ -1269,7 +1277,7 @@ async function loadAndAuthorizeWidgetComment(
   ticketId: string,
   commentId: string,
   widgetUserId: string,
-): Promise<{ serverId: string }> {
+): Promise<{ serverId: string; agentAssignmentEnabled: boolean }> {
   const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
   if (!visible) throw new WidgetError('ticket_not_found', 404);
   const [row] = await db
@@ -1289,7 +1297,10 @@ async function loadAndAuthorizeWidgetComment(
   if (row.createdByType !== 'external' || row.createdById !== widgetUserId) {
     throw new WidgetError('comment_author_only', 403);
   }
-  return { serverId: visible.serverId };
+  return {
+    serverId: visible.serverId,
+    agentAssignmentEnabled: visible.agentAssignmentEnabled,
+  };
 }
 
 export async function updateWidgetComment(
@@ -1384,6 +1395,7 @@ type WidgetTicketCreateProject = {
   serverId: string;
   channelId: string | null;
   votingPeriodHours: number | null;
+  agentAssignmentEnabled: boolean;
 };
 
 type PreparedWidgetTicketCreate = {
@@ -1402,6 +1414,7 @@ async function prepareWidgetTicketCreate(
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       votingPeriodHours: widgetProjects.votingPeriodHours,
+      agentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
@@ -1474,12 +1487,30 @@ async function insertPreparedWidgetTicket(prepared: PreparedWidgetTicketCreate) 
   return task;
 }
 
+async function requireSafeForAutoAssignment(
+  prepared: PreparedWidgetTicketCreate,
+): Promise<void> {
+  // Human-reviewed projects do not need AI availability at ticket creation.
+  // Auto-assigned projects do: an unreviewed ticket must not reach an agent.
+  if (!prepared.project.agentAssignmentEnabled) return;
+
+  const verdict = await InjectionGuardService.checkTicket(prepared.reviewTicket);
+  if (verdict.safe) return;
+
+  throw new WidgetError(
+    verdict.unavailable ? 'ticket_review_unavailable' : 'ticket_rejected',
+    verdict.unavailable ? 503 : 400,
+    verdict.reasons,
+  );
+}
+
 export async function createTicket(
   projectId: string,
   widgetUserId: string | undefined,
   opts: CreateWidgetTicketInput,
 ) {
   const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  await requireSafeForAutoAssignment(prepared);
   return insertPreparedWidgetTicket(prepared);
 }
 
@@ -1635,9 +1666,14 @@ function toGuardImages(files: Array<WidgetUploadFile & { mimeType: InjectionGuar
 async function requireSafeTicketAndImages(
   ticket: { title: string; description: string | null },
   files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>,
+  opts: { agentAssignmentEnabled: boolean },
 ): Promise<void> {
   const verdict = await InjectionGuardService.checkTicket(ticket, { images: toGuardImages(files) });
   if (verdict.safe) return;
+  // If no agent can be auto-assigned, a guard outage should not block the
+  // reporter from creating a ticket that a human will review.
+  if (verdict.unavailable && !opts.agentAssignmentEnabled) return;
+
   throw new WidgetError(
     verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
     verdict.unavailable ? 503 : 400,
@@ -1717,7 +1753,9 @@ export async function createTicketWithAttachments(
   assertWidgetImageFiles(files, MAX_ATTACHMENTS_PER_TICKET);
 
   const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
-  await requireSafeTicketAndImages(prepared.reviewTicket, files);
+  await requireSafeTicketAndImages(prepared.reviewTicket, files, {
+    agentAssignmentEnabled: prepared.project.agentAssignmentEnabled,
+  });
 
   const ticket = await insertPreparedWidgetTicket(prepared);
   const storedAttachments: Array<{ storageProvider: 'r2' | 's3'; storageKey: string }> = [];
@@ -1805,6 +1843,7 @@ export async function uploadTicketAttachment(
   await requireSafeTicketAndImages(
     { title: task.title, description: task.description ?? null },
     [file],
+    { agentAssignmentEnabled: project.widgetAgentAssignmentEnabled },
   );
 
   const { storageProvider: _storageProvider, storageKey: _storageKey, ...attachment } = await storeTaskAttachment({
@@ -1826,7 +1865,7 @@ export async function addWidgetCommentAttachment(
 ) {
   if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
 
-  const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
+  const { serverId, agentAssignmentEnabled } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
 
   assertWidgetImageFile(file);
   if (!attachmentStorage.isConfigured()) {
@@ -1870,6 +1909,7 @@ export async function addWidgetCommentAttachment(
       ].filter(Boolean).join('\n\n') || null,
     },
     [file],
+    { agentAssignmentEnabled },
   );
 
   const stored = await attachmentStorage.storeUpload({
@@ -2950,6 +2990,8 @@ export const WIDGET_ERROR_CODES = [
   'ticket_has_activity',
   'invalid_visibility',
   'voting_period_ended',
+  'ticket_rejected',
+  'ticket_review_unavailable',
   'attachment_unsupported_type',
   'attachment_too_large',
   'attachment_count_exceeded',

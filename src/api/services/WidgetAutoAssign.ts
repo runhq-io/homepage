@@ -108,6 +108,15 @@ export interface AutoAssignDeps {
   recordOutcome(serverId: string, ticketId: string, outcome: AutoAssignOutcome): Promise<void>;
 }
 
+export type AutoAssignOptions = {
+  /**
+   * Set by the synchronous widget create path after it has already run the
+   * injection guard against this immutable freshly-created ticket. Avoids a
+   * duplicate model call before the rest of the assignment gates.
+   */
+  skipGuard?: boolean;
+};
+
 /**
  * Decide whether to auto-assign a coding agent to a freshly-created widget
  * ticket, and do it. NEVER throws (fire-and-forget contract): every failure is
@@ -118,6 +127,7 @@ export async function maybeAutoAssign(
   ticketId: string,
   widgetUserId: string | undefined,
   deps: AutoAssignDeps,
+  opts: AutoAssignOptions = {},
 ): Promise<void> {
   let serverId: string | undefined;
   try {
@@ -141,13 +151,15 @@ export async function maybeAutoAssign(
 
     // Layer 2 — content guard. `unavailable` distinguishes an infra failure
     // (record `failed`) from a genuine content rejection (`skipped_unsafe`).
-    const verdict = await deps.guard(ticket);
-    if (!verdict.safe) {
-      await deps.recordOutcome(serverId, ticketId, {
-        status: verdict.unavailable ? 'failed' : 'skipped_unsafe',
-        reasons: verdict.reasons,
-      });
-      return;
+    if (!opts.skipGuard) {
+      const verdict = await deps.guard(ticket);
+      if (!verdict.safe) {
+        await deps.recordOutcome(serverId, ticketId, {
+          status: verdict.unavailable ? 'failed' : 'skipped_unsafe',
+          reasons: verdict.reasons,
+        });
+        return;
+      }
     }
 
     // Quality gate — clarify BEFORE committing an agent. A thin ticket (e.g.
@@ -360,10 +372,11 @@ export async function autoAssignTicket(
   projectId: string,
   ticketId: string,
   widgetUserId: string | undefined,
+  opts: AutoAssignOptions = {},
 ): Promise<void> {
   try {
     const deps = await defaultAutoAssignDeps();
-    await maybeAutoAssign(projectId, ticketId, widgetUserId, deps);
+    await maybeAutoAssign(projectId, ticketId, widgetUserId, deps, opts);
   } catch (err) {
     console.error('[WidgetAutoAssign] autoAssignTicket failed to run:', err);
   }

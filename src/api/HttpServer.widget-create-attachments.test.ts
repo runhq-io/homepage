@@ -94,7 +94,7 @@ describe('POST /api/widget/tickets multipart create', () => {
       originalName: 'screen.png',
     });
     expect(Buffer.isBuffer(files[0]!.buffer)).toBe(true);
-    expect(WidgetAutoAssign.autoAssignTicket).toHaveBeenCalledWith('proj-1', 'ticket-1', 'wu-1');
+    expect(WidgetAutoAssign.autoAssignTicket).toHaveBeenCalledWith('proj-1', 'ticket-1', 'wu-1', { skipGuard: true });
     expect(await res.json()).toMatchObject({ ticket: { id: 'ticket-1' }, attachments: [{ id: 'att-1' }] });
   });
 

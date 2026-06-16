@@ -107,6 +107,16 @@ describe('maybeAutoAssign', () => {
     expect(deps.assign).not.toHaveBeenCalled();
   });
 
+  it('can skip the guard when the synchronous create path already reviewed the ticket', async () => {
+    const deps = makeDeps({
+      guard: vi.fn().mockResolvedValue({ safe: false, reasons: ['guard_unavailable'], unavailable: true }),
+      clarify: vi.fn().mockResolvedValue({ status: 'ready' }),
+    });
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps, { skipGuard: true });
+    expect(deps.guard).not.toHaveBeenCalled();
+    expect(deps.assign).toHaveBeenCalledOnce();
+  });
+
   it('proceeds to dedup/suggest/assign when the clarifier says ready', async () => {
     const deps = makeDeps({ clarify: vi.fn().mockResolvedValue({ status: 'ready' }) });
     await maybeAutoAssign(PROJECT, TICKET, USER, deps);
