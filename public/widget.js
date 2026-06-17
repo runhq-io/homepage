@@ -26,6 +26,12 @@
   var themeToggleBtn = null;
   var footerEl = null;
   var modalMountEl = null;
+  // Header notifications bell (ticket-update alerts) + its dropdown.
+  var notifBellBtn = null;
+  var notifWrap = null;
+  var notifDropdownEl = null;
+  var notifOpen = false;
+  var notifOutsideHandler = null;
 
   var isOpen = false;
   var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
@@ -757,6 +763,7 @@
     send:      function (s) { return icon([{ d: "M22 2L11 13" }, { d: "M22 2l-7 20-4-9-9-4 20-7z" }], s); },
     sun:       function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 4 }, { d: "M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" }], s); },
     moon:      function (s) { return icon([{ d: "M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z" }], s); },
+    bell:      function (s) { return icon([{ d: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" }, { d: "M13.73 21a2 2 0 0 1-3.46 0" }], s); },
     link:      function (s) { return icon([{ d: "M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" }, { d: "M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" }], s); },
     image:     function (s) { return icon([{ tag: "rect", x: 3, y: 4, width: 18, height: 16, rx: 2 }, { tag: "circle", cx: 9, cy: 10, r: 1.5 }, { d: "M21 16l-5-5-8 8" }], s); },
     globe:     function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 10 }, { d: "M2 12h20" }, { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" }], s); },
@@ -857,6 +864,7 @@
       },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
       filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now." },
+      notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
       // labels are locale-overridable here.
@@ -1072,6 +1080,7 @@
       },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
       filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다." },
+      notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건" },
       status: {
         pending: "대기 중",
         planned: "계획됨",
@@ -1616,6 +1625,81 @@
     // and the collapsed state is suppressed when a badge is showing — so
     // re-evaluate every time the label rebuilds.
     applyCollapsedState();
+    // The in-panel notifications bell mirrors the same unseen-ticket count.
+    refreshNotifBell();
+  }
+
+  // ===========================================================================
+  // Header notifications bell — ticket-update alerts for the viewer's own
+  // tickets. Shows the unseen count as a badge; clicking opens a dropdown that
+  // lists exactly which tickets have new activity, each opening its detail.
+  // ===========================================================================
+
+  function refreshNotifBell() {
+    if (!notifBellBtn) return;
+    // Only identified viewers have "my tickets" to be notified about.
+    if (notifWrap) notifWrap.style.display = config.isIdentified ? "" : "none";
+    var n = launcherBadgeCount();
+    clearChildren(notifBellBtn);
+    notifBellBtn.appendChild(Icons.bell(16));
+    if (n > 0) {
+      notifBellBtn.appendChild(h("span", { className: "rw-notif-badge" }, n > 99 ? "99+" : String(n)));
+    }
+    notifBellBtn.setAttribute("aria-label", n > 0 ? t("notif.titleN", { n: n }) : t("notif.title"));
+    if (notifOpen) renderNotifDropdown(); // keep an open dropdown in sync
+  }
+
+  function closeNotifDropdown() {
+    notifOpen = false;
+    if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
+    notifDropdownEl = null;
+    if (notifOutsideHandler && shadowRoot) {
+      shadowRoot.removeEventListener("mousedown", notifOutsideHandler);
+      notifOutsideHandler = null;
+    }
+  }
+
+  function renderNotifDropdown() {
+    if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
+    var items = (myTicketsCache || []).filter(ticketHasUnseenActivity);
+    var listEl = h("div", { className: "rw-notif-list" });
+    if (items.length === 0) {
+      listEl.appendChild(h("div", { className: "rw-notif-empty" }, t("filters.noUnread")));
+    } else {
+      items.forEach(function (tk) {
+        var row = h("button", { className: "rw-notif-item", type: "button" }, [
+          h("span", { className: "rw-unseen-dot" }),
+          h("div", { className: "rw-notif-item-text" }, [
+            h("div", { className: "rw-notif-item-title" }, tk.title),
+            h("div", { className: "rw-notif-item-when" }, timeAgo(tk.lastActivityAt || tk.updatedAt || tk.createdAt)),
+          ]),
+        ]);
+        row.addEventListener("click", function () {
+          closeNotifDropdown();
+          if (!isOpen) openPanel();
+          openDetailModal(tk);
+        });
+        listEl.appendChild(row);
+      });
+    }
+    notifDropdownEl = h("div", { className: "rw-notif-dropdown", role: "menu" }, [
+      h("div", { className: "rw-notif-head" }, t("notif.title")),
+      listEl,
+    ]);
+    notifWrap.appendChild(notifDropdownEl);
+  }
+
+  function toggleNotifDropdown() {
+    if (notifOpen) { closeNotifDropdown(); return; }
+    notifOpen = true;
+    renderNotifDropdown();
+    // Close on any click outside the bell/dropdown (composedPath crosses the
+    // shadow boundary, so this works from inside the widget's shadow root).
+    notifOutsideHandler = function (e) {
+      var path = e.composedPath ? e.composedPath() : [];
+      if (notifWrap && path.indexOf(notifWrap) === -1) closeNotifDropdown();
+    };
+    if (shadowRoot) shadowRoot.addEventListener("mousedown", notifOutsideHandler);
   }
   function resolveInitialTheme(opt) {
     if (opt === "dark" || opt === "light") return opt;
@@ -2228,7 +2312,7 @@
       '  width: 100%; text-align: left;',
       '  background: transparent; border: 0;',
       '  border-bottom: 1px solid var(--rw-line);',
-      '  padding: 14px 4px;',
+      '  padding: 14px 10px;',
       '  cursor: pointer; font-family: inherit; color: var(--rw-fg);',
       '  transition: background 120ms;',
       '}',
@@ -2240,7 +2324,7 @@
       '.rw-dash-row--unseen .rw-dash-row-title { font-weight: 650; }',
       '.rw-unseen-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); margin-right: 7px; vertical-align: middle; flex: 0 0 auto; }',
       /* "Unread only" filter toggle (My Submissions) */
-      '.rw-unread-filter-row { display: flex; padding: 8px 4px 2px; }',
+      '.rw-unread-filter-row { display: flex; padding: 2px 10px 10px; }',
       '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
       '.rw-unread-filter:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
@@ -2427,6 +2511,35 @@
       '.rw-icon-btn:hover { background: rgba(255,255,255,0.04); color: var(--rw-fg); border-color: var(--rw-line); }',
       '.rw-widget[data-theme="light"] .rw-icon-btn:hover,',
       '.rw-modal-mount[data-theme="light"] .rw-icon-btn:hover { background: rgba(15,20,35,0.05); }',
+
+      /* notifications bell + dropdown (ticket-update alerts) */
+      '.rw-notif-wrap { position: relative; display: inline-flex; }',
+      '.rw-notif-bell { position: relative; }',
+      '.rw-notif-badge {',
+      '  position: absolute; top: -2px; right: -2px; min-width: 15px; height: 15px; padding: 0 4px;',
+      '  border-radius: 999px; background: #ef4444; color: #fff; font-size: 9px; font-weight: 700;',
+      '  display: inline-flex; align-items: center; justify-content: center; line-height: 1;',
+      '  box-shadow: 0 0 0 2px var(--rw-bg);',
+      '}',
+      '.rw-notif-dropdown {',
+      '  position: absolute; top: calc(100% + 8px); right: 0; width: 300px; max-width: 78vw; z-index: 70;',
+      '  background: var(--rw-panel, var(--rw-bg)); border: 1px solid var(--rw-line-2);',
+      '  border-radius: 12px; box-shadow: 0 12px 32px -10px rgba(0,0,0,0.4); overflow: hidden;',
+      '}',
+      '.rw-notif-head { padding: 10px 14px; font-size: 12px; font-weight: 600; color: var(--rw-fg-2); border-bottom: 1px solid var(--rw-line); }',
+      '.rw-notif-list { max-height: 320px; overflow-y: auto; }',
+      '.rw-notif-empty { padding: 16px 14px; font-size: 12.5px; color: var(--rw-muted); }',
+      '.rw-notif-item {',
+      '  display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left;',
+      '  padding: 10px 14px; background: transparent; border: 0; border-bottom: 1px solid var(--rw-line);',
+      '  cursor: pointer; font-family: inherit; color: var(--rw-fg);',
+      '}',
+      '.rw-notif-item:last-child { border-bottom: 0; }',
+      '.rw-notif-item:hover { background: color-mix(in oklab, var(--rw-accent) 8%, transparent); }',
+      '.rw-notif-item .rw-unseen-dot { margin-top: 5px; margin-right: 0; }',
+      '.rw-notif-item-text { min-width: 0; flex: 1 1 auto; }',
+      '.rw-notif-item-title { font-size: 13px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }',
+      '.rw-notif-item-when { font-size: 11px; color: var(--rw-muted); margin-top: 2px; }',
 
       /* scroll */
       '.rw-scroll {',
@@ -3736,21 +3849,13 @@
       tab === "hot"     ? (topTicketsCache || []) :
                           (myTicketsCache || []);
 
-    // "Unread only" filter — My Submissions only. The toggle is rendered above
-    // the list (see below) whenever the viewer has any of their own tickets.
+    // "Unread only" filter — My Submissions only.
+    var showFilter = tab === "mine" && config.isIdentified && allItems.length > 0;
     var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
     var items = (tab === "mine" && mineUnreadOnly) ? allItems.filter(ticketHasUnseenActivity) : allItems;
 
-    var wrap = h("div");
-    if (tab === "mine" && config.isIdentified && allItems.length > 0) {
-      wrap.appendChild(renderUnreadFilter(unreadCount));
-    }
-
-    if (items.length === 0) {
-      if (tab === "mine" && mineUnreadOnly) {
-        wrap.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
-        return wrap;
-      }
+    // Whole-area empty states (no tickets at all) replace the list outright.
+    if (allItems.length === 0) {
       if (tab === "mine" && !config.isIdentified) {
         return renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"));
       }
@@ -3763,12 +3868,21 @@
       return renderEmpty(t("empty.noTickets"), t("empty.beFirst"));
     }
 
+    // Return the scroll container DIRECTLY (it owns flex:1 + overflow:auto).
+    // The filter is its first child so it inherits the list's left padding and
+    // aligns with the ticket rows — and scrolling keeps working on every tab.
     var list = h("div", { className: "rw-dash-list" });
+    if (showFilter) list.appendChild(renderUnreadFilter(unreadCount));
+
+    if (items.length === 0 && mineUnreadOnly) {
+      list.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
+      return list;
+    }
+
     var cardOpts = tab === "updates" ? { hideStatus: true } : null;
     // Use `tk` for the loop variable — `t` is the i18n function.
     items.forEach(function (tk) { list.appendChild(renderTicketCard(tk, cardOpts)); });
-    wrap.appendChild(list);
-    return wrap;
+    return list;
   }
 
   // "Unread only" toggle for My Submissions. Shows the unread count and flips
@@ -6605,7 +6719,11 @@
       openPanel();
     });
 
-    // Shell controls (theme + close), pinned top-right of the modal card.
+    // Shell controls (notifications + theme + close), pinned top-right.
+    notifBellBtn = h("button", { className: "rw-icon-btn rw-notif-bell", type: "button" }, Icons.bell(16));
+    notifBellBtn.addEventListener("click", function (e) { e.stopPropagation(); toggleNotifDropdown(); });
+    notifWrap = h("div", { className: "rw-notif-wrap" }, [notifBellBtn]);
+
     themeToggleBtn = h("button", { className: "rw-icon-btn", type: "button" });
     themeToggleBtn.addEventListener("click", toggleTheme);
 
@@ -6627,7 +6745,7 @@
       className: "rw-card-modal", role: "dialog",
       "aria-label": t("aria.openPanel"), "aria-modal": "true",
     }, [
-      h("div", { className: "rw-shell-actions" }, [themeToggleBtn, closeShellBtn]),
+      h("div", { className: "rw-shell-actions" }, [notifWrap, themeToggleBtn, closeShellBtn]),
       scrollEl,
     ]);
 
