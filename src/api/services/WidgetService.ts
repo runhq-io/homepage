@@ -257,6 +257,25 @@ function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmen
   };
 }
 
+/**
+ * Strip code-revealing fields from activity metadata before it reaches an
+ * external widget viewer. The only known leak is `pr_linked`, whose metadata
+ * carries the PR number/url/branch — internal locators that point at code. We
+ * keep just the `state` (which the widget uses for a code-free review/ship
+ * label). All other activity types expose safe metadata (status from/to,
+ * agent name, etc.) and pass through unchanged.
+ */
+function sanitizeActivityMetadata(
+  type: string,
+  metadata: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  if (type === 'pr_linked') {
+    return { state: coercePrState(metadata.state) };
+  }
+  return metadata;
+}
+
 /** Internal (un-trimmed) PR info derived from the activity feed. */
 type InternalLinkedPr = { number: number; url: string; state: PrState; repoBranch: string | null };
 
@@ -1214,7 +1233,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       content: entry.content ?? null,
       createdByName: entry.createdByName ?? null,
       createdAt: entry.createdAt,
-      metadata: entry.metadata ?? null,
+      metadata: sanitizeActivityMetadata(entry.type, entry.metadata ?? null),
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
     clarification,

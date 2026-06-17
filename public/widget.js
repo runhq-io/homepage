@@ -939,9 +939,17 @@
         assigned: "assigned the ticket",
         assignedTo: "assigned the ticket to {to}",
         unassigned: "unassigned the ticket",
+        agentAssigned: "assigned an agent",
+        agentAssignedTo: "assigned {to}",
+        agentUnassigned: "unassigned the agent",
+        prLinked: "started a review",
+        prMerged: "merged the changes",
+        prClosed: "closed the review",
         ticketCreated: "opened the ticket",
         ticketEdited: "edited the ticket",
         ticketDeleted: "deleted the ticket",
+        ticketArchived: "archived the ticket",
+        ticketUnarchived: "restored the ticket",
       },
       chat: {
         back: "Back",
@@ -1142,9 +1150,17 @@
         assigned: "티켓을 할당했습니다",
         assignedTo: "티켓을 {to}에게 할당했습니다",
         unassigned: "티켓 할당을 해제했습니다",
+        agentAssigned: "에이전트를 배정했습니다",
+        agentAssignedTo: "{to}을(를) 배정했습니다",
+        agentUnassigned: "에이전트 배정을 해제했습니다",
+        prLinked: "검토를 시작했습니다",
+        prMerged: "변경 사항을 병합했습니다",
+        prClosed: "검토를 종료했습니다",
         ticketCreated: "티켓을 열었습니다",
         ticketEdited: "티켓을 수정했습니다",
         ticketDeleted: "티켓을 삭제했습니다",
+        ticketArchived: "티켓을 보관했습니다",
+        ticketUnarchived: "티켓을 복원했습니다",
       },
       chat: {
         back: "뒤로",
@@ -5944,10 +5960,30 @@
     }
     if (e.type === "assigned")       return m.assignee ? t("events.assignedTo", { to: m.assignee }) : t("events.assigned");
     if (e.type === "unassigned")     return t("events.unassigned");
-    if (e.type === "ticket_created") return t("events.ticketCreated");
+    // Canonical activity types (the shapes that actually reach the widget).
+    if (e.type === "agent_assigned")   return m.agentName ? t("events.agentAssignedTo", { to: m.agentName }) : t("events.agentAssigned");
+    if (e.type === "agent_unassigned") return t("events.agentUnassigned");
+    if (e.type === "pr_linked") {
+      // Code-safe: never the PR number/url — only the review/ship milestone.
+      if (m.state === "merged") return t("events.prMerged");
+      if (m.state === "closed") return t("events.prClosed");
+      return t("events.prLinked");
+    }
+    if (e.type === "ticket_created" || e.type === "task_created") return t("events.ticketCreated");
     if (e.type === "ticket_edited")  return t("events.ticketEdited");
-    if (e.type === "ticket_deleted") return t("events.ticketDeleted");
-    return e.content || e.type;
+    if (e.type === "ticket_deleted" || e.type === "task_deleted") return t("events.ticketDeleted");
+    if (e.type === "task_archived")   return t("events.ticketArchived");
+    if (e.type === "task_unarchived") return t("events.ticketUnarchived");
+    // Safety net: humanize any unmapped type so a raw snake_case identifier
+    // (e.g. "agent_assigned") never surfaces to a partner.
+    return e.content || humanizeEventType(e.type);
+  }
+
+  // "agent_assigned" → "Agent assigned". Used as the describeEvent fallback so
+  // unmapped activity types still read as plain English, never code.
+  function humanizeEventType(type) {
+    if (!type) return "";
+    return String(type).replace(/_/g, " ").replace(/^./, function (c) { return c.toUpperCase(); });
   }
 
   function renderEventNode(e) {

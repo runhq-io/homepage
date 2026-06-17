@@ -109,6 +109,13 @@ describe('getPublicTicketDetail — milestones', () => {
       expect(serialized).not.toContain('github.com');
       expect(serialized).not.toContain('session/job');
       expect(detail!.milestones.find((m) => m.key === 'in_review')!.state).toBe('current');
+      // The activity feed must NOT leak the PR locators either — only state.
+      const prActivity = detail!.activity.find((a) => a.type === 'pr_linked');
+      expect(prActivity).toBeTruthy();
+      expect(prActivity!.metadata).toEqual({ state: 'open' });
+      const activitySerialized = JSON.stringify(detail!.activity);
+      expect(activitySerialized).not.toContain('github.com');
+      expect(activitySerialized).not.toContain('session/job');
     } finally {
       await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, id));
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
