@@ -57,6 +57,9 @@
   // on back-navigation, view switches, and panel close.
   var detailPollIntervalId = null;
   var DETAIL_POLL_INTERVAL_MS = 5000;
+  // Live ticket-status stream (SSE). Preferred over polling; at most one of
+  // detailEventSourceRef / detailPollIntervalId is armed at a time.
+  var detailEventSourceRef = null;
 
   // ===========================================================================
   // Chat state (agent conversation view)
@@ -5300,12 +5303,60 @@
   // Detail polling helpers
   // ===========================================================================
 
-  // Start a recurring poll of loadTicketDetail while the given ticket's detail
-  // view is open. The callback receives the fresh detail data.
-  // Guards: clears any existing interval first to avoid stacking; bails on
-  // navigation away from the ticket.
+  // URL for the ticket-status SSE stream. Mirrors chatEventsUrl: app-token
+  // embeds pass the JWT as ?token= (the BE route shims it into Authorization);
+  // cookie embeds pass ?project= but the BE does not read it for SSE auth yet,
+  // so they degrade to polling by design (the stream errors once, never retries).
+  function ticketEventsUrl(ticketId) {
+    var url = RUNHQ_API + "/api/widget/tickets/" + encodeURIComponent(ticketId) + "/events";
+    var params = [];
+    if (config.identitySource !== "runhq" && config.token) {
+      params.push("token=" + encodeURIComponent(config.token));
+    }
+    if (config.project) params.push("project=" + encodeURIComponent(config.project));
+    return params.length ? url + "?" + params.join("&") : url;
+  }
+
+  // Start real-time delivery of ticket-detail updates while the given ticket's
+  // detail view is open. SSE (EventSource) is preferred; a stream that errors
+  // once (auth, proxy buffering, old browser, cookie embed) falls back to
+  // adaptive 5s polling — correctness never depends on the stream staying up.
+  // `onData(freshDetail)` receives a full PublicTicketDetail on each
+  // snapshot/update (SSE) or poll tick. Bails on navigation away from the ticket.
   function startDetailPoll(ticketId, onData) {
     stopDetailPoll();
+    var snap = currentDetailTicket;
+    if (typeof window.EventSource === "function") {
+      try {
+        var es = new EventSource(ticketEventsUrl(ticketId), { withCredentials: wantsCookieAuth() });
+        var apply = function (e) {
+          if (view !== "detail" || currentDetailTicket !== snap) { stopDetailPoll(); return; }
+          var detail = null;
+          try { detail = JSON.parse(e.data); } catch (_) { return; }
+          onData(detail);
+        };
+        es.addEventListener("snapshot", apply);
+        es.addEventListener("update", apply);
+        es.onerror = function () {
+          try { es.close(); } catch (_) {}
+          if (detailEventSourceRef === es) {
+            detailEventSourceRef = null;
+            if (view === "detail" && currentDetailTicket === snap) startDetailPollLoop(ticketId, onData);
+          }
+        };
+        detailEventSourceRef = es;
+        return;
+      } catch (_) {
+        detailEventSourceRef = null;
+      }
+    }
+    startDetailPollLoop(ticketId, onData);
+  }
+
+  // Recurring poll fallback for the detail view (used when SSE is unavailable
+  // or errors out). Same guards/posture as the original detail poll.
+  function startDetailPollLoop(ticketId, onData) {
+    if (detailPollIntervalId !== null) { clearInterval(detailPollIntervalId); detailPollIntervalId = null; }
     var snap = currentDetailTicket;
     detailPollIntervalId = setInterval(function () {
       if (view !== "detail" || currentDetailTicket !== snap) {
@@ -5322,6 +5373,10 @@
   }
 
   function stopDetailPoll() {
+    if (detailEventSourceRef) {
+      try { detailEventSourceRef.close(); } catch (_) {}
+      detailEventSourceRef = null;
+    }
     if (detailPollIntervalId !== null) {
       clearInterval(detailPollIntervalId);
       detailPollIntervalId = null;
@@ -5332,43 +5387,32 @@
   // Clarification timeline, question cards, PR card rendering
   // ===========================================================================
 
-  // Compact horizontal stepper: Submitted → Clarifying → In progress → PR opened.
-  // `clarification` and `linkedPr` may each be null.
-  function renderClarificationTimeline(clarification, linkedPr) {
-    var status = clarification ? clarification.status : null;
-
-    // Determine active step index (0-based): 0=Submitted 1=Clarifying 2=InProgress 3=PROpened
-    var activeStep = 0;
-    if (status === "asking") {
-      activeStep = 1;
-    } else if (status === "ready" || status === "started" || status === "skipped" || status === "duplicate") {
-      activeStep = linkedPr ? 3 : 2;
-    } else if (linkedPr) {
-      activeStep = 3;
-    }
-
-    // When the clarification was flagged as a possible duplicate, rename
-    // the "In progress" step to "Needs review" so the stepper communicates
-    // the pending-duplicate state (it sits at the same position — between
-    // Clarifying and PR opened — but the label makes the situation clearer).
-    var inProgressLabel = status === "duplicate" ? "Needs review" : "In progress";
-    var labels = ["Submitted", "Clarifying", inProgressLabel, "PR opened"];
+  // Compact horizontal progress stepper rendered from the SERVER-DERIVED
+  // milestone model — the only representation of progress shown to partners.
+  // Each milestone is { key, label, state: 'done'|'current'|'upcoming' } and
+  // carries no code, file paths, or PR locators by construction. The widget
+  // never computes milestones itself; it renders what the server sends, so
+  // there is a single source of truth for "what step are we on".
+  function renderMilestoneStepper(milestones) {
+    if (!milestones || milestones.length === 0) return null;
+    var currentLabel = milestones[0].label;
     var items = [];
-    for (var i = 0; i < labels.length; i++) {
+    for (var i = 0; i < milestones.length; i++) {
+      var m = milestones[i];
       var cls = "rw-clarif-step";
-      if (i < activeStep) cls += " rw-clarif-past";
-      else if (i === activeStep) cls += " rw-clarif-active";
+      if (m.state === "done") cls += " rw-clarif-past";
+      else if (m.state === "current") { cls += " rw-clarif-active"; currentLabel = m.label; }
 
       items.push(h("span", { className: cls }, [
         h("span", { className: "rw-clarif-step-dot" }),
-        document.createTextNode(labels[i]),
+        document.createTextNode(m.label),
       ]));
 
-      if (i < labels.length - 1) {
+      if (i < milestones.length - 1) {
         items.push(h("span", { className: "rw-clarif-connector" }));
       }
     }
-    return h("div", { className: "rw-clarif-timeline", "aria-label": "Progress: " + labels[activeStep] }, items);
+    return h("div", { className: "rw-clarif-timeline", "aria-label": "Progress: " + currentLabel }, items);
   }
 
   // Render question cards when status=asking and questions are present.
@@ -5552,28 +5596,10 @@
     ]);
   }
 
-  // Small linked-PR card rendered between the ticket head and body.
-  function renderPrCard(linkedPr) {
-    if (!linkedPr) return null;
-    var stateLabel = linkedPr.state === "merged" ? "Merged"
-      : linkedPr.state === "closed" ? "Closed"
-      : "Open";
-    var stateCls = "rw-pr-state rw-pr-state-" + (linkedPr.state === "merged" ? "merged"
-      : linkedPr.state === "closed" ? "closed"
-      : "open");
-
-    return h("div", { className: "rw-pr-card" }, [
-      h("span", { className: "rw-pr-card-label" }, "PR"),
-      h("a", {
-        className: "rw-pr-card-link",
-        href: linkedPr.url,
-        target: "_blank",
-        rel: "noopener noreferrer",
-        title: "View pull request #" + linkedPr.number + " on GitHub",
-      }, "Pull request #" + linkedPr.number),
-      h("span", { className: stateCls }, stateLabel),
-    ]);
-  }
+  // NOTE: a clickable "Pull request #N" card used to live here. It was removed
+  // deliberately: a PR number/URL is an internal locator that points at code,
+  // which violates the partner-facing "never reveal code" contract. A linked PR
+  // now surfaces only as the "In review"/"Shipped" milestone (server-derived).
 
   function renderDetailInto(card, data, loading) {
     clearChildren(card);
@@ -5673,16 +5699,12 @@
     var scrollArea = h("div", { className: "rw-td-scroll" });
     scrollArea.appendChild(head);
 
-    // Timeline stepper — shown when clarification or linked PR is present.
-    // Only present on the fully-loaded render (not the loading skeleton).
-    if (!loading && (data.clarification || data.linkedPr)) {
-      scrollArea.appendChild(renderClarificationTimeline(data.clarification, data.linkedPr));
-    }
-
-    // Linked-PR card — shown between timeline and body when a PR is attached.
-    if (!loading && data.linkedPr) {
-      var prCard = renderPrCard(data.linkedPr);
-      if (prCard) scrollArea.appendChild(prCard);
+    // Progress stepper — rendered from the server-derived milestone model (the
+    // only partner-facing representation of progress). Shown on the fully-loaded
+    // render (not the loading skeleton).
+    if (!loading && data.milestones && data.milestones.length > 0) {
+      var stepper = renderMilestoneStepper(data.milestones);
+      if (stepper) scrollArea.appendChild(stepper);
     }
 
     // Clarification question cards — rendered when status=asking and the
@@ -5711,7 +5733,7 @@
               openQuestions: resp.clarification.questions || [],
               duplicateOf: resp.clarification.duplicateOf ?? data.clarification.duplicateOf ?? null,
             } : data.clarification,
-            linkedPr: data.linkedPr,
+            milestones: data.milestones,
           };
           renderDetailInto(card, merged, false);
         });
@@ -5808,7 +5830,7 @@
     // composer (outside the scroll area, pinned to the bottom of the card)
     card.appendChild(renderComposer(ticket, function (newComment) {
       comments.push(newComment);
-      renderDetailInto(card, { ticket: ticket, comments: comments, activity: activity, isOwner: data.isOwner, isEditable: data.isEditable, clarification: data.clarification, linkedPr: data.linkedPr }, false);
+      renderDetailInto(card, { ticket: ticket, comments: comments, activity: activity, isOwner: data.isOwner, isEditable: data.isEditable, clarification: data.clarification, milestones: data.milestones }, false);
     }));
 
     // Polling — start once the full detail is loaded (not during the loading skeleton).
@@ -5819,12 +5841,13 @@
       startDetailPoll(ticket.id, function (freshData) {
         var clarifChanged =
           JSON.stringify(freshData.clarification) !== JSON.stringify(data.clarification);
-        var prChanged =
-          JSON.stringify(freshData.linkedPr) !== JSON.stringify(data.linkedPr);
+        var milestonesChanged =
+          JSON.stringify(freshData.milestones) !== JSON.stringify(data.milestones);
+        var statusChanged = freshData.ticket && data.ticket && freshData.ticket.status !== data.ticket.status;
         var threadChanged =
           (freshData.comments || []).length !== comments.length
           || (freshData.activity || []).length !== activity.length;
-        if (clarifChanged || prChanged || threadChanged) {
+        if (clarifChanged || milestonesChanged || statusChanged || threadChanged) {
           renderDetailInto(card, freshData, false);
         }
       });

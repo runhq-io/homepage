@@ -40,6 +40,7 @@ import * as WidgetAutoAssign from './services/WidgetAutoAssign';
 import * as ClarifierService from './services/ClarifierService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WidgetChatService from './services/WidgetChatService';
+import { subscribeToTicket } from './services/WidgetTicketEvents';
 import { streamSSE } from 'hono/streaming';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
@@ -6091,6 +6092,81 @@ export function createHttpApp() {
     const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId);
     if (!detail) return c.json({ error: 'Ticket not found' }, 404);
     return c.json(detail);
+  });
+
+  // Live ticket-status stream. Pushes the recomputed PublicTicketDetail to the
+  // widget whenever the ticket changes (status, activity, clarification),
+  // replacing the 5s detail poll with real-time updates. Mirrors the chat SSE
+  // route: EventSource cannot set an Authorization header, so the app-token
+  // path passes the JWT as ?token= (shimmed into Authorization below). The
+  // detail is recomputed PER VIEWER on each change because visibility
+  // (private tickets, clarifier open questions) is viewer-specific.
+  app.get('/api/widget/tickets/:id/events', async (c) => {
+    const tokenQ = c.req.query('token');
+    const reqForAuth = tokenQ && !c.req.header('Authorization')
+      ? {
+          header: (name: string) =>
+            name.toLowerCase() === 'authorization' ? `Bearer ${tokenQ}` : c.req.header(name),
+          method: 'GET',
+          raw: c.req.raw,
+        }
+      : c.req;
+    const auth = await WidgetService.authenticateWidget(reqForAuth as any);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const ticketId = c.req.param('id');
+    const projectId = auth.projectId;
+    const widgetUserId = auth.widgetUserId;
+
+    // Reject up-front if the viewer cannot see the ticket right now.
+    const initial = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId);
+    if (!initial) return c.json({ error: 'Ticket not found' }, 404);
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      let sending = false;
+      let pending = false;
+
+      const sendDetail = async (event: 'snapshot' | 'update') => {
+        const detail = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId);
+        // null => the viewer lost visibility (e.g. flipped to private). Skip.
+        if (detail) await stream.writeSSE({ event, data: JSON.stringify(detail) });
+      };
+
+      // Coalesce bursts (a status write + its status_change activity fire
+      // back-to-back) into a single recompute+send.
+      const flush = () => {
+        if (sending) { pending = true; return; }
+        sending = true;
+        void (async () => {
+          try {
+            do {
+              pending = false;
+              if (!open) break;
+              await sendDetail('update');
+            } while (pending);
+          } catch (err) {
+            console.warn('[widget-tickets/events] send failed:', err);
+          } finally {
+            sending = false;
+          }
+        })();
+      };
+
+      const unsubscribe = subscribeToTicket(ticketId, flush);
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+
+      // Initial snapshot reuses the visibility-checked `initial` payload.
+      await stream.writeSSE({ event: 'snapshot', data: JSON.stringify(initial) });
+
+      while (open) {
+        await stream.sleep(25_000);
+        if (!open) break;
+        await stream.write(': hb\n\n');
+      }
+    });
   });
 
   app.post('/api/widget/tickets', async (c) => {

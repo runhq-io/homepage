@@ -10,6 +10,7 @@ import {
 } from '../../db/schema';
 import { emitTaskNotification, type NotificationActor } from '../../notifications/emitTaskNotification';
 import { dispatchNotification } from '../../notifications/dispatch';
+import { publishTicketUpdate } from './WidgetTicketEvents';
 import type {
   ActivityType,
   CanonicalTaskAttachment,
@@ -625,6 +626,14 @@ export async function updateTask(
     if (found) emittedNotification = serializeNotification(found);
   }
 
+  // Push the change to any live widget ticket-status SSE subscribers. The task
+  // write is already committed; this is best-effort and must never throw.
+  if (resultTask) {
+    try { publishTicketUpdate(taskId); } catch (err) {
+      console.warn('[WorkspaceTaskService] publishTicketUpdate failed', err);
+    }
+  }
+
   return { task: resultTask, notification: emittedNotification };
 }
 
@@ -889,6 +898,11 @@ export async function addActivity(
     await insertOwnerAttachments(serverId, taskId, 'activity', row.id, input.attachments);
   }
   const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  // Activity rows (status_change, agent_assigned, pr_linked, comments) move the
+  // partner-facing milestone stepper — push to live SSE subscribers. Best-effort.
+  try { publishTicketUpdate(taskId); } catch (err) {
+    console.warn('[WorkspaceTaskService] publishTicketUpdate failed', err);
+  }
   return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 

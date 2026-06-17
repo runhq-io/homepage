@@ -300,10 +300,15 @@ describe('getPublicTicketDetail linkedPr field', () => {
     try {
       const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
       expect(detail!.linkedPr).not.toBeNull();
-      expect(detail!.linkedPr!.number).toBe(42);
-      expect(detail!.linkedPr!.url).toBe('https://github.com/acme/web/pull/42');
+      // Code-safety contract: ONLY state is exposed — never number/url/branch.
       expect(detail!.linkedPr!.state).toBe('open');
-      expect(detail!.linkedPr!.repoBranch).toBe('session/job1/ticket-abc');
+      expect(detail!.linkedPr).toEqual({ state: 'open' });
+      expect((detail!.linkedPr as any).number).toBeUndefined();
+      expect((detail!.linkedPr as any).url).toBeUndefined();
+      expect((detail!.linkedPr as any).repoBranch).toBeUndefined();
+      // An open PR advances the partner-facing stepper to "In review".
+      const inReview = detail!.milestones.find((m) => m.key === 'in_review');
+      expect(inReview?.state).toBe('current');
     } finally {
       await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, task!.id));
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
@@ -335,8 +340,8 @@ describe('getPublicTicketDetail linkedPr field', () => {
 
     try {
       const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
-      // Most recent pr_linked wins
-      expect(detail!.linkedPr!.number).toBe(20);
+      // Most recent pr_linked wins — the newer PR is 'open' (older was 'closed').
+      expect(detail!.linkedPr!.state).toBe('open');
     } finally {
       await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, task!.id));
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
