@@ -145,6 +145,14 @@ type WidgetTicketResponse = {
   completedAt: Date | null;
   userVote: boolean | null;
   canVote: boolean;
+  /**
+   * Timestamp of the most recent activity on the ticket — the max of the task's
+   * own updatedAt, its latest comment, and its latest activity row. Unlike
+   * updatedAt (which only bumps on field/status changes), this reflects new
+   * comments too, so the widget launcher badge can light up for a team reply.
+   * Populated by listMyTickets; may be absent on other list shapes.
+   */
+  lastActivityAt?: Date | null;
 };
 
 type PublicAttachmentSummary = {
@@ -2082,7 +2090,42 @@ export async function listMyTickets(
     .orderBy(desc(workspaceTasks.createdAt))
     .limit(50);
 
-  return rows.map((t) => mapTaskToWidgetResponse(t));
+  if (rows.length === 0) return [];
+
+  // Derive lastActivityAt = max(task.updatedAt, latest comment, latest activity)
+  // per ticket. Comments and activity rows do NOT bump workspaceTasks.updatedAt,
+  // so without this a team reply would never light the launcher badge.
+  const ids = rows.map((r) => r.id);
+  const [commentMax, activityMax] = await Promise.all([
+    db
+      .select({ taskId: workspaceTaskComments.taskId, max: sql<string>`max(${workspaceTaskComments.createdAt})` })
+      .from(workspaceTaskComments)
+      .where(and(inArray(workspaceTaskComments.taskId, ids), isNull(workspaceTaskComments.deletedAt)))
+      .groupBy(workspaceTaskComments.taskId),
+    db
+      .select({ taskId: workspaceTaskActivity.taskId, max: sql<string>`max(${workspaceTaskActivity.createdAt})` })
+      .from(workspaceTaskActivity)
+      .where(inArray(workspaceTaskActivity.taskId, ids))
+      .groupBy(workspaceTaskActivity.taskId),
+  ]);
+
+  const latest = new Map<string, number>();
+  const bump = (taskId: string, raw: string | null) => {
+    if (!raw) return;
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) return;
+    if (!(latest.has(taskId) && latest.get(taskId)! >= ms)) latest.set(taskId, ms);
+  };
+  for (const r of commentMax) bump(r.taskId, r.max);
+  for (const r of activityMax) bump(r.taskId, r.max);
+
+  return rows.map((t) => {
+    const dto = mapTaskToWidgetResponse(t);
+    const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
+    const activityMs = latest.get(t.id) ?? 0;
+    dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    return dto;
+  });
 }
 
 export async function getTicketStats(projectId: string) {

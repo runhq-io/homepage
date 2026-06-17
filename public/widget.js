@@ -1317,19 +1317,62 @@
     refreshTabLabel();
   }
 
-  function unreadUpdatesCount() {
+  // Per-ticket "seen" marks for the viewer's OWN submitted tickets. A ticket is
+  // marked seen (with the freshest activity timestamp we know) whenever its
+  // detail view renders — opening it, or a live SSE/poll update while it's open.
+  // Stored per project so the launcher badge can light up for a team reply that
+  // arrived while the panel was closed, then clear once the user reads it.
+  function ticketSeenKey() {
+    return "rw-ticket-seen:" + (config.projectId || config.project || "default");
+  }
+  function getTicketSeen() {
+    try { return JSON.parse(localStorage.getItem(ticketSeenKey()) || "{}") || {}; }
+    catch (_) { return {}; }
+  }
+  function markTicketSeen(id, whenMs) {
+    if (!id) return;
+    try {
+      var m = getTicketSeen();
+      var v = whenMs && !isNaN(whenMs) ? whenMs : Date.now();
+      if (!(m[id] >= v)) {
+        m[id] = v;
+        localStorage.setItem(ticketSeenKey(), JSON.stringify(m));
+      }
+    } catch (_) {}
+  }
+
+  // Count of items the launcher badge should reflect — a UNION of:
+  //  1. community "Updates" (public tickets) newer than the last panel-open, and
+  //  2. the viewer's OWN submitted tickets that have new activity/comments since
+  //     they last viewed them (e.g. a team reply or status change).
+  // Unioned by ticket id so a ticket that is both public and yours counts once.
+  function launcherBadgeCount() {
+    var ids = {};
+
     var rows = updatesCache || [];
-    if (rows.length === 0) return 0;
-    var lastOpened = getLastOpenedAt();
-    var weekAgo = Date.now() - WEEK_MS;
-    var threshold = Math.max(lastOpened, weekAgo);
-    var n = 0;
+    var threshold = Math.max(getLastOpenedAt(), Date.now() - WEEK_MS);
     for (var i = 0; i < rows.length; i++) {
-      var t = rows[i];
-      var when = new Date(t.completedAt || t.createdAt || 0).getTime();
-      if (when > threshold) n++;
+      var when = new Date(rows[i].completedAt || rows[i].createdAt || 0).getTime();
+      if (when > threshold) ids[rows[i].id] = true;
     }
-    return n;
+
+    if (config.isIdentified) {
+      var mine = myTicketsCache || [];
+      var seen = getTicketSeen();
+      for (var j = 0; j < mine.length; j++) {
+        var tk = mine[j];
+        // lastActivityAt reflects comments + activity (not just field changes);
+        // fall back to updatedAt for older payloads that don't include it.
+        var updated = new Date(tk.lastActivityAt || tk.updatedAt || tk.createdAt || 0).getTime();
+        // Baseline: when the user last viewed it, or — if never opened — its
+        // creation time, so a ticket only badges once something happens AFTER
+        // it was filed (a reply/status change), not merely for existing.
+        var base = seen[tk.id] != null ? seen[tk.id] : new Date(tk.createdAt || 0).getTime();
+        if (updated > base) ids[tk.id] = true;
+      }
+    }
+
+    return Object.keys(ids).length;
   }
 
   // ===========================================================================
@@ -1391,7 +1434,7 @@
     // there are unread updates so an actionable badge is never hidden away
     // (original desktop hover-to-hide behavior). An explicit *expand* wins
     // outright.
-    return pref && unreadUpdatesCount() === 0;
+    return pref && launcherBadgeCount() === 0;
   }
   function applyCollapsedState() {
     if (!tabEl) return;
@@ -1531,7 +1574,7 @@
   }
 
   function buildTabContent() {
-    var n = unreadUpdatesCount();
+    var n = launcherBadgeCount();
     var isRight = config.position === "right";
     var nodes = [];
     // Hide chevron lives on the protruding side: left of the pill for a
@@ -5624,6 +5667,25 @@
     var comments = data.comments || [];
     var activity = data.activity || [];
 
+    // Viewing the ticket (initial load or a live SSE/poll update) marks it seen
+    // up to the freshest thing shown, so the launcher badge clears for this
+    // ticket and only re-lights if NEW activity arrives afterwards. We use the
+    // max of the SERVER timestamps actually rendered (updatedAt + every comment
+    // + every activity) so both sides of the badge comparison stay on the
+    // server clock — no client/server skew, and it matches listMyTickets'
+    // lastActivityAt (comments/activity don't bump updatedAt).
+    if (!loading && ticket && ticket.id) {
+      var seenMs = new Date(ticket.updatedAt || 0).getTime() || 0;
+      for (var ci = 0; ci < comments.length; ci++) {
+        seenMs = Math.max(seenMs, new Date(comments[ci].createdAt || 0).getTime() || 0);
+      }
+      for (var ai = 0; ai < activity.length; ai++) {
+        seenMs = Math.max(seenMs, new Date(activity[ai].createdAt || 0).getTime() || 0);
+      }
+      markTicketSeen(ticket.id, seenMs);
+      refreshTabLabel();
+    }
+
     // head
     var voted = ticket.userVote === true;
     var countSpan = h("span", null, String(ticket.yesVotes || 0));
@@ -6513,8 +6575,8 @@
     applyTheme(theme);
     // Apply the persisted collapse preference on first paint so the pill
     // never flashes in its full state if the user previously hid it.
-    // Updates haven't loaded yet, so unreadUpdatesCount() is 0 here — if a
-    // badge arrives later, refreshTabLabel() re-runs applyCollapsedState().
+    // Updates/my-tickets haven't loaded yet, so launcherBadgeCount() is 0 here —
+    // if a badge arrives later, refreshTabLabel() re-runs applyCollapsedState().
     applyCollapsedState();
 
     document.addEventListener("keydown", function (e) {
@@ -6696,7 +6758,7 @@
         // Authenticated viewers (app token OR runhq cookie) get their own
         // ticket list. Pure-anon viewers only get the public update feed.
         if (config.isIdentified) {
-          loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {});
+          loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
         } else {
           myTicketsCache = [];
