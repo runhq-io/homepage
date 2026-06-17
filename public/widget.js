@@ -1341,11 +1341,12 @@
     } catch (_) {}
   }
 
-  // Count of items the launcher badge should reflect — a UNION of:
-  //  1. community "Updates" (public tickets) newer than the last panel-open, and
-  //  2. the viewer's OWN submitted tickets that have new activity/comments since
-  //     they last viewed them (e.g. a team reply or status change).
-  // Unioned by ticket id so a ticket that is both public and yours counts once.
+  // Launcher badge = how many of the viewer's OWN submitted tickets have new
+  // activity/comments they haven't viewed yet (a team reply or status change).
+  // Deliberately NOT unioned with the community "Updates" feed — that count
+  // lives on the "View Latest Updates" home card (newUpdatesCount). One clear
+  // meaning keeps the number understandable and makes it decrement when the
+  // user opens one of their tickets.
   function launcherBadgeCount() {
     if (!config.isIdentified) return 0;
     var mine = myTicketsCache || [];
