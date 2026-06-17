@@ -1344,14 +1344,19 @@
   // True when one of the viewer's OWN tickets has activity/comments they
   // haven't viewed yet (a team reply or status change). The single source of
   // truth for both the launcher count and the per-row "needs attention" dot.
-  //   - lastActivityAt reflects comments + activity (not just field changes);
-  //     fall back to updatedAt for older payloads that don't include it.
-  //   - Baseline = when they last viewed it, or — if never opened — its
-  //     creation time, so a ticket only flags once something happens AFTER it
-  //     was filed, not merely for existing. Anon viewers never flag.
+  //
+  // GATED ON lastActivityAt: only the viewer's own tickets (from
+  // listMyTickets) carry it. Community Hot/Updates rows do NOT, so they can
+  // never flag — this is what keeps the marker off tickets the user didn't
+  // create. (Do NOT fall back to updatedAt here: community tickets routinely
+  // have updatedAt > createdAt and would all light up.)
+  //
+  // Baseline = when they last viewed it, or — if never opened — its creation
+  // time, so a ticket only flags once something happens AFTER it was filed.
+  // Anon viewers never flag.
   function ticketHasUnseenActivity(ticket) {
-    if (!config.isIdentified || !ticket) return false;
-    var updated = new Date(ticket.lastActivityAt || ticket.updatedAt || ticket.createdAt || 0).getTime();
+    if (!config.isIdentified || !ticket || !ticket.lastActivityAt) return false;
+    var updated = new Date(ticket.lastActivityAt).getTime();
     var seen = getTicketSeen();
     var base = seen[ticket.id] != null ? seen[ticket.id] : new Date(ticket.createdAt || 0).getTime();
     return updated > base;
