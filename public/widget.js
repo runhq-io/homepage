@@ -1347,32 +1347,37 @@
   //     they last viewed them (e.g. a team reply or status change).
   // Unioned by ticket id so a ticket that is both public and yours counts once.
   function launcherBadgeCount() {
-    var ids = {};
+    if (!config.isIdentified) return 0;
+    var mine = myTicketsCache || [];
+    var seen = getTicketSeen();
+    var n = 0;
+    for (var j = 0; j < mine.length; j++) {
+      var tk = mine[j];
+      // lastActivityAt reflects comments + activity (not just field changes);
+      // fall back to updatedAt for older payloads that don't include it.
+      var updated = new Date(tk.lastActivityAt || tk.updatedAt || tk.createdAt || 0).getTime();
+      // Baseline: when the user last viewed it, or — if never opened — its
+      // creation time, so a ticket only counts once something happens AFTER it
+      // was filed (a reply/status change), not merely for existing.
+      var base = seen[tk.id] != null ? seen[tk.id] : new Date(tk.createdAt || 0).getTime();
+      if (updated > base) n++;
+    }
+    return n;
+  }
 
+  // Community "Updates" newer than the last panel-open (bounded to a week) —
+  // shown as the count on the "View Latest Updates" home card. This is the
+  // community-recency signal that previously rode on the launcher badge.
+  function newUpdatesCount() {
     var rows = updatesCache || [];
+    if (rows.length === 0) return 0;
     var threshold = Math.max(getLastOpenedAt(), Date.now() - WEEK_MS);
+    var n = 0;
     for (var i = 0; i < rows.length; i++) {
       var when = new Date(rows[i].completedAt || rows[i].createdAt || 0).getTime();
-      if (when > threshold) ids[rows[i].id] = true;
+      if (when > threshold) n++;
     }
-
-    if (config.isIdentified) {
-      var mine = myTicketsCache || [];
-      var seen = getTicketSeen();
-      for (var j = 0; j < mine.length; j++) {
-        var tk = mine[j];
-        // lastActivityAt reflects comments + activity (not just field changes);
-        // fall back to updatedAt for older payloads that don't include it.
-        var updated = new Date(tk.lastActivityAt || tk.updatedAt || tk.createdAt || 0).getTime();
-        // Baseline: when the user last viewed it, or — if never opened — its
-        // creation time, so a ticket only badges once something happens AFTER
-        // it was filed (a reply/status change), not merely for existing.
-        var base = seen[tk.id] != null ? seen[tk.id] : new Date(tk.createdAt || 0).getTime();
-        if (updated > base) ids[tk.id] = true;
-      }
-    }
-
-    return Object.keys(ids).length;
+    return n;
   }
 
   // ===========================================================================
@@ -2317,6 +2322,7 @@
       '.rw-home-card:hover { border-color: var(--rw-accent); box-shadow: 0 4px 16px -10px rgba(42,37,32,0.30); }',
       '.rw-home-card:active { transform: translateY(1px); }',
       '.rw-home-card-emoji { font-size: 22px; line-height: 1; flex: 0 0 auto; }',
+      '.rw-home-card-count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--rw-accent, #2563eb); color: #fff; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }',
       '.rw-home-card-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }',
       '.rw-home-card-title { font-size: 14px; font-weight: 600; }',
       '.rw-home-card-sub { font-size: 12px; color: var(--rw-muted); }',
@@ -4045,15 +4051,19 @@
     renderPanelBody();
   }
 
-  function renderHomeCard(emoji, title, sub, onClick) {
-    var btn = h("button", { className: "rw-home-card", type: "button" }, [
+  function renderHomeCard(emoji, title, sub, onClick, count) {
+    var children = [
       h("span", { className: "rw-home-card-emoji", "aria-hidden": "true" }, emoji),
       h("span", { className: "rw-home-card-text" }, [
         h("span", { className: "rw-home-card-title" }, title),
         h("span", { className: "rw-home-card-sub" }, sub),
       ]),
-      h("span", { className: "rw-home-card-chev" }, Icons.chevRight(16)),
-    ]);
+    ];
+    if (typeof count === "number" && count > 0) {
+      children.push(h("span", { className: "rw-home-card-count" }, count > 99 ? "99+" : String(count)));
+    }
+    children.push(h("span", { className: "rw-home-card-chev" }, Icons.chevRight(16)));
+    var btn = h("button", { className: "rw-home-card", type: "button" }, children);
     btn.addEventListener("click", onClick);
     return btn;
   }
@@ -4098,14 +4108,16 @@
       "🗳",
       t("home.discussTitle"),
       t("home.discussSub"),
-      function () { goList("hot"); }
+      function () { goList("hot"); },
+      (topTicketsCache || []).length
     ));
 
     cards.appendChild(renderHomeCard(
       "📣",
       t("home.updatesTitle"),
       t("home.updatesSub"),
-      function () { goList("updates"); }
+      function () { goList("updates"); },
+      (updatesCache || []).length
     ));
 
     root.appendChild(cards);
@@ -6481,6 +6493,9 @@
     view = "home";
     currentDetailTicket = null;
     activeTab = "updates";
+    // The launcher is hidden while open; rebuild it on close so its badge
+    // reflects any tickets the user just viewed (seen marks updated).
+    refreshTabLabel();
   }
 
   // ===========================================================================
