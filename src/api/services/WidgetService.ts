@@ -31,6 +31,7 @@ import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
 import * as ClarifierService from './ClarifierService';
 import type { ClarificationQuestion } from './ClarifierService';
+import { deriveTicketMilestones, type Milestone, type PrState } from './ticketMilestones';
 import * as InjectionGuardService from './InjectionGuardService';
 import type { InjectionGuardImage, InjectionGuardImageMime } from './injectionGuardCore';
 import {
@@ -210,11 +211,18 @@ export type PublicTicketDetail = {
     duplicateOf: string | null;
   } | null;
   /**
-   * The linked pull request for this ticket, derived from the most recent
-   * `pr_linked` activity. null if no PR has been linked.
-   * Visible to all viewers — the PR link is not sensitive.
+   * Code-safe view of the linked pull request, derived from the most recent
+   * `pr_linked` activity. We expose ONLY the state — never the PR number, URL,
+   * or branch, which are internal locators that point at code. The state feeds
+   * the `in_review`/`shipped` milestones. null if no PR has been linked.
    */
-  linkedPr: { number: number; url: string; state: string; repoBranch?: string | null } | null;
+  linkedPr: { state: PrState } | null;
+  /**
+   * Partner-facing progress stepper. The ONLY representation of agent/ticket
+   * progress shown externally — derived from a status enum, so it is incapable
+   * of leaking code. See deriveTicketMilestones.
+   */
+  milestones: Milestone[];
 };
 
 type PublicAttachmentLike = {
@@ -249,14 +257,25 @@ function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmen
   };
 }
 
+/** Internal (un-trimmed) PR info derived from the activity feed. */
+type InternalLinkedPr = { number: number; url: string; state: PrState; repoBranch: string | null };
+
+function coercePrState(value: unknown): PrState {
+  return value === 'closed' || value === 'merged' ? value : 'open';
+}
+
 /**
  * Derive the most recent linked PR from an activity feed (already loaded).
  * Returns null if no valid pr_linked activity exists.
  * Defensively validates that number is a number and url is a string.
+ *
+ * NOTE: the number/url/branch are internal and MUST NOT be sent to widget
+ * users — getPublicTicketDetail exposes only the `state` from this. They are
+ * retained here for internal milestone derivation and any internal callers.
  */
 function deriveLinkedPr(
   activity: Array<{ type: string; metadata?: Record<string, unknown> | null }>,
-): PublicTicketDetail['linkedPr'] {
+): InternalLinkedPr | null {
   // activity is ordered by createdAt asc; scan in reverse for the most recent
   for (let i = activity.length - 1; i >= 0; i--) {
     const entry = activity[i];
@@ -267,7 +286,7 @@ function deriveLinkedPr(
     const url = m.url;
     // Defensive validation — malformed metadata must not surface
     if (typeof number !== 'number' || typeof url !== 'string') continue;
-    const state = typeof m.state === 'string' ? m.state : 'open';
+    const state = coercePrState(m.state);
     const repoBranch = typeof m.repoBranch === 'string' ? m.repoBranch : null;
     return { number, url, state, repoBranch };
   }
@@ -1158,8 +1177,19 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   }
 
   // Derive the most recent linked PR from the already-loaded activity feed.
-  // Reuses the feed — no extra DB query needed.
-  const linkedPr = deriveLinkedPr(activity);
+  // Reuses the feed — no extra DB query needed. `internalPr` carries the full
+  // PR info (number/url/branch) for milestone derivation only; the response
+  // exposes ONLY its state.
+  const internalPr = deriveLinkedPr(activity);
+
+  // Partner-facing progress stepper — derived purely from a status enum, the
+  // clarification status, whether an agent was assigned, and the PR state.
+  const milestones = deriveTicketMilestones({
+    status: task.status,
+    clarificationStatus: clar?.status ?? null,
+    agentAssigned: !!lastAssign,
+    prState: internalPr?.state ?? null,
+  });
 
   return {
     ticket: {
@@ -1188,7 +1218,8 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
     clarification,
-    linkedPr,
+    linkedPr: internalPr ? { state: internalPr.state } : null,
+    milestones,
   };
 }
 

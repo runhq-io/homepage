@@ -24,6 +24,7 @@ import {
   type WidgetClarification,
 } from '../../db/schema';
 import { eq, and, asc, desc, sql } from 'drizzle-orm';
+import { publishTicketUpdate } from './WidgetTicketEvents';
 import {
   buildClarifierMessages,
   parseVerdict,
@@ -312,6 +313,11 @@ export async function startClarification(
     return { status: 'asking' as const, clarificationId, round: 0 as const, questions };
   });
 
+  // A new clarification (asking) makes the "Clarifying" milestone appear; a
+  // proceed (ready) advances to in-progress. Push to live SSE subscribers.
+  try { publishTicketUpdate(input.taskId); } catch (err) {
+    console.warn('[ClarifierService] publishTicketUpdate failed', err);
+  }
   return result;
 }
 
@@ -454,6 +460,11 @@ export async function answerClarification(
     return { status: 'asking' as const, clarificationId, round: newRound, questions };
   });
 
+  // Answering advances the clarifier (asking→ready/next round) — push the
+  // updated milestone stepper to live SSE subscribers.
+  try { publishTicketUpdate(clarRow.taskId); } catch (err) {
+    console.warn('[ClarifierService] publishTicketUpdate failed', err);
+  }
   return result;
 }
 
@@ -511,6 +522,26 @@ export async function markClarificationStarted(clarificationId: string): Promise
     .update(widgetClarifications)
     .set({ status: 'started', updatedAt: new Date() })
     .where(eq(widgetClarifications.id, clarificationId));
+  await publishClarificationTaskUpdate(clarificationId);
+}
+
+/**
+ * Resolve the ticket a clarification belongs to and push a milestone update to
+ * any live widget SSE subscribers. Best-effort — clarification transitions are
+ * known by clarificationId, but the milestone stepper is keyed by taskId. Never
+ * throws: the authoritative clarification write has already committed.
+ */
+async function publishClarificationTaskUpdate(clarificationId: string): Promise<void> {
+  try {
+    const [row] = await db
+      .select({ taskId: widgetClarifications.taskId })
+      .from(widgetClarifications)
+      .where(eq(widgetClarifications.id, clarificationId))
+      .limit(1);
+    if (row?.taskId) publishTicketUpdate(row.taskId);
+  } catch (err) {
+    console.warn('[ClarifierService] publishTicketUpdate failed', err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +563,7 @@ export async function markDuplicate(
     .update(widgetClarifications)
     .set({ status: 'duplicate', duplicateOfTaskId, updatedAt: new Date() })
     .where(eq(widgetClarifications.id, clarificationId));
+  await publishClarificationTaskUpdate(clarificationId);
 }
 
 /**
@@ -570,6 +602,10 @@ export async function markTicketDuplicate(args: {
       round: 0,
     })
     .returning({ id: widgetClarifications.id });
+  // New duplicate row created directly (no prior clarification) — push update.
+  try { publishTicketUpdate(args.taskId); } catch (err) {
+    console.warn('[ClarifierService] publishTicketUpdate failed', err);
+  }
   return clarRow!.id;
 }
 
@@ -584,6 +620,7 @@ export async function overrideDuplicate(clarificationId: string): Promise<void> 
     .update(widgetClarifications)
     .set({ status: 'ready', updatedAt: new Date() })
     .where(eq(widgetClarifications.id, clarificationId));
+  await publishClarificationTaskUpdate(clarificationId);
 }
 
 // ---------------------------------------------------------------------------
