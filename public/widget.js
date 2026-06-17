@@ -1341,27 +1341,31 @@
     } catch (_) {}
   }
 
-  // Launcher badge = how many of the viewer's OWN submitted tickets have new
-  // activity/comments they haven't viewed yet (a team reply or status change).
-  // Deliberately NOT unioned with the community "Updates" feed — that count
-  // lives on the "View Latest Updates" home card (newUpdatesCount). One clear
-  // meaning keeps the number understandable and makes it decrement when the
-  // user opens one of their tickets.
+  // True when one of the viewer's OWN tickets has activity/comments they
+  // haven't viewed yet (a team reply or status change). The single source of
+  // truth for both the launcher count and the per-row "needs attention" dot.
+  //   - lastActivityAt reflects comments + activity (not just field changes);
+  //     fall back to updatedAt for older payloads that don't include it.
+  //   - Baseline = when they last viewed it, or — if never opened — its
+  //     creation time, so a ticket only flags once something happens AFTER it
+  //     was filed, not merely for existing. Anon viewers never flag.
+  function ticketHasUnseenActivity(ticket) {
+    if (!config.isIdentified || !ticket) return false;
+    var updated = new Date(ticket.lastActivityAt || ticket.updatedAt || ticket.createdAt || 0).getTime();
+    var seen = getTicketSeen();
+    var base = seen[ticket.id] != null ? seen[ticket.id] : new Date(ticket.createdAt || 0).getTime();
+    return updated > base;
+  }
+
+  // Launcher badge = how many of the viewer's OWN submitted tickets have unseen
+  // activity. Deliberately NOT unioned with the community "Updates" feed — that
+  // count lives on the "View Latest Updates" home card (newUpdatesCount).
   function launcherBadgeCount() {
     if (!config.isIdentified) return 0;
     var mine = myTicketsCache || [];
-    var seen = getTicketSeen();
     var n = 0;
     for (var j = 0; j < mine.length; j++) {
-      var tk = mine[j];
-      // lastActivityAt reflects comments + activity (not just field changes);
-      // fall back to updatedAt for older payloads that don't include it.
-      var updated = new Date(tk.lastActivityAt || tk.updatedAt || tk.createdAt || 0).getTime();
-      // Baseline: when the user last viewed it, or — if never opened — its
-      // creation time, so a ticket only counts once something happens AFTER it
-      // was filed (a reply/status change), not merely for existing.
-      var base = seen[tk.id] != null ? seen[tk.id] : new Date(tk.createdAt || 0).getTime();
-      if (updated > base) n++;
+      if (ticketHasUnseenActivity(mine[j])) n++;
     }
     return n;
   }
@@ -2222,6 +2226,11 @@
       '}',
       '.rw-dash-row:hover { background: color-mix(in oklab, var(--rw-accent) 5%, transparent); }',
       '.rw-dash-row:last-child { border-bottom: 0; }',
+      /* "needs attention": subtle accent wash + a left accent bar on rows with unseen activity */
+      '.rw-dash-row--unseen { background: color-mix(in oklab, var(--rw-accent) 7%, transparent); box-shadow: inset 2px 0 0 var(--rw-accent); }',
+      '.rw-dash-row--unseen:hover { background: color-mix(in oklab, var(--rw-accent) 11%, transparent); }',
+      '.rw-dash-row--unseen .rw-dash-row-title { font-weight: 650; }',
+      '.rw-unseen-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); margin-right: 7px; vertical-align: middle; flex: 0 0 auto; }',
       '.rw-dash-row-main { flex: 1; min-width: 0; }',
       '.rw-dash-row-title {',
       '  font-size: 13.5px; font-weight: 500; line-height: 1.32;',
@@ -3626,15 +3635,24 @@
     if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
     metaChildren.push(h("span", { className: "rw-meta-when" }, timeAgo(ticket.completedAt || ticket.createdAt)));
 
-    var mainChildren = [h("div", { className: "rw-dash-row-title" }, ticket.title)];
+    // "Needs your attention" marker — a dot on the title + a highlighted row —
+    // for the viewer's OWN tickets that have new activity since they last
+    // looked. Only own tickets carry lastActivityAt, so this naturally shows
+    // only in My Submissions. Makes it obvious WHICH of many tickets to open.
+    var unseen = ticketHasUnseenActivity(ticket);
+
+    var titleChildren = [];
+    if (unseen) titleChildren.push(h("span", { className: "rw-unseen-dot", "aria-label": "New activity" }));
+    titleChildren.push(h("span", null, ticket.title));
+    var mainChildren = [h("div", { className: "rw-dash-row-title" }, titleChildren)];
     if (ticket.description) {
       mainChildren.push(h("div", { className: "rw-dash-row-body" }, ticket.description));
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
     var row = h("button", {
-      className: "rw-dash-row", type: "button",
-      "aria-label": t("aria.openTicket", { title: ticket.title }),
+      className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
+      "aria-label": (unseen ? "New activity — " : "") + t("aria.openTicket", { title: ticket.title }),
     }, [
       h("div", { className: "rw-dash-row-main" }, mainChildren),
       voteBtn,
