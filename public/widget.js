@@ -3773,7 +3773,7 @@
     titleChildren.push(h("span", null, ticket.title));
     var mainChildren = [h("div", { className: "rw-dash-row-title" }, titleChildren)];
     if (ticket.description) {
-      mainChildren.push(h("div", { className: "rw-dash-row-body" }, ticket.description));
+      mainChildren.push(h("div", { className: "rw-dash-row-body" }, renderMarkdownText(ticket.description)));
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
@@ -6062,7 +6062,14 @@
     ];
     if (ticket.description) {
       var postBody = h("div", { className: "rw-td-post-body" });
-      ticket.description.split(/\n\n+/).forEach(function (para) { postBody.appendChild(h("p", null, para)); });
+      // Render markdown (bold/italic/code/links) per paragraph so reports don't
+      // show raw ** and ` markers. pre-wrap on .rw-td-post-body keeps single
+      // newlines (e.g. "- " bullet lines) intact within a paragraph.
+      ticket.description.split(/\n\n+/).forEach(function (para) {
+        var p = h("p", null);
+        appendMarkdownInline(p, para);
+        postBody.appendChild(p);
+      });
       postChildren.push(postBody);
     }
     var ticketShots = renderShotGrid(ticket.attachments);
@@ -6270,7 +6277,7 @@
         h("span", { className: "rw-td-comment-author" }, authorName),
         h("span", { className: "rw-td-comment-when" }, timeAgo(c.createdAt)),
       ]),
-      h("div", { className: "rw-td-comment-text" }, c.body || ""),
+      h("div", { className: "rw-td-comment-text" }, renderMarkdownText(c.body || "")),
     ];
     var shots = renderShotGrid(c.attachments, /* tight */ true);
     if (shots) bodyChildren.push(shots);
