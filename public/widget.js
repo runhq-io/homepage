@@ -29,6 +29,7 @@
 
   var isOpen = false;
   var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
+  var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
   var theme = "light";
 
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
@@ -855,6 +856,7 @@
         back: "Back",
       },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
+      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now." },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
       // labels are locale-overridable here.
@@ -1069,6 +1071,7 @@
         back: "뒤로",
       },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
+      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다." },
       status: {
         pending: "대기 중",
         planned: "계획됨",
@@ -2231,11 +2234,17 @@
       '}',
       '.rw-dash-row:hover { background: color-mix(in oklab, var(--rw-accent) 5%, transparent); }',
       '.rw-dash-row:last-child { border-bottom: 0; }',
-      /* "needs attention": subtle accent wash + a left accent bar on rows with unseen activity */
-      '.rw-dash-row--unseen { background: color-mix(in oklab, var(--rw-accent) 7%, transparent); box-shadow: inset 2px 0 0 var(--rw-accent); }',
-      '.rw-dash-row--unseen:hover { background: color-mix(in oklab, var(--rw-accent) 11%, transparent); }',
+      /* "needs attention": a clean leading dot + slightly bolder title. No
+         heavy wash or left bar — that read as a rendering glitch. The dot is
+         inline so the title keeps its 2-line clamp. */
       '.rw-dash-row--unseen .rw-dash-row-title { font-weight: 650; }',
       '.rw-unseen-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); margin-right: 7px; vertical-align: middle; flex: 0 0 auto; }',
+      /* "Unread only" filter toggle (My Submissions) */
+      '.rw-unread-filter-row { display: flex; padding: 8px 4px 2px; }',
+      '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
+      '.rw-unread-filter:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
+      '.rw-unread-filter.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
+      '.rw-unread-filter-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); flex: 0 0 auto; }',
       '.rw-dash-row-main { flex: 1; min-width: 0; }',
       '.rw-dash-row-title {',
       '  font-size: 13.5px; font-weight: 500; line-height: 1.32;',
@@ -3722,12 +3731,26 @@
   function renderList() {
     // "top" stayed as the cache name even though the tab is now "Hot" — accept either.
     var tab = activeTab === "top" ? "hot" : activeTab;
-    var items =
+    var allItems =
       tab === "updates" ? (updatesCache || []) :
       tab === "hot"     ? (topTicketsCache || []) :
                           (myTicketsCache || []);
 
+    // "Unread only" filter — My Submissions only. The toggle is rendered above
+    // the list (see below) whenever the viewer has any of their own tickets.
+    var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
+    var items = (tab === "mine" && mineUnreadOnly) ? allItems.filter(ticketHasUnseenActivity) : allItems;
+
+    var wrap = h("div");
+    if (tab === "mine" && config.isIdentified && allItems.length > 0) {
+      wrap.appendChild(renderUnreadFilter(unreadCount));
+    }
+
     if (items.length === 0) {
+      if (tab === "mine" && mineUnreadOnly) {
+        wrap.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
+        return wrap;
+      }
       if (tab === "mine" && !config.isIdentified) {
         return renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"));
       }
@@ -3744,7 +3767,24 @@
     var cardOpts = tab === "updates" ? { hideStatus: true } : null;
     // Use `tk` for the loop variable — `t` is the i18n function.
     items.forEach(function (tk) { list.appendChild(renderTicketCard(tk, cardOpts)); });
-    return list;
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  // "Unread only" toggle for My Submissions. Shows the unread count and flips
+  // mineUnreadOnly, re-rendering the list in place.
+  function renderUnreadFilter(unreadCount) {
+    var on = mineUnreadOnly;
+    var btn = h("button", {
+      className: "rw-unread-filter" + (on ? " rw-on" : ""),
+      type: "button",
+      "aria-pressed": on ? "true" : "false",
+    }, [
+      h("span", { className: "rw-unread-filter-dot" }),
+      document.createTextNode(t("filters.unreadOnly") + (unreadCount > 0 ? " (" + unreadCount + ")" : "")),
+    ]);
+    btn.addEventListener("click", function () { mineUnreadOnly = !mineUnreadOnly; renderPanelBody(); });
+    return h("div", { className: "rw-unread-filter-row" }, [btn]);
   }
 
   // -----------------------------------------------------------------------
