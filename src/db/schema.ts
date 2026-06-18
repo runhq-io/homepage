@@ -1613,7 +1613,7 @@ export const widgetChatMessages = pgTable('widget_chat_messages', {
   role: text('role').notNull().$type<'user' | 'agent' | 'team' | 'event'>(),
   content: text('content').notNull().default(''),
   payload: jsonb('payload').$type<WidgetChatMessagePayload | null>(),
-  turnId: uuid('turn_id'),
+  turnId: text('turn_id'),
   seq: integer('seq'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [

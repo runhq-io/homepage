@@ -12,7 +12,7 @@ describe('forwardLiveMessage', () => {
   it('forwards a safe message', async () => {
     const d = deps();
     expect(await forwardLiveMessage(base, d)).toEqual({ status: 'forwarded' });
-    expect(d.sendToWorkspace).toHaveBeenCalledWith(expect.objectContaining({ jobChannelId: 'ch1', text: 'tweak header' }));
+    expect(d.sendToWorkspace).toHaveBeenCalledWith(expect.objectContaining({ jobChannelId: 'ch1', text: 'tweak header', conversationId: 'c1' }));
   });
   it('flags unsafe and does not forward', async () => {
     const d = deps({ screen: vi.fn(async () => ({ safe: false, reasons: ['injection'] })) });

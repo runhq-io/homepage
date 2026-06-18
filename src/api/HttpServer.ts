@@ -6060,12 +6060,14 @@ export function createHttpApp() {
         jobChannelId: string;
         text: string;
         actor: { externalUserId: string; name?: string | null };
+        conversationId: string;
       }) => {
         if (!server) throw new Error('no_server');
         await ServerService.serverTokenFetch(server, '/internal/live-coder/message', {
           jobChannelId: p.jobChannelId,
           text: p.text,
           actor: p.actor,
+          conversationId: p.conversationId,
         });
         return { ok: true };
       };

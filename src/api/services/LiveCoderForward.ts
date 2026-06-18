@@ -24,6 +24,7 @@ export interface LiveCoderForwardDeps {
     jobChannelId: string;
     text: string;
     actor: { externalUserId: string; name?: string | null };
+    conversationId: string;
   }) => Promise<{ ok: boolean }>;
 }
 
@@ -63,6 +64,7 @@ export async function forwardLiveMessage(
     jobChannelId: input.jobChannelId,
     text: input.text,
     actor: input.actor,
+    conversationId: input.conversationId,
   });
 
   return { status: 'forwarded' };
