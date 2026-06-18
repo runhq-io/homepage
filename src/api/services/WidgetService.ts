@@ -23,6 +23,7 @@ import {
   serverMembers,
   users,
   widgetExposedAgents,
+  widgetChatConversations,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
@@ -220,6 +221,14 @@ export type PublicTicketDetail = {
      */
     duplicateOf: string | null;
   } | null;
+  /**
+   * The widget chat conversation that originated this ticket, if any.
+   * Exposed only when the ticket was created from a chat conversation.
+   * Staff with `live_coder` permission use this to send messages into the
+   * running job via POST /api/widget/chat/conversations/:id/live-message.
+   * null if the ticket was not created from a conversation.
+   */
+  chatConversationId: string | null;
   /**
    * Code-safe view of the linked pull request, derived from the most recent
    * `pr_linked` activity. We expose ONLY the state — never the PR number, URL,
@@ -1237,6 +1246,16 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     prState: internalPr?.state ?? null,
   });
 
+  // Resolve the chat conversation that originated this ticket, if any.
+  // Used by staff with `live_coder` permission to send messages into the
+  // running job via the Live session UI.
+  const [originConv] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, task.id))
+    .limit(1);
+  const chatConversationId = originConv?.id ?? null;
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
@@ -1264,6 +1283,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
     clarification,
+    chatConversationId,
     linkedPr: internalPr ? { state: internalPr.state } : null,
     milestones,
   };

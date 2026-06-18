@@ -108,6 +108,14 @@
   var CHAT_CLOSED_WATCH_MS = 5000;
   var CHAT_INPUT_MAX = 4000;
   var CHAT_ESCAPE_HATCH_MIN_TURNS = 4;
+  // True when the chat view is a Live session (staff → running job), rather
+  // than the ordinary user → agent intake conversation. Set by openLiveSession;
+  // cleared when the chat view exits. Controls: send route (liveCoderSend vs
+  // chatSendMessage), topbar label, back destination, and hatch-slot visibility.
+  var chatIsLiveSession = false;
+  // When chatIsLiveSession is true: the ticket the live session was opened from
+  // (used to restore the detail view on back-navigation).
+  var liveSessionTicket = null;
 
   // ===========================================================================
   // Console & error capture
@@ -298,6 +306,14 @@
   }
   function chatSendMessage(conversationId, content) {
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages", {
+      method: "POST", body: { content: content },
+    });
+  }
+  // Staff-only: send a message into the running job via the front-door agent.
+  // Requires the `live_coder` permission (enforced server-side; 403 otherwise).
+  // Replies arrive on the SAME /events SSE stream as the ordinary chat transport.
+  function liveCoderSend(conversationId, content) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/live-message", {
       method: "POST", body: { content: content },
     });
   }
@@ -4205,6 +4221,11 @@
     // A detail opened FROM chat must not leave its return-to-chat marker
     // behind once the user jumps home instead.
     detailReturnView = null;
+    // If a live session was open when goHome() was triggered (e.g. via the
+    // topbar home button), clear the live session flags so they don't bleed
+    // into the next chat view open.
+    chatIsLiveSession = false;
+    liveSessionTicket = null;
     renderPanelBody();
   }
 
@@ -4214,6 +4235,8 @@
     if (tab) activeTab = tab;
     currentDetailTicket = null;
     detailReturnView = null;
+    chatIsLiveSession = false;
+    liveSessionTicket = null;
     renderPanelBody();
   }
 
@@ -4607,6 +4630,27 @@
     stopDetailPoll();
     view = "chat";
     currentDetailTicket = null;
+    renderPanelBody();
+  }
+
+  // Open the Live session chat view for a staff member with the `live_coder`
+  // permission. Pre-seeds the chatConversation with a stub so renderChatViewShell
+  // skips chatOpenConversation() and goes straight to message-loading + transport.
+  // Back-navigation returns to the ticket detail.
+  function openLiveSession(conversationId, ticket) {
+    stopDetailPoll();
+    stopChatTransport();
+    // Pre-seed the conversation stub. renderChatViewShell detects a non-null
+    // chatConversation and skips chatOpenConversation().
+    chatConversation = { id: conversationId, status: "active", createdTaskId: ticket.id, pendingTurnId: null };
+    chatMessages = [];
+    chatTurnPending = false;
+    chatSubmitInFlight = false;
+    chatIsLiveSession = true;
+    liveSessionTicket = ticket;
+    // Return-from-detail bookkeeping.
+    detailReturnView = "detail";
+    view = "chat";
     renderPanelBody();
   }
 
@@ -5193,6 +5237,9 @@
     if (!chatUi || !chatUi.hatchSlot) return;
     var slot = chatUi.hatchSlot;
     clearChildren(slot);
+    // Live session: no submit-ticket or escape-hatch actions (this is a
+    // staff-to-job channel, not a user intake conversation).
+    if (chatIsLiveSession) return;
     if (!chatConversation || chatConversation.status !== "active") return;
 
     if (!chatThreadHasAgent()) {
@@ -5410,7 +5457,10 @@
       sendBtn.disabled = true;
       ta.disabled = true;
       clearChildren(noticeSlot);
-      chatSendMessage(chatConversation.id, content).then(function (data) {
+      // Live session: route through the staff-only live-message endpoint.
+      // Regular chat: route through the user-message endpoint.
+      var sendFn = chatIsLiveSession ? liveCoderSend : chatSendMessage;
+      sendFn(chatConversation.id, content).then(function (data) {
         ta.value = "";
         // Use the server's row when returned; otherwise an optimistic echo
         // that chatReplaceLocalEcho swaps for the authoritative row later.
@@ -5464,26 +5514,44 @@
   function renderChatViewShell() {
     var root = h("div", { className: "rw-chat-full" });
 
+    // Live session: back returns to the ticket detail. Regular chat: back goes home.
+    var isLive = chatIsLiveSession;
+    var savedLiveTicket = liveSessionTicket;
     var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
       Icons.arrowLeft(13),
-      h("span", null, t("chat.back")),
+      h("span", null, isLive ? t("detail.back") : t("chat.back")),
     ]);
     backBtn.addEventListener("click", function () {
       stopChatTransport();
       chatUi = null;
-      // The Home screen (Plan 1) is live: back returns to the landing view
-      // the chat card came from.
-      goHome();
+      if (isLive) {
+        // Return to the ticket detail that spawned this live session.
+        chatIsLiveSession = false;
+        liveSessionTicket = null;
+        detailReturnView = null;
+        if (savedLiveTicket) {
+          view = "detail";
+          currentDetailTicket = savedLiveTicket;
+          renderPanelBody();
+        } else {
+          goHome();
+        }
+      } else {
+        // The Home screen (Plan 1) is live: back returns to the landing view
+        // the chat card came from.
+        goHome();
+      }
     });
+
+    var topbarLabel = isLive ? "Live session" : (
+      chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()
+    );
 
     root.appendChild(h("div", { className: "rw-chat-topbar" }, [
       backBtn,
       h("div", { className: "rw-chat-topbar-identity" }, [
         renderChatAgentAvatar(22),
-        // Agent mode: "Chat with {agent}". Agentless: just the project
-        // name — there is no agent to attribute the thread to.
-        h("span", { className: "rw-chat-topbar-name" },
-          chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()),
+        h("span", { className: "rw-chat-topbar-name" }, topbarLabel),
       ]),
     ]));
 
@@ -5494,41 +5562,62 @@
     chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
 
     listEl.appendChild(renderLoading());
-    chatOpenConversation().then(function (data) {
-      if (view !== "chat" || !chatUi) return;
-      chatConversation = (data && data.conversation) || null;
-      chatMessages = ((data && data.messages) || []).slice();
-      // The conversation DTO carries pendingTurnId — resuming mid-turn
-      // restores the typing indicator (and the fast poll cadence) instead
-      // of silently dropping the in-flight turn.
-      chatTurnPending = !!(chatConversation
-        && chatConversation.status === "active"
-        && chatConversation.pendingTurnId);
-      chatSubmitInFlight = false;
-      renderChatMessageList();
-      renderChatFooter();
-      if (chatConversation && chatConversation.status === "active") {
+
+    if (isLive && chatConversation) {
+      // Live session: conversation is pre-seeded by openLiveSession(). Skip
+      // chatOpenConversation() and go straight to message-loading + transport.
+      var liveConvAtOpen = chatConversation;
+      chatLoadMessages(liveConvAtOpen.id, null).then(function (data) {
+        if (view !== "chat" || !chatUi || chatConversation !== liveConvAtOpen) return;
+        chatMessages = ((data && data.messages) || []).slice();
+        chatTurnPending = false;
+        chatSubmitInFlight = false;
+        renderChatMessageList();
+        renderChatFooter();
         startChatTransport();
-        if (chatConversation.createdTaskId) startChatClosedWatch();
-      }
-    }).catch(function (err) {
-      if (view !== "chat" || !chatUi) return;
-      clearChildren(listEl);
-      if (err && err.status === 403) {
-        // Anonymous / unidentified caller — mirror the composer's gate: a
-        // public widget with a login URL redirects (preserving a "chat"
-        // intent); anything else shows the sign-in notice.
-        if (canAnonInteract()) {
-          gateWriteAction({ type: "chat" });
+      }).catch(function (err) {
+        if (view !== "chat" || !chatUi) return;
+        clearChildren(listEl);
+        listEl.appendChild(h("div", { style: { padding: "16px" } },
+          renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
+      });
+    } else {
+      chatOpenConversation().then(function (data) {
+        if (view !== "chat" || !chatUi) return;
+        chatConversation = (data && data.conversation) || null;
+        chatMessages = ((data && data.messages) || []).slice();
+        // The conversation DTO carries pendingTurnId — resuming mid-turn
+        // restores the typing indicator (and the fast poll cadence) instead
+        // of silently dropping the in-flight turn.
+        chatTurnPending = !!(chatConversation
+          && chatConversation.status === "active"
+          && chatConversation.pendingTurnId);
+        chatSubmitInFlight = false;
+        renderChatMessageList();
+        renderChatFooter();
+        if (chatConversation && chatConversation.status === "active") {
+          startChatTransport();
+          if (chatConversation.createdTaskId) startChatClosedWatch();
+        }
+      }).catch(function (err) {
+        if (view !== "chat" || !chatUi) return;
+        clearChildren(listEl);
+        if (err && err.status === 403) {
+          // Anonymous / unidentified caller — mirror the composer's gate: a
+          // public widget with a login URL redirects (preserving a "chat"
+          // intent); anything else shows the sign-in notice.
+          if (canAnonInteract()) {
+            gateWriteAction({ type: "chat" });
+            return;
+          }
+          listEl.appendChild(h("div", { style: { padding: "16px" } },
+            renderNotice("error", config.authErrorMessage || t("chat.signInPrompt"))));
           return;
         }
         listEl.appendChild(h("div", { style: { padding: "16px" } },
-          renderNotice("error", config.authErrorMessage || t("chat.signInPrompt"))));
-        return;
-      }
-      listEl.appendChild(h("div", { style: { padding: "16px" } },
-        renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
-    });
+          renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
+      });
+    }
 
     return root;
   }
@@ -6045,6 +6134,31 @@
       if (chatConvId) {
         scrollArea.appendChild(renderChatTranscriptSection(chatConvId));
       }
+    }
+
+    // Live session affordance — staff-only (requires the `live_coder`
+    // permission). Shown only when the ticket has an assigned agent (meaning
+    // a job is running) AND a chatConversationId was returned by the server
+    // (meaning this ticket originated from a conversation whose job channel
+    // the staff message can be forwarded into).
+    //
+    // Clicking "Live session" navigates to the chat view with the conversation
+    // pre-seeded, reusing the existing chatApplyMessages + startChatTransport
+    // SSE machinery (no duplicate transport).
+    if (!loading
+        && data.chatConversationId
+        && ticket.assignedAgentName
+        && currentUser.permissions && currentUser.permissions.indexOf("live_coder") !== -1) {
+      var liveConvId = data.chatConversationId;
+      var liveBtn = h("button", {
+        className: "rw-chat-escape-link",
+        type: "button",
+        style: { margin: "8px 16px 4px" },
+      }, "⚡ Live session — send message to running job");
+      liveBtn.addEventListener("click", function () {
+        openLiveSession(liveConvId, ticket);
+      });
+      scrollArea.appendChild(liveBtn);
     }
 
     // body
