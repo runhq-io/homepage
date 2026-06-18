@@ -122,6 +122,8 @@ interface WidgetProjectContext {
   allowedOrigins: string[];
   autoRecognizeRunhqMembers: boolean;
   widgetAgentAssignmentEnabled: boolean;
+  widgetRoleClaimName: string;
+  widgetRolePermissions: Record<string, string[]>;
   serverId: string;
   channelId: string | null;
   widgetChatAgentEntityId: string | null;
@@ -366,6 +368,8 @@ async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContex
       allowedOrigins: widgetProjects.allowedOrigins,
       autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
       widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
@@ -693,15 +697,17 @@ export async function authenticateWidget(
             widgetUserId = inserted.id;
           }
 
-          // Workspace owners/admins auto-grant the assign_agent permission
-          // when the project has triager-assignment enabled. Regular members
-          // continue to need explicit role-claim configuration via JWT —
-          // expanding the trust boundary further requires explicit owner opt-in.
+          // Spec §2.2: route through derivePermissions using a synthetic JWT
+          // payload. Workspace owners/admins map to the `team_member` role;
+          // non-admin members map to no roles. This means admins get whatever
+          // the project maps `team_member` to, plus any `'*'` wildcard grants —
+          // exactly consistent with the JWT path.
           const isAdmin = isOwnerOrAdmin(membership);
-          const permissions: ReadonlySet<WidgetPermission> =
-            isAdmin && project.widgetAgentAssignmentEnabled
-              ? new Set<WidgetPermission>(['assign_agent'])
-              : EMPTY_PERMISSIONS;
+          const claimName = project.widgetRoleClaimName || 'runhq_roles';
+          const syntheticPayload: jose.JWTPayload = {
+            [claimName]: isAdmin ? ['team_member'] : [],
+          };
+          const { permissions, matchedRoles } = derivePermissions(project, syntheticPayload);
 
           return {
             projectId: project.id,
@@ -709,7 +715,7 @@ export async function authenticateWidget(
             widgetUserId,
             authenticated: true,
             permissions,
-            matchedRoles: isAdmin ? ['admin'] : [],
+            matchedRoles,
             authSource: 'runhq',
             runhqUserId: verified.userId,
             csrfToken: csrfTokenFor(verified.userId, verified.iat),

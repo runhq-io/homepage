@@ -22,8 +22,10 @@ const OTHER_ORIGIN = 'https://malicious.test';
 
 let PROJECT_ENABLED_ID: string;
 let PROJECT_DISABLED_ID: string;
+let PROJECT_RBAC_ID: string;
 const PROJECT_ENABLED_SLUG = `enabled-${RUN_HEX}`;
 const PROJECT_DISABLED_SLUG = `disabled-${RUN_HEX}`;
+const PROJECT_RBAC_SLUG = `rbac-${RUN_HEX}`;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
@@ -94,6 +96,9 @@ beforeAll(async () => {
     allowedOrigins: [ALLOWED_ORIGIN],
     widgetAgentAssignmentEnabled: true,
     widgetAssignRoles: ['some-role'],
+    // RBAC map: team_member (owner/admin) → assign_agent; mirrors what the
+    // Task-1 migration writes for pre-existing projects with the legacy flag.
+    widgetRolePermissions: { team_member: ['assign_agent'] },
   }).returning({ id: widgetProjects.id });
   PROJECT_ENABLED_ID = enabled.id;
 
@@ -109,13 +114,32 @@ beforeAll(async () => {
     allowedOrigins: [ALLOWED_ORIGIN],
   }).returning({ id: widgetProjects.id });
   PROJECT_DISABLED_ID = disabled.id;
+
+  // RBAC project: uses widgetRolePermissions map (not legacy flag).
+  // team_member → ['assign_agent', 'live_coder']; '*' wildcard → ['attach_image']
+  const [rbac] = await db.insert(widgetProjects).values({
+    serverId: SERVER_ID,
+    name: `RBAC ${RUN_HEX}`,
+    slug: PROJECT_RBAC_SLUG,
+    apiKey: `rkey-${RUN_HEX}`,
+    apiSecretHash: `rsecret-${RUN_HEX}`,
+    channelId: `ch_ca_r_${RUN_HEX}`,
+    enabled: true,
+    autoRecognizeRunhqMembers: true,
+    allowedOrigins: [ALLOWED_ORIGIN],
+    widgetRoleClaimName: 'runhq_roles',
+    widgetRolePermissions: { team_member: ['assign_agent', 'live_coder'], '*': ['attach_image'] },
+  }).returning({ id: widgetProjects.id });
+  PROJECT_RBAC_ID = rbac.id;
 });
 
 afterAll(async () => {
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_ENABLED_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_DISABLED_ID));
+  await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_RBAC_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_ENABLED_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_DISABLED_ID));
+  await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_RBAC_ID));
   await db.delete(serverMembers).where(eq(serverMembers.serverId, SERVER_ID));
   await db.delete(servers).where(eq(servers.id, SERVER_ID));
   await db.delete(users).where(eq(users.id, ADMIN_USER_ID));
@@ -143,7 +167,7 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
     expect(Array.from(auth!.permissions)).toEqual([]);
   });
 
-  it('grants assign_agent permission to workspace admins (when triager assignment is enabled)', async () => {
+  it('grants assign_agent permission to workspace admins via RBAC team_member mapping', async () => {
     const { token } = await makeRwSession(ADMIN_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -155,7 +179,8 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
     expect(auth).not.toBeNull();
     expect(auth!.authSource).toBe('runhq');
     expect(Array.from(auth!.permissions)).toEqual(['assign_agent']);
-    expect(auth!.matchedRoles).toEqual(['admin']);
+    // Admins map to team_member via derivePermissions (not the legacy 'admin' label)
+    expect(auth!.matchedRoles).toEqual(['team_member']);
   });
 
   it('grants assign_agent permission to the workspace OWNER (role=owner, is_admin=false)', async () => {
@@ -172,7 +197,8 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
     expect(auth).not.toBeNull();
     expect(auth!.authSource).toBe('runhq');
     expect(Array.from(auth!.permissions)).toEqual(['assign_agent']);
-    expect(auth!.matchedRoles).toEqual(['admin']);
+    // Owners map to team_member via derivePermissions (not the legacy 'admin' label)
+    expect(auth!.matchedRoles).toEqual(['team_member']);
   });
 
   it('falls through (returns null) when the cookied user is not a workspace member', async () => {
@@ -305,5 +331,56 @@ describe('authenticateWidget — CSRF protection on cookie path', () => {
     });
     const auth = await authenticateWidget(req);
     expect(auth).not.toBeNull();
+  });
+});
+
+describe('authenticateWidget — Mode 0 RBAC: cookie-auth routes through derivePermissions', () => {
+  // Spec §2.2: owners/admins map to `team_member` and go through derivePermissions.
+  // Non-admin members map to no roles (but still get wildcard grants).
+
+  it('owner/admin gets team_member-mapped permissions plus the wildcard grant', async () => {
+    const { token } = await makeRwSession(ADMIN_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_RBAC_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(auth!.authSource).toBe('runhq');
+    // team_member → assign_agent + live_coder; '*' → attach_image
+    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'attach_image']));
+    expect(auth!.matchedRoles).toContain('team_member');
+  });
+
+  it('workspace owner (role=owner, is_admin=false) also gets team_member permissions via RBAC', async () => {
+    const { token } = await makeRwSession(OWNER_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_RBAC_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'attach_image']));
+    expect(auth!.matchedRoles).toContain('team_member');
+  });
+
+  it('non-admin member gets only wildcard grant (no team_member role)', async () => {
+    const { token } = await makeRwSession(MEMBER_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_RBAC_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(auth!.authSource).toBe('runhq');
+    // No team_member role → only the '*' wildcard grants attach_image
+    expect(new Set(auth!.permissions)).toEqual(new Set(['attach_image']));
+    expect(auth!.matchedRoles).toEqual([]);
   });
 });
