@@ -58,7 +58,7 @@ import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions, widgetProjects } from '../db/schema';
 import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
 import { serializeNotification } from '../notifications/serialize';
 import { getOrCreatePreferences } from '../notifications/gates';
@@ -74,6 +74,8 @@ import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
+import * as InjectionGuardService from './services/InjectionGuardService';
+import { forwardLiveMessage } from './services/LiveCoderForward';
 
 type BuildInfo = {
   gitSha?: string;
@@ -5996,6 +5998,103 @@ export function createHttpApp() {
     try {
       await WidgetChatService.dismissProposal(c.req.param('id'), auth.projectId, auth.widgetUserId);
       return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/chat/conversations/:id/live-message
+  //
+  // Staff-to-agent forward: a widget-authenticated staff member with the
+  // `live_coder` permission sends an instruction into the running job via the
+  // workspace Runtime Operator front door.
+  //
+  // Auth: widget auth (same as other /api/widget/chat/conversations/... routes).
+  // RBAC: requires permissions.has('live_coder') → 403 otherwise.
+  //
+  // Flow:
+  //   1. Persist the staff message (role='user') via sendLiveCoderMessage.
+  //   2. Screen + forward via forwardLiveMessage.
+  //   3. On 'flagged': append a rejection event row.
+  //   4. Return { status } to the client.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/chat/conversations/:id/live-message', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+
+    // RBAC gate: live_coder permission required.
+    if (!auth.permissions.has('live_coder')) {
+      return c.json({ error: 'live_coder_permission_required' }, 403);
+    }
+
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') {
+      return c.json({ error: 'content required' }, 400);
+    }
+
+    const conversationId = c.req.param('id');
+    const text = body.content;
+
+    try {
+      // Persist the staff message and resolve the job channel id.
+      const { message, jobChannelId } = await WidgetChatService.sendLiveCoderMessage(
+        conversationId, auth.projectId, text,
+      );
+
+      // Resolve the server for HMAC forwarding.
+      const [wp] = await db
+        .select({ serverId: widgetProjects.serverId })
+        .from(widgetProjects)
+        .where(eq(widgetProjects.id, auth.projectId))
+        .limit(1);
+
+      const server = wp ? await ServerService.getServer(wp.serverId) : null;
+
+      // Build the default screen + sendToWorkspace deps.
+      const screenDep = async (t: string) =>
+        InjectionGuardService.checkTicket({ title: t, description: null });
+
+      const sendToWorkspaceDep = async (p: {
+        jobChannelId: string;
+        text: string;
+        actor: { externalUserId: string; name?: string | null };
+      }) => {
+        if (!server) throw new Error('no_server');
+        await ServerService.serverTokenFetch(server, '/internal/live-coder/message', {
+          jobChannelId: p.jobChannelId,
+          text: p.text,
+          actor: p.actor,
+        });
+        return { ok: true };
+      };
+
+      const actor = {
+        externalUserId: auth.widgetUserId ?? `runhq:${auth.runhqUserId ?? 'unknown'}`,
+        name: auth.displayName ?? null,
+      };
+
+      const result = await forwardLiveMessage(
+        {
+          conversationId,
+          projectId: auth.projectId,
+          widgetUserId: auth.widgetUserId ?? '',
+          jobChannelId: jobChannelId ?? '',
+          text,
+          actor,
+        },
+        { screen: screenDep, sendToWorkspace: sendToWorkspaceDep },
+      );
+
+      if (result.status === 'flagged') {
+        await WidgetChatService.appendLiveCoderRejectionEvent(
+          conversationId,
+          'injection_guard',
+        );
+      }
+
+      return c.json({ status: result.status, messageId: message.id });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }

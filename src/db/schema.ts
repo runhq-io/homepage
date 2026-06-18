@@ -1564,7 +1564,11 @@ export type WidgetChatEventPayload =
   // Agentless intake: appended once after the first user message when no
   // support agent is configured; the widget renders the "anything more?"
   // bubble + persistent [Submit Ticket] affordance off it.
-  | { kind: 'collect_prompt' };
+  | { kind: 'collect_prompt' }
+  // Live-coder forward rejected by injection guard. The reason string carries
+  // a machine-readable code ('injection_guard') so the widget can show a
+  // localized error without parsing human text.
+  | { kind: 'live_coder_rejected'; reason: string };
 
 /**
  * Attribution payload on role='team' rows (workspace-member replies from the
