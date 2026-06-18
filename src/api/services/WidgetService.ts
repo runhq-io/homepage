@@ -70,7 +70,7 @@ export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 // Types
 // ============================================================================
 
-export type WidgetPermission = 'assign_agent';
+export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image';
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 export interface WidgetAuthResult {
@@ -550,6 +550,7 @@ interface PermissionPolicyRow {
   widgetAgentAssignmentEnabled: boolean;
   widgetAssignRoles: string[];
   widgetRoleClaimName: string;
+  widgetRolePermissions: Record<string, string[]>;
 }
 
 interface PermissionDerivation {
@@ -559,15 +560,26 @@ interface PermissionDerivation {
 
 function derivePermissions(
   policy: PermissionPolicyRow,
-  _jwtPayload: jose.JWTPayload,
+  jwtPayload: jose.JWTPayload,
 ): PermissionDerivation {
-  // Role-gating removed: a valid backend-issued widget token already proves the
-  // app trusts this (identified, non-anonymous) user. Identity alone authorizes
-  // agent work — there is no per-role check anymore. The only remaining axis is
-  // the project's master on/off switch. (Auto-assignment is server-driven; this
-  // permission is now only a capability hint surfaced by /me and /identity.)
-  if (!policy.widgetAgentAssignmentEnabled) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
-  return { permissions: new Set<WidgetPermission>(['assign_agent']), matchedRoles: [] };
+  // Role→permissions RBAC: the project's widgetRolePermissions map controls
+  // what each JWT role grants. The special '*' key grants permissions to any
+  // authenticated user (back-compat: migrated projects that had
+  // widgetAgentAssignmentEnabled=true have '*': ['assign_agent'] set).
+  const mapping = (policy.widgetRolePermissions ?? {}) as Record<string, string[]>;
+  const claimName = policy.widgetRoleClaimName || 'runhq_roles';
+  const claimed = jwtPayload[claimName];
+  const roles = Array.isArray(claimed) ? claimed.filter((x): x is string => typeof x === 'string') : [];
+  const permissions = new Set<WidgetPermission>();
+  const matchedRoles: string[] = [];
+  for (const p of mapping['*'] ?? []) permissions.add(p as WidgetPermission);
+  for (const role of roles) {
+    const granted = mapping[role];
+    if (!granted) continue;
+    matchedRoles.push(role);
+    for (const p of granted) permissions.add(p as WidgetPermission);
+  }
+  return { permissions, matchedRoles };
 }
 
 /**
@@ -769,6 +781,7 @@ export async function authenticateWidget(
       widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
       widgetAssignRoles: widgetProjects.widgetAssignRoles,
       widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.apiKey, decoded.fp))

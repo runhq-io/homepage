@@ -1394,6 +1394,12 @@ export const widgetProjects = pgTable('widget_projects', {
   // instruction layer the workspace stacks on top of the agent's own prompt.
   widgetChatAgentEntityId: text('widget_chat_agent_entity_id'),
   widgetChatInstructions: text('widget_chat_instructions'),
+  // Role→permissions RBAC map. Keys are JWT role names (or '*' for any
+  // authenticated user); values are arrays of WidgetPermission strings.
+  // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder"] }
+  widgetRolePermissions: jsonb('widget_role_permissions').$type<Record<string, string[]>>().notNull().default({}),
+  // Feature flag enabling the live-coder UI for this widget project.
+  widgetLiveCoderEnabled: boolean('widget_live_coder_enabled').notNull().default(false),
   // Origins (e.g. https://acme.com) where the widget is allowed to use
   // cookie-based RunHQ-member auto-recognition. Required when
   // autoRecognizeRunhqMembers is true; enforced at the CORS + auth layer.
