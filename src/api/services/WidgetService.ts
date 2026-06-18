@@ -2623,6 +2623,8 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
       widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
       widgetAssignRateLimitPerHour: widgetProjects.widgetAssignRateLimitPerHour,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
+      widgetLiveCoderEnabled: widgetProjects.widgetLiveCoderEnabled,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2647,6 +2649,8 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     widget_role_claim_name: project.widgetRoleClaimName,
     widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
     widgetChatAgentEntityId: project.widgetChatAgentEntityId,
+    widgetRolePermissions: project.widgetRolePermissions,
+    widgetLiveCoderEnabled: project.widgetLiveCoderEnabled,
   };
 }
 
@@ -2687,6 +2691,9 @@ export async function updateWidgetSettings(
     widgetAssignRateLimitPerHour?: number;
     // Chat-with-agent intake (camelCase per the widget-chat contract)
     widgetChatAgentEntityId?: string | null;
+    // Role→permissions RBAC map + live-coder master switch
+    widgetRolePermissions?: Record<string, string[]>;
+    widgetLiveCoderEnabled?: boolean;
   },
   opts?: WidgetLookup,
 ): Promise<UpdateWidgetSettingsResult> {
@@ -2867,6 +2874,9 @@ export async function updateWidgetSettings(
           ? settings.widgetChatAgentEntityId.trim()
           : null,
       }),
+      // RBAC: role→permissions map and live-coder master switch
+      ...(settings.widgetRolePermissions !== undefined && { widgetRolePermissions: settings.widgetRolePermissions }),
+      ...(settings.widgetLiveCoderEnabled !== undefined && { widgetLiveCoderEnabled: settings.widgetLiveCoderEnabled }),
       updatedAt: new Date(),
     })
     .where(and(...projConds()));
