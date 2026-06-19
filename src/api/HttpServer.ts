@@ -4396,6 +4396,35 @@ export function createHttpApp() {
     }
   });
 
+  // Rebuild a remote server's machine: tear down the current machine + reprovision
+  // a fresh one (volume reattached). The "Rebuild machine" button calls this, and
+  // it is the supported recovery for a wedged/destroyed machine.
+  app.post('/api/servers/:serverId/server/rebuild', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const result = await ServerService.rebuildRemoteServer(serverId, userId);
+
+      if (!result.success) {
+        return c.json({ error: result.error }, result.error === 'Access denied' ? 403 : 400);
+      }
+
+      return c.json({ success: true, status: 'provisioning' });
+    } catch (error) {
+      console.error('[HttpServer] Rebuild server error:', error);
+      return c.json({ error: 'Failed to rebuild server' }, 500);
+    }
+  });
+
   // Update a remote server's image to latest (owner-only)
   app.post('/api/servers/:serverId/server/update', async (c) => {
     try {

@@ -2365,6 +2365,61 @@ export async function updateRemoteServer(
 }
 
 /**
+ * Rebuild a remote server's machine: tear down the current machine (if any),
+ * clear its machine reference, and kick off a fresh reprovision. The server's
+ * persistent volume is keyed by serverId and is reattached by createMachine, so
+ * data survives the rebuild.
+ *
+ * Used by the "Rebuild machine" action, and the recovery path when a machine is
+ * wedged/destroyed out-of-band (wake refuses to auto-reprovision a "destroyed"
+ * machine by design, so an explicit rebuild is the supported escape hatch).
+ */
+export async function rebuildRemoteServer(
+  serverId: string,
+  userId: string,
+): Promise<{ success: boolean; error?: string }> {
+  if (!(await checkCloudOpPermission(serverId, userId))) {
+    return { success: false, error: 'Access denied' };
+  }
+  const server = await getServer(serverId);
+  if (!server) {
+    return { success: false, error: 'Server not found' };
+  }
+  if (server.deploymentType !== 'remote') {
+    return { success: false, error: 'Not a remote server' };
+  }
+
+  // Best-effort teardown of the existing machine. It may already be gone (a
+  // wedged machine that was force-destroyed, or a prior failed rebuild) — ignore
+  // failures; the goal is a clean slate from which reprovision can start.
+  if (server.machineId) {
+    try {
+      const provider = getProvider((server.provider || 'fly') as ProviderId);
+      await provider.deleteMachine(server.machineId, server.flyAppName);
+    } catch (err) {
+      console.warn(
+        `[ServerService] rebuild: deleteMachine ${server.machineId} failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // Clear the stale machine reference and mark provisioning. Nulling machineId is
+  // what lets the session/reprovision path treat this as "needs a fresh machine".
+  await db
+    .update(servers)
+    .set({ machineId: null, machineName: null, serverUrl: null, status: 'provisioning', updatedAt: new Date() })
+    .where(eq(servers.id, serverId));
+
+  // Reprovision in the background; the client polls server status. A concurrent
+  // session load sees status='provisioning' and waits rather than double-firing.
+  reprovisionRemoteServer(serverId, userId).catch((err) => {
+    console.error(`[ServerService] rebuild: background reprovision failed for ${serverId}:`, err);
+  });
+
+  return { success: true };
+}
+
+/**
  * Reprovision a remote server (after machine was destroyed).
  * Token hash is only updated in the DB once the new machine is created,
  * so the old machine can still register if provisioning fails.
