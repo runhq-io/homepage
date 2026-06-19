@@ -242,6 +242,13 @@ export type PublicTicketDetail = {
    * of leaking code. See deriveTicketMilestones.
    */
   milestones: Milestone[];
+  /**
+   * Whether the viewing staff member can launch an isolated preview for this
+   * ticket. True only when the viewer holds the `live_coder` permission AND
+   * the ticket has a linked PR/branch (i.e. `internalPr` is non-null).
+   * Defaults to false for all other callers (no permissions passed).
+   */
+  canPreview: boolean;
 };
 
 type PublicAttachmentLike = {
@@ -1194,7 +1201,7 @@ function mapCommentToWidgetResponse(
 }
 
 
-export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
+export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string, permissions?: ReadonlySet<WidgetPermission>): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
@@ -1327,6 +1334,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     chatConversationId,
     linkedPr: internalPr ? { state: internalPr.state } : null,
     milestones,
+    canPreview: !!permissions?.has('live_coder') && !!internalPr,
   };
 }
 

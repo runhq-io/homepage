@@ -6190,7 +6190,7 @@ export function createHttpApp() {
   app.get('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId);
+    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId, auth.permissions);
     if (!detail) return c.json({ error: 'Ticket not found' }, 404);
     return c.json(detail);
   });
