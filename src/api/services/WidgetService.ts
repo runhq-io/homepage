@@ -3602,3 +3602,53 @@ export async function syncWidgetExposedAgents(
 
   return { upserted, removed };
 }
+
+// ============================================================================
+// Preview branch + server resolution (for PR-preview forwarding)
+// ============================================================================
+
+/**
+ * Resolve the linked PR branch for a widget ticket (for PR-preview forwarding).
+ *
+ * Reuses the same `deriveLinkedPr` helper that `getPublicTicketDetail` uses —
+ * no extra DB query pattern beyond what already exists. Returns `null` when:
+ *   - the project or ticket doesn't exist / isn't visible
+ *   - no `pr_linked` activity exists on the ticket
+ *   - the linked PR has no `repoBranch` value
+ */
+export async function getTicketPreviewBranch(
+  projectId: string,
+  ticketId: string,
+): Promise<string | null> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+
+  const [task] = await db
+    .select({ id: workspaceTasks.id })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+
+  if (!task) return null;
+
+  const activity = await WorkspaceTaskService.listActivity(task.id);
+  const internalPr = deriveLinkedPr(activity);
+  return internalPr?.repoBranch ?? null;
+}
+
+/**
+ * Resolve the workspace Server for a widget project.
+ *
+ * Extracted so callers (route handlers) don't need to query the DB directly,
+ * keeping the server resolution mockable in route-level tests.
+ */
+export async function getProjectServer(projectId: string) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+  return ServerService.getServer(project.serverId);
+}

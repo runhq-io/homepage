@@ -6633,6 +6633,51 @@ export function createHttpApp() {
     }
   });
 
+  // POST /api/widget/tickets/:id/preview
+  //
+  // Live-preview bridge: a widget-authenticated staff member with the
+  // `live_coder` permission triggers (or polls) the PR preview for the given
+  // ticket. The workspace returns an async contract:
+  //   • preparing  — port not yet allocated; client should poll
+  //   • starting   — port allocated; publicUrl + token returned
+  //   • ready      — already running; publicUrl + token returned
+  //   • no_preview — no job/worktree for the linked branch
+  //
+  // Auth:  widget auth (same as other /api/widget/tickets/... routes).
+  // RBAC:  requires permissions.has('live_coder') → 403 otherwise.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/preview', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('live_coder')) return c.json({ error: 'forbidden' }, 403);
+
+    const branch = await WidgetService.getTicketPreviewBranch(auth.projectId, c.req.param('id'));
+    if (!branch) return c.json({ ok: false, reason: 'no_preview' }, 200);
+
+    // Resolve the project's workspace Server via WidgetService helper so the
+    // server lookup stays mockable in route-level tests (no direct DB access here).
+    const server = await WidgetService.getProjectServer(auth.projectId);
+    if (!server) return c.json({ ok: false, reason: 'unavailable' }, 200);
+
+    const resp = await ServerService.serverTokenFetch<{
+      ok: boolean;
+      publicUrl?: string | null;
+      token?: string | null;
+      status?: string;
+      reason?: string;
+    }>(server, '/internal/preview/start', { branch });
+
+    if (!resp.ok) {
+      return c.json({ ok: false, reason: resp.reason ?? 'unavailable' }, 200);
+    }
+    if (resp.publicUrl) {
+      // Port is allocated — return the decorated URL so the widget can open it.
+      return c.json({ ok: true, url: `${resp.publicUrl}?__preview_token=${resp.token}`, status: resp.status });
+    }
+    // Preview is still booting (no port yet). Client should poll.
+    return c.json({ ok: true, status: resp.status ?? 'preparing' });
+  });
+
   // ==========================================================================
   // Widget Management API (called by RunHQ frontend UI)
   // ==========================================================================
