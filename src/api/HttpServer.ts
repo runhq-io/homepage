@@ -6219,7 +6219,7 @@ export function createHttpApp() {
     const widgetUserId = auth.widgetUserId;
 
     // Reject up-front if the viewer cannot see the ticket right now.
-    const initial = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId);
+    const initial = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId, auth.permissions);
     if (!initial) return c.json({ error: 'Ticket not found' }, 404);
 
     return streamSSE(c, async (stream) => {
@@ -6228,7 +6228,7 @@ export function createHttpApp() {
       let pending = false;
 
       const sendDetail = async (event: 'snapshot' | 'update') => {
-        const detail = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId);
+        const detail = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId, auth.permissions);
         // null => the viewer lost visibility (e.g. flipped to private). Skip.
         if (detail) await stream.writeSSE({ event, data: JSON.stringify(detail) });
       };
