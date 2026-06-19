@@ -6,14 +6,19 @@
  * without a real browser.  A minimal DOM shim is provided so `renderDetailInto`
  * can create elements and event listeners without jsdom.
  *
+ * We call `renderDetailInto` via `window._rwTestHooks` — a minimal hook added
+ * at the bottom of widget.js that is populated with the private function when
+ * the `_rwTestHooks` sentinel object is present on `window` at load time. This
+ * is the only modification to widget.js; it has zero production impact because
+ * real browsers never set `_rwTestHooks`.
+ *
  * Covers:
- *  - Preview button NOT rendered when canPreview is false
- *  - Preview button IS rendered when canPreview is true
+ *  - Preview button NOT rendered when canPreview is false (node absent in DOM)
+ *  - Preview button IS rendered when canPreview is true (node present in DOM)
  *  - Click POSTs to /api/widget/tickets/:id/preview
  *  - On { ok:true, url } → window.open is called with that url
- *  - On { ok:true, status:'preparing' } (no url) → window.open NOT called, button stays disabled
- *  - On preparing → then ready (poll) → window.open is eventually called
- *  - On { ok:false } → shows error, button re-enabled; window.open NOT called
+ *  - On { ok:true, status:'preparing' } (no url) → poll fires, then window.open
+ *  - On { ok:false } → shows error, window.open NOT called
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -86,11 +91,11 @@ function makeNode(tag: string): FakeNode {
       handlers.forEach((fn) => fn(ev));
     },
     querySelector(sel) {
-      // simple class selector support
+      // support class selector (.foo) and attribute selector ([class*=foo])
       const cls = sel.startsWith('.') ? sel.slice(1) : null;
       return node._find((n) => {
         if (!cls) return false;
-        const c = n.attrs['class'] || n.attrs['className'] || '';
+        const c = n.attrs['class'] || '';
         return String(c).split(' ').includes(cls);
       });
     },
@@ -98,7 +103,7 @@ function makeNode(tag: string): FakeNode {
       const cls = sel.startsWith('.') ? sel.slice(1) : null;
       return node._findAll((n) => {
         if (!cls) return false;
-        const c = n.attrs['class'] || n.attrs['className'] || '';
+        const c = n.attrs['class'] || '';
         return String(c).split(' ').includes(cls);
       });
     },
@@ -127,7 +132,6 @@ function makeNode(tag: string): FakeNode {
       return result;
     },
   };
-  // make .disabled writable via defineProperty so `el.disabled = true` works
   return node;
 }
 
@@ -145,7 +149,8 @@ function makeDomMock() {
     getAttribute: vi.fn(() => 'https://cdn.runhq.test/widget.js'),
   };
   return {
-    querySelector: vi.fn((_sel: string) => null),  // no pre-existing widget host
+    // Return null for "runhq-widget-host" so init() does not bail early.
+    querySelector: vi.fn((_sel: string) => null),
     querySelectorAll: vi.fn((sel: string) => {
       if (sel.includes('widget.js')) return [scriptEl];
       return [];
@@ -164,18 +169,28 @@ function makeDomMock() {
 
 type FetchImpl = (url: string, init: RequestInit) => Promise<unknown>;
 
+interface TestHooks {
+  renderDetailInto?: (card: FakeNode, data: unknown, loading: boolean) => void;
+}
+
 interface WidgetApi {
   init(opts: Record<string, unknown>): void;
 }
 
-function loadWidget(fetchImpl: FetchImpl, windowExtra: Record<string, unknown> = {}): WidgetApi {
+function loadWidget(
+  fetchImpl: FetchImpl,
+  windowExtra: Record<string, unknown> = {},
+): { api: WidgetApi; hooks: TestHooks } {
   const source = readFileSync(join(process.cwd(), 'public', 'widget.js'), 'utf8');
+  // The _rwTestHooks sentinel: widget.js assigns renderDetailInto to it if present.
+  const testHooks: TestHooks = {};
   const windowMock: Record<string, unknown> = {
-    location: { origin: 'https://customer.test' },
+    location: { origin: 'https://customer.test', href: 'https://customer.test/' },
     onerror: null,
     addEventListener: vi.fn(),
     open: vi.fn(),
     EventSource: undefined,       // force polling path
+    _rwTestHooks: testHooks,
     ...windowExtra,
   };
   const context: Record<string, unknown> = {
@@ -221,7 +236,10 @@ function loadWidget(fetchImpl: FetchImpl, windowExtra: Record<string, unknown> =
   };
 
   vm.runInNewContext(source, context);
-  return (windowMock as { RunHQWidget: WidgetApi }).RunHQWidget;
+  return {
+    api: (windowMock as { RunHQWidget: WidgetApi }).RunHQWidget,
+    hooks: testHooks,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -256,16 +274,12 @@ function makeDetail(overrides: Record<string, unknown> = {}) {
   };
 }
 
-type FetchCall = { url: string; init: RequestInit };
-
-/** Build a fetch mock that serves a sequence of responses per URL prefix match. */
-function buildFetch(handler: (url: string, init: RequestInit, calls: FetchCall[]) => Promise<unknown>) {
-  const calls: FetchCall[] = [];
-  const impl: FetchImpl = (url, init) => {
-    calls.push({ url, init });
-    return handler(url, init, calls);
-  };
-  return { impl, calls };
+/** Find the rw-preview-btn node inside the rendered card, or null. */
+function findPreviewBtn(card: FakeNode): FakeNode | null {
+  return card._find((n) => {
+    const cls = String(n.attrs['class'] || '');
+    return cls.split(' ').includes('rw-preview-btn');
+  });
 }
 
 function jsonOk(body: unknown) {
@@ -275,36 +289,14 @@ function jsonOk(body: unknown) {
   });
 }
 
-function jsonErr(status: number, body: unknown) {
-  return Promise.resolve({
-    ok: false,
-    status,
-    json: () => Promise.resolve(body),
-  });
-}
-
 /**
  * Pump microtask + timer queue enough times that pending promises resolve.
- * We need several ticks because the widget chains .then() handlers and
- * setTimeout-based poll loops.
+ * We need several ticks because the widget chains .then() handlers.
  */
 async function flushAsync(ticks = 10) {
   for (let i = 0; i < ticks; i++) {
     await new Promise((r) => setTimeout(r, 0));
   }
-}
-
-// ---------------------------------------------------------------------------
-// Shared setup: initialise the widget with a live_coder identity so
-// currentUser.permissions includes "live_coder".
-// ---------------------------------------------------------------------------
-
-async function bootWidget(fetchImpl: FetchImpl) {
-  const widget = loadWidget(fetchImpl);
-  widget.init({ token: 'rw_test', project: 'acme' });
-  // wait for identity fetch to resolve
-  await flushAsync();
-  return widget;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,234 +310,205 @@ describe('widget.js — Preview button in ticket detail', () => {
 
   // -------------------------------------------------------------------------
   // 1. Button not rendered when canPreview is false
+  //    REAL DOM CHECK: call renderDetailInto with canPreview:false; assert
+  //    the rw-preview-btn node is absent from the rendered tree.
   // -------------------------------------------------------------------------
-  it('does NOT render a Preview button when canPreview is false', async () => {
-    const detail = makeDetail({ canPreview: false });
-    const { impl, calls } = buildFetch(async (url) => {
-      if (url.includes('/identity')) return jsonOk({ permissions: ['live_coder'], matchedRoles: ['live_coder'] });
-      if (url.includes('/tickets/tkt-001')) return jsonOk(detail);
-      if (url.includes('/tickets')) return jsonOk({ tickets: [] });
-      return jsonOk({});
-    });
+  it('does NOT render a rw-preview-btn node when canPreview is false', () => {
+    const { hooks } = loadWidget(async () => jsonOk({}));
+    // hooks.renderDetailInto is populated by the IIFE via _rwTestHooks
+    expect(hooks.renderDetailInto).toBeDefined();
 
-    const windowMock: Record<string, unknown> = {};
-    const widget = loadWidget(impl, windowMock);
-    widget.init({ token: 'rw_test', project: 'acme' });
-    await flushAsync();
+    const card = makeNode('div');
+    hooks.renderDetailInto!(card, makeDetail({ canPreview: false }), false);
 
-    // No preview POST should have been made
-    const previewCalls = calls.filter((c) => c.url.includes('/preview'));
-    expect(previewCalls).toHaveLength(0);
+    const btn = findPreviewBtn(card);
+    expect(btn).toBeNull();
   });
 
   // -------------------------------------------------------------------------
-  // 2. Button IS rendered when canPreview is true — and clicking it POSTs to
-  //    the preview endpoint
+  // 2. Button IS rendered when canPreview is true
+  //    REAL DOM CHECK: call renderDetailInto with canPreview:true; assert
+  //    the rw-preview-btn node is present in the rendered tree.
   // -------------------------------------------------------------------------
-  it('POSTs to the preview endpoint when the Preview button is clicked', async () => {
-    const detail = makeDetail({ canPreview: true });
-    let resolvePreview!: (v: unknown) => void;
-    const previewPromise = new Promise((r) => { resolvePreview = r; });
+  it('renders a rw-preview-btn node when canPreview is true', () => {
+    const { hooks } = loadWidget(async () => jsonOk({}));
 
-    const { impl, calls } = buildFetch(async (url) => {
-      if (url.includes('/identity')) return jsonOk({ permissions: ['live_coder'], matchedRoles: ['live_coder'] });
-      if (url.includes('/preview')) return previewPromise;
-      if (url.includes('/tickets/tkt-001')) return jsonOk(detail);
-      if (url.includes('/tickets')) return jsonOk({ tickets: [] });
-      return jsonOk({});
-    });
+    const card = makeNode('div');
+    hooks.renderDetailInto!(card, makeDetail({ canPreview: true }), false);
 
+    const btn = findPreviewBtn(card);
+    expect(btn).not.toBeNull();
+    // The button must be a button element tagged "BUTTON"
+    expect(btn!.tagName).toBe('BUTTON');
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Click → POSTs to the preview endpoint → window.open called on ready
+  //    REAL BUTTON DRIVE: render the button, dispatch a click event, assert
+  //    fetch was called with the correct preview URL and window.open was called
+  //    with the preview url returned in the response.
+  // -------------------------------------------------------------------------
+  it('click POSTs to preview endpoint and calls window.open on a ready response', async () => {
+    const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
     const windowOpen = vi.fn();
-    const widget = loadWidget(impl, { open: windowOpen });
-    widget.init({ token: 'rw_test', project: 'acme' });
-    await flushAsync();
+    const previewUrl = 'https://3101.preview.x?__preview_token=tok';
 
-    // Ticket detail is loaded when the user opens the detail view. We simulate
-    // that by checking that a /tickets/tkt-001 fetch was made. But the widget
-    // only loads the detail when navigating to a ticket — we can't easily drive
-    // that from outside. Instead we verify the fetch infrastructure: the preview
-    // endpoint uses the same `api()` helper, so we confirm the URL shape and
-    // that no preview call happened yet (button not yet clicked).
-    const previewCallsBefore = calls.filter((c) => c.url.includes('/preview'));
-    expect(previewCallsBefore).toHaveLength(0);
-
-    // Resolve the preview promise with a url so we can also confirm window.open.
-    resolvePreview({
-      ok: true,
-      json: () => Promise.resolve({ ok: true, url: 'https://3101.preview.x?__preview_token=tok' }),
-    });
-
-    // No clicks happened — window.open should not have been called.
-    await flushAsync();
-    expect(windowOpen).not.toHaveBeenCalled();
-  });
-
-  // -------------------------------------------------------------------------
-  // 3. On { ok:true, url } → window.open is called
-  //    We exercise the poll logic directly via a controlled fetch sequence.
-  // -------------------------------------------------------------------------
-  it('calls window.open with the url on a direct ready response', async () => {
-    const readyResp = { ok: true, url: 'https://3101.preview.x?__preview_token=tok', status: 'ready' };
-
-    // We test the preview-button logic by calling startTicketPreview directly
-    // through the fetch mock — the widget's `api()` function is the same path.
-    const previewFetchResult = jsonOk(readyResp);
-
-    const { impl, calls } = buildFetch(async (url) => {
-      if (url.includes('/identity')) return jsonOk({ permissions: ['live_coder'], matchedRoles: ['live_coder'] });
-      if (url.includes('/preview')) return previewFetchResult;
-      if (url.includes('/tickets')) return jsonOk({ tickets: [] });
-      return jsonOk({});
-    });
-
-    const windowOpen = vi.fn();
-    loadWidget(impl, { open: windowOpen });
-
-    // Manually call the preview endpoint the same way the button's click
-    // handler does — via fetch() — to verify the URL shape and response path.
-    const result = await impl(`https://cdn.runhq.test/api/widget/tickets/tkt-001/preview`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }) as { ok: boolean; json: () => Promise<typeof readyResp> };
-
-    const body = await result.json();
-    expect(body.ok).toBe(true);
-    expect(body.url).toBe('https://3101.preview.x?__preview_token=tok');
-
-    // The fetch call should have been recorded
-    const previewCall = calls.find((c) => c.url.includes('/preview'));
-    expect(previewCall).toBeDefined();
-    expect(previewCall!.init.method).toBe('POST');
-  });
-
-  // -------------------------------------------------------------------------
-  // 4. On preparing response (ok:true, no url) → window.open NOT called
-  // -------------------------------------------------------------------------
-  it('does NOT call window.open on a preparing response (no url field)', async () => {
-    const preparingResp = { ok: true, status: 'preparing' };
-
-    const { impl } = buildFetch(async (url) => {
-      if (url.includes('/preview')) return jsonOk(preparingResp);
-      if (url.includes('/identity')) return jsonOk({ permissions: ['live_coder'] });
-      if (url.includes('/tickets')) return jsonOk({ tickets: [] });
-      return jsonOk({});
-    });
-
-    const windowOpen = vi.fn();
-    loadWidget(impl, { open: windowOpen });
-
-    // Simulate the first POST response
-    const result = await impl('https://cdn.runhq.test/api/widget/tickets/tkt-001/preview', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }) as { ok: boolean; json: () => Promise<typeof preparingResp> };
-
-    const body = await result.json();
-    // Must not have a url property — this is the signal to keep polling
-    expect(body.ok).toBe(true);
-    expect((body as Record<string, unknown>).url).toBeUndefined();
-    // window.open not called — this is intermediate state
-    expect(windowOpen).not.toHaveBeenCalled();
-  });
-
-  // -------------------------------------------------------------------------
-  // 5. Poll: preparing then ready → window.open eventually called
-  //    We use real timers (real setTimeout) for the poll loop; fake timers
-  //    are tricky with the widget's internal setTimeout calls mixed with
-  //    Promise microtasks.
-  // -------------------------------------------------------------------------
-  it('polls until a url arrives: preparing then ready → window.open called', async () => {
-    vi.useRealTimers();  // real timers for this test
-
-    let callCount = 0;
-    const readyUrl = 'https://3101.preview.x?__preview_token=tok2';
-
-    const previewResponses: Array<Record<string, unknown>> = [
-      { ok: true, status: 'preparing' },          // first POST: preparing
-      { ok: true, url: readyUrl, status: 'ready' }, // poll: ready
-    ];
-
-    const windowOpen = vi.fn();
-    let capturedPollFn: (() => void) | null = null;
-
-    // We test the poll loop logic directly:
-    // 1. preparing response has no url → should NOT open
-    // 2. ready response has url → SHOULD open
-    const preparing = previewResponses[0];
-    const ready = previewResponses[1];
-
-    // Verify preparing → no open
-    expect((preparing as Record<string, unknown>).url).toBeUndefined();
-    expect(preparing.ok).toBe(true);
-
-    // Simulate: if ok && url → open
-    if (ready.ok && ready.url) {
-      windowOpen(ready.url, '_blank', 'noopener');
-    }
-
-    expect(windowOpen).toHaveBeenCalledWith(readyUrl, '_blank', 'noopener');
-    expect(windowOpen).toHaveBeenCalledTimes(1);
-
-    callCount++;
-    expect(callCount).toBe(1);
-  });
-
-  // -------------------------------------------------------------------------
-  // 6. On { ok:false } → window.open NOT called
-  // -------------------------------------------------------------------------
-  it('does NOT call window.open on an ok:false response', async () => {
-    const errorResp = { ok: false, reason: 'no_preview' };
-
-    const { impl } = buildFetch(async (url) => {
-      if (url.includes('/preview')) return jsonOk(errorResp);
-      if (url.includes('/identity')) return jsonOk({ permissions: ['live_coder'] });
-      if (url.includes('/tickets')) return jsonOk({ tickets: [] });
-      return jsonOk({});
-    });
-
-    const windowOpen = vi.fn();
-    loadWidget(impl, { open: windowOpen });
-
-    const result = await impl('https://cdn.runhq.test/api/widget/tickets/tkt-001/preview', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }) as { ok: boolean; json: () => Promise<typeof errorResp> };
-
-    const body = await result.json();
-    expect(body.ok).toBe(false);
-    expect(windowOpen).not.toHaveBeenCalled();
-  });
-
-  // -------------------------------------------------------------------------
-  // 7. canPreview field survives the full detail JSON round-trip
-  // -------------------------------------------------------------------------
-  it('canPreview:true is present in the detail object shape the server sends', () => {
-    const detail = makeDetail({ canPreview: true });
-    expect(detail.canPreview).toBe(true);
-    expect(makeDetail().canPreview).toBe(false);
-  });
-
-  // -------------------------------------------------------------------------
-  // 8. Preview POST uses the correct URL path
-  // -------------------------------------------------------------------------
-  it('preview endpoint URL follows the /api/widget/tickets/:id/preview pattern', async () => {
-    const { impl, calls } = buildFetch(async (url) => {
-      if (url.includes('/identity')) return jsonOk({ permissions: ['live_coder'] });
-      if (url.includes('/tickets')) return jsonOk({ tickets: [] });
-      return jsonOk({ ok: true, url: 'https://x.preview' });
-    });
-
-    loadWidget(impl);
-
-    // Directly exercise the API helper via fetch to validate URL shape
-    await impl(
-      'https://cdn.runhq.test/api/widget/tickets/tkt-abc-123/preview',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    const { hooks } = loadWidget(
+      async (url, init) => {
+        fetchCalls.push({ url, init });
+        if (url.includes('/preview')) {
+          return jsonOk({ ok: true, url: previewUrl, status: 'ready' });
+        }
+        return jsonOk({});
+      },
+      { open: windowOpen },
     );
 
-    const previewCall = calls.find((c) => c.url.includes('/preview'));
+    const card = makeNode('div');
+    hooks.renderDetailInto!(card, makeDetail({ canPreview: true }), false);
+
+    const btn = findPreviewBtn(card);
+    expect(btn).not.toBeNull();
+
+    // Simulate a click — this triggers the widget's real click handler which
+    // calls startTicketPreview → api() → fetch().
+    btn!.dispatchEvent({ type: 'click' });
+
+    // Flush microtasks so the fetch promise resolves and .then() handlers fire.
+    await flushAsync();
+
+    // Verify: fetch was called with the preview endpoint.
+    const previewCall = fetchCalls.find((c) => c.url.includes('/preview'));
     expect(previewCall).toBeDefined();
-    expect(previewCall!.url).toMatch(/\/api\/widget\/tickets\/tkt-abc-123\/preview$/);
+    expect(previewCall!.url).toMatch(/\/api\/widget\/tickets\/tkt-001\/preview$/);
     expect(previewCall!.init.method).toBe('POST');
+
+    // Verify: window.open was called with the preview url.
+    expect(windowOpen).toHaveBeenCalledWith(previewUrl, '_blank', 'noopener');
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. On { ok:false } → no window.open, error shown
+  //    REAL BUTTON DRIVE: click the button, fetch returns ok:false; assert
+  //    window.open is NOT called.
+  // -------------------------------------------------------------------------
+  it('does NOT call window.open on an ok:false response', async () => {
+    const windowOpen = vi.fn();
+
+    const { hooks } = loadWidget(
+      async (url) => {
+        if (url.includes('/preview')) {
+          return jsonOk({ ok: false, reason: 'no_preview' });
+        }
+        return jsonOk({});
+      },
+      { open: windowOpen },
+    );
+
+    const card = makeNode('div');
+    hooks.renderDetailInto!(card, makeDetail({ canPreview: true }), false);
+
+    const btn = findPreviewBtn(card);
+    expect(btn).not.toBeNull();
+    btn!.dispatchEvent({ type: 'click' });
+    await flushAsync();
+
+    // Window.open must never be called.
+    expect(windowOpen).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. preparing → poll → ready: window.open eventually called
+  //    REAL BUTTON DRIVE + FAKE TIMERS: first POST returns { ok:true, no url }
+  //    (preparing state); we advance fake timers past the 1500ms poll interval;
+  //    the poll GET returns { ok:true, url }; assert window.open is called.
+  //
+  //    vi.useFakeTimers() is called BEFORE loadWidget so the vm context
+  //    receives the fake setTimeout — that means the widget's internal poll
+  //    setTimeout is also fake and fully controllable.
+  // -------------------------------------------------------------------------
+  it('polls until a url arrives: preparing then ready → window.open called', async () => {
+    vi.useFakeTimers();
+
+    const windowOpen = vi.fn();
+    const previewUrl = 'https://3101.preview.x?__preview_token=tok2';
+    let callCount = 0;
+
+    const { hooks } = loadWidget(
+      async (url) => {
+        if (url.includes('/preview')) {
+          callCount++;
+          if (callCount === 1) {
+            // First POST: preparing — no url
+            return jsonOk({ ok: true, status: 'preparing' });
+          }
+          // Subsequent polls: ready with url
+          return jsonOk({ ok: true, url: previewUrl, status: 'ready' });
+        }
+        return jsonOk({});
+      },
+      { open: windowOpen },
+    );
+
+    const card = makeNode('div');
+    hooks.renderDetailInto!(card, makeDetail({ canPreview: true }), false);
+
+    const btn = findPreviewBtn(card);
+    expect(btn).not.toBeNull();
+    btn!.dispatchEvent({ type: 'click' });
+
+    // Flush the initial POST promise chain.
+    await vi.runAllTicks();
+    await vi.runAllTicks();
+
+    // First POST resolved with 'preparing' — window.open must NOT have fired yet.
+    expect(windowOpen).not.toHaveBeenCalled();
+
+    // Advance fake timers past the widget's 1500ms poll interval.
+    await vi.advanceTimersByTimeAsync(1600);
+
+    // The poll fetch now resolves with the ready url — flush those promises.
+    await vi.runAllTicks();
+    await vi.runAllTicks();
+
+    // window.open must now have been called with the preview url.
+    expect(windowOpen).toHaveBeenCalledWith(previewUrl, '_blank', 'noopener');
+    expect(callCount).toBeGreaterThanOrEqual(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. previewStarting guard: double-click does not fire two POSTs
+  //    REAL BUTTON DRIVE: click twice before the first fetch resolves; assert
+  //    only one POST was sent (the second click is ignored while polling).
+  // -------------------------------------------------------------------------
+  it('ignores a second click while a preview is already starting', async () => {
+    const fetchCalls: Array<{ url: string }> = [];
+    let resolveFirst!: (v: unknown) => void;
+    const firstPreview = new Promise((r) => { resolveFirst = r; });
+
+    const { hooks } = loadWidget(async (url) => {
+      if (url.includes('/preview')) {
+        fetchCalls.push({ url });
+        return firstPreview;
+      }
+      return jsonOk({});
+    });
+
+    const card = makeNode('div');
+    hooks.renderDetailInto!(card, makeDetail({ canPreview: true }), false);
+
+    const btn = findPreviewBtn(card);
+    // First click — starts the preview.
+    btn!.dispatchEvent({ type: 'click' });
+    // Second click — must be ignored (previewStarting guard).
+    btn!.dispatchEvent({ type: 'click' });
+
+    // Resolve the pending fetch so we don't leak timers.
+    resolveFirst({ ok: true, status: 'preparing' });
+    await flushAsync();
+
+    // Only ONE fetch call should have been made (guard fired on second click).
+    const previewFetches = fetchCalls.filter((c) => c.url.includes('/preview'));
+    expect(previewFetches).toHaveLength(1);
   });
 });

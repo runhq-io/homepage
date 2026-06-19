@@ -7213,4 +7213,14 @@
     },
   };
 
+  // ---------------------------------------------------------------------------
+  // Test-only hook — zero production impact; never called by the widget itself.
+  // When the host context sets window._rwTestHooks to a plain object before the
+  // IIFE runs, we populate it with internal functions so vm-based tests can
+  // drive the real rendering code without a full browser environment.
+  // ---------------------------------------------------------------------------
+  if (window._rwTestHooks && typeof window._rwTestHooks === "object") {
+    window._rwTestHooks.renderDetailInto = renderDetailInto;
+  }
+
 })();
