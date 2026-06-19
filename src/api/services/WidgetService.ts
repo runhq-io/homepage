@@ -596,6 +596,47 @@ function derivePermissions(
 }
 
 /**
+ * Opt-in enforcement for the `attach_image` permission.
+ *
+ * Image attachments predate the permission, so we cannot fail closed without
+ * breaking every widget that relied on open uploads. Instead the gate is
+ * opt-in: while no role (including the '*' wildcard) grants `attach_image`,
+ * uploads stay open for everyone. The moment a project grants it to any role,
+ * uploads are restricted to users whose derived permission set includes it.
+ *
+ * Pure function so the policy is unit-testable without a DB; see
+ * `canAttachImages` for the request-time wrapper that loads the project map.
+ */
+export function attachImageAllowed(
+  rolePermissions: Record<string, string[]> | null | undefined,
+  permissions: ReadonlySet<WidgetPermission>,
+): boolean {
+  const map = rolePermissions ?? {};
+  const configured = Object.values(map).some(
+    (list) => Array.isArray(list) && list.includes('attach_image'),
+  );
+  if (!configured) return true;
+  return permissions.has('attach_image');
+}
+
+/**
+ * Request-time wrapper around {@link attachImageAllowed}: loads the project's
+ * `widgetRolePermissions` map and applies the opt-in gate to the caller's
+ * derived permission set. Returns true when the upload should be allowed.
+ */
+export async function canAttachImages(
+  projectId: string,
+  permissions: ReadonlySet<WidgetPermission>,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ rolePermissions: widgetProjects.widgetRolePermissions })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+  return attachImageAllowed(row?.rolePermissions, permissions);
+}
+
+/**
  * Parses a single named cookie out of a `Cookie:` header. Hono's
  * `getCookie` helper requires the Context, but `authenticateWidget`
  * accepts a raw HonoRequest for unit-testability. Manual parse keeps
