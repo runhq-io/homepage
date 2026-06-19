@@ -294,6 +294,10 @@
     });
   }
 
+  function startTicketPreview(ticketId) {
+    return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/preview", { method: "POST" });
+  }
+
   function chatOpenConversation() {
     return api("/api/widget/chat/conversations", { method: "POST", body: {} });
   }
@@ -6159,6 +6163,99 @@
         openLiveSession(liveConvId, ticket);
       });
       scrollArea.appendChild(liveBtn);
+    }
+
+    // Preview button — staff-only (requires canPreview from the server, which
+    // is true only for live_coder staff on a ticket with a linked PR).
+    // The preview start is async: the first POST often returns `preparing`
+    // (no url), so we poll until a url comes back, then open it in a new tab.
+    // Guard against overlapping clicks (ignore while already polling).
+    if (!loading && data.canPreview) {
+      var previewStarting = false;
+      var previewPollTimer = null;
+      var previewPollStart = null;
+      var PREVIEW_POLL_INTERVAL_MS = 1500;
+      var PREVIEW_POLL_TIMEOUT_MS = 55000;
+
+      var previewErrEl = h("span", { className: "rw-preview-err", style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)", marginLeft: "8px" } }, "");
+      var previewBtn = h("button", {
+        className: "rw-preview-btn",
+        type: "button",
+        style: { margin: "8px 16px 4px" },
+      }, "▶ Preview");
+
+      function stopPreviewPoll() {
+        if (previewPollTimer !== null) {
+          clearTimeout(previewPollTimer);
+          previewPollTimer = null;
+        }
+      }
+
+      function setPreviewError(msg) {
+        previewStarting = false;
+        stopPreviewPoll();
+        previewBtn.disabled = false;
+        previewBtn.textContent = "▶ Preview";
+        previewErrEl.textContent = msg;
+      }
+
+      function schedulePreviewPoll(ticketIdForPreview) {
+        previewPollTimer = setTimeout(function () {
+          previewPollTimer = null;
+          if (!previewStarting) return;
+          var elapsed = Date.now() - previewPollStart;
+          if (elapsed > PREVIEW_POLL_TIMEOUT_MS) {
+            setPreviewError("Preview unavailable");
+            return;
+          }
+          startTicketPreview(ticketIdForPreview).then(function (resp) {
+            if (!previewStarting) return;
+            if (resp && resp.ok && resp.url) {
+              previewStarting = false;
+              stopPreviewPoll();
+              previewBtn.disabled = false;
+              previewBtn.textContent = "▶ Preview";
+              previewErrEl.textContent = "";
+              window.open(resp.url, "_blank", "noopener");
+            } else if (resp && resp.ok && !resp.url) {
+              // still preparing — poll again
+              schedulePreviewPoll(ticketIdForPreview);
+            } else {
+              setPreviewError("Preview unavailable");
+            }
+          }).catch(function () {
+            setPreviewError("Preview unavailable");
+          });
+        }, PREVIEW_POLL_INTERVAL_MS);
+      }
+
+      previewBtn.addEventListener("click", function () {
+        if (previewStarting) return;
+        previewStarting = true;
+        previewPollStart = Date.now();
+        previewBtn.disabled = true;
+        previewBtn.textContent = "Starting preview…";
+        previewErrEl.textContent = "";
+        startTicketPreview(ticket.id).then(function (resp) {
+          if (!previewStarting) return;
+          if (resp && resp.ok && resp.url) {
+            previewStarting = false;
+            previewBtn.disabled = false;
+            previewBtn.textContent = "▶ Preview";
+            window.open(resp.url, "_blank", "noopener");
+          } else if (resp && resp.ok && !resp.url) {
+            // preparing — start poll
+            schedulePreviewPoll(ticket.id);
+          } else {
+            setPreviewError("Preview unavailable");
+          }
+        }).catch(function () {
+          setPreviewError("Preview unavailable");
+        });
+      });
+
+      var previewRow = h("div", { style: { display: "flex", alignItems: "center", flexWrap: "wrap" } }, [previewBtn, previewErrEl]);
+      scrollArea.appendChild(previewRow);
     }
 
     // body
