@@ -24,6 +24,7 @@ import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
 import { openPullRequestForReadyTask, registerGithubRoutes } from './github/githubRoutes';
 import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
+import { resolveGithubActingUser } from './github/resolveActingUser';
 import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
 import * as GithubInstallationsService from './services/GithubInstallationsService';
 import * as GithubProjectReposService from './services/GithubProjectReposService';
@@ -7420,8 +7421,11 @@ export function createHttpApp() {
       // Identity for user-acting endpoints comes from the verified Bearer, not a
       // request field — a leaked workspace server token must not be usable to
       // impersonate another user (the container runs as root, so the token is
-      // reachable from a member's terminal).
-      authenticateUser: (bearer) => (bearer ? extractUserIdFromToken(bearer) : Promise.resolve(null)),
+      // reachable from a member's terminal). The Bearer the browser sends is its
+      // workspace server-session token (EdDSA), which the workspace forwards
+      // here; resolveGithubActingUser verifies that as well as a direct user
+      // session/OAuth token.
+      authenticateUser: resolveGithubActingUser,
       canAccessServer: (serverId, userId) => ServerService.canAccessServer(serverId, userId),
       listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
       listInstallationsForUser: GithubInstallationsService.listInstallationsForUser,
