@@ -74,6 +74,26 @@ export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image';
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
+/**
+ * Does a widget role→permissions map grant `assign_agent` to ANY role
+ * (including the `*` everyone key)? This is the project-level "agent assignment
+ * is on" signal.
+ *
+ * The legacy `widget_agent_assignment_enabled` boolean is the denormalized
+ * cache of exactly this predicate: the new settings UI has no master-switch
+ * toggle — granting `assign_agent` in the Permissions matrix IS how an operator
+ * turns assignment on — so the column must be kept equal to this whenever the
+ * permission map is saved (and was backfilled for rows edited before that sync
+ * existed). Without that, the auto-assign orchestrator and the creation-time
+ * injection guard, which both gate on the column, silently never fire.
+ */
+export function roleMapGrantsAssignAgent(
+  map: Record<string, string[]> | null | undefined,
+): boolean {
+  if (!map) return false;
+  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('assign_agent'));
+}
+
 export interface WidgetAuthResult {
   projectId: string;
   projectSlug: string;
@@ -2944,7 +2964,15 @@ export async function updateWidgetSettings(
           : null,
       }),
       // RBAC: role→permissions map and live-coder master switch
-      ...(settings.widgetRolePermissions !== undefined && { widgetRolePermissions: settings.widgetRolePermissions }),
+      ...(settings.widgetRolePermissions !== undefined && {
+        widgetRolePermissions: settings.widgetRolePermissions,
+        // Keep the legacy master switch in lock-step with the permission map:
+        // the orchestrator + creation guard gate on the column, and the new UI
+        // has no separate toggle. Placed AFTER the explicit widgetAgentAssignmentEnabled
+        // set above so the permission map (the source of truth) wins when both
+        // are somehow supplied.
+        widgetAgentAssignmentEnabled: roleMapGrantsAssignAgent(settings.widgetRolePermissions),
+      }),
       ...(settings.widgetLiveCoderEnabled !== undefined && { widgetLiveCoderEnabled: settings.widgetLiveCoderEnabled }),
       updatedAt: new Date(),
     })
