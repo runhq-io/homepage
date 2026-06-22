@@ -3433,27 +3433,13 @@ export async function assignAgent(
     throw new WidgetAssignError('workspace_error', 502, res);
   }
 
-  // Audit row — best-effort; do not fail the request if this errors.
-  try {
-    await db.insert(workspaceTaskActivity).values({
-      taskId: ticketId,
-      serverId,
-      type: 'agent_assigned',
-      createdByType: 'external',
-      createdById: req.actor.widgetUserId,
-      createdByName: req.actor.name,
-      metadata: {
-        via: 'widget_triage',
-        widget_user_id: req.actor.widgetUserId,
-        external_user_id: req.actor.externalUserId,
-        agent_id: req.agentId,
-        command: req.command,
-        matched_roles: req.actor.matchedRoles,
-      },
-    });
-  } catch (err) {
-    console.warn('[WidgetService] audit row write failed:', err);
-  }
+  // The `agent_assigned` audit row is now written by the WORKSPACE inside the
+  // deferred tail of performWidgetTicketAssign (recordAssignmentActivity:true),
+  // carrying agentName (which the widget reads for assignedAgentName → the
+  // "Live session" affordance). Writing it here too would (a) duplicate the row
+  // and (b) be skipped entirely whenever this fetch timed out on a cold machine
+  // — the very failure that hid the Live session button. So the BE no longer
+  // writes it; the workspace's row lands regardless of this call's timeout.
 
   return { jobId: res.jobId };
 }
