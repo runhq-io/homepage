@@ -3523,6 +3523,45 @@
       '.rw-chat-escape-link:hover:not(:disabled) { color: var(--rw-fg); }',
       '.rw-chat-escape-link:disabled { cursor: not-allowed; opacity: 0.45; }',
 
+      /* Staff tools bar (live_coder only): groups the Live-session relay and
+         PR Preview launcher into one accent-tinted, clearly-privileged control
+         surface. Previously these were a quiet underlined link + an unstyled
+         native button that were easy to miss. Hidden entirely for non-staff
+         (gated in JS), so this surface only ever renders for live_coder users. */
+      '.rw-staff-bar {',
+      '  margin: 12px 16px 4px; padding: 10px 12px;',
+      '  background: color-mix(in oklab, var(--rw-accent) 7%, var(--rw-panel));',
+      '  border: 1px solid color-mix(in oklab, var(--rw-accent) 22%, var(--rw-line-2));',
+      '  border-left: 3px solid var(--rw-accent); border-radius: 10px;',
+      '  display: flex; flex-direction: column; gap: 9px;',
+      '}',
+      '.rw-staff-bar-head {',
+      '  display: flex; align-items: center; gap: 6px;',
+      '  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;',
+      '  color: var(--rw-accent);',
+      '}',
+      '.rw-staff-bar-head svg { width: 12px; height: 12px; }',
+      '.rw-staff-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }',
+      '.rw-staff-btn {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 7px 14px; border-radius: 999px;',
+      '  font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.005em;',
+      '  cursor: pointer; white-space: nowrap; flex-shrink: 0;',
+      '  transition: transform .12s ease, box-shadow .16s ease, filter .12s ease, background .12s ease, border-color .12s ease;',
+      '}',
+      '.rw-staff-btn:not(:disabled):hover { transform: translateY(-1px); }',
+      '.rw-staff-btn:disabled { cursor: not-allowed; opacity: 0.55; }',
+      '.rw-staff-btn-ic { font-size: 13px; line-height: 1; }',
+      '.rw-staff-btn--primary {',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink); border: 1px solid var(--rw-accent);',
+      '}',
+      '.rw-staff-btn--primary:not(:disabled):hover { filter: brightness(1.05); box-shadow: 0 8px 18px -10px color-mix(in oklab, var(--rw-accent) 60%, transparent); }',
+      '.rw-staff-btn--ghost {',
+      '  background: var(--rw-bg); color: var(--rw-fg);',
+      '  border: 1px solid color-mix(in oklab, var(--rw-accent) 40%, var(--rw-line-2));',
+      '}',
+      '.rw-staff-btn--ghost:not(:disabled):hover { background: color-mix(in oklab, var(--rw-accent) 10%, var(--rw-bg)); border-color: var(--rw-accent); }',
+
       /* "Created from a conversation" — collapsed transcript section on the
          ticket detail for tickets born from chat. Reporter-only by
          construction (the chat API is owner-scoped). */
@@ -6140,6 +6179,13 @@
       }
     }
 
+    // Staff tools bar (live_coder only): the Live-session relay and the PR
+    // Preview launcher are powerful, privileged actions, but used to render as
+    // a quiet underlined link + an unstyled native button that staff routinely
+    // missed. Collect whichever apply into `staffActionEls` and emit them in
+    // one accent-tinted bar below.
+    var staffActionEls = [];
+
     // Live session affordance — staff-only (requires the `live_coder`
     // permission). Shown only when the ticket has an assigned agent (meaning
     // a job is running) AND a chatConversationId was returned by the server
@@ -6155,14 +6201,17 @@
         && currentUser.permissions && currentUser.permissions.indexOf("live_coder") !== -1) {
       var liveConvId = data.chatConversationId;
       var liveBtn = h("button", {
-        className: "rw-chat-escape-link",
+        className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
-        style: { margin: "8px 16px 4px" },
-      }, "⚡ Live session — send message to running job");
+        title: "Send a message into the running coder job",
+      }, [
+        h("span", { className: "rw-staff-btn-ic" }, "⚡"),
+        "Live session",
+      ]);
       liveBtn.addEventListener("click", function () {
         openLiveSession(liveConvId, ticket);
       });
-      scrollArea.appendChild(liveBtn);
+      staffActionEls.push(liveBtn);
     }
 
     // Preview button — staff-only (requires canPreview from the server, which
@@ -6177,11 +6226,11 @@
       var PREVIEW_POLL_INTERVAL_MS = 1500;
       var PREVIEW_POLL_TIMEOUT_MS = 55000;
 
-      var previewErrEl = h("span", { className: "rw-preview-err", style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)", marginLeft: "8px" } }, "");
+      var previewErrEl = h("span", { className: "rw-preview-err", style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" } }, "");
       var previewBtn = h("button", {
-        className: "rw-preview-btn",
+        className: "rw-staff-btn rw-staff-btn--ghost",
         type: "button",
-        style: { margin: "8px 16px 4px" },
+        title: "Open a live preview of this PR in a new tab",
       }, "▶ Preview");
 
       function stopPreviewPoll() {
@@ -6254,8 +6303,21 @@
         });
       });
 
-      var previewRow = h("div", { style: { display: "flex", alignItems: "center", flexWrap: "wrap" } }, [previewBtn, previewErrEl]);
-      scrollArea.appendChild(previewRow);
+      staffActionEls.push(previewBtn, previewErrEl);
+    }
+
+    // Emit the staff tools bar if any privileged action applies. The eyebrow
+    // label + accent tint make these controls unmistakably staff-only and far
+    // easier to spot than the prior loose link/button.
+    if (staffActionEls.length) {
+      var staffBar = h("div", { className: "rw-staff-bar" }, [
+        h("div", { className: "rw-staff-bar-head" }, [
+          icon([{ d: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" }], 12),
+          "Staff tools",
+        ]),
+        h("div", { className: "rw-staff-actions" }, staffActionEls),
+      ]);
+      scrollArea.appendChild(staffBar);
     }
 
     // body
