@@ -1084,6 +1084,98 @@ export async function sendTeamReply(
 }
 
 /**
+ * Live-coder send: staff member (identified widget user with live_coder
+ * permission) sends a message into a conversation they do NOT own.
+ *
+ * Resolves the conversation scoped to the project (not to widgetUserId).
+ * Persists as role='user' so it appears in the transcript just like a regular
+ * visitor message (the caller is instructing the agent on the visitor's behalf).
+ * Also returns the resolved workspace channel id (workspaceTasks.workspaceChannelId)
+ * for the caller to forward via forwardLiveMessage.
+ *
+ * Throws WidgetError('conversation_not_found', 404) if the conversation does
+ * not belong to the project. Throws WidgetError('conversation_closed', 409)
+ * if the conversation is not active.
+ */
+export async function sendLiveCoderMessage(
+  conversationId: string,
+  projectId: string,
+  content: string,
+): Promise<{ message: ChatMessageRow; jobChannelId: string | null; canonicalTaskId: string | null }> {
+  if (!UUID_RE.test(conversationId)) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  const [conv] = await db
+    .select()
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!conv || conv.widgetProjectId !== projectId) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  // NOTE: intentionally NOT gated on conv.status === 'active'. A live-coder
+  // message is a staff member steering the agent AFTER a ticket exists, and the
+  // originating intake conversation is closed the moment it produces that ticket
+  // (submit-ticket closes it server-side). The Live session reuses that same
+  // conversation, so requiring 'active' here rejected every live-coder message
+  // with conversation_closed (surfaced in the widget as "message limit reached").
+  // The intake turn-cap / closed guards live on the intake send path, not here.
+
+  const text = content.trim();
+  if (!text) throw new WidgetService.WidgetError('message_required', 400);
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw new WidgetService.WidgetError('message_too_long', 400);
+  }
+
+  // Resolve the job channel from the linked workspace task (if any).
+  let jobChannelId: string | null = null;
+  if (conv.createdTaskId) {
+    const [taskRow] = await db
+      .select({ workspaceChannelId: workspaceTasks.workspaceChannelId })
+      .from(workspaceTasks)
+      .where(eq(workspaceTasks.id, conv.createdTaskId))
+      .limit(1);
+    jobChannelId = taskRow?.workspaceChannelId ?? null;
+  }
+
+  const [message] = await db
+    .insert(widgetChatMessages)
+    .values({ conversationId, role: 'user', content: text })
+    .returning();
+  publish(message!);
+
+  await db
+    .update(widgetChatConversations)
+    .set({ updatedAt: new Date() })
+    .where(eq(widgetChatConversations.id, conversationId));
+
+  // The canonical task id is the stable key for the running coder job on the
+  // workspace (the coder runs in its own per-job channel, not this ticket's
+  // jobChannelId). conv.createdTaskId IS the canonical task id.
+  return { message: message!, jobChannelId, canonicalTaskId: conv.createdTaskId ?? null };
+}
+
+/**
+ * Append a rejection event row into the conversation transcript (e.g. when
+ * forwardLiveMessage returns 'flagged'). The event is surfaced to the widget
+ * SSE stream so the live-coder UI can show an inline error.
+ */
+export async function appendLiveCoderRejectionEvent(
+  conversationId: string,
+  reason: string,
+): Promise<void> {
+  const [row] = await db
+    .insert(widgetChatMessages)
+    .values({
+      conversationId,
+      role: 'event',
+      payload: { kind: 'live_coder_rejected', reason },
+    })
+    .returning();
+  if (row) publish(row);
+}
+
+/**
  * Idempotently persist a batch of turn events. Rows upsert on the partial
  * unique index (turn_id, seq) via onConflictDoNothing — retries cannot
  * duplicate, reordering cannot corrupt (rows are processed in seq order and

@@ -108,6 +108,14 @@
   var CHAT_CLOSED_WATCH_MS = 5000;
   var CHAT_INPUT_MAX = 4000;
   var CHAT_ESCAPE_HATCH_MIN_TURNS = 4;
+  // True when the chat view is a Live session (staff → running job), rather
+  // than the ordinary user → agent intake conversation. Set by openLiveSession;
+  // cleared when the chat view exits. Controls: send route (liveCoderSend vs
+  // chatSendMessage), topbar label, back destination, and hatch-slot visibility.
+  var chatIsLiveSession = false;
+  // When chatIsLiveSession is true: the ticket the live session was opened from
+  // (used to restore the detail view on back-navigation).
+  var liveSessionTicket = null;
 
   // ===========================================================================
   // Console & error capture
@@ -286,6 +294,10 @@
     });
   }
 
+  function startTicketPreview(ticketId) {
+    return api("/api/widget/tickets/" + encodeURIComponent(ticketId) + "/preview", { method: "POST" });
+  }
+
   function chatOpenConversation() {
     return api("/api/widget/chat/conversations", { method: "POST", body: {} });
   }
@@ -298,6 +310,14 @@
   }
   function chatSendMessage(conversationId, content) {
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages", {
+      method: "POST", body: { content: content },
+    });
+  }
+  // Staff-only: send a message into the running job via the front-door agent.
+  // Requires the `live_coder` permission (enforced server-side; 403 otherwise).
+  // Replies arrive on the SAME /events SSE stream as the ordinary chat transport.
+  function liveCoderSend(conversationId, content) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/live-message", {
       method: "POST", body: { content: content },
     });
   }
@@ -3503,6 +3523,45 @@
       '.rw-chat-escape-link:hover:not(:disabled) { color: var(--rw-fg); }',
       '.rw-chat-escape-link:disabled { cursor: not-allowed; opacity: 0.45; }',
 
+      /* Staff tools bar (live_coder only): groups the Live-session relay and
+         PR Preview launcher into one accent-tinted, clearly-privileged control
+         surface. Previously these were a quiet underlined link + an unstyled
+         native button that were easy to miss. Hidden entirely for non-staff
+         (gated in JS), so this surface only ever renders for live_coder users. */
+      '.rw-staff-bar {',
+      '  margin: 12px 16px 4px; padding: 10px 12px;',
+      '  background: color-mix(in oklab, var(--rw-accent) 7%, var(--rw-panel));',
+      '  border: 1px solid color-mix(in oklab, var(--rw-accent) 22%, var(--rw-line-2));',
+      '  border-left: 3px solid var(--rw-accent); border-radius: 10px;',
+      '  display: flex; flex-direction: column; gap: 9px;',
+      '}',
+      '.rw-staff-bar-head {',
+      '  display: flex; align-items: center; gap: 6px;',
+      '  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;',
+      '  color: var(--rw-accent);',
+      '}',
+      '.rw-staff-bar-head svg { width: 12px; height: 12px; }',
+      '.rw-staff-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }',
+      '.rw-staff-btn {',
+      '  display: inline-flex; align-items: center; gap: 6px;',
+      '  padding: 7px 14px; border-radius: 999px;',
+      '  font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.005em;',
+      '  cursor: pointer; white-space: nowrap; flex-shrink: 0;',
+      '  transition: transform .12s ease, box-shadow .16s ease, filter .12s ease, background .12s ease, border-color .12s ease;',
+      '}',
+      '.rw-staff-btn:not(:disabled):hover { transform: translateY(-1px); }',
+      '.rw-staff-btn:disabled { cursor: not-allowed; opacity: 0.55; }',
+      '.rw-staff-btn-ic { font-size: 13px; line-height: 1; }',
+      '.rw-staff-btn--primary {',
+      '  background: var(--rw-accent); color: var(--rw-accent-ink); border: 1px solid var(--rw-accent);',
+      '}',
+      '.rw-staff-btn--primary:not(:disabled):hover { filter: brightness(1.05); box-shadow: 0 8px 18px -10px color-mix(in oklab, var(--rw-accent) 60%, transparent); }',
+      '.rw-staff-btn--ghost {',
+      '  background: var(--rw-bg); color: var(--rw-fg);',
+      '  border: 1px solid color-mix(in oklab, var(--rw-accent) 40%, var(--rw-line-2));',
+      '}',
+      '.rw-staff-btn--ghost:not(:disabled):hover { background: color-mix(in oklab, var(--rw-accent) 10%, var(--rw-bg)); border-color: var(--rw-accent); }',
+
       /* "Created from a conversation" — collapsed transcript section on the
          ticket detail for tickets born from chat. Reporter-only by
          construction (the chat API is owner-scoped). */
@@ -4205,6 +4264,11 @@
     // A detail opened FROM chat must not leave its return-to-chat marker
     // behind once the user jumps home instead.
     detailReturnView = null;
+    // If a live session was open when goHome() was triggered (e.g. via the
+    // topbar home button), clear the live session flags so they don't bleed
+    // into the next chat view open.
+    chatIsLiveSession = false;
+    liveSessionTicket = null;
     renderPanelBody();
   }
 
@@ -4214,6 +4278,8 @@
     if (tab) activeTab = tab;
     currentDetailTicket = null;
     detailReturnView = null;
+    chatIsLiveSession = false;
+    liveSessionTicket = null;
     renderPanelBody();
   }
 
@@ -4610,6 +4676,27 @@
     renderPanelBody();
   }
 
+  // Open the Live session chat view for a staff member with the `live_coder`
+  // permission. Pre-seeds the chatConversation with a stub so renderChatViewShell
+  // skips chatOpenConversation() and goes straight to message-loading + transport.
+  // Back-navigation returns to the ticket detail.
+  function openLiveSession(conversationId, ticket) {
+    stopDetailPoll();
+    stopChatTransport();
+    // Pre-seed the conversation stub. renderChatViewShell detects a non-null
+    // chatConversation and skips chatOpenConversation().
+    chatConversation = { id: conversationId, status: "active", createdTaskId: ticket.id, pendingTurnId: null };
+    chatMessages = [];
+    chatTurnPending = false;
+    chatSubmitInFlight = false;
+    chatIsLiveSession = true;
+    liveSessionTicket = ticket;
+    // Return-from-detail bookkeeping.
+    detailReturnView = "detail";
+    view = "chat";
+    renderPanelBody();
+  }
+
   // Tear down whatever delivery mechanism is live (SSE stream, poll timer,
   // closed-watch). Safe to call repeatedly; the refs it clears are armed by
   // the transport layer.
@@ -4695,6 +4782,11 @@
   // an agent turn. Agentless threads short-circuit to false: nothing is
   // ever pending when no agent dispatches turns.
   function chatTurnStillPending() {
+    // A live-coder session is a steering channel, not a request/response turn:
+    // the coder works in its own terminal and narrates back asynchronously (if
+    // at all). Gating a "typing…" indicator on the staff's last message would
+    // leave it spinning forever, so never treat a live session as pending.
+    if (chatIsLiveSession) return false;
     if (!chatThreadHasAgent()) return false;
     for (var i = chatMessages.length - 1; i >= 0; i--) {
       var m = chatMessages[i];
@@ -5193,6 +5285,9 @@
     if (!chatUi || !chatUi.hatchSlot) return;
     var slot = chatUi.hatchSlot;
     clearChildren(slot);
+    // Live session: no submit-ticket or escape-hatch actions (this is a
+    // staff-to-job channel, not a user intake conversation).
+    if (chatIsLiveSession) return;
     if (!chatConversation || chatConversation.status !== "active") return;
 
     if (!chatThreadHasAgent()) {
@@ -5410,7 +5505,10 @@
       sendBtn.disabled = true;
       ta.disabled = true;
       clearChildren(noticeSlot);
-      chatSendMessage(chatConversation.id, content).then(function (data) {
+      // Live session: route through the staff-only live-message endpoint.
+      // Regular chat: route through the user-message endpoint.
+      var sendFn = chatIsLiveSession ? liveCoderSend : chatSendMessage;
+      sendFn(chatConversation.id, content).then(function (data) {
         ta.value = "";
         // Use the server's row when returned; otherwise an optimistic echo
         // that chatReplaceLocalEcho swaps for the authoritative row later.
@@ -5464,26 +5562,44 @@
   function renderChatViewShell() {
     var root = h("div", { className: "rw-chat-full" });
 
+    // Live session: back returns to the ticket detail. Regular chat: back goes home.
+    var isLive = chatIsLiveSession;
+    var savedLiveTicket = liveSessionTicket;
     var backBtn = h("button", { className: "rw-back-btn", type: "button" }, [
       Icons.arrowLeft(13),
-      h("span", null, t("chat.back")),
+      h("span", null, isLive ? t("detail.back") : t("chat.back")),
     ]);
     backBtn.addEventListener("click", function () {
       stopChatTransport();
       chatUi = null;
-      // The Home screen (Plan 1) is live: back returns to the landing view
-      // the chat card came from.
-      goHome();
+      if (isLive) {
+        // Return to the ticket detail that spawned this live session.
+        chatIsLiveSession = false;
+        liveSessionTicket = null;
+        detailReturnView = null;
+        if (savedLiveTicket) {
+          view = "detail";
+          currentDetailTicket = savedLiveTicket;
+          renderPanelBody();
+        } else {
+          goHome();
+        }
+      } else {
+        // The Home screen (Plan 1) is live: back returns to the landing view
+        // the chat card came from.
+        goHome();
+      }
     });
+
+    var topbarLabel = isLive ? "Live session" : (
+      chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()
+    );
 
     root.appendChild(h("div", { className: "rw-chat-topbar" }, [
       backBtn,
       h("div", { className: "rw-chat-topbar-identity" }, [
         renderChatAgentAvatar(22),
-        // Agent mode: "Chat with {agent}". Agentless: just the project
-        // name — there is no agent to attribute the thread to.
-        h("span", { className: "rw-chat-topbar-name" },
-          chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()),
+        h("span", { className: "rw-chat-topbar-name" }, topbarLabel),
       ]),
     ]));
 
@@ -5494,41 +5610,63 @@
     chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
 
     listEl.appendChild(renderLoading());
-    chatOpenConversation().then(function (data) {
-      if (view !== "chat" || !chatUi) return;
-      chatConversation = (data && data.conversation) || null;
-      chatMessages = ((data && data.messages) || []).slice();
-      // The conversation DTO carries pendingTurnId — resuming mid-turn
-      // restores the typing indicator (and the fast poll cadence) instead
-      // of silently dropping the in-flight turn.
-      chatTurnPending = !!(chatConversation
-        && chatConversation.status === "active"
-        && chatConversation.pendingTurnId);
-      chatSubmitInFlight = false;
-      renderChatMessageList();
-      renderChatFooter();
-      if (chatConversation && chatConversation.status === "active") {
+
+    if (isLive && chatConversation) {
+      // Live session: conversation is pre-seeded by openLiveSession(). Skip
+      // chatOpenConversation() and go straight to message-loading + transport.
+      var liveConvAtOpen = chatConversation;
+      chatLoadMessages(liveConvAtOpen.id, null).then(function (data) {
+        if (view !== "chat" || !chatUi || chatConversation !== liveConvAtOpen) return;
+        chatMessages = ((data && data.messages) || []).slice();
+        chatTurnPending = false;
+        chatSubmitInFlight = false;
+        renderChatMessageList();
+        renderChatFooter();
         startChatTransport();
-        if (chatConversation.createdTaskId) startChatClosedWatch();
-      }
-    }).catch(function (err) {
-      if (view !== "chat" || !chatUi) return;
-      clearChildren(listEl);
-      if (err && err.status === 403) {
-        // Anonymous / unidentified caller — mirror the composer's gate: a
-        // public widget with a login URL redirects (preserving a "chat"
-        // intent); anything else shows the sign-in notice.
-        if (canAnonInteract()) {
-          gateWriteAction({ type: "chat" });
+      }).catch(function (err) {
+        if (view !== "chat" || !chatUi) return;
+        clearChildren(listEl);
+        listEl.appendChild(h("div", { style: { padding: "16px" } },
+          renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
+      });
+    } else {
+      chatOpenConversation().then(function (data) {
+        if (view !== "chat" || !chatUi) return;
+        chatConversation = (data && data.conversation) || null;
+        chatMessages = ((data && data.messages) || []).slice();
+        // The conversation DTO carries pendingTurnId — resuming mid-turn
+        // restores the typing indicator (and the fast poll cadence) instead
+        // of silently dropping the in-flight turn.
+        chatTurnPending = !!(chatConversation
+          && chatConversation.status === "active"
+          && chatConversation.pendingTurnId
+          && !chatIsLiveSession);
+        chatSubmitInFlight = false;
+        renderChatMessageList();
+        renderChatFooter();
+        if (chatConversation && chatConversation.status === "active") {
+          startChatTransport();
+          if (chatConversation.createdTaskId) startChatClosedWatch();
+        }
+      }).catch(function (err) {
+        if (view !== "chat" || !chatUi) return;
+        clearChildren(listEl);
+        if (err && err.status === 403) {
+          // Anonymous / unidentified caller — mirror the composer's gate: a
+          // public widget with a login URL redirects (preserving a "chat"
+          // intent); anything else shows the sign-in notice.
+          if (canAnonInteract()) {
+            gateWriteAction({ type: "chat" });
+            return;
+          }
+          listEl.appendChild(h("div", { style: { padding: "16px" } },
+            renderNotice("error", config.authErrorMessage || t("chat.signInPrompt"))));
           return;
         }
         listEl.appendChild(h("div", { style: { padding: "16px" } },
-          renderNotice("error", config.authErrorMessage || t("chat.signInPrompt"))));
-        return;
-      }
-      listEl.appendChild(h("div", { style: { padding: "16px" } },
-        renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
-    });
+          renderNotice("error", t("chat.loadFailed", { msg: (err && err.message) || "" }))));
+      });
+    }
 
     return root;
   }
@@ -6045,6 +6183,147 @@
       if (chatConvId) {
         scrollArea.appendChild(renderChatTranscriptSection(chatConvId));
       }
+    }
+
+    // Staff tools bar (live_coder only): the Live-session relay and the PR
+    // Preview launcher are powerful, privileged actions, but used to render as
+    // a quiet underlined link + an unstyled native button that staff routinely
+    // missed. Collect whichever apply into `staffActionEls` and emit them in
+    // one accent-tinted bar below.
+    var staffActionEls = [];
+
+    // Live session affordance — staff-only (requires the `live_coder`
+    // permission). Shown only when the ticket has an assigned agent (meaning
+    // a job is running) AND a chatConversationId was returned by the server
+    // (meaning this ticket originated from a conversation whose job channel
+    // the staff message can be forwarded into).
+    //
+    // Clicking "Live session" navigates to the chat view with the conversation
+    // pre-seeded, reusing the existing chatApplyMessages + startChatTransport
+    // SSE machinery (no duplicate transport).
+    if (!loading
+        && data.chatConversationId
+        && ticket.assignedAgentName
+        && currentUser.permissions && currentUser.permissions.indexOf("live_coder") !== -1) {
+      var liveConvId = data.chatConversationId;
+      var liveBtn = h("button", {
+        className: "rw-staff-btn rw-staff-btn--primary",
+        type: "button",
+        title: "Send a message into the running coder job",
+      }, [
+        h("span", { className: "rw-staff-btn-ic" }, "⚡"),
+        "Live session",
+      ]);
+      liveBtn.addEventListener("click", function () {
+        openLiveSession(liveConvId, ticket);
+      });
+      staffActionEls.push(liveBtn);
+    }
+
+    // Preview button — staff-only (requires canPreview from the server, which
+    // is true only for live_coder staff on a ticket with a linked PR).
+    // The preview start is async: the first POST often returns `preparing`
+    // (no url), so we poll until a url comes back, then open it in a new tab.
+    // Guard against overlapping clicks (ignore while already polling).
+    if (!loading && data.canPreview) {
+      var previewStarting = false;
+      var previewPollTimer = null;
+      var previewPollStart = null;
+      var PREVIEW_POLL_INTERVAL_MS = 1500;
+      var PREVIEW_POLL_TIMEOUT_MS = 55000;
+
+      var previewErrEl = h("span", { className: "rw-preview-err", style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" } }, "");
+      var previewBtn = h("button", {
+        className: "rw-staff-btn rw-staff-btn--ghost",
+        type: "button",
+        title: "Open a live preview of this PR in a new tab",
+      }, "▶ Preview");
+
+      function stopPreviewPoll() {
+        if (previewPollTimer !== null) {
+          clearTimeout(previewPollTimer);
+          previewPollTimer = null;
+        }
+      }
+
+      function setPreviewError(msg) {
+        previewStarting = false;
+        stopPreviewPoll();
+        previewBtn.disabled = false;
+        previewBtn.textContent = "▶ Preview";
+        previewErrEl.textContent = msg;
+      }
+
+      function schedulePreviewPoll(ticketIdForPreview) {
+        previewPollTimer = setTimeout(function () {
+          previewPollTimer = null;
+          if (!previewStarting) return;
+          var elapsed = Date.now() - previewPollStart;
+          if (elapsed > PREVIEW_POLL_TIMEOUT_MS) {
+            setPreviewError("Preview unavailable");
+            return;
+          }
+          startTicketPreview(ticketIdForPreview).then(function (resp) {
+            if (!previewStarting) return;
+            if (resp && resp.ok && resp.url) {
+              previewStarting = false;
+              stopPreviewPoll();
+              previewBtn.disabled = false;
+              previewBtn.textContent = "▶ Preview";
+              previewErrEl.textContent = "";
+              window.open(resp.url, "_blank", "noopener");
+            } else if (resp && resp.ok && !resp.url) {
+              // still preparing — poll again
+              schedulePreviewPoll(ticketIdForPreview);
+            } else {
+              setPreviewError("Preview unavailable");
+            }
+          }).catch(function () {
+            setPreviewError("Preview unavailable");
+          });
+        }, PREVIEW_POLL_INTERVAL_MS);
+      }
+
+      previewBtn.addEventListener("click", function () {
+        if (previewStarting) return;
+        previewStarting = true;
+        previewPollStart = Date.now();
+        previewBtn.disabled = true;
+        previewBtn.textContent = "Starting preview…";
+        previewErrEl.textContent = "";
+        startTicketPreview(ticket.id).then(function (resp) {
+          if (!previewStarting) return;
+          if (resp && resp.ok && resp.url) {
+            previewStarting = false;
+            previewBtn.disabled = false;
+            previewBtn.textContent = "▶ Preview";
+            window.open(resp.url, "_blank", "noopener");
+          } else if (resp && resp.ok && !resp.url) {
+            // preparing — start poll
+            schedulePreviewPoll(ticket.id);
+          } else {
+            setPreviewError("Preview unavailable");
+          }
+        }).catch(function () {
+          setPreviewError("Preview unavailable");
+        });
+      });
+
+      staffActionEls.push(previewBtn, previewErrEl);
+    }
+
+    // Emit the staff tools bar if any privileged action applies. The eyebrow
+    // label + accent tint make these controls unmistakably staff-only and far
+    // easier to spot than the prior loose link/button.
+    if (staffActionEls.length) {
+      var staffBar = h("div", { className: "rw-staff-bar" }, [
+        h("div", { className: "rw-staff-bar-head" }, [
+          icon([{ d: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" }], 12),
+          "Staff tools",
+        ]),
+        h("div", { className: "rw-staff-actions" }, staffActionEls),
+      ]);
+      scrollArea.appendChild(staffBar);
     }
 
     // body
@@ -7001,5 +7280,15 @@
       openPanel(function () { openChat(); });
     },
   };
+
+  // ---------------------------------------------------------------------------
+  // Test-only hook — zero production impact; never called by the widget itself.
+  // When the host context sets window._rwTestHooks to a plain object before the
+  // IIFE runs, we populate it with internal functions so vm-based tests can
+  // drive the real rendering code without a full browser environment.
+  // ---------------------------------------------------------------------------
+  if (window._rwTestHooks && typeof window._rwTestHooks === "object") {
+    window._rwTestHooks.renderDetailInto = renderDetailInto;
+  }
 
 })();

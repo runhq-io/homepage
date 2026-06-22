@@ -48,25 +48,34 @@ describe('authenticateWidget — permissions', () => {
     expect(result?.permissions.has('assign_agent')).toBe(false);
   });
 
-  // Role-gating removed: identity (a valid signed widget JWT) + the project's
-  // master switch is the whole gate. Roles in the JWT are ignored entirely.
-  it('grants assign_agent when switch ON for any identified user, regardless of role', async () => {
-    await db.update(widgetProjects).set({ widgetAgentAssignmentEnabled: true, widgetAssignRoles: ['triager', 'pm'] }).where(eq(widgetProjects.id, projectId));
+  // RBAC model: widgetRolePermissions controls access. The '*' wildcard grants
+  // a permission to any authenticated user regardless of roles in the JWT.
+  it('grants assign_agent to any identified user when "*" wildcard is set', async () => {
+    await db.update(widgetProjects).set({
+      widgetAgentAssignmentEnabled: true, widgetAssignRoles: ['triager', 'pm'],
+      widgetRolePermissions: { '*': ['assign_agent'] },
+    }).where(eq(widgetProjects.id, projectId));
     const token = await signJwt({ runhq_roles: ['developer'] });
     const result = await authenticateWidget(makeReq({ Authorization: `Bearer ${token}` }));
     expect(result?.permissions.has('assign_agent')).toBe(true);
   });
 
-  it('grants assign_agent when switch ON even with no role claim at all', async () => {
-    await db.update(widgetProjects).set({ widgetAgentAssignmentEnabled: true, widgetAssignRoles: [], widgetRoleClaimName: 'runhq_roles' }).where(eq(widgetProjects.id, projectId));
+  it('grants assign_agent via wildcard even with no role claim at all', async () => {
+    await db.update(widgetProjects).set({
+      widgetAgentAssignmentEnabled: true, widgetAssignRoles: [],
+      widgetRoleClaimName: 'runhq_roles', widgetRolePermissions: { '*': ['assign_agent'] },
+    }).where(eq(widgetProjects.id, projectId));
     const token = await signJwt({});
     const result = await authenticateWidget(makeReq({ Authorization: `Bearer ${token}` }));
     expect(result?.permissions.has('assign_agent')).toBe(true);
   });
 
-  it('ignores the role-claim shape entirely (non-array claim no longer denies)', async () => {
-    await db.update(widgetProjects).set({ widgetAgentAssignmentEnabled: true, widgetAssignRoles: ['triager'], widgetRoleClaimName: 'runhq_roles' }).where(eq(widgetProjects.id, projectId));
-    const token = await signJwt({ runhq_roles: 'triager' });
+  it('grants assign_agent via role-specific mapping when role claim matches', async () => {
+    await db.update(widgetProjects).set({
+      widgetAgentAssignmentEnabled: true, widgetAssignRoles: ['triager'],
+      widgetRoleClaimName: 'runhq_roles', widgetRolePermissions: { triager: ['assign_agent'] },
+    }).where(eq(widgetProjects.id, projectId));
+    const token = await signJwt({ runhq_roles: ['triager'] });
     const result = await authenticateWidget(makeReq({ Authorization: `Bearer ${token}` }));
     expect(result?.permissions.has('assign_agent')).toBe(true);
   });
@@ -126,6 +135,8 @@ describe('generateUserTokenBySecret — mint-time workspace roles', () => {
       apiKey: MT_API_KEY, apiSecretHash: MT_SECRET, channelId: `ch_perm_mt_${MT_RUN_HEX}`,
       enabled: true, widgetAgentAssignmentEnabled: true,
       widgetAssignRoles: ['triager'], widgetRoleClaimName: 'runhq_roles',
+      // RBAC: '*' wildcard grants assign_agent to any authenticated user.
+      widgetRolePermissions: { '*': ['assign_agent'] },
     }).returning({ id: widgetProjects.id });
     mtProjectId = proj.id;
   });
@@ -140,23 +151,23 @@ describe('generateUserTokenBySecret — mint-time workspace roles', () => {
     }
   });
 
-  // Role-gating removed: minted tokens only IDENTIFY the user — no workspace
-  // role claim is baked in for anyone. The project's master switch alone decides
-  // assign_agent at auth time.
+  // RBAC model: minted tokens only IDENTIFY the user — no workspace role claim
+  // is baked in. widgetRolePermissions (with '*' wildcard) decides what any
+  // authenticated user gets; role-specific entries gate elevated permissions.
   it('mints NO role claim for the workspace owner (identity only)', async () => {
     const result = await generateUserTokenBySecret(MT_SECRET, OWNER_ID, 'MT Owner');
     expect(result).not.toBeNull();
     expect(decodeClaims(result!.token).runhq_roles).toBeUndefined();
   });
 
-  it('the owner token round-trips through authenticateWidget to assign_agent (switch ON)', async () => {
+  it('the owner token round-trips through authenticateWidget to assign_agent (wildcard grant)', async () => {
     const result = await generateUserTokenBySecret(MT_SECRET, OWNER_ID, 'MT Owner');
     const auth = await authenticateWidget(makeReq({ Authorization: `Bearer ${result!.token}` }));
     expect(auth?.permissions.has('assign_agent')).toBe(true);
     expect(auth?.matchedRoles).toEqual([]);
   });
 
-  it('a regular workspace member also round-trips to assign_agent (identity is the gate)', async () => {
+  it('a regular workspace member also round-trips to assign_agent (wildcard grant)', async () => {
     const result = await generateUserTokenBySecret(MT_SECRET, PLAIN_MEMBER_ID, 'MT Member');
     expect(decodeClaims(result!.token).runhq_roles).toBeUndefined();
     const auth = await authenticateWidget(makeReq({ Authorization: `Bearer ${result!.token}` }));
@@ -168,11 +179,11 @@ describe('generateUserTokenBySecret — mint-time workspace roles', () => {
     expect(decodeClaims(result!.token).runhq_roles).toBeUndefined();
   });
 
-  it('the minted token grants NO permission when agent assignment is disabled', async () => {
-    await db.update(widgetProjects).set({ widgetAgentAssignmentEnabled: false }).where(eq(widgetProjects.id, mtProjectId));
+  it('the minted token grants NO permission when widgetRolePermissions is empty', async () => {
+    await db.update(widgetProjects).set({ widgetRolePermissions: {} }).where(eq(widgetProjects.id, mtProjectId));
     const result = await generateUserTokenBySecret(MT_SECRET, OWNER_ID, 'MT Owner');
     const auth = await authenticateWidget(makeReq({ Authorization: `Bearer ${result!.token}` }));
     expect(auth?.permissions.has('assign_agent')).toBe(false);
-    await db.update(widgetProjects).set({ widgetAgentAssignmentEnabled: true }).where(eq(widgetProjects.id, mtProjectId));
+    await db.update(widgetProjects).set({ widgetRolePermissions: { '*': ['assign_agent'] } }).where(eq(widgetProjects.id, mtProjectId));
   });
 });

@@ -23,6 +23,7 @@ import {
   serverMembers,
   users,
   widgetExposedAgents,
+  widgetChatConversations,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
@@ -70,8 +71,28 @@ export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 // Types
 // ============================================================================
 
-export type WidgetPermission = 'assign_agent';
+export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image';
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
+
+/**
+ * Does a widget role→permissions map grant `assign_agent` to ANY role
+ * (including the `*` everyone key)? This is the project-level "agent assignment
+ * is on" signal.
+ *
+ * The legacy `widget_agent_assignment_enabled` boolean is the denormalized
+ * cache of exactly this predicate: the new settings UI has no master-switch
+ * toggle — granting `assign_agent` in the Permissions matrix IS how an operator
+ * turns assignment on — so the column must be kept equal to this whenever the
+ * permission map is saved (and was backfilled for rows edited before that sync
+ * existed). Without that, the auto-assign orchestrator and the creation-time
+ * injection guard, which both gate on the column, silently never fire.
+ */
+export function roleMapGrantsAssignAgent(
+  map: Record<string, string[]> | null | undefined,
+): boolean {
+  if (!map) return false;
+  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('assign_agent'));
+}
 
 export interface WidgetAuthResult {
   projectId: string;
@@ -122,6 +143,8 @@ interface WidgetProjectContext {
   allowedOrigins: string[];
   autoRecognizeRunhqMembers: boolean;
   widgetAgentAssignmentEnabled: boolean;
+  widgetRoleClaimName: string;
+  widgetRolePermissions: Record<string, string[]>;
   serverId: string;
   channelId: string | null;
   widgetChatAgentEntityId: string | null;
@@ -219,6 +242,14 @@ export type PublicTicketDetail = {
     duplicateOf: string | null;
   } | null;
   /**
+   * The widget chat conversation that originated this ticket, if any.
+   * Exposed only when the ticket was created from a chat conversation.
+   * Staff with `live_coder` permission use this to send messages into the
+   * running job via POST /api/widget/chat/conversations/:id/live-message.
+   * null if the ticket was not created from a conversation.
+   */
+  chatConversationId: string | null;
+  /**
    * Code-safe view of the linked pull request, derived from the most recent
    * `pr_linked` activity. We expose ONLY the state — never the PR number, URL,
    * or branch, which are internal locators that point at code. The state feeds
@@ -231,6 +262,13 @@ export type PublicTicketDetail = {
    * of leaking code. See deriveTicketMilestones.
    */
   milestones: Milestone[];
+  /**
+   * Whether the viewing staff member can launch an isolated preview for this
+   * ticket. True only when the viewer holds the `live_coder` permission AND
+   * the ticket has a linked PR/branch (i.e. `internalPr` is non-null).
+   * Defaults to false for all other callers (no permissions passed).
+   */
+  canPreview: boolean;
 };
 
 type PublicAttachmentLike = {
@@ -366,6 +404,8 @@ async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContex
       allowedOrigins: widgetProjects.allowedOrigins,
       autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
       widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
@@ -550,6 +590,7 @@ interface PermissionPolicyRow {
   widgetAgentAssignmentEnabled: boolean;
   widgetAssignRoles: string[];
   widgetRoleClaimName: string;
+  widgetRolePermissions: Record<string, string[]>;
 }
 
 interface PermissionDerivation {
@@ -559,15 +600,67 @@ interface PermissionDerivation {
 
 function derivePermissions(
   policy: PermissionPolicyRow,
-  _jwtPayload: jose.JWTPayload,
+  jwtPayload: jose.JWTPayload,
 ): PermissionDerivation {
-  // Role-gating removed: a valid backend-issued widget token already proves the
-  // app trusts this (identified, non-anonymous) user. Identity alone authorizes
-  // agent work — there is no per-role check anymore. The only remaining axis is
-  // the project's master on/off switch. (Auto-assignment is server-driven; this
-  // permission is now only a capability hint surfaced by /me and /identity.)
-  if (!policy.widgetAgentAssignmentEnabled) return { permissions: EMPTY_PERMISSIONS, matchedRoles: [] };
-  return { permissions: new Set<WidgetPermission>(['assign_agent']), matchedRoles: [] };
+  // Role→permissions RBAC: the project's widgetRolePermissions map controls
+  // what each JWT role grants. The special '*' key grants permissions to any
+  // authenticated user (back-compat: migrated projects that had
+  // widgetAgentAssignmentEnabled=true have '*': ['assign_agent'] set).
+  const mapping = (policy.widgetRolePermissions ?? {}) as Record<string, string[]>;
+  const claimName = policy.widgetRoleClaimName || 'runhq_roles';
+  const claimed = jwtPayload[claimName];
+  const roles = Array.isArray(claimed) ? claimed.filter((x): x is string => typeof x === 'string') : [];
+  const permissions = new Set<WidgetPermission>();
+  const matchedRoles: string[] = [];
+  for (const p of mapping['*'] ?? []) permissions.add(p as WidgetPermission);
+  for (const role of roles) {
+    const granted = mapping[role];
+    if (!granted) continue;
+    matchedRoles.push(role);
+    for (const p of granted) permissions.add(p as WidgetPermission);
+  }
+  return { permissions, matchedRoles };
+}
+
+/**
+ * Opt-in enforcement for the `attach_image` permission.
+ *
+ * Image attachments predate the permission, so we cannot fail closed without
+ * breaking every widget that relied on open uploads. Instead the gate is
+ * opt-in: while no role (including the '*' wildcard) grants `attach_image`,
+ * uploads stay open for everyone. The moment a project grants it to any role,
+ * uploads are restricted to users whose derived permission set includes it.
+ *
+ * Pure function so the policy is unit-testable without a DB; see
+ * `canAttachImages` for the request-time wrapper that loads the project map.
+ */
+export function attachImageAllowed(
+  rolePermissions: Record<string, string[]> | null | undefined,
+  permissions: ReadonlySet<WidgetPermission>,
+): boolean {
+  const map = rolePermissions ?? {};
+  const configured = Object.values(map).some(
+    (list) => Array.isArray(list) && list.includes('attach_image'),
+  );
+  if (!configured) return true;
+  return permissions.has('attach_image');
+}
+
+/**
+ * Request-time wrapper around {@link attachImageAllowed}: loads the project's
+ * `widgetRolePermissions` map and applies the opt-in gate to the caller's
+ * derived permission set. Returns true when the upload should be allowed.
+ */
+export async function canAttachImages(
+  projectId: string,
+  permissions: ReadonlySet<WidgetPermission>,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ rolePermissions: widgetProjects.widgetRolePermissions })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+  return attachImageAllowed(row?.rolePermissions, permissions);
 }
 
 /**
@@ -681,15 +774,17 @@ export async function authenticateWidget(
             widgetUserId = inserted.id;
           }
 
-          // Workspace owners/admins auto-grant the assign_agent permission
-          // when the project has triager-assignment enabled. Regular members
-          // continue to need explicit role-claim configuration via JWT —
-          // expanding the trust boundary further requires explicit owner opt-in.
+          // Spec §2.2: route through derivePermissions using a synthetic JWT
+          // payload. Workspace owners/admins map to the `team_member` role;
+          // non-admin members map to no roles. This means admins get whatever
+          // the project maps `team_member` to, plus any `'*'` wildcard grants —
+          // exactly consistent with the JWT path.
           const isAdmin = isOwnerOrAdmin(membership);
-          const permissions: ReadonlySet<WidgetPermission> =
-            isAdmin && project.widgetAgentAssignmentEnabled
-              ? new Set<WidgetPermission>(['assign_agent'])
-              : EMPTY_PERMISSIONS;
+          const claimName = project.widgetRoleClaimName || 'runhq_roles';
+          const syntheticPayload: jose.JWTPayload = {
+            [claimName]: isAdmin ? ['team_member'] : [],
+          };
+          const { permissions, matchedRoles } = derivePermissions(project, syntheticPayload);
 
           return {
             projectId: project.id,
@@ -697,7 +792,7 @@ export async function authenticateWidget(
             widgetUserId,
             authenticated: true,
             permissions,
-            matchedRoles: isAdmin ? ['admin'] : [],
+            matchedRoles,
             authSource: 'runhq',
             runhqUserId: verified.userId,
             csrfToken: csrfTokenFor(verified.userId, verified.iat),
@@ -769,6 +864,7 @@ export async function authenticateWidget(
       widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
       widgetAssignRoles: widgetProjects.widgetAssignRoles,
       widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.apiKey, decoded.fp))
@@ -1125,7 +1221,7 @@ function mapCommentToWidgetResponse(
 }
 
 
-export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
+export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string, permissions?: ReadonlySet<WidgetPermission>): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
@@ -1218,6 +1314,16 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     prState: internalPr?.state ?? null,
   });
 
+  // Resolve the chat conversation that originated this ticket, if any.
+  // Used by staff with `live_coder` permission to send messages into the
+  // running job via the Live session UI.
+  const [originConv] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, task.id))
+    .limit(1);
+  const chatConversationId = originConv?.id ?? null;
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
@@ -1245,8 +1351,10 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
     clarification,
+    chatConversationId,
     linkedPr: internalPr ? { state: internalPr.state } : null,
     milestones,
+    canPreview: !!permissions?.has('live_coder') && !!internalPr,
   };
 }
 
@@ -2604,6 +2712,8 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
       widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
       widgetAssignRateLimitPerHour: widgetProjects.widgetAssignRateLimitPerHour,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
+      widgetLiveCoderEnabled: widgetProjects.widgetLiveCoderEnabled,
     })
     .from(widgetProjects)
     .where(and(...conditions))
@@ -2628,6 +2738,8 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     widget_role_claim_name: project.widgetRoleClaimName,
     widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
     widgetChatAgentEntityId: project.widgetChatAgentEntityId,
+    widgetRolePermissions: project.widgetRolePermissions,
+    widgetLiveCoderEnabled: project.widgetLiveCoderEnabled,
   };
 }
 
@@ -2668,6 +2780,9 @@ export async function updateWidgetSettings(
     widgetAssignRateLimitPerHour?: number;
     // Chat-with-agent intake (camelCase per the widget-chat contract)
     widgetChatAgentEntityId?: string | null;
+    // Role→permissions RBAC map + live-coder master switch
+    widgetRolePermissions?: Record<string, string[]>;
+    widgetLiveCoderEnabled?: boolean;
   },
   opts?: WidgetLookup,
 ): Promise<UpdateWidgetSettingsResult> {
@@ -2848,6 +2963,17 @@ export async function updateWidgetSettings(
           ? settings.widgetChatAgentEntityId.trim()
           : null,
       }),
+      // RBAC: role→permissions map and live-coder master switch
+      ...(settings.widgetRolePermissions !== undefined && {
+        widgetRolePermissions: settings.widgetRolePermissions,
+        // Keep the legacy master switch in lock-step with the permission map:
+        // the orchestrator + creation guard gate on the column, and the new UI
+        // has no separate toggle. Placed AFTER the explicit widgetAgentAssignmentEnabled
+        // set above so the permission map (the source of truth) wins when both
+        // are somehow supplied.
+        widgetAgentAssignmentEnabled: roleMapGrantsAssignAgent(settings.widgetRolePermissions),
+      }),
+      ...(settings.widgetLiveCoderEnabled !== undefined && { widgetLiveCoderEnabled: settings.widgetLiveCoderEnabled }),
       updatedAt: new Date(),
     })
     .where(and(...projConds()));
@@ -3307,27 +3433,13 @@ export async function assignAgent(
     throw new WidgetAssignError('workspace_error', 502, res);
   }
 
-  // Audit row — best-effort; do not fail the request if this errors.
-  try {
-    await db.insert(workspaceTaskActivity).values({
-      taskId: ticketId,
-      serverId,
-      type: 'agent_assigned',
-      createdByType: 'external',
-      createdById: req.actor.widgetUserId,
-      createdByName: req.actor.name,
-      metadata: {
-        via: 'widget_triage',
-        widget_user_id: req.actor.widgetUserId,
-        external_user_id: req.actor.externalUserId,
-        agent_id: req.agentId,
-        command: req.command,
-        matched_roles: req.actor.matchedRoles,
-      },
-    });
-  } catch (err) {
-    console.warn('[WidgetService] audit row write failed:', err);
-  }
+  // The `agent_assigned` audit row is now written by the WORKSPACE inside the
+  // deferred tail of performWidgetTicketAssign (recordAssignmentActivity:true),
+  // carrying agentName (which the widget reads for assignedAgentName → the
+  // "Live session" affordance). Writing it here too would (a) duplicate the row
+  // and (b) be skipped entirely whenever this fetch timed out on a cold machine
+  // — the very failure that hid the Live session button. So the BE no longer
+  // writes it; the workspace's row lands regardless of this call's timeout.
 
   return { jobId: res.jobId };
 }
@@ -3511,4 +3623,54 @@ export async function syncWidgetExposedAgents(
   }
 
   return { upserted, removed };
+}
+
+// ============================================================================
+// Preview branch + server resolution (for PR-preview forwarding)
+// ============================================================================
+
+/**
+ * Resolve the linked PR branch for a widget ticket (for PR-preview forwarding).
+ *
+ * Reuses the same `deriveLinkedPr` helper that `getPublicTicketDetail` uses —
+ * no extra DB query pattern beyond what already exists. Returns `null` when:
+ *   - the project or ticket doesn't exist / isn't visible
+ *   - no `pr_linked` activity exists on the ticket
+ *   - the linked PR has no `repoBranch` value
+ */
+export async function getTicketPreviewBranch(
+  projectId: string,
+  ticketId: string,
+): Promise<string | null> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+
+  const [task] = await db
+    .select({ id: workspaceTasks.id })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+
+  if (!task) return null;
+
+  const activity = await WorkspaceTaskService.listActivity(task.id);
+  const internalPr = deriveLinkedPr(activity);
+  return internalPr?.repoBranch ?? null;
+}
+
+/**
+ * Resolve the workspace Server for a widget project.
+ *
+ * Extracted so callers (route handlers) don't need to query the DB directly,
+ * keeping the server resolution mockable in route-level tests.
+ */
+export async function getProjectServer(projectId: string) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+  return ServerService.getServer(project.serverId);
 }

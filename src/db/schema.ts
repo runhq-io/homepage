@@ -1394,6 +1394,12 @@ export const widgetProjects = pgTable('widget_projects', {
   // instruction layer the workspace stacks on top of the agent's own prompt.
   widgetChatAgentEntityId: text('widget_chat_agent_entity_id'),
   widgetChatInstructions: text('widget_chat_instructions'),
+  // Role→permissions RBAC map. Keys are JWT role names (or '*' for any
+  // authenticated user); values are arrays of WidgetPermission strings.
+  // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder"] }
+  widgetRolePermissions: jsonb('widget_role_permissions').$type<Record<string, string[]>>().notNull().default({}),
+  // Feature flag enabling the live-coder UI for this widget project.
+  widgetLiveCoderEnabled: boolean('widget_live_coder_enabled').notNull().default(false),
   // Origins (e.g. https://acme.com) where the widget is allowed to use
   // cookie-based RunHQ-member auto-recognition. Required when
   // autoRecognizeRunhqMembers is true; enforced at the CORS + auth layer.
@@ -1558,7 +1564,11 @@ export type WidgetChatEventPayload =
   // Agentless intake: appended once after the first user message when no
   // support agent is configured; the widget renders the "anything more?"
   // bubble + persistent [Submit Ticket] affordance off it.
-  | { kind: 'collect_prompt' };
+  | { kind: 'collect_prompt' }
+  // Live-coder forward rejected by injection guard. The reason string carries
+  // a machine-readable code ('injection_guard') so the widget can show a
+  // localized error without parsing human text.
+  | { kind: 'live_coder_rejected'; reason: string };
 
 /**
  * Attribution payload on role='team' rows (workspace-member replies from the
@@ -1603,7 +1613,7 @@ export const widgetChatMessages = pgTable('widget_chat_messages', {
   role: text('role').notNull().$type<'user' | 'agent' | 'team' | 'event'>(),
   content: text('content').notNull().default(''),
   payload: jsonb('payload').$type<WidgetChatMessagePayload | null>(),
-  turnId: uuid('turn_id'),
+  turnId: text('turn_id'),
   seq: integer('seq'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [

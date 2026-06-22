@@ -24,6 +24,7 @@ import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
 import { openPullRequestForReadyTask, registerGithubRoutes } from './github/githubRoutes';
 import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
+import { resolveGithubActingUser } from './github/resolveActingUser';
 import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
 import * as GithubInstallationsService from './services/GithubInstallationsService';
 import * as GithubProjectReposService from './services/GithubProjectReposService';
@@ -58,7 +59,7 @@ import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions, widgetProjects } from '../db/schema';
 import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
 import { serializeNotification } from '../notifications/serialize';
 import { getOrCreatePreferences } from '../notifications/gates';
@@ -74,6 +75,8 @@ import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
+import * as InjectionGuardService from './services/InjectionGuardService';
+import { forwardLiveMessage } from './services/LiveCoderForward';
 
 type BuildInfo = {
   gitSha?: string;
@@ -4394,6 +4397,35 @@ export function createHttpApp() {
     }
   });
 
+  // Rebuild a remote server's machine: tear down the current machine + reprovision
+  // a fresh one (volume reattached). The "Rebuild machine" button calls this, and
+  // it is the supported recovery for a wedged/destroyed machine.
+  app.post('/api/servers/:serverId/server/rebuild', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const result = await ServerService.rebuildRemoteServer(serverId, userId);
+
+      if (!result.success) {
+        return c.json({ error: result.error }, result.error === 'Access denied' ? 403 : 400);
+      }
+
+      return c.json({ success: true, status: 'provisioning' });
+    } catch (error) {
+      console.error('[HttpServer] Rebuild server error:', error);
+      return c.json({ error: 'Failed to rebuild server' }, 500);
+    }
+  });
+
   // Update a remote server's image to latest (owner-only)
   app.post('/api/servers/:serverId/server/update', async (c) => {
     try {
@@ -6001,6 +6033,113 @@ export function createHttpApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/chat/conversations/:id/live-message
+  //
+  // Staff-to-agent forward: a widget-authenticated staff member with the
+  // `live_coder` permission sends an instruction into the running job via the
+  // workspace Runtime Operator front door.
+  //
+  // Auth: widget auth (same as other /api/widget/chat/conversations/... routes).
+  // RBAC: requires permissions.has('live_coder') → 403 otherwise.
+  //
+  // Flow:
+  //   1. Persist the staff message (role='user') via sendLiveCoderMessage.
+  //   2. Screen + forward via forwardLiveMessage.
+  //   3. On 'flagged': append a rejection event row.
+  //   4. Return { status } to the client.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/chat/conversations/:id/live-message', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+
+    // RBAC gate: live_coder permission required.
+    if (!auth.permissions.has('live_coder')) {
+      return c.json({ error: 'live_coder_permission_required' }, 403);
+    }
+
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') {
+      return c.json({ error: 'content required' }, 400);
+    }
+
+    const conversationId = c.req.param('id');
+    const text = body.content;
+
+    try {
+      // Persist the staff message and resolve the job channel id.
+      const { message, jobChannelId, canonicalTaskId } = await WidgetChatService.sendLiveCoderMessage(
+        conversationId, auth.projectId, text,
+      );
+
+      // Resolve the server for HMAC forwarding.
+      const [wp] = await db
+        .select({ serverId: widgetProjects.serverId })
+        .from(widgetProjects)
+        .where(eq(widgetProjects.id, auth.projectId))
+        .limit(1);
+
+      const server = wp ? await ServerService.getServer(wp.serverId) : null;
+
+      // Build the default screen + sendToWorkspace deps.
+      const screenDep = async (t: string) =>
+        InjectionGuardService.checkTicket({ title: t, description: null });
+
+      const sendToWorkspaceDep = async (p: {
+        jobChannelId: string;
+        text: string;
+        actor: { externalUserId: string; name?: string | null };
+        conversationId: string;
+      }) => {
+        if (!server) throw new Error('no_server');
+        await ServerService.serverTokenFetch(server, '/internal/live-coder/message', {
+          jobChannelId: p.jobChannelId,
+          text: p.text,
+          actor: p.actor,
+          conversationId: p.conversationId,
+          // Stable key for the running coder job on the workspace — the coder
+          // runs in its own per-job channel, not this ticket's jobChannelId.
+          ...(canonicalTaskId ? { canonicalTaskId } : {}),
+        });
+        return { ok: true };
+      };
+
+      const actor = {
+        externalUserId: auth.widgetUserId ?? `runhq:${auth.runhqUserId ?? 'unknown'}`,
+        name: auth.displayName ?? null,
+      };
+
+      const result = await forwardLiveMessage(
+        {
+          conversationId,
+          projectId: auth.projectId,
+          widgetUserId: auth.widgetUserId ?? '',
+          jobChannelId: jobChannelId ?? '',
+          text,
+          actor,
+        },
+        { screen: screenDep, sendToWorkspace: sendToWorkspaceDep },
+      );
+
+      if (result.status === 'flagged') {
+        await WidgetChatService.appendLiveCoderRejectionEvent(
+          conversationId,
+          'injection_guard',
+        );
+      }
+
+      // Return the authoritative message row (same shape the SSE stream emits)
+      // so the widget client merges by server id instead of falling back to an
+      // optimistic `local-` echo. Without this the echo can't be deduped against
+      // the SSE-delivered row (which often arrives BEFORE this POST resolves,
+      // since the BE awaits the forward), and the staff message renders TWICE.
+      return c.json({ status: result.status, messageId: message.id, message: chatMessageDto(message) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
   // SSE stream of new messages. EventSource cannot set headers, so app-JWT
   // embeds pass ?token=<widget JWT> (shimmed into Authorization below);
   // runhq cookie auth works natively (withCredentials). Heartbeat comment
@@ -6089,7 +6228,7 @@ export function createHttpApp() {
   app.get('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId);
+    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId, auth.permissions);
     if (!detail) return c.json({ error: 'Ticket not found' }, 404);
     return c.json(detail);
   });
@@ -6118,7 +6257,7 @@ export function createHttpApp() {
     const widgetUserId = auth.widgetUserId;
 
     // Reject up-front if the viewer cannot see the ticket right now.
-    const initial = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId);
+    const initial = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId, auth.permissions);
     if (!initial) return c.json({ error: 'Ticket not found' }, 404);
 
     return streamSSE(c, async (stream) => {
@@ -6127,7 +6266,7 @@ export function createHttpApp() {
       let pending = false;
 
       const sendDetail = async (event: 'snapshot' | 'update') => {
-        const detail = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId);
+        const detail = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId, auth.permissions);
         // null => the viewer lost visibility (e.g. flipped to private). Skip.
         if (detail) await stream.writeSSE({ event, data: JSON.stringify(detail) });
       };
@@ -6207,6 +6346,12 @@ export function createHttpApp() {
             filename: inputFile.name || 'attachment',
             originalName: inputFile.name,
           });
+        }
+        // Opt-in attach_image RBAC: once a project grants the permission to any
+        // role, only users who hold it may attach. Skipped when no files were
+        // sent (a multipart submit without attachments is just a normal ticket).
+        if (files.length > 0 && !(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+          return c.json({ error: 'attach_image_permission_required' }, 403);
         }
         const result = await WidgetService.createTicketWithAttachments(
           auth.projectId,
@@ -6408,6 +6553,10 @@ export function createHttpApp() {
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
     if (limited) return limited;
+    // Opt-in attach_image RBAC — see POST /api/widget/tickets.
+    if (!(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
     try {
       const formData = await c.req.raw.formData();
       const file = formData.get('file');
@@ -6500,6 +6649,10 @@ export function createHttpApp() {
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
     if (limited) return limited;
+    // Opt-in attach_image RBAC — see POST /api/widget/tickets.
+    if (!(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
     try {
       const formData = await c.req.raw.formData();
       const file = formData.get('file');
@@ -6516,6 +6669,51 @@ export function createHttpApp() {
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
+  });
+
+  // POST /api/widget/tickets/:id/preview
+  //
+  // Live-preview bridge: a widget-authenticated staff member with the
+  // `live_coder` permission triggers (or polls) the PR preview for the given
+  // ticket. The workspace returns an async contract:
+  //   • preparing  — port not yet allocated; client should poll
+  //   • starting   — port allocated; publicUrl + token returned
+  //   • ready      — already running; publicUrl + token returned
+  //   • no_preview — no job/worktree for the linked branch
+  //
+  // Auth:  widget auth (same as other /api/widget/tickets/... routes).
+  // RBAC:  requires permissions.has('live_coder') → 403 otherwise.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/preview', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('live_coder')) return c.json({ error: 'forbidden' }, 403);
+
+    const branch = await WidgetService.getTicketPreviewBranch(auth.projectId, c.req.param('id'));
+    if (!branch) return c.json({ ok: false, reason: 'no_preview' }, 200);
+
+    // Resolve the project's workspace Server via WidgetService helper so the
+    // server lookup stays mockable in route-level tests (no direct DB access here).
+    const server = await WidgetService.getProjectServer(auth.projectId);
+    if (!server) return c.json({ ok: false, reason: 'unavailable' }, 200);
+
+    const resp = await ServerService.serverTokenFetch<{
+      ok: boolean;
+      publicUrl?: string | null;
+      token?: string | null;
+      status?: string;
+      reason?: string;
+    }>(server, '/internal/preview/start', { branch });
+
+    if (!resp.ok) {
+      return c.json({ ok: false, reason: resp.reason ?? 'unavailable' }, 200);
+    }
+    if (resp.publicUrl) {
+      // Port is allocated — return the decorated URL so the widget can open it.
+      return c.json({ ok: true, url: `${resp.publicUrl}?__preview_token=${resp.token}`, status: resp.status });
+    }
+    // Preview is still booting (no port yet). Client should poll.
+    return c.json({ ok: true, status: resp.status ?? 'preparing' });
   });
 
   // ==========================================================================
@@ -6726,6 +6924,8 @@ export function createHttpApp() {
       widgetRoleClaimName,
       widgetAssignRateLimitPerHour,
       widgetChatAgentEntityId,
+      widgetRolePermissions,
+      widgetLiveCoderEnabled,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const lookup = parseWidgetLookup(projectId);
@@ -6742,6 +6942,8 @@ export function createHttpApp() {
         widgetRoleClaimName,
         widgetAssignRateLimitPerHour,
         widgetChatAgentEntityId,
+        widgetRolePermissions,
+        widgetLiveCoderEnabled,
       }, lookup);
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {
@@ -7227,8 +7429,11 @@ export function createHttpApp() {
       // Identity for user-acting endpoints comes from the verified Bearer, not a
       // request field — a leaked workspace server token must not be usable to
       // impersonate another user (the container runs as root, so the token is
-      // reachable from a member's terminal).
-      authenticateUser: (bearer) => (bearer ? extractUserIdFromToken(bearer) : Promise.resolve(null)),
+      // reachable from a member's terminal). The Bearer the browser sends is its
+      // workspace server-session token (EdDSA), which the workspace forwards
+      // here; resolveGithubActingUser verifies that as well as a direct user
+      // session/OAuth token.
+      authenticateUser: resolveGithubActingUser,
       canAccessServer: (serverId, userId) => ServerService.canAccessServer(serverId, userId),
       listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
       listInstallationsForUser: GithubInstallationsService.listInstallationsForUser,
