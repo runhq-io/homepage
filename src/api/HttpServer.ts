@@ -6129,7 +6129,12 @@ export function createHttpApp() {
         );
       }
 
-      return c.json({ status: result.status, messageId: message.id });
+      // Return the authoritative message row (same shape the SSE stream emits)
+      // so the widget client merges by server id instead of falling back to an
+      // optimistic `local-` echo. Without this the echo can't be deduped against
+      // the SSE-delivered row (which often arrives BEFORE this POST resolves,
+      // since the BE awaits the forward), and the staff message renders TWICE.
+      return c.json({ status: result.status, messageId: message.id, message: chatMessageDto(message) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
