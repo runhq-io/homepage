@@ -6069,7 +6069,7 @@ export function createHttpApp() {
 
     try {
       // Persist the staff message and resolve the job channel id.
-      const { message, jobChannelId } = await WidgetChatService.sendLiveCoderMessage(
+      const { message, jobChannelId, canonicalTaskId } = await WidgetChatService.sendLiveCoderMessage(
         conversationId, auth.projectId, text,
       );
 
@@ -6098,6 +6098,9 @@ export function createHttpApp() {
           text: p.text,
           actor: p.actor,
           conversationId: p.conversationId,
+          // Stable key for the running coder job on the workspace — the coder
+          // runs in its own per-job channel, not this ticket's jobChannelId.
+          ...(canonicalTaskId ? { canonicalTaskId } : {}),
         });
         return { ok: true };
       };

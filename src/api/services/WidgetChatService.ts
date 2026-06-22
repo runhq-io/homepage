@@ -1101,7 +1101,7 @@ export async function sendLiveCoderMessage(
   conversationId: string,
   projectId: string,
   content: string,
-): Promise<{ message: ChatMessageRow; jobChannelId: string | null }> {
+): Promise<{ message: ChatMessageRow; jobChannelId: string | null; canonicalTaskId: string | null }> {
   if (!UUID_RE.test(conversationId)) {
     throw new WidgetService.WidgetError('conversation_not_found', 404);
   }
@@ -1149,7 +1149,10 @@ export async function sendLiveCoderMessage(
     .set({ updatedAt: new Date() })
     .where(eq(widgetChatConversations.id, conversationId));
 
-  return { message: message!, jobChannelId };
+  // The canonical task id is the stable key for the running coder job on the
+  // workspace (the coder runs in its own per-job channel, not this ticket's
+  // jobChannelId). conv.createdTaskId IS the canonical task id.
+  return { message: message!, jobChannelId, canonicalTaskId: conv.createdTaskId ?? null };
 }
 
 /**
