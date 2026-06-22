@@ -1113,9 +1113,13 @@ export async function sendLiveCoderMessage(
   if (!conv || conv.widgetProjectId !== projectId) {
     throw new WidgetService.WidgetError('conversation_not_found', 404);
   }
-  if (conv.status !== 'active') {
-    throw new WidgetService.WidgetError('conversation_closed', 409);
-  }
+  // NOTE: intentionally NOT gated on conv.status === 'active'. A live-coder
+  // message is a staff member steering the agent AFTER a ticket exists, and the
+  // originating intake conversation is closed the moment it produces that ticket
+  // (submit-ticket closes it server-side). The Live session reuses that same
+  // conversation, so requiring 'active' here rejected every live-coder message
+  // with conversation_closed (surfaced in the widget as "message limit reached").
+  // The intake turn-cap / closed guards live on the intake send path, not here.
 
   const text = content.trim();
   if (!text) throw new WidgetService.WidgetError('message_required', 400);
