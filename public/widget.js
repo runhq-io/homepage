@@ -4782,6 +4782,11 @@
   // an agent turn. Agentless threads short-circuit to false: nothing is
   // ever pending when no agent dispatches turns.
   function chatTurnStillPending() {
+    // A live-coder session is a steering channel, not a request/response turn:
+    // the coder works in its own terminal and narrates back asynchronously (if
+    // at all). Gating a "typing…" indicator on the staff's last message would
+    // leave it spinning forever, so never treat a live session as pending.
+    if (chatIsLiveSession) return false;
     if (!chatThreadHasAgent()) return false;
     for (var i = chatMessages.length - 1; i >= 0; i--) {
       var m = chatMessages[i];
@@ -5634,7 +5639,8 @@
         // of silently dropping the in-flight turn.
         chatTurnPending = !!(chatConversation
           && chatConversation.status === "active"
-          && chatConversation.pendingTurnId);
+          && chatConversation.pendingTurnId
+          && !chatIsLiveSession);
         chatSubmitInFlight = false;
         renderChatMessageList();
         renderChatFooter();
