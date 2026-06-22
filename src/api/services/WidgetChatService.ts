@@ -37,18 +37,19 @@ import { autoAssignTicket as autoAssignTicketDefault } from './WidgetAutoAssign'
  * the real, self-contained `autoAssignTicket` (resolves its own deps, never
  * throws). Callers MUST invoke as `void triggerAutoAssign(...)`.
  */
-let autoAssignImpl: (projectId: string, ticketId: string, widgetUserId: string | undefined) => void = (
-  projectId,
-  ticketId,
-  widgetUserId,
-) => {
-  void autoAssignTicketDefault(projectId, ticketId, widgetUserId);
+type AutoAssignHook = (
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string | undefined,
+  opts?: { creatorCanAssign?: boolean },
+) => void;
+
+let autoAssignImpl: AutoAssignHook = (projectId, ticketId, widgetUserId, opts) => {
+  void autoAssignTicketDefault(projectId, ticketId, widgetUserId, opts);
 };
 
 /** Test seam: override the auto-assign hook. Returns a restore function. */
-export function __setAutoAssignForTests(
-  fn: (projectId: string, ticketId: string, widgetUserId: string | undefined) => void,
-): () => void {
+export function __setAutoAssignForTests(fn: AutoAssignHook): () => void {
   const prev = autoAssignImpl;
   autoAssignImpl = fn;
   return () => {
@@ -56,8 +57,13 @@ export function __setAutoAssignForTests(
   };
 }
 
-function triggerAutoAssign(projectId: string, ticketId: string, widgetUserId: string | undefined): void {
-  autoAssignImpl(projectId, ticketId, widgetUserId);
+function triggerAutoAssign(
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string | undefined,
+  opts?: { creatorCanAssign?: boolean },
+): void {
+  autoAssignImpl(projectId, ticketId, widgetUserId, opts);
 }
 
 export type ChatConversationRow = typeof widgetChatConversations.$inferSelect;
@@ -681,6 +687,8 @@ export async function createTicketFromChat(
   projectId: string,
   widgetUserId: string,
   draft: { title?: string; description?: string },
+  /** Whether the reporter holds `assign_agent`; gates automatic assignment. */
+  creatorCanAssign = true,
 ): Promise<{ ticketId: string }> {
   const fresh = await requireWritableConversation(conversationId, projectId, widgetUserId);
   await requirePendingProposal(conversationId);
@@ -724,10 +732,10 @@ export async function createTicketFromChat(
   publish(resolvedEvent!);
 
   // Fire-and-forget auto-assign: the single server-side authority decides
-  // whether to start a coding agent (identity + injection guard + agent
-  // picker). Independent of the post-creation turn, which now only
-  // acknowledges/closes — it no longer assigns.
-  triggerAutoAssign(projectId, task.id, widgetUserId);
+  // whether to start a coding agent (identity + per-creator authorization +
+  // injection guard + agent picker). Independent of the post-creation turn,
+  // which now only acknowledges/closes — it no longer assigns.
+  triggerAutoAssign(projectId, task.id, widgetUserId, { creatorCanAssign });
 
   // Post-creation turn: computePendingProposal now derives
   // {created:true, ticketId} from the row just written.
@@ -779,6 +787,8 @@ export async function submitTicketFromConversation(
   conversationId: string,
   projectId: string,
   widgetUserId: string,
+  /** Whether the reporter holds `assign_agent`; gates automatic assignment. */
+  creatorCanAssign = true,
 ): Promise<{ ticketId: string }> {
   const conversation = await getConversationOwned(conversationId, projectId, widgetUserId);
   if (conversation.createdTaskId) {
@@ -838,7 +848,7 @@ export async function submitTicketFromConversation(
     .where(eq(widgetChatConversations.id, conversationId));
 
   // Fire-and-forget auto-assign (same authority as the agent-chat path).
-  triggerAutoAssign(projectId, task.id, widgetUserId);
+  triggerAutoAssign(projectId, task.id, widgetUserId, { creatorCanAssign });
 
   return { ticketId: task.id };
 }

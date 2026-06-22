@@ -44,6 +44,31 @@ describe('maybeAutoAssign', () => {
     expect(deps.recordOutcome).not.toHaveBeenCalled();
   });
 
+  it('does NOT auto-assign when the creator lacks assign_agent — skipped_unauthorized', async () => {
+    const deps = makeDeps();
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps, { creatorCanAssign: false });
+    expect(deps.guard).not.toHaveBeenCalled();
+    expect(deps.suggest).not.toHaveBeenCalled();
+    expect(deps.assign).not.toHaveBeenCalled();
+    expect(deps.recordOutcome).toHaveBeenCalledWith(
+      SERVER,
+      TICKET,
+      expect.objectContaining({ status: 'skipped_unauthorized' }),
+    );
+  });
+
+  it('auto-assigns when the creator holds assign_agent (creatorCanAssign: true)', async () => {
+    const deps = makeDeps();
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps, { creatorCanAssign: true });
+    expect(deps.assign).toHaveBeenCalledOnce();
+  });
+
+  it('preserves legacy behaviour and assigns when creatorCanAssign is omitted (undefined)', async () => {
+    const deps = makeDeps();
+    await maybeAutoAssign(PROJECT, TICKET, USER, deps);
+    expect(deps.assign).toHaveBeenCalledOnce();
+  });
+
   it('does nothing when agent assignment is disabled for the project', async () => {
     const deps = makeDeps({
       getProject: vi.fn().mockResolvedValue({ serverId: SERVER, agentAssignmentEnabled: false }),
