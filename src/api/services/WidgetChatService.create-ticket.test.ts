@@ -193,7 +193,21 @@ describe('createTicketFromChat auto-assign hook', () => {
       const { ticketId } = await WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
         title: 'Hook title', description: 'Hook description',
       });
-      expect(spy).toHaveBeenCalledWith(PROJECT_ID, ticketId, WIDGET_USER_ID);
+      expect(spy).toHaveBeenCalledWith(PROJECT_ID, ticketId, WIDGET_USER_ID, { creatorCanAssign: true });
+    } finally {
+      restore();
+    }
+  });
+
+  it('passes creatorCanAssign through to the auto-assign hook (unauthorized reporter)', async () => {
+    const spy = vi.fn();
+    const restore = WidgetChatService.__setAutoAssignForTests(spy);
+    try {
+      await seedProposal('tu_autoassign_unauth');
+      const { ticketId } = await WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
+        title: 'Hook title', description: 'Hook description',
+      }, false);
+      expect(spy).toHaveBeenCalledWith(PROJECT_ID, ticketId, WIDGET_USER_ID, { creatorCanAssign: false });
     } finally {
       restore();
     }

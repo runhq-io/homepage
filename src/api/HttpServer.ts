@@ -5994,6 +5994,7 @@ export function createHttpApp() {
       const result = await WidgetChatService.createTicketFromChat(
         c.req.param('id'), auth.projectId, auth.widgetUserId,
         { title: body.title, description: body.description },
+        auth.permissions.has('assign_agent'),
       );
       return c.json({ ticketId: result.ticketId });
     } catch (err) {
@@ -6014,6 +6015,7 @@ export function createHttpApp() {
     try {
       const result = await WidgetChatService.submitTicketFromConversation(
         c.req.param('id'), auth.projectId, auth.widgetUserId,
+        auth.permissions.has('assign_agent'),
       );
       return c.json({ ticketId: result.ticketId });
     } catch (err) {
@@ -6366,7 +6368,12 @@ export function createHttpApp() {
         );
         // WidgetService reviewed text + images before insert when project
         // auto-assignment is enabled, so avoid a duplicate guard call here.
-        void WidgetAutoAssign.autoAssignTicket(auth.projectId, result.ticket.id, auth.widgetUserId, { skipGuard: true });
+        // Only creators who themselves hold `assign_agent` trigger an automatic
+        // assignment; others' tickets wait for an authorized teammate.
+        void WidgetAutoAssign.autoAssignTicket(auth.projectId, result.ticket.id, auth.widgetUserId, {
+          skipGuard: true,
+          creatorCanAssign: auth.permissions.has('assign_agent'),
+        });
         return c.json(result, 201);
       }
 
@@ -6374,8 +6381,12 @@ export function createHttpApp() {
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
       // Fire-and-forget auto-assign: WidgetService already ran the creation-time
       // injection guard when project auto-assignment is enabled, so the
-      // orchestrator can skip its duplicate guard call here.
-      void WidgetAutoAssign.autoAssignTicket(auth.projectId, ticket.id, auth.widgetUserId, { skipGuard: true });
+      // orchestrator can skip its duplicate guard call here. Only creators who
+      // hold `assign_agent` trigger an automatic assignment.
+      void WidgetAutoAssign.autoAssignTicket(auth.projectId, ticket.id, auth.widgetUserId, {
+        skipGuard: true,
+        creatorCanAssign: auth.permissions.has('assign_agent'),
+      });
       return c.json({ ticket }, 201);
     } catch (err) {
       return widgetErrorResponse(c, err);
@@ -6487,6 +6498,53 @@ export function createHttpApp() {
       console.error('[widget] clarify-proceed finalize/assign failed:', err);
       // The override IS recorded; the assign tail can be retried later.
       return c.json({ clarification: { status: 'started' as const }, outcome: { status: 'failed' as const } });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/assign
+  //
+  // Manual triager assignment. A ticket filed by an UNAUTHORIZED reporter (one
+  // whose role lacks `assign_agent`) is created but never auto-assigned — it
+  // waits here. A teammate who DOES hold `assign_agent` reviews the ticket in
+  // the widget and clicks "Assign agent": this runs the same suggest → assign
+  // tail the auto-flow uses (dedup skipped — a human reviewed it). Idempotent:
+  // a ticket that already has an assigned agent is rejected so a second click
+  // can never spawn a duplicate job.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/assign', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    // Authorization: only users granted `assign_agent` may trigger assignment.
+    if (!auth.permissions.has('assign_agent')) {
+      return c.json({ error: 'assign_agent_permission_required' }, 403);
+    }
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'triager_assign');
+    if (limited) return limited;
+
+    const ticketId = c.req.param('id');
+    // Reuse the visibility-checked detail to confirm the ticket exists, is
+    // visible to this viewer, and is still assignable (not already assigned,
+    // not terminal). `canAssign` already encodes permission + state.
+    const detail = await WidgetService.getPublicTicketDetail(
+      auth.projectId, ticketId, auth.widgetUserId, auth.permissions,
+    );
+    if (!detail) return c.json({ error: 'ticket_not_found' }, 404);
+    if (detail.ticket.assignedAgentName) return c.json({ error: 'already_assigned' }, 409);
+    if (!detail.canAssign) return c.json({ error: 'not_assignable' }, 409);
+
+    try {
+      const outcome = await WidgetAutoAssign.finalizeAutoAssignTicket(
+        auth.projectId,
+        ticketId,
+        auth.widgetUserId,
+        { skipDedup: true },
+      );
+      return c.json({ outcome });
+    } catch (err) {
+      console.error('[widget] triager assign failed:', err);
+      return c.json({ outcome: { status: 'failed' as const } }, 502);
     }
   });
 

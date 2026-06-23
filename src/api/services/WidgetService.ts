@@ -269,6 +269,15 @@ export type PublicTicketDetail = {
    * Defaults to false for all other callers (no permissions passed).
    */
   canPreview: boolean;
+  /**
+   * Whether the viewer may manually assign a coding agent to this ticket — the
+   * widget shows the "Assign agent" button when true. True only when the viewer
+   * holds `assign_agent`, no agent is assigned yet (`assignedAgentName` is null),
+   * and the ticket is in an actionable (non-terminal) status. Defaults to false
+   * for callers that pass no permissions. The POST assign endpoint enforces the
+   * same authorization server-side — this flag is purely for showing/hiding UI.
+   */
+  canAssign: boolean;
 };
 
 type PublicAttachmentLike = {
@@ -1324,6 +1333,21 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     .limit(1);
   const chatConversationId = originConv?.id ?? null;
 
+  const assignedAgentName = lastAssign?.metadata && (lastAssign.metadata as any).agentName
+    ? String((lastAssign.metadata as any).agentName)
+    : null;
+
+  // A ticket is assignable only while it is still open work. Terminal statuses
+  // (shipped/closed) and the in-flight states already covered by an assigned
+  // agent must not show the manual "Assign agent" affordance.
+  const ASSIGNABLE_STATUSES: ReadonlySet<typeof task.status> = new Set([
+    'pending', 'planned', 'in_progress', 'needs_review',
+  ]);
+  const canAssign =
+    !!permissions?.has('assign_agent') &&
+    !assignedAgentName &&
+    ASSIGNABLE_STATUSES.has(task.status);
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
@@ -1331,9 +1355,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       createdByType: task.createdByType,
       externalUserId: ticketExternalUserId,
       commentsDisabled: task.commentsDisabled,
-      assignedAgentName: lastAssign?.metadata && (lastAssign.metadata as any).agentName
-        ? String((lastAssign.metadata as any).agentName)
-        : null,
+      assignedAgentName,
       lastTriager: lastAssign?.createdByType === 'external'
         ? { name: lastAssign.createdByName ?? null, at: lastAssign.createdAt.toISOString() }
         : null,
@@ -1355,6 +1377,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     linkedPr: internalPr ? { state: internalPr.state } : null,
     milestones,
     canPreview: !!permissions?.has('live_coder') && !!internalPr,
+    canAssign,
   };
 }
 

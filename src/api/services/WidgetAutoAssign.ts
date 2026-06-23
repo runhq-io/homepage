@@ -29,6 +29,7 @@ export type AutoAssignStatus =
   | 'skipped_no_agent'
   | 'skipped_duplicate'
   | 'skipped_anon'
+  | 'skipped_unauthorized'
   | 'failed';
 
 export interface AutoAssignOutcome {
@@ -115,6 +116,21 @@ export type AutoAssignOptions = {
    * duplicate model call before the rest of the assignment gates.
    */
   skipGuard?: boolean;
+  /**
+   * Whether the ticket's CREATOR is authorized to assign agents — i.e. their
+   * resolved widget permissions include `assign_agent`. When explicitly `false`,
+   * the ticket is created but NEVER auto-assigned: it is recorded
+   * `skipped_unauthorized` and left for an authorized teammate to assign by
+   * hand (the widget "Assign agent" button → POST /api/widget/tickets/:id/assign).
+   *
+   * The project-level `agentAssignmentEnabled` switch is true whenever ANY role
+   * holds `assign_agent`; this per-creator gate is what makes the permission
+   * matrix's role granularity actually bite — without it, granting the
+   * permission to a single role would still auto-assign every identified user's
+   * ticket. `undefined` (the default) preserves the legacy "identity alone
+   * authorizes" behaviour for internal callers and tests that don't supply it.
+   */
+  creatorCanAssign?: boolean;
 };
 
 /**
@@ -143,6 +159,15 @@ export async function maybeAutoAssign(
     // feedback but can never start an agent.
     if (!widgetUserId) {
       await deps.recordOutcome(serverId, ticketId, { status: 'skipped_anon' });
+      return;
+    }
+
+    // Layer 1b — per-creator authorization. An identified reporter whose role
+    // does NOT grant `assign_agent` can file a ticket but never auto-starts an
+    // agent. The ticket waits for an authorized teammate to assign it by hand.
+    // (Undefined means the caller opted out of this gate — legacy behaviour.)
+    if (opts.creatorCanAssign === false) {
+      await deps.recordOutcome(serverId, ticketId, { status: 'skipped_unauthorized' });
       return;
     }
 

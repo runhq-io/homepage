@@ -254,6 +254,7 @@
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
+  function assignTicketAgent(id)  { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/assign", { method: "POST" }); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
   function createTicketWithAttachments(data, files) {
     var fd = new FormData();
@@ -6191,6 +6192,66 @@
     // missed. Collect whichever apply into `staffActionEls` and emit them in
     // one accent-tinted bar below.
     var staffActionEls = [];
+
+    // Assign-agent affordance — staff-only (server sets data.canAssign true
+    // only when the viewer holds `assign_agent`, no agent is assigned yet, and
+    // the ticket is in an actionable status). This is the path for a ticket
+    // filed by an unauthorized reporter (never auto-assigned): an authorized
+    // teammate reviews it and clicks here. One click runs the server's
+    // suggest → assign tail; on success the detail re-fetches and this button
+    // disappears (the ticket now shows its assigned agent + Live session).
+    if (!loading && data.canAssign) {
+      var assignErrEl = h("span", {
+        className: "rw-assign-err",
+        style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+      }, "");
+      var assignBtn = h("button", {
+        className: "rw-staff-btn rw-staff-btn--primary",
+        type: "button",
+        title: "Assign a coding agent to this ticket",
+      }, [
+        h("span", { className: "rw-staff-btn-ic" }, "🤖"),
+        "Assign agent",
+      ]);
+      var assigning = false;
+      var resetAssignBtn = function () {
+        assigning = false;
+        assignBtn.disabled = false;
+        assignBtn.textContent = "Assign agent";
+      };
+      assignBtn.addEventListener("click", function () {
+        if (assigning) return;
+        assigning = true;
+        assignBtn.disabled = true;
+        assignBtn.textContent = "Assigning…";
+        assignErrEl.textContent = "";
+        assignTicketAgent(ticket.id).then(function (resp) {
+          var status = resp && resp.outcome && resp.outcome.status;
+          if (status === "assigned") {
+            // Re-fetch so the assigned agent + Live-session affordance render
+            // and this button disappears.
+            loadTicketDetail(ticket.id).then(function (freshData) {
+              if (view !== "detail") return;
+              renderDetailInto(card, freshData, false);
+            }).catch(resetAssignBtn);
+          } else {
+            // Reached the server but it could not assign (no matching agent or
+            // a transient failure). Surface it and let the user retry.
+            resetAssignBtn();
+            assignErrEl.textContent = status === "skipped_no_agent"
+              ? "No matching agent available"
+              : "Couldn't assign — try again";
+          }
+        }).catch(function (err) {
+          resetAssignBtn();
+          assignErrEl.textContent =
+            (err && err.status === 409) ? "Already assigned"
+            : (err && err.status === 403) ? "Not authorized"
+            : "Couldn't assign — try again";
+        });
+      });
+      staffActionEls.push(assignBtn, assignErrEl);
+    }
 
     // Live session affordance — staff-only (requires the `live_coder`
     // permission). Shown only when the ticket has an assigned agent (meaning
