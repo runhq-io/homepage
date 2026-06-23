@@ -71,7 +71,7 @@ export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 // Types
 // ============================================================================
 
-export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image';
+export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image' | 'preview';
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 /**
@@ -264,8 +264,10 @@ export type PublicTicketDetail = {
   milestones: Milestone[];
   /**
    * Whether the viewing staff member can launch an isolated preview for this
-   * ticket. True only when the viewer holds the `live_coder` permission AND
-   * the ticket has a linked PR/branch (i.e. `internalPr` is non-null).
+   * ticket. True only when the viewer holds the `preview` permission AND the
+   * ticket has a linked PR/branch (i.e. `internalPr` is non-null). `preview` is
+   * a permission distinct from `live_coder`/`assign_agent` — a staff member who
+   * can assign or use Live session does NOT implicitly get worktree preview.
    * Defaults to false for all other callers (no permissions passed).
    */
   canPreview: boolean;
@@ -1376,9 +1378,59 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     chatConversationId,
     linkedPr: internalPr ? { state: internalPr.state } : null,
     milestones,
-    canPreview: !!permissions?.has('live_coder') && !!internalPr,
+    canPreview: !!permissions?.has('preview') && !!internalPr,
     canAssign,
   };
+}
+
+/**
+ * Find-or-create the widget chat conversation that backs a ticket's Live
+ * session. Chat-originated tickets already have one (linked via createdTaskId);
+ * a ticket assigned directly (auto-assign or manual triager assign) has none,
+ * so staff couldn't open a Live session against the running coder even though
+ * the workspace relay can target it by canonical task id. This lazily creates a
+ * conversation linked to the ticket (the relay container — `sendLiveCoderMessage`
+ * resolves the coder from `createdTaskId`), reusing any existing one so repeated
+ * opens are idempotent.
+ *
+ * Returns null when the ticket isn't a widget task visible in this project.
+ * Caller MUST have already checked the `live_coder` permission.
+ */
+export async function ensureTicketLiveConversation(
+  widgetProjectId: string,
+  ticketId: string,
+  widgetUserId: string,
+): Promise<{ conversationId: string } | null> {
+  const project = await getWidgetProjectContext(widgetProjectId);
+  if (!project) return null;
+
+  // The ticket must be a live widget task scoped to this project's server/channel.
+  const [task] = await db
+    .select({ id: workspaceTasks.id })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+  if (!task) return null;
+
+  // Reuse an existing conversation linked to this ticket (chat-originated or a
+  // previously-created live session) so we never spawn duplicates.
+  const [existing] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, ticketId))
+    .limit(1);
+  if (existing) return { conversationId: existing.id };
+
+  const [created] = await db
+    .insert(widgetChatConversations)
+    .values({ widgetProjectId, widgetUserId, createdTaskId: ticketId })
+    .returning({ id: widgetChatConversations.id });
+  return { conversationId: created!.id };
 }
 
 async function resolveTicketVisibleToWidget(

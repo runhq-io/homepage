@@ -8,7 +8,7 @@
  * a pattern established by WidgetService.milestones-detail.test.ts.
  *
  * canPreview is true only when BOTH conditions hold:
- *   1. The viewer's permissions include 'live_coder'.
+ *   1. The viewer's permissions include 'preview'.
  *   2. The ticket has a valid pr_linked activity (internalPr is non-null).
  */
 import 'dotenv/config';
@@ -77,11 +77,11 @@ async function linkPr(taskId: string) {
 }
 
 describe('getPublicTicketDetail — canPreview field', () => {
-  it('canPreview is true when permissions has live_coder AND a linked PR exists', async () => {
+  it('canPreview is true when permissions has preview AND a linked PR exists', async () => {
     const id = await makeTask('Preview-eligible task');
     await linkPr(id);
     try {
-      const permissions = new Set<'live_coder'>(['live_coder']);
+      const permissions = new Set<'preview'>(['preview']);
       const detail = await getPublicTicketDetail(PROJECT_ID, id, undefined, permissions);
       expect(detail).not.toBeNull();
       expect(detail!.canPreview).toBe(true);
@@ -91,7 +91,7 @@ describe('getPublicTicketDetail — canPreview field', () => {
     }
   });
 
-  it('canPreview is false when permissions lacks live_coder even if a linked PR exists', async () => {
+  it('canPreview is false when permissions lacks preview even if a linked PR exists', async () => {
     const id = await makeTask('No-live-coder task');
     await linkPr(id);
     try {
@@ -118,10 +118,10 @@ describe('getPublicTicketDetail — canPreview field', () => {
     }
   });
 
-  it('canPreview is false when live_coder is granted but no linked PR exists', async () => {
+  it('canPreview is false when preview is granted but no linked PR exists', async () => {
     const id = await makeTask('No-PR task for preview');
     try {
-      const permissions = new Set<'live_coder'>(['live_coder']);
+      const permissions = new Set<'preview'>(['preview']);
       const detail = await getPublicTicketDetail(PROJECT_ID, id, undefined, permissions);
       expect(detail).not.toBeNull();
       expect(detail!.canPreview).toBe(false);

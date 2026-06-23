@@ -3,7 +3,7 @@
  *
  * Covers:
  *   • 401 when authenticateWidget returns null
- *   • 403 when the authenticated user lacks live_coder permission
+ *   • 403 when the authenticated user lacks preview permission
  *   • { ok:false, reason:'no_preview' } when the ticket has no linked branch
  *   • { ok:false, reason:'unavailable' } when no workspace server is found
  *   • { ok:true, url, status } when the workspace returns a ready/starting preview
@@ -58,18 +58,18 @@ const TICKET_ID = 'tkt-preview-00001';
 const BRANCH = 'feat/preview-branch';
 const SERVER = { id: 'srv-preview-1', serverUrl: 'http://ws.local', tokenHash: 'h' };
 
-/** Auth result with live_coder permission. */
+/** Auth result with preview permission. */
 const LIVE_CODER_AUTH = {
   projectId: 'proj-preview',
   projectSlug: 'proj-preview-slug',
   widgetUserId: 'wu-staff-1',
   authenticated: true,
-  permissions: new Set(['live_coder']),
-  matchedRoles: ['live_coder'],
+  permissions: new Set(['preview']),
+  matchedRoles: ['preview'],
   authSource: 'app' as const,
 };
 
-/** Auth result without live_coder permission. */
+/** Auth result without preview permission. */
 const VIEWER_AUTH = {
   ...LIVE_CODER_AUTH,
   permissions: new Set<string>(),
@@ -98,7 +98,7 @@ describe('POST /api/widget/tickets/:id/preview', () => {
     expect((await res.json()).error).toBe('Unauthorized');
   });
 
-  it('403 when authenticated user lacks live_coder permission', async () => {
+  it('403 when authenticated user lacks preview permission', async () => {
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(VIEWER_AUTH as any);
     vi.mocked(WidgetService.getTicketPreviewBranch).mockResolvedValue(BRANCH);
     const res = await makeApp().request(

@@ -255,6 +255,7 @@
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
   function assignTicketAgent(id)  { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/assign", { method: "POST" }); }
+  function ensureTicketLiveSession(id) { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/live-session", { method: "POST" }); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
   function createTicketWithAttachments(data, files) {
     var fd = new FormData();
@@ -6254,19 +6255,18 @@
     }
 
     // Live session affordance — staff-only (requires the `live_coder`
-    // permission). Shown only when the ticket has an assigned agent (meaning
-    // a job is running) AND a chatConversationId was returned by the server
-    // (meaning this ticket originated from a conversation whose job channel
-    // the staff message can be forwarded into).
+    // permission). Shown whenever the ticket has an assigned agent (a coder job
+    // is running), regardless of how the ticket was created. Chat-originated
+    // tickets carry a `chatConversationId`; a directly-assigned ticket has none,
+    // so we lazily create the relay conversation on click (the workspace relay
+    // targets the coder by canonical task id either way).
     //
     // Clicking "Live session" navigates to the chat view with the conversation
     // pre-seeded, reusing the existing chatApplyMessages + startChatTransport
     // SSE machinery (no duplicate transport).
     if (!loading
-        && data.chatConversationId
         && ticket.assignedAgentName
         && currentUser.permissions && currentUser.permissions.indexOf("live_coder") !== -1) {
-      var liveConvId = data.chatConversationId;
       var liveBtn = h("button", {
         className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
@@ -6275,8 +6275,31 @@
         h("span", { className: "rw-staff-btn-ic" }, "⚡"),
         "Live session",
       ]);
+      var liveOpening = false;
       liveBtn.addEventListener("click", function () {
-        openLiveSession(liveConvId, ticket);
+        if (liveOpening) return;
+        // Chat-originated ticket: the conversation already exists — open it.
+        if (data.chatConversationId) {
+          openLiveSession(data.chatConversationId, ticket);
+          return;
+        }
+        // Otherwise create/reuse a ticket-scoped conversation, then open it.
+        liveOpening = true;
+        liveBtn.disabled = true;
+        liveBtn.textContent = "Opening…";
+        ensureTicketLiveSession(ticket.id).then(function (resp) {
+          if (resp && resp.conversationId) {
+            openLiveSession(resp.conversationId, ticket);
+          } else {
+            liveOpening = false;
+            liveBtn.disabled = false;
+            liveBtn.textContent = "Live session";
+          }
+        }).catch(function () {
+          liveOpening = false;
+          liveBtn.disabled = false;
+          liveBtn.textContent = "Live session";
+        });
       });
       staffActionEls.push(liveBtn);
     }
