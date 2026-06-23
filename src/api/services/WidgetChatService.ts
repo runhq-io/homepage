@@ -263,6 +263,12 @@ async function findActiveConversation(
       eq(widgetChatConversations.widgetProjectId, projectId),
       eq(widgetChatConversations.widgetUserId, widgetUserId),
       eq(widgetChatConversations.status, 'active'),
+      // INTAKE conversations only. A conversation with createdTaskId set is a
+      // ticket's Live-session relay container (or a chat that already produced a
+      // ticket), NOT a general "Chat with Agent" intake — resuming it here would
+      // surface a coder's progress messages when the user just wanted a fresh
+      // chat. Those are reached explicitly via the ticket's Live session button.
+      isNull(widgetChatConversations.createdTaskId),
     ))
     .orderBy(desc(widgetChatConversations.createdAt))
     .limit(1);
