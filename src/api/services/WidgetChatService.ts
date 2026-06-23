@@ -186,6 +186,39 @@ export async function getConversationOwned(
   return conv;
 }
 
+/**
+ * Like getConversationOwned, but also lets a `live_coder` staff member read a
+ * ticket-linked conversation they don't own. The Live session relay container is
+ * created owned by ONE widget user (the reporter, or the staff member who opened
+ * it first), but ANY staff with `live_coder` must be able to read the running
+ * coder's progress for a ticket in their project — not just the owner. Reporter
+ * access (owner) is unchanged. Used by the live-session READ paths (message
+ * history + the events SSE); the reporter-action paths keep getConversationOwned.
+ */
+export async function getConversationForViewer(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetService.WidgetPermission>,
+): Promise<ChatConversationRow> {
+  if (!UUID_RE.test(conversationId)) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  const [conv] = await db
+    .select()
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!conv || conv.widgetProjectId !== projectId) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  // Owner always reads; a live_coder staff member reads any ticket-linked
+  // (Live session) conversation in their project.
+  if (conv.widgetUserId === widgetUserId) return conv;
+  if (conv.createdTaskId && permissions.has('live_coder')) return conv;
+  throw new WidgetService.WidgetError('conversation_not_found', 404);
+}
+
 /** Ownership + still-active gate for every mutating chat call. */
 async function requireWritableConversation(
   conversationId: string,
@@ -322,9 +355,12 @@ export async function listMessages(
   conversationId: string,
   projectId: string,
   widgetUserId: string,
+  permissions: ReadonlySet<WidgetService.WidgetPermission>,
   after?: string,
 ): Promise<ChatMessageRow[]> {
-  await getConversationOwned(conversationId, projectId, widgetUserId);
+  // Read access: the owner (reporter) OR a live_coder staff member viewing a
+  // ticket-linked Live session.
+  await getConversationForViewer(conversationId, projectId, widgetUserId, permissions);
   if (!after) return loadAllMessages(conversationId);
   if (!UUID_RE.test(after)) throw new WidgetService.WidgetError('invalid_cursor', 400);
   const [anchor] = await db

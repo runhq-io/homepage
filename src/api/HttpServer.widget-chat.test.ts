@@ -183,7 +183,7 @@ describe('POST /api/widget/chat/conversations/:id/create-ticket', () => {
     });
     expect(res.status).toBe(200);
     expect(WidgetChatService.createTicketFromChat).toHaveBeenCalledWith(
-      CONV.id, 'proj-1', 'wu-1', { title: 'T', description: 'D' },
+      CONV.id, 'proj-1', 'wu-1', { title: 'T', description: 'D' }, false,
     );
     expect((await res.json()).ticketId).toBe('tk-9');
   });
@@ -208,7 +208,7 @@ describe('POST /api/widget/chat/conversations/:id/submit-ticket', () => {
       method: 'POST',
     });
     expect(res.status).toBe(200);
-    expect(WidgetChatService.submitTicketFromConversation).toHaveBeenCalledWith(CONV.id, 'proj-1', 'wu-1');
+    expect(WidgetChatService.submitTicketFromConversation).toHaveBeenCalledWith(CONV.id, 'proj-1', 'wu-1', false);
     expect((await res.json()).ticketId).toBe('tk-7');
   });
 

@@ -3967,6 +3967,31 @@ export function createHttpApp() {
     }
   });
 
+  // Resolve (find-or-create) the Live-session conversation for a canonical task.
+  // Called by the workspace `runhq post-to-widget` path so a coder's outbound
+  // messages reach + persist in the ticket's conversation even when no staff
+  // Live session is open yet (the in-memory relay registry would otherwise drop
+  // them). Auth: X-Server-Token, scoped to the calling server's own tasks.
+  app.post('/api/internal/widget-chat/resolve-conversation', async (c) => {
+    try {
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+      const body = await c.req.json().catch(() => null) as { canonicalTaskId?: unknown } | null;
+      if (!body || typeof body.canonicalTaskId !== 'string') {
+        return c.json({ error: 'canonicalTaskId required' }, 400);
+      }
+      const result = await WidgetService.ensureLiveConversationForServerTask(server.id, body.canonicalTaskId);
+      if (!result) return c.json({ error: 'not_found' }, 404);
+      return c.json({ conversationId: result.conversationId });
+    } catch (err) {
+      console.error('[HttpServer] resolve-conversation error:', err);
+      return c.json({ error: 'resolve failed' }, 500);
+    }
+  });
+
   // Get server info for a server (called by client)
   app.get('/api/servers/:serverId/server', async (c) => {
     try {
@@ -5937,7 +5962,7 @@ export function createHttpApp() {
     const { auth } = gate;
     try {
       const messages = await WidgetChatService.listMessages(
-        c.req.param('id'), auth.projectId, auth.widgetUserId, c.req.query('after') || undefined,
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, c.req.query('after') || undefined,
       );
       return c.json({ messages: messages.map(chatMessageDto) });
     } catch (err) {
@@ -6164,13 +6189,14 @@ export function createHttpApp() {
     }
     const conversationId = c.req.param('id');
     try {
-      await WidgetChatService.getConversationOwned(conversationId, auth.projectId, auth.widgetUserId);
+      await WidgetChatService.getConversationForViewer(conversationId, auth.projectId, auth.widgetUserId, auth.permissions);
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
     const after = c.req.query('after') || undefined;
     const widgetUserId = auth.widgetUserId;
     const projectId = auth.projectId;
+    const permissions = auth.permissions;
 
     return streamSSE(c, async (stream) => {
       let open = true;
@@ -6183,7 +6209,7 @@ export function createHttpApp() {
       });
       if (after) {
         try {
-          const missed = await WidgetChatService.listMessages(conversationId, projectId, widgetUserId, after);
+          const missed = await WidgetChatService.listMessages(conversationId, projectId, widgetUserId, permissions, after);
           for (const m of missed) {
             await stream.writeSSE({ event: 'message', id: m.id, data: JSON.stringify(chatMessageDto(m)) });
           }

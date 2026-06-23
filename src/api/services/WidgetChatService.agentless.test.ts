@@ -114,7 +114,7 @@ describe('agentless conversations', () => {
     expect(prompts).toHaveLength(1);
 
     // Transcript order: the collect_prompt sits right after the first message.
-    const all = await WidgetChatService.listMessages(conversation.id, PROJECT_ID, WIDGET_USER_ID);
+    const all = await WidgetChatService.listMessages(conversation.id, PROJECT_ID, WIDGET_USER_ID, new Set());
     expect(all.map((m) => m.role)).toEqual(['user', 'event', 'user', 'user']);
   });
 
