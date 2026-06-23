@@ -2401,9 +2401,9 @@
       '  padding: 22px 4px 0;',
       '}',
       '.rw-detail-topbar {',
-      '  display: flex; align-items: center; justify-content: space-between;',
+      '  display: flex; align-items: center;',
       /* Right padding leaves room for the absolute-positioned shell
-         actions (theme + close) so the #refId never overlaps the X. */
+         actions (notifications + theme + close). */
       '  padding: 0 80px 10px 22px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '  flex: 0 0 auto;',
@@ -2488,9 +2488,7 @@
       '  color: var(--rw-fg); margin: 6px 0 12px;',
       '}',
 
-      /* Compact back-to-home control shared by the list + detail headers.
-         Quiet outline styling so it never competes with the accent-filled
-         "Back to activity" action sitting next to it in the detail topbar. */
+      /* Compact back-to-home control used by compose/list headers. */
       '.rw-home-btn {',
       '  display: inline-flex; align-items: center; gap: 6px;',
       '  padding: 5px 11px 5px 9px;',
@@ -4487,15 +4485,7 @@
         view = returnTo === "chat" ? "chat" : "list";
         renderPanelBody();
       });
-      // Home control opposite the existing "Back to activity" action. Back
-      // (←) means "up one level" (the list); Home jumps to the landing view
-      // — hence a house glyph, not a second left arrow. The detail topbar's
-      // space-between layout places them at opposite ends.
-      var detailHomeBtn = h("button", {
-        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
-      }, [Icons.home(13), h("span", null, t("home.back"))]);
-      detailHomeBtn.addEventListener("click", goHome);
-      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [backBtn, detailHomeBtn]));
+      detailFull.appendChild(h("div", { className: "rw-detail-topbar" }, [backBtn]));
 
       // Body uses the same renderDetailInto pipeline as the legacy modal,
       // just rendered inline. Loads detail data on demand.
