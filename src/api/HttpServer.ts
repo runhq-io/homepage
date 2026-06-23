@@ -6548,6 +6548,34 @@ export function createHttpApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/live-session
+  //
+  // Open (find-or-create) the Live-session conversation for a ticket. Lets staff
+  // with `live_coder` start a Live session against the running coder on ANY
+  // assigned ticket — not just chat-originated ones. Chat tickets already carry
+  // a conversation (returned as `chatConversationId` in the detail); a directly-
+  // assigned ticket has none, so this lazily creates the relay container linked
+  // to the ticket. Idempotent: repeated calls reuse the same conversation.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/live-session', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    if (!auth.permissions.has('live_coder')) {
+      return c.json({ error: 'live_coder_permission_required' }, 403);
+    }
+    try {
+      const result = await WidgetService.ensureTicketLiveConversation(
+        auth.projectId, c.req.param('id'), auth.widgetUserId,
+      );
+      if (!result) return c.json({ error: 'ticket_not_found' }, 404);
+      return c.json({ conversationId: result.conversationId });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
@@ -6732,7 +6760,7 @@ export function createHttpApp() {
   // POST /api/widget/tickets/:id/preview
   //
   // Live-preview bridge: a widget-authenticated staff member with the
-  // `live_coder` permission triggers (or polls) the PR preview for the given
+  // `preview` permission triggers (or polls) the PR preview for the given
   // ticket. The workspace returns an async contract:
   //   • preparing  — port not yet allocated; client should poll
   //   • starting   — port allocated; publicUrl + token returned
@@ -6740,12 +6768,14 @@ export function createHttpApp() {
   //   • no_preview — no job/worktree for the linked branch
   //
   // Auth:  widget auth (same as other /api/widget/tickets/... routes).
-  // RBAC:  requires permissions.has('live_coder') → 403 otherwise.
+  // RBAC:  requires permissions.has('preview') → 403 otherwise. This is a
+  //        permission distinct from `live_coder` — assigning agents or using
+  //        Live session does NOT grant worktree preview.
   // ---------------------------------------------------------------------------
   app.post('/api/widget/tickets/:id/preview', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    if (!auth.permissions.has('live_coder')) return c.json({ error: 'forbidden' }, 403);
+    if (!auth.permissions.has('preview')) return c.json({ error: 'forbidden' }, 403);
 
     const branch = await WidgetService.getTicketPreviewBranch(auth.projectId, c.req.param('id'));
     if (!branch) return c.json({ ok: false, reason: 'no_preview' }, 200);

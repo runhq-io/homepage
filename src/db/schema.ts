@@ -1396,7 +1396,7 @@ export const widgetProjects = pgTable('widget_projects', {
   widgetChatInstructions: text('widget_chat_instructions'),
   // Role→permissions RBAC map. Keys are JWT role names (or '*' for any
   // authenticated user); values are arrays of WidgetPermission strings.
-  // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder"] }
+  // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder","preview"] }
   widgetRolePermissions: jsonb('widget_role_permissions').$type<Record<string, string[]>>().notNull().default({}),
   // Feature flag enabling the live-coder UI for this widget project.
   widgetLiveCoderEnabled: boolean('widget_live_coder_enabled').notNull().default(false),
