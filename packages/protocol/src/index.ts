@@ -310,7 +310,11 @@ export type ActivityType =
   | 'task_unarchived'
   | 'task_deleted'
   | 'branch_pushed'
-  | 'pr_linked';
+  | 'pr_linked'
+  // Agent-authored, customer-facing ticket status update. The ONLY activity
+  // type whose free-form `content` is surfaced to external widget viewers; it
+  // is produced exclusively through the runhq-side screening gate.
+  | 'agent_update';
 
 export interface ActivityLogEntry {
   id: string;

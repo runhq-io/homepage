@@ -982,6 +982,7 @@
         ticketDeleted: "deleted the ticket",
         ticketArchived: "archived the ticket",
         ticketUnarchived: "restored the ticket",
+        agentUpdate: "posted an update",
       },
       chat: {
         back: "Back",
@@ -1195,6 +1196,7 @@
         ticketDeleted: "티켓을 삭제했습니다",
         ticketArchived: "티켓을 보관했습니다",
         ticketUnarchived: "티켓을 복원했습니다",
+        agentUpdate: "업데이트를 게시했습니다",
       },
       chat: {
         back: "뒤로",
@@ -6596,6 +6598,9 @@
     if (e.type === "ticket_deleted" || e.type === "task_deleted") return t("events.ticketDeleted");
     if (e.type === "task_archived")   return t("events.ticketArchived");
     if (e.type === "task_unarchived") return t("events.ticketUnarchived");
+    // Agent-authored, screened status update. Its `content` is plain-language
+    // prose already cleared by the runhq-side gate — render it as the message.
+    if (e.type === "agent_update")    return e.content || t("events.agentUpdate");
     // Safety net: humanize any unmapped type so a raw snake_case identifier
     // (e.g. "agent_assigned") never surfaces to a partner.
     return e.content || humanizeEventType(e.type);
