@@ -119,6 +119,23 @@ describe('getOrCreateActiveConversation', () => {
     expect(messages[0]!.content).toBe('m10');
     expect(messages[49]!.content).toBe('m59');
   });
+
+  it('does NOT resume a ticket-linked Live-session conversation — starts a fresh intake', async () => {
+    // A Live-session relay container: active + owned by the user, but createdTaskId
+    // is set. "Chat with Agent" must NOT surface it (that showed the coder's
+    // progress messages); it should create a fresh intake conversation instead.
+    const [linked] = await db.insert(widgetChatConversations).values({
+      widgetProjectId: PROJECT_ID, widgetUserId: OWNER_ID, createdTaskId: randomUUID(),
+    }).returning();
+    try {
+      const { conversation } = await WidgetChatService.getOrCreateActiveConversation(PROJECT_ID, OWNER_ID);
+      expect(conversation.id).not.toBe(linked!.id);
+      expect(conversation.createdTaskId).toBeNull();
+      await db.delete(widgetChatConversations).where(eq(widgetChatConversations.id, conversation.id));
+    } finally {
+      await db.delete(widgetChatConversations).where(eq(widgetChatConversations.id, linked!.id));
+    }
+  });
 });
 
 describe('getActiveConversation', () => {
