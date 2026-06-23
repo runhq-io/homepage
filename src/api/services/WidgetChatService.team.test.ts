@@ -101,7 +101,7 @@ describe('sendTeamReply', () => {
     expect(seen.map((r) => r.id)).toEqual([reply.id]);
 
     // Round-trips through the widget-side listing like any other message.
-    const all = await WidgetChatService.listMessages(conv.id, PROJECT_ID, WIDGET_USER_ID);
+    const all = await WidgetChatService.listMessages(conv.id, PROJECT_ID, WIDGET_USER_ID, new Set());
     expect(all.map((m) => m.role)).toEqual(['team']);
 
     // No turn machinery touched.

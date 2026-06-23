@@ -1433,6 +1433,68 @@ export async function ensureTicketLiveConversation(
   return { conversationId: created!.id };
 }
 
+/**
+ * Resolve (find-or-create) the Live-session conversation for a ticket given only
+ * the workspace's serverId + the canonical task id — the context a coder's
+ * `runhq post-to-widget` carries. This lets the coder's outbound messages reach
+ * (and PERSIST in) the ticket's conversation even when no staff member has opened
+ * a Live session yet, instead of being dropped because the in-memory relay
+ * registry was never populated by an inbound message.
+ *
+ * The conversation is created owned by the ticket's external reporter (the widget
+ * user who filed it); `live_coder` staff read it via getConversationForViewer.
+ * Returns null when the task isn't a widget ticket on this server, has no widget
+ * project, or has no external reporter to own the conversation.
+ */
+export async function ensureLiveConversationForServerTask(
+  serverId: string,
+  canonicalTaskId: string,
+): Promise<{ conversationId: string } | null> {
+  const [task] = await db
+    .select({
+      id: workspaceTasks.id,
+      channelId: workspaceTasks.workspaceChannelId,
+      createdByType: workspaceTasks.createdByType,
+      createdById: workspaceTasks.createdById,
+    })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, canonicalTaskId),
+      eq(workspaceTasks.serverId, serverId),
+      isNull(workspaceTasks.deletedAt),
+    ))
+    .limit(1);
+  if (!task) return null;
+
+  // Reuse an existing conversation (chat-originated or staff-opened) so a coder
+  // post and a staff Live session always converge on the SAME conversation.
+  const [existing] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, canonicalTaskId))
+    .limit(1);
+  if (existing) return { conversationId: existing.id };
+
+  // Need a widget project + an external reporter (a real widget_users row) to
+  // own a freshly-created conversation.
+  if (task.createdByType !== 'external' || !task.createdById) return null;
+  const [project] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      ...(task.channelId ? [eq(widgetProjects.channelId, task.channelId)] : []),
+    ))
+    .limit(1);
+  if (!project) return null;
+
+  const [created] = await db
+    .insert(widgetChatConversations)
+    .values({ widgetProjectId: project.id, widgetUserId: task.createdById, createdTaskId: canonicalTaskId })
+    .returning({ id: widgetChatConversations.id });
+  return { conversationId: created!.id };
+}
+
 async function resolveTicketVisibleToWidget(
   projectId: string,
   ticketId: string,

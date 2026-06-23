@@ -12,7 +12,7 @@ import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import { users, servers, workspaceTasks, widgetProjects, widgetUsers, widgetChatConversations } from '../../db/schema';
-import { ensureTicketLiveConversation } from './WidgetService';
+import { ensureTicketLiveConversation, ensureLiveConversationForServerTask } from './WidgetService';
 
 const RUN_HEX = randomBytes(6).toString('hex');
 const SERVER_ID = `ws_lc_test_${RUN_HEX}`;
@@ -61,9 +61,44 @@ async function makeTask(serverId: string) {
     title: 'Directly assigned ticket',
     visibility: 'public',
     status: 'in_progress',
+    // External reporter — the widget user who filed it (owner of any
+    // coder-created live conversation).
+    createdByType: 'external',
+    createdById: WIDGET_USER_ID,
   }).returning({ id: workspaceTasks.id });
   return task!.id;
 }
+
+describe('ensureLiveConversationForServerTask (coder post-to-widget resolution)', () => {
+  it('creates a conversation owned by the ticket reporter, idempotently', async () => {
+    const id = await makeTask(SERVER_ID);
+    try {
+      const first = await ensureLiveConversationForServerTask(SERVER_ID, id);
+      expect(first).not.toBeNull();
+      const [row] = await db
+        .select({ createdTaskId: widgetChatConversations.createdTaskId, widgetUserId: widgetChatConversations.widgetUserId })
+        .from(widgetChatConversations)
+        .where(eq(widgetChatConversations.id, first!.conversationId));
+      expect(row?.createdTaskId).toBe(id);
+      expect(row?.widgetUserId).toBe(WIDGET_USER_ID);
+
+      const second = await ensureLiveConversationForServerTask(SERVER_ID, id);
+      expect(second!.conversationId).toBe(first!.conversationId);
+    } finally {
+      await db.delete(widgetChatConversations).where(eq(widgetChatConversations.createdTaskId, id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
+    }
+  });
+
+  it('returns null for a task that is not on this server', async () => {
+    const id = await makeTask(OTHER_SERVER_ID);
+    try {
+      expect(await ensureLiveConversationForServerTask(SERVER_ID, id)).toBeNull();
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
+    }
+  });
+});
 
 describe('ensureTicketLiveConversation', () => {
   it('creates a conversation linked to the ticket and is idempotent', async () => {

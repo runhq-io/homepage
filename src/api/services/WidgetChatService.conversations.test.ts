@@ -152,7 +152,7 @@ describe('listMessages', () => {
     const conv = await seedConversation();
     await seedMessage(conv.id, 'a');
     await seedMessage(conv.id, 'b');
-    const rows = await WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID);
+    const rows = await WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, new Set());
     expect(rows.map((m) => m.content)).toEqual(['a', 'b']);
   });
 
@@ -161,22 +161,22 @@ describe('listMessages', () => {
     const a = await seedMessage(conv.id, 'a');
     await seedMessage(conv.id, 'b');
     const c = await seedMessage(conv.id, 'c');
-    const afterA = await WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, a.id);
+    const afterA = await WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, new Set(), a.id);
     expect(afterA.map((m) => m.content)).toEqual(['b', 'c']);
-    expect(await WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, c.id)).toEqual([]);
+    expect(await WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, new Set(), c.id)).toEqual([]);
   });
 
   it('400s invalid_cursor for unknown or malformed cursors', async () => {
     const conv = await seedConversation();
-    await expect(WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, randomUUID()))
+    await expect(WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, new Set(), randomUUID()))
       .rejects.toMatchObject({ code: 'invalid_cursor', status: 400 });
-    await expect(WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, 'nope'))
+    await expect(WidgetChatService.listMessages(conv.id, PROJECT_ID, OWNER_ID, new Set(), 'nope'))
       .rejects.toMatchObject({ code: 'invalid_cursor' });
   });
 
   it('enforces ownership before reading', async () => {
     const conv = await seedConversation();
-    await expect(WidgetChatService.listMessages(conv.id, PROJECT_ID, STRANGER_ID))
+    await expect(WidgetChatService.listMessages(conv.id, PROJECT_ID, STRANGER_ID, new Set()))
       .rejects.toMatchObject({ code: 'conversation_not_found' });
   });
 });
