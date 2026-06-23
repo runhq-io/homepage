@@ -333,6 +333,29 @@ function sanitizeActivityMetadata(
   return metadata;
 }
 
+/**
+ * Activity types whose free-form `content` is safe to surface to an external
+ * widget viewer. `content` is the unsafe channel — historically it was passed
+ * through verbatim, which leaked internals (e.g. `branch_pushed`'s content
+ * `Branch session/job_<id>/ticket-<id> pushed` exposes the internal job id and
+ * branch naming). We now surface `content` ONLY for:
+ *   - `comment`       — authored by humans/agents for the thread.
+ *   - `status_change` — system-generated transition text ("started a review").
+ *   - `agent_update`  — agent-authored prose that ALREADY passed the runhq-side
+ *                       screening gate (charset → scrub → LLM screen).
+ * Every other type (branch_pushed, pr_linked, agent_assigned, …) renders from
+ * its `type` + sanitized `metadata`; its raw `content` is dropped.
+ */
+const CONTENT_SURFACE_ALLOWLIST: ReadonlySet<string> = new Set([
+  'comment',
+  'status_change',
+  'agent_update',
+]);
+
+export function surfaceActivityContent(type: string, content: string | null | undefined): string | null {
+  return CONTENT_SURFACE_ALLOWLIST.has(type) ? (content ?? null) : null;
+}
+
 /** Internal (un-trimmed) PR info derived from the activity feed. */
 type InternalLinkedPr = { number: number; url: string; state: PrState; repoBranch: string | null };
 
@@ -1368,7 +1391,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     activity: activity.map((entry) => ({
       id: entry.id,
       type: entry.type,
-      content: entry.content ?? null,
+      content: surfaceActivityContent(entry.type, entry.content),
       createdByName: entry.createdByName ?? null,
       createdAt: entry.createdAt,
       metadata: sanitizeActivityMetadata(entry.type, entry.metadata ?? null),
