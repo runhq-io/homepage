@@ -257,6 +257,18 @@ export async function startClarification(
   const callModel = deps?.callModel ?? defaultCallModel;
   const loadIntakeQa = deps?.loadIntakeQa ?? defaultLoadIntakeQa;
 
+  // A ticket created from the support chat already went through clarification
+  // THERE (the chat agent asks what it needs before proposing the ticket). Such
+  // tickets carry a 'skipped' clarification row, written up-front by
+  // createTicketFromChat / submitTicketFromConversation. Respect it: the
+  // ticket-page clarifier must NEVER re-interrogate a chat-born ticket — whether
+  // the chat asked questions, the visitor gave full detail, or they asked us to
+  // just do it. (Direct/compose tickets have no such row and clarify normally.)
+  const priorClar = await getTicketClarification(input.taskId);
+  if (priorClar && priorClar.status === 'skipped') {
+    return { status: 'ready', clarificationId: priorClar.id };
+  }
+
   // One conversation, one interrogator: a ticket born from an agent chat
   // conversation was already fleshed out there — and the visitor explicitly
   // confirmed the drafted ticket. Re-asking on the ticket page after that

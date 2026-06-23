@@ -982,6 +982,7 @@
         ticketDeleted: "deleted the ticket",
         ticketArchived: "archived the ticket",
         ticketUnarchived: "restored the ticket",
+        agentDefault: "Agent",
         agentUpdate: "posted an update",
       },
       chat: {
@@ -1196,6 +1197,7 @@
         ticketDeleted: "티켓을 삭제했습니다",
         ticketArchived: "티켓을 보관했습니다",
         ticketUnarchived: "티켓을 복원했습니다",
+        agentDefault: "에이전트",
         agentUpdate: "업데이트를 게시했습니다",
       },
       chat: {
@@ -3907,6 +3909,32 @@
   function renderList() {
     // "top" stayed as the cache name even though the tab is now "Hot" — accept either.
     var tab = activeTab === "top" ? "hot" : activeTab;
+
+    // Lazy (re)load a stale cache. Filing a ticket nulls all three caches to
+    // force a refetch, but navigating BACK to the list (a re-render, not a full
+    // panel refresh) would otherwise render the "no tickets" empty state until a
+    // manual refresh — the bug where a freshly-filed ticket "disappears" from My
+    // Submissions. null = not loaded yet; [] = loaded and genuinely empty. Only
+    // My Submissions is gated on identity (anon users can't load it).
+    var cacheIsNull =
+      tab === "updates" ? updatesCache === null :
+      tab === "hot"     ? topTicketsCache === null :
+                          (myTicketsCache === null && config.isIdentified);
+    if (cacheIsNull) {
+      var reload =
+        tab === "updates" ? loadUpdates().then(function (d) { updatesCache = d.tickets || []; }) :
+        tab === "hot"     ? loadTopTickets().then(function (d) { topTicketsCache = d.tickets || []; }) :
+                            loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; });
+      reload.catch(function () {
+        if (tab === "updates") updatesCache = [];
+        else if (tab === "hot") topTicketsCache = [];
+        else myTicketsCache = [];
+      }).then(function () {
+        if (view === "list") renderPanelBody();
+      });
+      return renderLoading();
+    }
+
     var allItems =
       tab === "updates" ? (updatesCache || []) :
       tab === "hot"     ? (topTicketsCache || []) :
@@ -6117,6 +6145,32 @@
       if (stepper) scrollArea.appendChild(stepper);
     }
 
+    // "Reviewing" banner — shown while auto-assign is still processing a freshly
+    // filed ticket (server-computed data.processing). The clarifier / agent
+    // picker runs for a few seconds after creation; without this the ticket looks
+    // idle and the author may close it before the questions or assignment appear.
+    // The detail poll replaces it automatically the moment an outcome lands.
+    if (!loading && data.processing) {
+      scrollArea.appendChild(
+        h("div", {
+          style: {
+            display: "flex", alignItems: "center", gap: "12px",
+            margin: "0 0 14px", padding: "12px 14px", borderRadius: "10px",
+            background: "color-mix(in oklab, var(--rw-accent) 8%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--rw-accent) 22%, transparent)",
+          },
+        }, [
+          h("div", { className: "rw-spinner", style: { flex: "0 0 auto" } }),
+          h("div", null, [
+            h("div", { style: { fontWeight: "600", fontSize: "13px", color: "var(--rw-fg)" } },
+              "Reviewing your request…"),
+            h("div", { style: { fontSize: "12px", color: "var(--rw-muted)", marginTop: "2px", lineHeight: "1.4" } },
+              "This takes a few seconds. Any clarifying questions or an assigned agent will appear here automatically — no need to refresh or close."),
+          ]),
+        ]),
+      );
+    }
+
     // Clarification question cards — rendered when status=asking and the
     // viewer is the answerer (server only populates openQuestions for them).
     if (!loading && data.clarification && data.clarification.status === "asking"
@@ -6320,7 +6374,7 @@
 
       var previewErrEl = h("span", { className: "rw-preview-err", style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" } }, "");
       var previewBtn = h("button", {
-        className: "rw-staff-btn rw-staff-btn--ghost",
+        className: "rw-staff-btn rw-staff-btn--ghost rw-preview-btn",
         type: "button",
         title: "Open a live preview of this PR in a new tab",
       }, "▶ Preview");
@@ -6458,7 +6512,7 @@
         thread.appendChild(h("div", { className: "rw-empty-sub", style: { padding: "4px 0" } }, t("detail.noActivity")));
       } else {
         merged.forEach(function (node) {
-          if (node.kind === "event") thread.appendChild(renderEventNode(node.event));
+          if (node.kind === "event") thread.appendChild(renderEventNode(node.event, ticket));
           else thread.appendChild(renderCommentNode(node.comment));
         });
       }
@@ -6487,7 +6541,11 @@
         var threadChanged =
           (freshData.comments || []).length !== comments.length
           || (freshData.activity || []).length !== activity.length;
-        if (clarifChanged || milestonesChanged || statusChanged || threadChanged) {
+        // Also re-render when the "reviewing" state clears — for skip/failed
+        // outcomes nothing else changes (no clarification, same status), so the
+        // banner would otherwise linger forever.
+        var processingChanged = !!freshData.processing !== !!data.processing;
+        if (clarifChanged || milestonesChanged || statusChanged || threadChanged || processingChanged) {
           renderDetailInto(card, freshData, false);
         }
       });
@@ -6613,8 +6671,20 @@
     return String(type).replace(/_/g, " ").replace(/^./, function (c) { return c.toUpperCase(); });
   }
 
-  function renderEventNode(e) {
-    var actorName = e.createdByName || "Team";
+  function activityActorName(e, ticket) {
+    if (e.createdByName) return e.createdByName;
+    var m = e.metadata || {};
+    var isAgentActor = e.createdByType === "agent" || e.type === "agent_update";
+    if (isAgentActor) {
+      if (typeof m.agentName === "string" && m.agentName) return m.agentName;
+      if (ticket && ticket.assignedAgentName) return ticket.assignedAgentName;
+      return t("events.agentDefault");
+    }
+    return "Team";
+  }
+
+  function renderEventNode(e, ticket) {
+    var actorName = activityActorName(e, ticket);
     var textChildren = [h("b", null, actorName)];
     var m = e.metadata || {};
 

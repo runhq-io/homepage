@@ -13,6 +13,7 @@ let PROJECT_ID: string;
 let TASK_ID: string;
 let WIDGET_USER_ID: string;
 const EXTERNAL_USER_ID = `ext-${RUN_HEX}`;
+const BASE_CHANNEL_ID = `ch-${RUN_HEX}`;
 
 beforeAll(async () => {
   await db.insert(users).values({ id: USER_ID, email: `u+${RUN_HEX}@test.invalid`, name: 'U' }).onConflictDoNothing();
@@ -26,6 +27,7 @@ beforeAll(async () => {
     apiSecretHash: `secret-${RUN_HEX}`,
     enabled: true,
     isPublic: true,
+    channelId: BASE_CHANNEL_ID,
   }).returning({ id: widgetProjects.id });
   PROJECT_ID = project!.id;
 
@@ -37,7 +39,7 @@ beforeAll(async () => {
   WIDGET_USER_ID = widgetUser!.id;
 
   const [task] = await db.insert(workspaceTasks).values({
-    serverId: SERVER_ID, title: 'Test task', visibility: 'public', status: 'in_progress',
+    serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Test task', visibility: 'public', status: 'in_progress',
   }).returning({ id: workspaceTasks.id });
   TASK_ID = task!.id;
 
@@ -97,7 +99,7 @@ describe('getPublicTicketDetail comment payload', () => {
 
   it('exposes createdByType and externalUserId on the ticket itself when available', async () => {
     const [extTask] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Widget-authored', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Widget-authored', visibility: 'public',
       createdByType: 'external', createdById: WIDGET_USER_ID, createdByName: 'Alice',
     }).returning({ id: workspaceTasks.id });
     const detail = await getPublicTicketDetail(PROJECT_ID, extTask!.id, WIDGET_USER_ID);
@@ -141,11 +143,12 @@ describe('getPublicTicketDetail comment payload', () => {
       apiSecretHash: `secret-b-${RUN_HEX}`,
       enabled: true,
       isPublic: true,
+      channelId: `ch-b-${RUN_HEX}`,
     }).returning({ id: widgetProjects.id });
 
     try {
       const [taskB] = await db.insert(workspaceTasks).values({
-        serverId: SERVER_B, title: 'Cross-project task', visibility: 'public', status: 'in_progress',
+        serverId: SERVER_B, workspaceChannelId: `ch-b-${RUN_HEX}`, title: 'Cross-project task', visibility: 'public', status: 'in_progress',
       }).returning({ id: workspaceTasks.id });
 
       // Comment whose createdById references project A's widget user.
@@ -176,7 +179,7 @@ describe('getPublicTicketDetail comment payload', () => {
 
   it('exposes commentsDisabled on the ticket detail payload', async () => {
     const [disabled] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Has flag', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Has flag', visibility: 'public',
       createdByType: 'external', createdById: WIDGET_USER_ID, commentsDisabled: true,
     }).returning({ id: workspaceTasks.id });
     const detail = await getPublicTicketDetail(PROJECT_ID, disabled!.id, WIDGET_USER_ID);
@@ -184,10 +187,36 @@ describe('getPublicTicketDetail comment payload', () => {
     await db.delete(workspaceTasks).where(eq(workspaceTasks.id, disabled!.id));
   });
 
+  it('exposes createdByType on activity rows for actor-aware widget labels', async () => {
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Agent activity actor type', visibility: 'public',
+    }).returning({ id: workspaceTasks.id });
+
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID,
+      taskId: task!.id,
+      type: 'agent_update',
+      content: 'I am checking this now.',
+      createdByType: 'agent',
+      createdByName: null,
+    });
+
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
+      const update = detail!.activity.find((entry) => entry.type === 'agent_update');
+      expect(update?.createdByType).toBe('agent');
+      expect(update?.createdByName).toBeNull();
+      expect(update?.content).toBe('I am checking this now.');
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, task!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
+
   it('returns assignedAgentName + lastTriager from latest agent_assigned activity', async () => {
     // Insert an agent_assigned activity by an external user (triager scenario)
     const [extTask] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Assign agent test', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Assign agent test', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     await db.insert(workspaceTaskActivity).values({
@@ -213,7 +242,7 @@ describe('getPublicTicketDetail comment payload', () => {
   it('returns null lastTriager when latest assignment was done by an internal actor', async () => {
     // Insert an agent_assigned activity by a member (not external)
     const [intTask] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Internal assign test', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Internal assign test', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     await db.insert(workspaceTaskActivity).values({
@@ -273,7 +302,7 @@ describe('getPublicTicketDetail comment payload', () => {
 describe('getPublicTicketDetail linkedPr field', () => {
   it('returns linkedPr:null when no pr_linked activity exists', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'No PR task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'No PR task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
     try {
       const detail = await getPublicTicketDetail(PROJECT_ID, task!.id);
@@ -286,7 +315,7 @@ describe('getPublicTicketDetail linkedPr field', () => {
 
   it('returns linkedPr populated when a pr_linked activity exists', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'PR linked task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'PR linked task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     await db.insert(workspaceTaskActivity).values({
@@ -317,7 +346,7 @@ describe('getPublicTicketDetail linkedPr field', () => {
 
   it('returns the most recent pr_linked activity when multiple exist', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Two PRs task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Two PRs task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     // Insert older activity first, then newer (DB default createdAt = now(), but ordering matters)
@@ -350,7 +379,7 @@ describe('getPublicTicketDetail linkedPr field', () => {
 
   it('returns linkedPr:null when pr_linked metadata is malformed (number missing)', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Malformed PR task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Malformed PR task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     await db.insert(workspaceTaskActivity).values({
@@ -381,7 +410,7 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('returns clarification:null when no clarification exists for the ticket', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'No-clarif task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'No-clarif task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
     try {
       const detail = await getPublicTicketDetail(PROJECT_ID, task!.id, WIDGET_USER_ID);
@@ -394,7 +423,7 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('exposes clarification.id so the widget can POST /clarify-answer', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Clarif id exposure task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Clarif id exposure task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     const [widgetUserZ] = await db.insert(widgetUsers).values({
@@ -432,7 +461,7 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('exposes status+round+openQuestions(2) to the clarification answerer when status=asking', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Clarif asking task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Clarif asking task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     // widgetUser B is the answerer — different from the existing WIDGET_USER_ID fixture
@@ -481,7 +510,7 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('returns status+round but openQuestions=[] for a different widget user (non-answerer)', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Clarif non-owner task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Clarif non-owner task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     const [widgetUserC] = await db.insert(widgetUsers).values({
@@ -523,7 +552,7 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('returns openQuestions=[] for the answerer when status is not asking (e.g. ready)', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Clarif ready task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Clarif ready task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     const [widgetUserD] = await db.insert(widgetUsers).values({
@@ -569,7 +598,7 @@ describe('getPublicTicketDetail clarification field', () => {
     // must never receive openQuestions — question cards must not leak to
     // unauthenticated callers.
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Clarif anon task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Clarif anon task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     const [widgetUserE] = await db.insert(widgetUsers).values({
@@ -611,12 +640,12 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('exposes clarification.duplicateOf when status=duplicate and duplicate_of_task_id is set', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Dup task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Dup task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     // Create a reference task to serve as the "existing duplicate"
     const [refTask] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Original issue', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Original issue', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     const [widgetUserF] = await db.insert(widgetUsers).values({
@@ -653,7 +682,7 @@ describe('getPublicTicketDetail clarification field', () => {
 
   it('clarification.duplicateOf is null when status is not duplicate', async () => {
     const [task] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID, title: 'Non-dup task', visibility: 'public',
+      serverId: SERVER_ID, workspaceChannelId: BASE_CHANNEL_ID, title: 'Non-dup task', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
 
     const [widgetUserG] = await db.insert(widgetUsers).values({

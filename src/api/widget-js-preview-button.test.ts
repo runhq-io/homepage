@@ -512,3 +512,36 @@ describe('widget.js — Preview button in ticket detail', () => {
     expect(previewFetches).toHaveLength(1);
   });
 });
+
+describe('widget.js — ticket activity actor labels', () => {
+  it('uses the assigned agent name for nameless agent-authored activity rows', () => {
+    const { hooks } = loadWidget(async () => jsonOk({}));
+    expect(hooks.renderDetailInto).toBeDefined();
+
+    const card = makeNode('div');
+    hooks.renderDetailInto!(
+      card,
+      makeDetail({
+        ticket: {
+          ...makeDetail().ticket,
+          assignedAgentName: 'Codex Coder',
+        },
+        activity: [{
+          id: 'act-agent-started',
+          type: 'comment',
+          content: 'Coder session started',
+          createdByType: 'agent',
+          createdByName: null,
+          createdAt: new Date().toISOString(),
+          metadata: null,
+        }],
+      }),
+      false,
+    );
+
+    const text = card._text();
+    expect(text).toContain('Codex Coder');
+    expect(text).toContain('Coder session started');
+    expect(text).not.toContain('Team');
+  });
+});

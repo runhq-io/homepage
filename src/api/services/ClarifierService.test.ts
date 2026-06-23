@@ -153,6 +153,33 @@ describe('startClarification', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Chat-born tickets: a pre-existing 'skipped' clarification (written by
+  // createTicketFromChat) suppresses the ticket-page clarifier entirely — the
+  // support chat already handled clarification, so we never re-ask.
+  // -------------------------------------------------------------------------
+  it('returns ready WITHOUT calling the model when a chat-born skipped clarification exists', async () => {
+    const taskId = await makeTask('Test ticket – widget functionality check', 'just a quick check');
+    const [skipped] = await db.insert(widgetClarifications).values({
+      taskId, serverId: SERVER_ID, widgetUserId: WIDGET_USER_ID,
+      agentId: 'widget_chat', command: 'widget_chat', status: 'skipped',
+    }).returning({ id: widgetClarifications.id });
+
+    const stub: CallModel = vi.fn().mockResolvedValue(
+      JSON.stringify({ ready: false, questions: [{ prompt: 'Should never be asked' }] }),
+    );
+
+    const result = await startClarification(
+      { serverId: SERVER_ID, taskId, widgetUserId: WIDGET_USER_ID, agentId: 'agent-skip', command: '', ticket: { title: 'Test ticket', description: 'just a quick check' } },
+      { callModel: stub },
+    );
+
+    expect(result.status).toBe('ready');
+    expect(result.clarificationId).toBe(skipped!.id);
+    // The chat already clarified — the model must never be consulted.
+    expect(stub).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
   // Test 2: startClarification → ready immediately
   // -------------------------------------------------------------------------
   it('returns status:ready and sets clarification row to ready when model says ready:true', async () => {

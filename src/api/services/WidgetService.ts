@@ -217,6 +217,7 @@ export type PublicTicketDetail = {
     id: string;
     type: string;
     content?: string | null;
+    createdByType?: CanonicalTaskActorType | null;
     createdByName?: string | null;
     createdAt: string;
     metadata?: Record<string, unknown> | null;
@@ -275,11 +276,22 @@ export type PublicTicketDetail = {
    * Whether the viewer may manually assign a coding agent to this ticket — the
    * widget shows the "Assign agent" button when true. True only when the viewer
    * holds `assign_agent`, no agent is assigned yet (`assignedAgentName` is null),
-   * and the ticket is in an actionable (non-terminal) status. Defaults to false
-   * for callers that pass no permissions. The POST assign endpoint enforces the
-   * same authorization server-side — this flag is purely for showing/hiding UI.
+   * the ticket is in an actionable (non-terminal) status, AND the system is not
+   * already handling assignment — i.e. no open clarification card (questions /
+   * duplicate) and auto-assign is not still reviewing (`processing`). Defaults to
+   * false for callers that pass no permissions. The POST assign endpoint enforces
+   * the same authorization server-side — this flag is purely for showing/hiding UI.
    */
   canAssign: boolean;
+  /**
+   * True while the freshly-filed ticket is still being reviewed by auto-assign
+   * (the clarifier/agent picker runs server-side for a few seconds after
+   * creation). Lets the widget show a "reviewing your request" state instead of
+   * a silent, seemingly-idle ticket — the author might otherwise close it before
+   * the clarifying questions / assignment appear. Goes false the moment an
+   * outcome is recorded (questions, assignment, or a skip).
+   */
+  processing: boolean;
 };
 
 type PublicAttachmentLike = {
@@ -1362,15 +1374,35 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     ? String((lastAssign.metadata as any).agentName)
     : null;
 
+  // Auto-assign records an outcome on metadata.autoAssign only when it FINISHES
+  // (assigned / needs_clarification / skipped_* / failed). Until then — for a
+  // freshly-filed ticket on an assignment-enabled project, with no clarification
+  // row and no agent yet — it is still being reviewed (the clarifier model call
+  // takes a few seconds). Surface that so the widget can show a "reviewing"
+  // state rather than a silent ticket the author may close prematurely.
+  const autoAssignRecorded = !!(task.metadata && (task.metadata as Record<string, unknown>).autoAssign);
+  const processing =
+    project.widgetAgentAssignmentEnabled &&
+    !autoAssignRecorded &&
+    task.status === 'pending' &&
+    !clar &&
+    !assignedAgentName;
+
   // A ticket is assignable only while it is still open work. Terminal statuses
   // (shipped/closed) and the in-flight states already covered by an assigned
-  // agent must not show the manual "Assign agent" affordance.
+  // agent must not show the manual "Assign agent" affordance. We ALSO hide it
+  // while the system is already handling assignment — an open clarification card
+  // (questions pending / duplicate notice) or auto-assign still reviewing — so
+  // the manual control doesn't clutter or compete with that flow.
   const ASSIGNABLE_STATUSES: ReadonlySet<typeof task.status> = new Set([
     'pending', 'planned', 'in_progress', 'needs_review',
   ]);
+  const clarificationActive = clar?.status === 'asking' || clar?.status === 'duplicate';
   const canAssign =
     !!permissions?.has('assign_agent') &&
     !assignedAgentName &&
+    !processing &&
+    !clarificationActive &&
     ASSIGNABLE_STATUSES.has(task.status);
 
   return {
@@ -1392,6 +1424,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       id: entry.id,
       type: entry.type,
       content: surfaceActivityContent(entry.type, entry.content),
+      createdByType: entry.createdByType ?? null,
       createdByName: entry.createdByName ?? null,
       createdAt: entry.createdAt,
       metadata: sanitizeActivityMetadata(entry.type, entry.metadata ?? null),
@@ -1403,6 +1436,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     milestones,
     canPreview: !!permissions?.has('preview') && !!internalPr,
     canAssign,
+    processing,
   };
 }
 
