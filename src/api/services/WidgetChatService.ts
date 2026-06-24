@@ -73,6 +73,7 @@ export type { WidgetChatEventPayload };
 /** Events the workspace reports back for a turn. seq orders them; turn_done completes the turn. */
 export type TurnEventInput =
   | { seq: number; kind: 'agent_message'; text?: unknown }
+  | { seq: number; kind: 'team_message'; text?: unknown }
   | { seq: number; kind: 'proposal'; title?: unknown; description?: unknown; toolUseId?: unknown }
   | { seq: number; kind: 'ticket_link'; ticketId?: unknown }
   | { seq: number; kind: 'assigned'; ticketId?: unknown; agentEntityId?: unknown }
@@ -1267,11 +1268,21 @@ export async function ingestTurnEvents(
       continue;
     }
 
-    let row: { role: 'agent' | 'event'; content: string; payload: WidgetChatEventPayload | null } | null = null;
+    let row: { role: 'agent' | 'team' | 'event'; content: string; payload: WidgetChatEventPayload | null } | null = null;
     switch (ev.kind) {
       case 'agent_message': {
         if (typeof ev.text === 'string' && ev.text.length > 0) {
           row = { role: 'agent', content: ev.text, payload: null };
+        }
+        break;
+      }
+      case 'team_message': {
+        // A workspace member's live-chat message mirrored OUT to the widget live
+        // session. Persisted as a `team` row so the external viewer sees what the
+        // team said (the live session mirrors the workspace live chat). Not part
+        // of the agent's turn transcript (buildTranscript excludes role='team').
+        if (typeof ev.text === 'string' && ev.text.length > 0) {
+          row = { role: 'team', content: ev.text, payload: null };
         }
         break;
       }

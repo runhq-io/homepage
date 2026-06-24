@@ -122,6 +122,30 @@ describe('ingestTurnEvents', () => {
     expect(await messages()).toHaveLength(2);
   });
 
+  it('persists a team_message as a role=team row and publishes it (live chat → live session mirror)', async () => {
+    const seen: string[] = [];
+    const unsubscribe = WidgetChatService.subscribeToConversation(CONV_ID, (row) => seen.push(row.role));
+    const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'team_message', text: 'Pushed a fix — can you re-test?' }],
+    });
+    unsubscribe();
+    expect(result).toEqual({ inserted: 1, turnDone: false });
+    expect(seen).toEqual(['team']);
+    const rows = await messages();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ role: 'team', content: 'Pushed a fix — can you re-test?', turnId: TURN_ID });
+  });
+
+  it('drops an empty team_message (no text)', async () => {
+    const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'team_message' }],
+    });
+    expect(result).toEqual({ inserted: 0, turnDone: false });
+    expect(await messages()).toHaveLength(0);
+  });
+
   it('enriches ticket_link from the synced task store and drops unknown ticket ids', async () => {
     const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
       conversationId: CONV_ID, turnId: TURN_ID,
