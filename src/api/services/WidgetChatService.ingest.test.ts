@@ -137,6 +137,29 @@ describe('ingestTurnEvents', () => {
     expect(rows[0]).toMatchObject({ role: 'team', content: 'Pushed a fix — can you re-test?', turnId: TURN_ID });
   });
 
+  it('per-message turn ids: same seq + different turn ids both persist; same turn id dedups (mirror convergence contract)', async () => {
+    // The live-coder mirror sends each message as its own turn id `lc:<originId>`
+    // with seq 0. The global (turn_id, seq) unique index must therefore NOT
+    // collide two distinct messages that happen to share seq 0 — and MUST dedup
+    // a re-sent message with the same turn id. This is what makes the mirror
+    // provably convergent (idempotent + collision-free) instead of silently
+    // dropping messages the way the old constant-turnId + resettable-seq did.
+    const a = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: 'lc:msgA', events: [{ seq: 0, kind: 'agent_message', text: 'first' }],
+    });
+    const b = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: 'lc:msgB', events: [{ seq: 0, kind: 'agent_message', text: 'second' }],
+    });
+    const dup = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: 'lc:msgA', events: [{ seq: 0, kind: 'agent_message', text: 'first' }],
+    });
+    expect(a).toEqual({ inserted: 1, turnDone: false });
+    expect(b).toEqual({ inserted: 1, turnDone: false }); // same seq 0, different turn id → NOT a collision
+    expect(dup).toEqual({ inserted: 0, turnDone: false }); // same turn id → idempotent dedup
+    const rows = await messages();
+    expect(rows.map((r) => r.content).sort()).toEqual(['first', 'second']);
+  });
+
   it('drops an empty team_message (no text)', async () => {
     const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
       conversationId: CONV_ID, turnId: TURN_ID,
