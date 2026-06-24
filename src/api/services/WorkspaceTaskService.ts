@@ -40,6 +40,7 @@ type CreateWorkspaceTaskInput = {
   createdById?: string | null;
   createdByName?: string | null;
   commentsDisabled?: boolean;
+  useWorktree?: boolean;
   type?: CanonicalTaskType;
   schedule?: string | null;
   scheduledAt?: number | null;
@@ -154,6 +155,7 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     createdById: row.createdById,
     createdByName: row.createdByName,
     commentsDisabled: row.commentsDisabled,
+    useWorktree: row.useWorktree,
     type: row.taskType as CanonicalTaskType,
     schedule: row.schedule,
     scheduledAt: row.scheduledAt ?? null,
@@ -453,6 +455,7 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
       createdById: input.createdById ?? null,
       createdByName: input.createdByName ?? null,
       commentsDisabled: input.commentsDisabled ?? false,
+      useWorktree: input.useWorktree ?? false,
       taskType: input.type ?? 'regular',
       schedule: input.schedule ?? null,
       scheduledAt: input.scheduledAt ?? null,

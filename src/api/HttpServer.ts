@@ -5005,6 +5005,7 @@ export function createHttpApp() {
     'scheduledAt',
     'timezone',
     'commentsDisabled',
+    'useWorktree',
   ] as const;
 
   // Fields a server member is allowed to update on a task. archivedAt and

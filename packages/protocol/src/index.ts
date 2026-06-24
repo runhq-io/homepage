@@ -368,6 +368,8 @@ export interface CanonicalTask {
   createdById?: string | null;
   createdByName?: string | null;
   commentsDisabled: boolean;
+  /** When true, this task's coding job runs in an isolated git worktree+branch. */
+  useWorktree?: boolean;
   type: CanonicalTaskType;
   schedule?: string | null;
   scheduledAt?: number | null;
