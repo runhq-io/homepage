@@ -1206,6 +1206,7 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   createdById: text('created_by_id'),
   createdByName: text('created_by_name'),
   commentsDisabled: boolean('comments_disabled').notNull().default(false),
+  useWorktree: boolean('use_worktree').notNull().default(false),
   taskType: text('task_type').notNull().$type<'regular' | 'delayed' | 'scheduled'>().default('regular'),
   schedule: text('schedule'),
   scheduledAt: bigint('scheduled_at', { mode: 'number' }),
