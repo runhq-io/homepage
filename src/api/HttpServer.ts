@@ -43,6 +43,8 @@ import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimit
 import * as WidgetChatService from './services/WidgetChatService';
 import { subscribeToTicket } from './services/WidgetTicketEvents';
 import { streamSSE } from 'hono/streaming';
+import { setCookie } from 'hono/cookie';
+import { RW_SESSION_COOKIE, rwSessionCookieOptions } from './services/WidgetCookieAuth';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -6998,6 +7000,19 @@ export function createHttpApp() {
     const [user] = await db.select({ name: users.name }).from(users).where(eq(users.id, userId)).limit(1);
     const result = await WidgetService.generateUserTokenBySecret(FEEDBACK_WIDGET_SECRET, userId, user?.name || undefined);
     if (!result) return c.json({ error: 'Feedback widget not enabled' }, 404);
+
+    // Mint the rw_session cookie so the feedback widget — embedded by the
+    // RunHQ console itself — can authenticate via the RunHQ-member cookie path
+    // (authenticateWidget Mode 0) instead of the role-less bearer path. This is
+    // the only login surface the SPA's token flow (returnToken:true) leaves
+    // without an rw_session cookie. We mint a fresh session JWT rather than
+    // reuse the incoming bearer because the bearer may be an opaque OAuth token
+    // (mobile), which verifyRwSession can't validate. The /api/widget/ CORS
+    // envelope already echoes the allowlisted origin + Allow-Credentials, so
+    // the browser stores and later sends this cookie cross-subdomain.
+    const sessionToken = await createToken(userId);
+    setCookie(c, RW_SESSION_COOKIE, sessionToken, rwSessionCookieOptions());
+
     return c.json({ success: true, data: result });
   });
 

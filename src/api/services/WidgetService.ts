@@ -2762,6 +2762,7 @@ export async function generateUserTokenBySecret(
       apiKey: widgetProjects.apiKey,
       apiSecretHash: widgetProjects.apiSecretHash,
       enabled: widgetProjects.enabled,
+      slug: widgetProjects.slug,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.apiKey, fingerprint), eq(widgetProjects.enabled, true)))
@@ -2776,7 +2777,12 @@ export async function generateUserTokenBySecret(
     userName,
   });
 
-  return { token };
+  // `slug` lets the embedding host (e.g. the RunHQ console itself) initialise
+  // the widget with `project` + `useCookieAuth`, so a signed-in workspace
+  // member is recognised via the rw_session cookie path (Mode 0) and receives
+  // their RBAC roles (`staff`/`team_member`) — the bearer token alone carries
+  // no roles by design.
+  return { token, slug: project.slug };
 }
 
 export async function getWidgetIntegration(serverId: string, lookup?: WidgetLookup) {

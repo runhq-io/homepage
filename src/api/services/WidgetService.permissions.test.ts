@@ -160,6 +160,14 @@ describe('generateUserTokenBySecret — mint-time workspace roles', () => {
     expect(decodeClaims(result!.token).runhq_roles).toBeUndefined();
   });
 
+  it('returns the project slug so the host can opt into cookie auth', async () => {
+    // The embedding host (e.g. the RunHQ console) needs the slug to init the
+    // widget with `project` + `useCookieAuth`, routing signed-in members
+    // through the rw_session cookie path that grants their RBAC roles.
+    const result = await generateUserTokenBySecret(MT_SECRET, OWNER_ID, 'MT Owner');
+    expect(result!.slug).toBe(`perm-mt-${MT_RUN_HEX}`);
+  });
+
   it('the owner token round-trips through authenticateWidget to assign_agent (wildcard grant)', async () => {
     const result = await generateUserTokenBySecret(MT_SECRET, OWNER_ID, 'MT Owner');
     const auth = await authenticateWidget(makeReq({ Authorization: `Bearer ${result!.token}` }));
