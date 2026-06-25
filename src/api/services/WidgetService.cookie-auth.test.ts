@@ -23,9 +23,11 @@ const OTHER_ORIGIN = 'https://malicious.test';
 let PROJECT_ENABLED_ID: string;
 let PROJECT_DISABLED_ID: string;
 let PROJECT_RBAC_ID: string;
+let PROJECT_STAFF_ID: string;
 const PROJECT_ENABLED_SLUG = `enabled-${RUN_HEX}`;
 const PROJECT_DISABLED_SLUG = `disabled-${RUN_HEX}`;
 const PROJECT_RBAC_SLUG = `rbac-${RUN_HEX}`;
+const PROJECT_STAFF_SLUG = `staff-${RUN_HEX}`;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
@@ -131,15 +133,35 @@ beforeAll(async () => {
     widgetRolePermissions: { team_member: ['assign_agent', 'live_coder'], '*': ['attach_image'] },
   }).returning({ id: widgetProjects.id });
   PROJECT_RBAC_ID = rbac.id;
+
+  // Staff-convention project: configures permissions under the `staff` role —
+  // the label the widget settings UI suggests. Workspace admins must map onto
+  // it automatically via the cookie-auth synthetic payload.
+  const [staff] = await db.insert(widgetProjects).values({
+    serverId: SERVER_ID,
+    name: `Staff ${RUN_HEX}`,
+    slug: PROJECT_STAFF_SLUG,
+    apiKey: `skey-${RUN_HEX}`,
+    apiSecretHash: `ssecret-${RUN_HEX}`,
+    channelId: `ch_ca_s_${RUN_HEX}`,
+    enabled: true,
+    autoRecognizeRunhqMembers: true,
+    allowedOrigins: [ALLOWED_ORIGIN],
+    widgetRoleClaimName: 'runhq_roles',
+    widgetRolePermissions: { staff: ['assign_agent', 'live_coder', 'preview'] },
+  }).returning({ id: widgetProjects.id });
+  PROJECT_STAFF_ID = staff.id;
 });
 
 afterAll(async () => {
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_ENABLED_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_DISABLED_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_RBAC_ID));
+  await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_STAFF_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_ENABLED_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_DISABLED_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_RBAC_ID));
+  await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_STAFF_ID));
   await db.delete(serverMembers).where(eq(serverMembers.serverId, SERVER_ID));
   await db.delete(servers).where(eq(servers.id, SERVER_ID));
   await db.delete(users).where(eq(users.id, ADMIN_USER_ID));
@@ -381,6 +403,56 @@ describe('authenticateWidget — Mode 0 RBAC: cookie-auth routes through deriveP
     expect(auth!.authSource).toBe('runhq');
     // No team_member role → only the '*' wildcard grants attach_image
     expect(new Set(auth!.permissions)).toEqual(new Set(['attach_image']));
+    expect(auth!.matchedRoles).toEqual([]);
+  });
+});
+
+describe('authenticateWidget — Mode 0 RBAC: admins map onto the `staff` role', () => {
+  // A project that configures permissions under the `staff` role (the label the
+  // widget settings UI suggests) must grant them to workspace admins/owners on
+  // the cookie-auth path — the synthetic payload now emits `staff`.
+
+  it('grants staff-mapped permissions to a workspace admin', async () => {
+    const { token } = await makeRwSession(ADMIN_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_STAFF_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(auth!.authSource).toBe('runhq');
+    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'preview']));
+    expect(auth!.matchedRoles).toContain('staff');
+  });
+
+  it('grants staff-mapped permissions to the workspace owner (is_admin=false)', async () => {
+    const { token } = await makeRwSession(OWNER_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_STAFF_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'preview']));
+    expect(auth!.matchedRoles).toContain('staff');
+  });
+
+  it('non-admin member does NOT get the staff role', async () => {
+    const { token } = await makeRwSession(MEMBER_USER_ID);
+    const req = buildReq({
+      cookieHeader: `rw_session=${token}`,
+      origin: ALLOWED_ORIGIN,
+      slug: PROJECT_STAFF_SLUG,
+      method: 'GET',
+    });
+    const auth = await authenticateWidget(req);
+    expect(auth).not.toBeNull();
+    expect(auth!.authSource).toBe('runhq');
+    expect(Array.from(auth!.permissions)).toEqual([]);
     expect(auth!.matchedRoles).toEqual([]);
   });
 });

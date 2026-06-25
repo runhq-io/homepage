@@ -623,6 +623,26 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
 
 /**
+ * Synthetic widget roles granted to a RunHQ workspace owner/admin on the
+ * cookie-auth path (Mode 0). These are injected into a synthetic JWT payload
+ * and resolved through {@link derivePermissions} against the project's
+ * `widgetRolePermissions` map — so a workspace admin who opens the widget while
+ * signed into RunHQ automatically receives whatever the project maps these
+ * roles to (e.g. `live_coder`, `assign_agent`, `preview`).
+ *
+ * Both labels are emitted because two naming conventions exist in the wild and
+ * a project may have configured either:
+ *   - `staff`       — the role name the widget settings UI suggests/seeds and
+ *     the one used throughout its copy ("prefer a specific staff role").
+ *   - `team_member` — the legacy label the Task-1 migration wrote for
+ *     pre-existing projects that had the old assignment flag enabled.
+ *
+ * A role with no entry in the project's map contributes nothing (it isn't even
+ * added to `matchedRoles`), so emitting both is safe and never over-grants.
+ */
+const RUNHQ_ADMIN_WIDGET_ROLES: readonly string[] = ['staff', 'team_member'];
+
+/**
  * Owner-or-admin check on a server_members row. Owner rows carry
  * role='owner' with is_admin=false — is_admin is the workspace-derived
  * mirror, set only for workspace-PROMOTED admins. Same shape as
@@ -821,14 +841,15 @@ export async function authenticateWidget(
           }
 
           // Spec §2.2: route through derivePermissions using a synthetic JWT
-          // payload. Workspace owners/admins map to the `team_member` role;
-          // non-admin members map to no roles. This means admins get whatever
-          // the project maps `team_member` to, plus any `'*'` wildcard grants —
-          // exactly consistent with the JWT path.
+          // payload. Workspace owners/admins map to the staff roles
+          // (see RUNHQ_ADMIN_WIDGET_ROLES); non-admin members map to no roles.
+          // This means admins get whatever the project maps `staff`/`team_member`
+          // to, plus any `'*'` wildcard grants — exactly consistent with the
+          // JWT path.
           const isAdmin = isOwnerOrAdmin(membership);
           const claimName = project.widgetRoleClaimName || 'runhq_roles';
           const syntheticPayload: jose.JWTPayload = {
-            [claimName]: isAdmin ? ['team_member'] : [],
+            [claimName]: isAdmin ? [...RUNHQ_ADMIN_WIDGET_ROLES] : [],
           };
           const { permissions, matchedRoles } = derivePermissions(project, syntheticPayload);
 
