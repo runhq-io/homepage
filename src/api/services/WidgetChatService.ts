@@ -76,6 +76,7 @@ export type TurnEventInput =
   | { seq: number; kind: 'team_message'; text?: unknown }
   | { seq: number; kind: 'proposal'; title?: unknown; description?: unknown; toolUseId?: unknown }
   | { seq: number; kind: 'ticket_link'; ticketId?: unknown }
+  | { seq: number; kind: 'search_performed'; query?: unknown; resultText?: unknown }
   | { seq: number; kind: 'assigned'; ticketId?: unknown; agentEntityId?: unknown }
   | { seq: number; kind: 'turn_error'; message?: unknown }
   | { seq: number; kind: 'turn_done' };
@@ -1319,6 +1320,17 @@ export async function ingestTurnEvents(
           role: 'event', content: '',
           payload: { kind: 'ticket_link', ticketId: ev.ticketId, title: task.title, status: task.status },
         };
+        break;
+      }
+      case 'search_performed': {
+        // Model-memory trace of a search_tickets call. Stored as an event row;
+        // buildTranscript passes it back to the workspace, which reconstructs
+        // the tool exchange so the agent does not re-search every turn. Both
+        // fields required (a malformed trace is dropped, not stored empty).
+        if (typeof ev.query === 'string' && ev.query.length > 0
+          && typeof ev.resultText === 'string' && ev.resultText.length > 0) {
+          row = { role: 'event', content: '', payload: { kind: 'search_performed', query: ev.query, resultText: ev.resultText } };
+        }
         break;
       }
       case 'assigned': {

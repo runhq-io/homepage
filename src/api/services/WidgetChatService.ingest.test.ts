@@ -185,6 +185,21 @@ describe('ingestTurnEvents', () => {
     expect(rows[0]!.payload).toEqual({ kind: 'ticket_link', ticketId: TASK_ID, title: 'Linked task', status: 'pending' });
   });
 
+  it('persists a search_performed trace verbatim, and drops one missing query or resultText', async () => {
+    const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [
+        { seq: 0, kind: 'search_performed', query: 'login loop', resultText: 'Found 1 existing ticket(s): Login loop' },
+        { seq: 1, kind: 'search_performed', query: 'no result text' }, // missing resultText → dropped
+        { seq: 2, kind: 'search_performed', resultText: 'no query' }, // missing query → dropped
+      ],
+    });
+    expect(res.inserted).toBe(1);
+    const rows = await messages();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.payload).toEqual({ kind: 'search_performed', query: 'login loop', resultText: 'Found 1 existing ticket(s): Login loop' });
+  });
+
   it('resolves assigned agent names from the exposed-agents mirror (null when unmirrored)', async () => {
     const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
       conversationId: CONV_ID, turnId: TURN_ID,

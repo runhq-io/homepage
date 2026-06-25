@@ -1559,6 +1559,12 @@ export type WidgetChatEventPayload =
   | { kind: 'proposal'; title: string; description: string; toolUseId: string }
   | { kind: 'proposal_resolved'; created: boolean; ticketId?: string }
   | { kind: 'ticket_link'; ticketId: string; title: string; status: string }
+  // The model-visible trace of a search_tickets call (query + the tool result
+  // text). render-only for the widget; the WORKSPACE reconstructs the
+  // search_tickets tool exchange from it each turn so the disposable agent loop
+  // remembers it already searched and does not re-run the deflection search
+  // (re-showing the same cards) on every visitor message.
+  | { kind: 'search_performed'; query: string; resultText: string }
   | { kind: 'assigned'; ticketId: string; agentEntityId: string; agentName: string | null }
   | { kind: 'system_notice'; code: string; text: string }
   | { kind: 'force_proposal_requested' }
