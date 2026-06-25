@@ -6255,16 +6255,16 @@
       var assignBtn = h("button", {
         className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
-        title: "Assign a coding agent to this ticket",
+        title: "Assign an agent to work on this task",
       }, [
         h("span", { className: "rw-staff-btn-ic" }, "🤖"),
-        "Assign agent",
+        "Assign an agent",
       ]);
       var assigning = false;
       var resetAssignBtn = function () {
         assigning = false;
         assignBtn.disabled = false;
-        assignBtn.textContent = "Assign agent";
+        assignBtn.textContent = "Assign an agent";
       };
       assignBtn.addEventListener("click", function () {
         if (assigning) return;
@@ -6297,7 +6297,17 @@
             : "Couldn't assign — try again";
         });
       });
-      staffActionEls.push(assignBtn, assignErrEl);
+      // Non-technical framing: state plainly that nobody is on the task yet,
+      // with the action right beneath it — clearer than a bare "Assign agent"
+      // button for a non-technical teammate reviewing the ticket.
+      var assignNote = h("div", {
+        className: "rw-staff-assign-note",
+        style: { fontSize: "12.5px", lineHeight: "1.4", color: "var(--rw-muted, #6b7280)" },
+      }, "No agent is working on this task yet.");
+      var assignGroup = h("div", {
+        style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
+      }, [assignNote, assignBtn, assignErrEl]);
+      staffActionEls.push(assignGroup);
     }
 
     // Live session affordance — staff-only (requires the `live_coder`
