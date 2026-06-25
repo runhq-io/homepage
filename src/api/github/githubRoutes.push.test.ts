@@ -108,6 +108,28 @@ describe('handlePushEvent', () => {
     });
     await expect(handlePushEvent(push(), deps)).resolves.toBe('error');
   });
+
+  it('skips while an OPEN PR is still linked to the branch', async () => {
+    const deps = makeDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        { id: 'act_pr', type: 'pr_linked', metadata: { number: 5, state: 'open', repoBranch: 'session/job_x/ticket-abcd1234' } },
+      ]),
+    });
+    expect(await handlePushEvent(push(), deps)).toBe('skipped');
+    expect(deps.addActivity).not.toHaveBeenCalled();
+  });
+
+  it('records a re-push after the branch\'s PR was merged (terminal PRs do not block continued work)', async () => {
+    const deps = makeDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        { id: 'act_pr', type: 'pr_linked', metadata: { number: 5, state: 'merged', repoBranch: 'session/job_x/ticket-abcd1234' } },
+      ]),
+    });
+    expect(await handlePushEvent(push(), deps)).toBe('recorded');
+    expect(deps.addActivity).toHaveBeenCalledWith('ws_1', 'task_1', expect.objectContaining({
+      type: 'branch_pushed',
+    }));
+  });
 });
 
 function makeReadyDeps(over: Partial<ReadyPullRequestDeps> = {}): ReadyPullRequestDeps {
@@ -169,5 +191,37 @@ describe('openPullRequestForReadyTask', () => {
     const deps = makeReadyDeps({ listActivity: vi.fn().mockResolvedValue([]) });
     expect(await openPullRequestForReadyTask('ws_1', 'task_1', deps)).toBe('skipped');
     expect(deps.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('skips while an OPEN PR is already linked (no duplicate PR)', async () => {
+    const deps = makeReadyDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        {
+          id: 'act_branch',
+          type: 'branch_pushed',
+          metadata: { shortId: 'abcd1234', owner: 'acme', repo: 'app', branch: 'session/job_x/ticket-abcd1234', base: 'main', installationId: 42, title: 'Add dark mode' },
+        },
+        { id: 'act_pr', type: 'pr_linked', metadata: { number: 9, state: 'open', repoBranch: 'session/job_x/ticket-abcd1234' } },
+      ]),
+    });
+    expect(await openPullRequestForReadyTask('ws_1', 'task_1', deps)).toBe('skipped');
+    expect(deps.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('opens a fresh PR for continued work after the previous PR was merged', async () => {
+    const deps = makeReadyDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        {
+          id: 'act_branch',
+          type: 'branch_pushed',
+          metadata: { shortId: 'abcd1234', owner: 'acme', repo: 'app', branch: 'session/job_x/ticket-abcd1234', base: 'main', installationId: 42, title: 'Add dark mode' },
+        },
+        { id: 'act_pr', type: 'pr_linked', metadata: { number: 9, state: 'merged', repoBranch: 'session/job_x/ticket-abcd1234' } },
+      ]),
+    });
+    expect(await openPullRequestForReadyTask('ws_1', 'task_1', deps)).toBe('opened');
+    expect(deps.createPullRequest).toHaveBeenCalledWith(42, 'acme', 'app', expect.objectContaining({
+      head: 'session/job_x/ticket-abcd1234',
+    }));
   });
 });

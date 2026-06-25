@@ -307,9 +307,10 @@ export async function handlePushEvent(
   const projectId = repoCandidates.find((r) => r.serverId === task.serverId)?.projectId ?? null;
 
   const activity = await deps.listActivity(task.taskId);
-  const alreadyLinked = activity.some((a) =>
-    a.type === 'pr_linked' && a.metadata?.repoBranch === branch);
-  if (alreadyLinked) return 'skipped';
+  // Only an *open* PR means this branch is already covered. A merged/closed PR
+  // is terminal — continued work on the branch needs a fresh PR later — so it
+  // must not block re-recording the branch.
+  if (hasOpenLinkedPr(activity, branch)) return 'skipped';
 
   const alreadyRecorded = activity.some((a) =>
     a.type === 'branch_pushed' && a.metadata?.branch === branch);
@@ -368,6 +369,31 @@ function readNumber(value: unknown): number | null {
 }
 
 /**
+ * A ticket branch has a *live* pull request only while its latest `pr_linked`
+ * activity is still open. Merged and closed PRs are terminal on GitHub — a
+ * merged PR never reopens, and a branch pushed again after merge needs a brand
+ * new PR — so a resolved `pr_linked` must NOT suppress recording further pushes
+ * or opening a fresh PR for continued work. (PRs predating the `state` field
+ * are treated as open, the safe default that avoids opening a duplicate.)
+ *
+ * Pass `branch` to scope the check to one ticket branch (push handler); omit it
+ * to ask "does this task have any open PR at all?" (ready handler — a task only
+ * ever drives one ticket branch).
+ */
+function hasOpenLinkedPr(
+  activity: Array<{ type: ActivityType; metadata?: Record<string, any> | null }>,
+  branch?: string,
+): boolean {
+  return activity.some(
+    (a) =>
+      a.type === 'pr_linked' &&
+      typeof a.metadata?.number === 'number' &&
+      (a.metadata?.state ?? 'open') === 'open' &&
+      (branch === undefined || a.metadata?.repoBranch === branch),
+  );
+}
+
+/**
  * Open/link a PR for a task that has been explicitly marked ready. This uses
  * the latest branch recorded by the push webhook, so repeated pushes before
  * readiness do not create noisy under-progress PRs.
@@ -378,8 +404,11 @@ export async function openPullRequestForReadyTask(
   deps: ReadyPullRequestDeps,
 ): Promise<'opened' | 'linked_existing' | 'skipped' | 'error'> {
   const activity = await deps.listActivity(taskId);
-  const existingLinked = activity.find((a) => a.type === 'pr_linked' && typeof a.metadata?.number === 'number');
-  if (existingLinked) return 'skipped';
+  // Skip only while an *open* PR is still linked — a merged/closed PR is
+  // terminal, so continued work after a merge opens a brand-new PR rather than
+  // silently no-op'ing. `findOpenPullRequestByHead` below is the safety net
+  // against duplicates when GitHub still has an open PR for the branch.
+  if (hasOpenLinkedPr(activity)) return 'skipped';
 
   const branchActivity = [...activity].reverse().find((a) => a.type === 'branch_pushed' && a.metadata);
   const metadata = branchActivity?.metadata ?? null;
