@@ -6381,7 +6381,7 @@ export function createHttpApp() {
         // Opt-in attach_image RBAC: once a project grants the permission to any
         // role, only users who hold it may attach. Skipped when no files were
         // sent (a multipart submit without attachments is just a normal ticket).
-        if (files.length > 0 && !(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+        if (files.length > 0 && !auth.permissions.has('attach_image')) {
           return c.json({ error: 'attach_image_permission_required' }, 403);
         }
         const result = await WidgetService.createTicketWithAttachments(
@@ -6668,8 +6668,9 @@ export function createHttpApp() {
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
     if (limited) return limited;
-    // Opt-in attach_image RBAC — see POST /api/widget/tickets.
-    if (!(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+    // attach_image is a tier permission (granted to both app_user and staff);
+    // anonymous callers have no permissions and cannot attach.
+    if (!auth.permissions.has('attach_image')) {
       return c.json({ error: 'attach_image_permission_required' }, 403);
     }
     try {
@@ -6764,8 +6765,9 @@ export function createHttpApp() {
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
     if (limited) return limited;
-    // Opt-in attach_image RBAC — see POST /api/widget/tickets.
-    if (!(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+    // attach_image is a tier permission (granted to both app_user and staff);
+    // anonymous callers have no permissions and cannot attach.
+    if (!auth.permissions.has('attach_image')) {
       return c.json({ error: 'attach_image_permission_required' }, 403);
     }
     try {

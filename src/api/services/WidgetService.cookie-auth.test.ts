@@ -170,8 +170,13 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, OWNER_USER_ID));
 });
 
+// Per-user tier model: every RunHQ teammate (member, admin, owner) is 'staff'
+// by default on first cookie auth, so they resolve to the full staff permission
+// set. The project's legacy role map is ignored entirely.
+const STAFF_PERMS = ['assign_agent', 'attach_image', 'live_coder', 'preview'];
+
 describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
-  it('recognizes a workspace member on an allowlisted origin', async () => {
+  it('recognizes a workspace member on an allowlisted origin (staff by default)', async () => {
     const { token } = await makeRwSession(MEMBER_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -185,11 +190,12 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
     expect(auth!.runhqUserId).toBe(MEMBER_USER_ID);
     expect(auth!.authenticated).toBe(true);
     expect(auth!.csrfToken).toBeTruthy();
-    // Regular member → no triager perms
-    expect(Array.from(auth!.permissions)).toEqual([]);
+    // Teammates default to the 'staff' tier → full permission set.
+    expect([...auth!.permissions].sort()).toEqual(STAFF_PERMS);
+    expect(auth!.matchedRoles).toEqual([]);
   });
 
-  it('grants assign_agent permission to workspace admins via RBAC team_member mapping', async () => {
+  it('grants the full staff permission set to a workspace admin', async () => {
     const { token } = await makeRwSession(ADMIN_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -200,14 +206,11 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
     const auth = await authenticateWidget(req);
     expect(auth).not.toBeNull();
     expect(auth!.authSource).toBe('runhq');
-    expect(Array.from(auth!.permissions)).toEqual(['assign_agent']);
-    // Admins map to team_member via derivePermissions (not the legacy 'admin' label)
-    expect(auth!.matchedRoles).toEqual(['team_member']);
+    expect([...auth!.permissions].sort()).toEqual(STAFF_PERMS);
+    expect(auth!.matchedRoles).toEqual([]);
   });
 
-  it('grants assign_agent permission to the workspace OWNER (role=owner, is_admin=false)', async () => {
-    // Real owner rows have is_admin=false — the flag is only mirrored for
-    // workspace-promoted admins. The owner must still count as an admin here.
+  it('grants the full staff permission set to the workspace OWNER (role=owner, is_admin=false)', async () => {
     const { token } = await makeRwSession(OWNER_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -218,9 +221,8 @@ describe('authenticateWidget — Mode 0 (rw_session cookie)', () => {
     const auth = await authenticateWidget(req);
     expect(auth).not.toBeNull();
     expect(auth!.authSource).toBe('runhq');
-    expect(Array.from(auth!.permissions)).toEqual(['assign_agent']);
-    // Owners map to team_member via derivePermissions (not the legacy 'admin' label)
-    expect(auth!.matchedRoles).toEqual(['team_member']);
+    expect([...auth!.permissions].sort()).toEqual(STAFF_PERMS);
+    expect(auth!.matchedRoles).toEqual([]);
   });
 
   it('falls through (returns null) when the cookied user is not a workspace member', async () => {
@@ -356,11 +358,13 @@ describe('authenticateWidget — CSRF protection on cookie path', () => {
   });
 });
 
-describe('authenticateWidget — Mode 0 RBAC: cookie-auth routes through derivePermissions', () => {
-  // Spec §2.2: owners/admins map to `team_member` and go through derivePermissions.
-  // Non-admin members map to no roles (but still get wildcard grants).
+describe('authenticateWidget — Mode 0: tier model ignores the project role map', () => {
+  // The legacy widgetRolePermissions map is no longer consulted. Regardless of
+  // what a project configures, every teammate resolves to the 'staff' tier on
+  // first cookie auth. These projects carry role maps purely to prove they are
+  // ignored.
 
-  it('owner/admin gets team_member-mapped permissions plus the wildcard grant', async () => {
+  it('admin on a role-mapped project still gets the full staff set (map ignored)', async () => {
     const { token } = await makeRwSession(ADMIN_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -371,26 +375,11 @@ describe('authenticateWidget — Mode 0 RBAC: cookie-auth routes through deriveP
     const auth = await authenticateWidget(req);
     expect(auth).not.toBeNull();
     expect(auth!.authSource).toBe('runhq');
-    // team_member → assign_agent + live_coder; '*' → attach_image
-    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'attach_image']));
-    expect(auth!.matchedRoles).toContain('team_member');
+    expect([...auth!.permissions].sort()).toEqual(STAFF_PERMS);
+    expect(auth!.matchedRoles).toEqual([]);
   });
 
-  it('workspace owner (role=owner, is_admin=false) also gets team_member permissions via RBAC', async () => {
-    const { token } = await makeRwSession(OWNER_USER_ID);
-    const req = buildReq({
-      cookieHeader: `rw_session=${token}`,
-      origin: ALLOWED_ORIGIN,
-      slug: PROJECT_RBAC_SLUG,
-      method: 'GET',
-    });
-    const auth = await authenticateWidget(req);
-    expect(auth).not.toBeNull();
-    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'attach_image']));
-    expect(auth!.matchedRoles).toContain('team_member');
-  });
-
-  it('non-admin member gets only wildcard grant (no team_member role)', async () => {
+  it('non-admin member also defaults to staff (map ignored)', async () => {
     const { token } = await makeRwSession(MEMBER_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -401,33 +390,11 @@ describe('authenticateWidget — Mode 0 RBAC: cookie-auth routes through deriveP
     const auth = await authenticateWidget(req);
     expect(auth).not.toBeNull();
     expect(auth!.authSource).toBe('runhq');
-    // No team_member role → only the '*' wildcard grants attach_image
-    expect(new Set(auth!.permissions)).toEqual(new Set(['attach_image']));
+    expect([...auth!.permissions].sort()).toEqual(STAFF_PERMS);
     expect(auth!.matchedRoles).toEqual([]);
   });
-});
 
-describe('authenticateWidget — Mode 0 RBAC: admins map onto the `staff` role', () => {
-  // A project that configures permissions under the `staff` role (the label the
-  // widget settings UI suggests) must grant them to workspace admins/owners on
-  // the cookie-auth path — the synthetic payload now emits `staff`.
-
-  it('grants staff-mapped permissions to a workspace admin', async () => {
-    const { token } = await makeRwSession(ADMIN_USER_ID);
-    const req = buildReq({
-      cookieHeader: `rw_session=${token}`,
-      origin: ALLOWED_ORIGIN,
-      slug: PROJECT_STAFF_SLUG,
-      method: 'GET',
-    });
-    const auth = await authenticateWidget(req);
-    expect(auth).not.toBeNull();
-    expect(auth!.authSource).toBe('runhq');
-    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'preview']));
-    expect(auth!.matchedRoles).toContain('staff');
-  });
-
-  it('grants staff-mapped permissions to the workspace owner (is_admin=false)', async () => {
+  it('persists the staff tier + email on the upserted runhq row', async () => {
     const { token } = await makeRwSession(OWNER_USER_ID);
     const req = buildReq({
       cookieHeader: `rw_session=${token}`,
@@ -437,22 +404,9 @@ describe('authenticateWidget — Mode 0 RBAC: admins map onto the `staff` role',
     });
     const auth = await authenticateWidget(req);
     expect(auth).not.toBeNull();
-    expect(new Set(auth!.permissions)).toEqual(new Set(['assign_agent', 'live_coder', 'preview']));
-    expect(auth!.matchedRoles).toContain('staff');
-  });
-
-  it('non-admin member does NOT get the staff role', async () => {
-    const { token } = await makeRwSession(MEMBER_USER_ID);
-    const req = buildReq({
-      cookieHeader: `rw_session=${token}`,
-      origin: ALLOWED_ORIGIN,
-      slug: PROJECT_STAFF_SLUG,
-      method: 'GET',
-    });
-    const auth = await authenticateWidget(req);
-    expect(auth).not.toBeNull();
-    expect(auth!.authSource).toBe('runhq');
-    expect(Array.from(auth!.permissions)).toEqual([]);
-    expect(auth!.matchedRoles).toEqual([]);
+    const [row] = await db.select().from(widgetUsers).where(eq(widgetUsers.id, auth!.widgetUserId!));
+    expect(row.permissionTier).toBe('staff');
+    expect(row.email).toBe(`owner+${RUN_HEX}@test.invalid`);
+    expect(row.lastActiveAt).not.toBeNull();
   });
 });
