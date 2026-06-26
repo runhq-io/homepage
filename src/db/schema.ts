@@ -1435,6 +1435,17 @@ export const widgetUsers = pgTable('widget_users', {
   name: text('name'),
   username: text('username'),
   avatarUrl: text('avatar_url'),
+  // Per-user permission tier. Replaces JWT-role-derived permissions: a user's
+  // effective widget permissions are resolved from this tier, not from a
+  // project role map. 'app_user' = files tickets/chats + attaches images;
+  // 'staff' = full control (assign agents, live session, preview).
+  permissionTier: text('permission_tier').notNull().default('app_user'),
+  // Captured from the JWT `email` claim (app path) or users.email (runhq path)
+  // when available; null when the issuer doesn't provide it.
+  email: text('email'),
+  // Refreshed (throttled) on each widget auth so the Members tab can surface
+  // recent activity without a separate analytics store.
+  lastActiveAt: timestamp('last_active_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [
   { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
