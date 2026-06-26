@@ -2874,6 +2874,93 @@ export async function getPreviewWidgetFlag(
   return { shouldInject: true, projectSlug: project.slug };
 }
 
+// ============================================================================
+// Members — per-user widget participants and their permission tiers.
+// Backs the project-level "Members" tab. Admin-gated at the route layer.
+// ============================================================================
+
+export interface WidgetMember {
+  id: string;
+  externalUserId: string;
+  authSource: 'app' | 'runhq';
+  name: string | null;
+  email: string | null;
+  permissionTier: WidgetPermissionTier;
+  createdAt: string;
+  lastActiveAt: string | null;
+}
+
+/** Resolve the widget_projects.id for a (serverId, lookup) pair, or null. */
+async function resolveWidgetProjectId(serverId: string, lookup: WidgetLookup): Promise<string | null> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
+  const [row] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(and(...conditions))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/**
+ * List every widget user for a project, newest activity first. Returns null
+ * when the project has no widget configured (the caller renders an empty/setup
+ * state rather than an error).
+ */
+export async function listWidgetMembers(
+  serverId: string,
+  lookup: WidgetLookup,
+): Promise<WidgetMember[] | null> {
+  const projectId = await resolveWidgetProjectId(serverId, lookup);
+  if (!projectId) return null;
+  const rows = await db
+    .select({
+      id: widgetUsers.id,
+      externalUserId: widgetUsers.externalUserId,
+      authSource: widgetUsers.authSource,
+      name: widgetUsers.name,
+      email: widgetUsers.email,
+      permissionTier: widgetUsers.permissionTier,
+      createdAt: widgetUsers.createdAt,
+      lastActiveAt: widgetUsers.lastActiveAt,
+    })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.projectId, projectId))
+    .orderBy(sql`${widgetUsers.lastActiveAt} DESC NULLS LAST`, desc(widgetUsers.createdAt));
+  return rows.map((r) => ({
+    id: r.id,
+    externalUserId: r.externalUserId,
+    authSource: r.authSource === 'runhq' ? 'runhq' : 'app',
+    name: r.name,
+    email: r.email,
+    permissionTier: isWidgetPermissionTier(r.permissionTier) ? r.permissionTier : 'app_user',
+    createdAt: r.createdAt.toISOString(),
+    lastActiveAt: r.lastActiveAt ? r.lastActiveAt.toISOString() : null,
+  }));
+}
+
+/**
+ * Set one widget user's permission tier. Scoped to the resolved project so a
+ * cross-tenant member id can't be edited. Returns 'no_project' when the widget
+ * is missing and 'not_found' when the member isn't in this project.
+ */
+export async function updateWidgetMemberTier(
+  serverId: string,
+  lookup: WidgetLookup,
+  memberId: string,
+  tier: WidgetPermissionTier,
+): Promise<'ok' | 'no_project' | 'not_found'> {
+  const projectId = await resolveWidgetProjectId(serverId, lookup);
+  if (!projectId) return 'no_project';
+  const updated = await db
+    .update(widgetUsers)
+    .set({ permissionTier: tier })
+    .where(and(eq(widgetUsers.id, memberId), eq(widgetUsers.projectId, projectId)))
+    .returning({ id: widgetUsers.id });
+  return updated.length > 0 ? 'ok' : 'not_found';
+}
+
 export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup) {
   const conditions = [eq(widgetProjects.serverId, serverId)];
   const extra = widgetLookupCondition(lookup);
