@@ -75,6 +75,39 @@ export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image' | 
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 /**
+ * Per-user permission tier. The single axis along which a widget user's
+ * capabilities are managed (in the RunHQ "Members" tab). Replaces the former
+ * JWT-role-derived permission resolution.
+ */
+export type WidgetPermissionTier = 'app_user' | 'staff';
+
+export const WIDGET_PERMISSION_TIERS: readonly WidgetPermissionTier[] = ['app_user', 'staff'];
+
+/**
+ * Single source of truth mapping each tier to the permissions it grants.
+ * `attach_image` is intentionally granted to BOTH tiers — every reporter can
+ * attach screenshots. Adding a tier later is a one-line change here.
+ */
+const TIER_PERMISSIONS: Record<WidgetPermissionTier, readonly WidgetPermission[]> = {
+  app_user: ['attach_image'],
+  staff: ['assign_agent', 'live_coder', 'preview', 'attach_image'],
+};
+
+export function isWidgetPermissionTier(v: unknown): v is WidgetPermissionTier {
+  return v === 'app_user' || v === 'staff';
+}
+
+/**
+ * Resolve a stored tier value to its permission set. Unknown/legacy values
+ * (e.g. a tier removed in a future migration) fall back to `app_user` so a
+ * stale row never silently grants elevated access.
+ */
+export function permissionsForTier(tier: string | null | undefined): ReadonlySet<WidgetPermission> {
+  const key: WidgetPermissionTier = isWidgetPermissionTier(tier) ? tier : 'app_user';
+  return new Set(TIER_PERMISSIONS[key]);
+}
+
+/**
  * Does a widget role→permissions map grant `assign_agent` to ANY role
  * (including the `*` everyone key)? This is the project-level "agent assignment
  * is on" signal.
