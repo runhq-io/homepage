@@ -7100,6 +7100,50 @@ export function createHttpApp() {
   });
 
   // ---------------------------------------------------------------------------
+  // Widget Members — per-user participants + permission tiers (workspace-admin
+  // surface, backs the project-level "Members" tab). Auth mirrors the widget
+  // settings routes: runhq session Bearer → extractUserIdFromToken, then
+  // requireWidgetAdmin (owner/workspace-admin). projectId = the WORKSPACE
+  // project id; serverId pins the tenant.
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/widget/members', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
+    if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
+    const members = await WidgetService.listWidgetMembers(serverId, lookup);
+    // `data: null` distinguishes "no widget configured" (client shows a setup
+    // prompt) from `data: []` ("widget enabled, no members yet").
+    return c.json({ success: true, data: members });
+  });
+
+  app.put('/api/widget/members/:memberId', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const memberId = c.req.param('memberId');
+    const { serverId, projectId, permissionTier } = await c.req.json();
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
+    if (!WidgetService.isWidgetPermissionTier(permissionTier)) {
+      return c.json({ error: 'invalid permissionTier' }, 400);
+    }
+    if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
+    const result = await WidgetService.updateWidgetMemberTier(serverId, lookup, memberId, permissionTier);
+    if (result === 'no_project') return c.json({ error: 'widget not found' }, 404);
+    if (result === 'not_found') return c.json({ error: 'member not found' }, 404);
+    return c.json({ success: true });
+  });
+
+  // ---------------------------------------------------------------------------
   // Widget Chat — team Conversations inbox (workspace-member surface).
   // Auth mirrors the widget settings routes: runhq session Bearer token →
   // extractUserIdFromToken, then server membership (ANY member — replying to
