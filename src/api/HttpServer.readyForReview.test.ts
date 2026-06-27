@@ -21,6 +21,15 @@ describe('prepareServerWorkspaceTaskPatchBody', () => {
     const result = prepareServerWorkspaceTaskPatchBody({ status: 'done' });
 
     expect(result.readyForReview).toBe(false);
+    expect(result.openPullRequest).toBe(false);
     expect(result.body).toEqual({ status: 'done' });
+  });
+
+  it('extracts the openPullRequest command and strips it from the body', () => {
+    const result = prepareServerWorkspaceTaskPatchBody({ openPullRequest: true, actingUserId: 'user_1' });
+
+    expect(result.openPullRequest).toBe(true);
+    expect(result.readyForReview).toBe(false);
+    expect(result.body).toEqual({});
   });
 });

@@ -161,7 +161,7 @@ describe('openPullRequestForReadyTask', () => {
   it('opens and links a PR from the recorded branch', async () => {
     const deps = makeReadyDeps();
     const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps);
-    expect(result).toBe('opened');
+    expect(result).toEqual({ status: 'opened', prNumber: 7, url: 'https://github.com/acme/app/pull/7' });
     expect(deps.createPullRequest).toHaveBeenCalledWith(42, 'acme', 'app', expect.objectContaining({
       head: 'session/job_x/ticket-abcd1234',
       base: 'main',
@@ -179,7 +179,7 @@ describe('openPullRequestForReadyTask', () => {
       findOpenPullRequestByHead: vi.fn().mockResolvedValue({ number: 3, url: 'https://github.com/acme/app/pull/3' }),
     });
     const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps);
-    expect(result).toBe('linked_existing');
+    expect(result).toEqual({ status: 'linked_existing', prNumber: 3, url: 'https://github.com/acme/app/pull/3' });
     expect(deps.createPullRequest).not.toHaveBeenCalled();
     expect(deps.addActivity).toHaveBeenCalledWith('ws_1', 'task_1', expect.objectContaining({
       type: 'pr_linked',
@@ -187,10 +187,20 @@ describe('openPullRequestForReadyTask', () => {
     }));
   });
 
-  it('skips when no pushed branch has been recorded', async () => {
+  it('skips with an actionable reason when no pushed branch has been recorded', async () => {
     const deps = makeReadyDeps({ listActivity: vi.fn().mockResolvedValue([]) });
-    expect(await openPullRequestForReadyTask('ws_1', 'task_1', deps)).toBe('skipped');
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps);
+    expect(result.status).toBe('skipped');
+    expect(result).toMatchObject({ reason: expect.stringContaining('No pushed commits') });
     expect(deps.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the GitHub error message when PR creation fails', async () => {
+    const deps = makeReadyDeps({
+      createPullRequest: vi.fn().mockRejectedValue(new Error('No commits between main and the branch')),
+    });
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps);
+    expect(result).toEqual({ status: 'error', message: 'No commits between main and the branch' });
   });
 
   it('skips while an OPEN PR is already linked (no duplicate PR)', async () => {
@@ -204,7 +214,8 @@ describe('openPullRequestForReadyTask', () => {
         { id: 'act_pr', type: 'pr_linked', metadata: { number: 9, state: 'open', repoBranch: 'session/job_x/ticket-abcd1234' } },
       ]),
     });
-    expect(await openPullRequestForReadyTask('ws_1', 'task_1', deps)).toBe('skipped');
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps);
+    expect(result.status).toBe('skipped');
     expect(deps.createPullRequest).not.toHaveBeenCalled();
   });
 
@@ -219,7 +230,8 @@ describe('openPullRequestForReadyTask', () => {
         { id: 'act_pr', type: 'pr_linked', metadata: { number: 9, state: 'merged', repoBranch: 'session/job_x/ticket-abcd1234' } },
       ]),
     });
-    expect(await openPullRequestForReadyTask('ws_1', 'task_1', deps)).toBe('opened');
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps);
+    expect(result.status).toBe('opened');
     expect(deps.createPullRequest).toHaveBeenCalledWith(42, 'acme', 'app', expect.objectContaining({
       head: 'session/job_x/ticket-abcd1234',
     }));

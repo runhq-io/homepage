@@ -394,6 +394,16 @@ function hasOpenLinkedPr(
 }
 
 /**
+ * Outcome of {@link openPullRequestForReadyTask}. `reason` (skipped) and
+ * `message` (error) carry a human-readable explanation so callers can surface
+ * *why* nothing opened instead of failing silently.
+ */
+export type ReadyPrResult =
+  | { status: 'opened' | 'linked_existing'; prNumber: number; url: string }
+  | { status: 'skipped'; reason: string }
+  | { status: 'error'; message: string };
+
+/**
  * Open/link a PR for a task that has been explicitly marked ready. This uses
  * the latest branch recorded by the push webhook, so repeated pushes before
  * readiness do not create noisy under-progress PRs.
@@ -402,17 +412,21 @@ export async function openPullRequestForReadyTask(
   serverId: string,
   taskId: string,
   deps: ReadyPullRequestDeps,
-): Promise<'opened' | 'linked_existing' | 'skipped' | 'error'> {
+): Promise<ReadyPrResult> {
   const activity = await deps.listActivity(taskId);
   // Skip only while an *open* PR is still linked — a merged/closed PR is
   // terminal, so continued work after a merge opens a brand-new PR rather than
   // silently no-op'ing. `findOpenPullRequestByHead` below is the safety net
   // against duplicates when GitHub still has an open PR for the branch.
-  if (hasOpenLinkedPr(activity)) return 'skipped';
+  if (hasOpenLinkedPr(activity)) {
+    return { status: 'skipped', reason: 'A pull request is already open for this branch.' };
+  }
 
   const branchActivity = [...activity].reverse().find((a) => a.type === 'branch_pushed' && a.metadata);
   const metadata = branchActivity?.metadata ?? null;
-  if (!metadata) return 'skipped';
+  if (!metadata) {
+    return { status: 'skipped', reason: 'No pushed commits found for this branch yet — commit and push your changes, then try again.' };
+  }
 
   const owner = readString(metadata.owner);
   const repo = readString(metadata.repo);
@@ -421,7 +435,9 @@ export async function openPullRequestForReadyTask(
   const title = readString(metadata.title) ?? 'RunHQ ticket';
   const shortId = readString(metadata.shortId) ?? taskId.slice(0, 8);
   const installationId = readNumber(metadata.installationId);
-  if (!owner || !repo || !branch || !base || !installationId || branch === base) return 'skipped';
+  if (!owner || !repo || !branch || !base || !installationId || branch === base) {
+    return { status: 'skipped', reason: "This branch can't be opened as a pull request (missing or invalid branch info)." };
+  }
 
   try {
     const existing = await deps.findOpenPullRequestByHead(installationId, owner, repo, branch);
@@ -467,10 +483,11 @@ export async function openPullRequestForReadyTask(
       taskId,
       pr: pr.number,
     });
-    return existing ? 'linked_existing' : 'opened';
+    return { status: existing ? 'linked_existing' : 'opened', prNumber: pr.number, url: pr.url };
   } catch (err) {
-    console.warn('[github/ready] failed to open PR for ready ticket branch', { owner, repo, branch, taskId, err: (err as Error)?.message });
-    return 'error';
+    const message = (err as Error)?.message || 'GitHub rejected the request.';
+    console.warn('[github/ready] failed to open PR for ready ticket branch', { owner, repo, branch, taskId, err: message });
+    return { status: 'error', message };
   }
 }
 

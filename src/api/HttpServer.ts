@@ -22,7 +22,7 @@ import * as InviteService from './services/InviteService';
 import { assertActivated } from '../lib/signupGating';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
-import { openPullRequestForReadyTask, registerGithubRoutes } from './github/githubRoutes';
+import { openPullRequestForReadyTask, registerGithubRoutes, type ReadyPrResult } from './github/githubRoutes';
 import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
 import { resolveGithubActingUser } from './github/resolveActingUser';
 import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
@@ -94,16 +94,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function prepareServerWorkspaceTaskPatchBody(input: unknown): {
   body: unknown;
   readyForReview: boolean;
+  openPullRequest: boolean;
 } {
   if (!isRecord(input)) {
-    return { body: input, readyForReview: false };
+    return { body: input, readyForReview: false, openPullRequest: false };
   }
 
   const body = { ...input };
   const readyForReview = body.readyForReview === true;
   delete body.readyForReview;
+  // `openPullRequest` is an explicit "open a PR for this branch now" command
+  // (the job-header Open/New PR button) — distinct from readyForReview, and it
+  // must NOT require status=done so it works for continued work after a merge.
+  const openPullRequest = body.openPullRequest === true;
+  delete body.openPullRequest;
   delete body.actingUserId;
-  return { body, readyForReview };
+  return { body, readyForReview, openPullRequest };
 }
 
 let cachedBuildInfo: BuildInfo | null | undefined;
@@ -5418,7 +5424,7 @@ export function createHttpApp() {
     // `readyForReview` is an explicit command signal from the workspace server;
     // plain status=done can be produced by heuristic job completion and must not
     // open a PR by itself.
-    const { body, readyForReview } = prepareServerWorkspaceTaskPatchBody(rawBody);
+    const { body, readyForReview, openPullRequest } = prepareServerWorkspaceTaskPatchBody(rawBody);
     const { task, notification } = await WorkspaceTaskService.updateTask(
       server.id,
       c.req.param('taskId'),
@@ -5426,8 +5432,15 @@ export function createHttpApp() {
       actor,
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    if (isGithubAppConfigured() && readyForReview && isRecord(body) && body.status === 'done') {
-      void openPullRequestForReadyTask(server.id, task.id, {
+    // Open a PR when the task is explicitly marked ready (status=done +
+    // readyForReview) OR when the user clicked Open/New PR (openPullRequest).
+    // The result is awaited and returned as `prResult` so the caller can surface
+    // the real outcome — a silent fire-and-forget left the UI with no feedback.
+    let prResult: ReadyPrResult | undefined;
+    const shouldOpenPr = isGithubAppConfigured()
+      && (openPullRequest || (readyForReview && isRecord(body) && body.status === 'done'));
+    if (shouldOpenPr) {
+      prResult = await openPullRequestForReadyTask(server.id, task.id, {
         listActivity: WorkspaceTaskService.listActivity,
         addActivity: async (serverId, taskId, input) => {
           await WorkspaceTaskService.addActivity(serverId, taskId, input);
@@ -5442,12 +5455,14 @@ export function createHttpApp() {
         notifyPrLinked: (input) =>
           ServerService.serverTokenFetch(server, '/api/internal/pr-linked', input).then(() => undefined),
       }).catch((err) => {
+        const message = (err as Error)?.message || 'Failed to open pull request';
         console.warn('[HttpServer] ready PR creation failed', err);
+        return { status: 'error', message } as ReadyPrResult;
       });
     }
     // Ship the emitted notification (if any) back to the calling per-server
     // so it can push to its connected WS clients.
-    return c.json({ success: true, data: task, notification });
+    return c.json({ success: true, data: task, notification, prResult });
   });
 
   app.post('/api/server/workspace-tasks/:taskId/upvote', async (c) => {
