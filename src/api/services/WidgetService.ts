@@ -75,6 +75,39 @@ export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image' | 
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 /**
+ * Per-user permission tier. The single axis along which a widget user's
+ * capabilities are managed (in the RunHQ "Members" tab). Replaces the former
+ * JWT-role-derived permission resolution.
+ */
+export type WidgetPermissionTier = 'app_user' | 'staff';
+
+export const WIDGET_PERMISSION_TIERS: readonly WidgetPermissionTier[] = ['app_user', 'staff'];
+
+/**
+ * Single source of truth mapping each tier to the permissions it grants.
+ * `attach_image` is intentionally granted to BOTH tiers — every reporter can
+ * attach screenshots. Adding a tier later is a one-line change here.
+ */
+const TIER_PERMISSIONS: Record<WidgetPermissionTier, readonly WidgetPermission[]> = {
+  app_user: ['attach_image'],
+  staff: ['assign_agent', 'live_coder', 'preview', 'attach_image'],
+};
+
+export function isWidgetPermissionTier(v: unknown): v is WidgetPermissionTier {
+  return v === 'app_user' || v === 'staff';
+}
+
+/**
+ * Resolve a stored tier value to its permission set. Unknown/legacy values
+ * (e.g. a tier removed in a future migration) fall back to `app_user` so a
+ * stale row never silently grants elevated access.
+ */
+export function permissionsForTier(tier: string | null | undefined): ReadonlySet<WidgetPermission> {
+  const key: WidgetPermissionTier = isWidgetPermissionTier(tier) ? tier : 'app_user';
+  return new Set(TIER_PERMISSIONS[key]);
+}
+
+/**
  * Does a widget role→permissions map grant `assign_agent` to ANY role
  * (including the `*` everyone key)? This is the project-level "agent assignment
  * is on" signal.
@@ -622,111 +655,13 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 
 const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
 
-/**
- * Synthetic widget roles granted to a RunHQ workspace owner/admin on the
- * cookie-auth path (Mode 0). These are injected into a synthetic JWT payload
- * and resolved through {@link derivePermissions} against the project's
- * `widgetRolePermissions` map — so a workspace admin who opens the widget while
- * signed into RunHQ automatically receives whatever the project maps these
- * roles to (e.g. `live_coder`, `assign_agent`, `preview`).
- *
- * Both labels are emitted because two naming conventions exist in the wild and
- * a project may have configured either:
- *   - `staff`       — the role name the widget settings UI suggests/seeds and
- *     the one used throughout its copy ("prefer a specific staff role").
- *   - `team_member` — the legacy label the Task-1 migration wrote for
- *     pre-existing projects that had the old assignment flag enabled.
- *
- * A role with no entry in the project's map contributes nothing (it isn't even
- * added to `matchedRoles`), so emitting both is safe and never over-grants.
- */
-const RUNHQ_ADMIN_WIDGET_ROLES: readonly string[] = ['staff', 'team_member'];
-
-/**
- * Owner-or-admin check on a server_members row. Owner rows carry
- * role='owner' with is_admin=false — is_admin is the workspace-derived
- * mirror, set only for workspace-PROMOTED admins. Same shape as
- * ServerService.checkCloudOpPermission.
- */
-function isOwnerOrAdmin(membership: { role: string; isAdmin: boolean }): boolean {
-  return membership.role === 'owner' || membership.isAdmin === true;
-}
-
-interface PermissionPolicyRow {
-  widgetAgentAssignmentEnabled: boolean;
-  widgetAssignRoles: string[];
-  widgetRoleClaimName: string;
-  widgetRolePermissions: Record<string, string[]>;
-}
-
-interface PermissionDerivation {
-  permissions: ReadonlySet<WidgetPermission>;
-  matchedRoles: string[];
-}
-
-function derivePermissions(
-  policy: PermissionPolicyRow,
-  jwtPayload: jose.JWTPayload,
-): PermissionDerivation {
-  // Role→permissions RBAC: the project's widgetRolePermissions map controls
-  // what each JWT role grants. The special '*' key grants permissions to any
-  // authenticated user (back-compat: migrated projects that had
-  // widgetAgentAssignmentEnabled=true have '*': ['assign_agent'] set).
-  const mapping = (policy.widgetRolePermissions ?? {}) as Record<string, string[]>;
-  const claimName = policy.widgetRoleClaimName || 'runhq_roles';
-  const claimed = jwtPayload[claimName];
-  const roles = Array.isArray(claimed) ? claimed.filter((x): x is string => typeof x === 'string') : [];
-  const permissions = new Set<WidgetPermission>();
-  const matchedRoles: string[] = [];
-  for (const p of mapping['*'] ?? []) permissions.add(p as WidgetPermission);
-  for (const role of roles) {
-    const granted = mapping[role];
-    if (!granted) continue;
-    matchedRoles.push(role);
-    for (const p of granted) permissions.add(p as WidgetPermission);
-  }
-  return { permissions, matchedRoles };
-}
-
-/**
- * Opt-in enforcement for the `attach_image` permission.
- *
- * Image attachments predate the permission, so we cannot fail closed without
- * breaking every widget that relied on open uploads. Instead the gate is
- * opt-in: while no role (including the '*' wildcard) grants `attach_image`,
- * uploads stay open for everyone. The moment a project grants it to any role,
- * uploads are restricted to users whose derived permission set includes it.
- *
- * Pure function so the policy is unit-testable without a DB; see
- * `canAttachImages` for the request-time wrapper that loads the project map.
- */
-export function attachImageAllowed(
-  rolePermissions: Record<string, string[]> | null | undefined,
-  permissions: ReadonlySet<WidgetPermission>,
-): boolean {
-  const map = rolePermissions ?? {};
-  const configured = Object.values(map).some(
-    (list) => Array.isArray(list) && list.includes('attach_image'),
-  );
-  if (!configured) return true;
-  return permissions.has('attach_image');
-}
-
-/**
- * Request-time wrapper around {@link attachImageAllowed}: loads the project's
- * `widgetRolePermissions` map and applies the opt-in gate to the caller's
- * derived permission set. Returns true when the upload should be allowed.
- */
-export async function canAttachImages(
-  projectId: string,
-  permissions: ReadonlySet<WidgetPermission>,
-): Promise<boolean> {
-  const [row] = await db
-    .select({ rolePermissions: widgetProjects.widgetRolePermissions })
-    .from(widgetProjects)
-    .where(eq(widgetProjects.id, projectId))
-    .limit(1);
-  return attachImageAllowed(row?.rolePermissions, permissions);
+// Refresh widget_users.last_active_at at most this often, to avoid hot-row
+// write amplification under widget polling (every authenticated request would
+// otherwise issue an UPDATE).
+const LAST_ACTIVE_REFRESH_MS = 5 * 60 * 1000;
+function shouldRefreshLastActive(last: Date | null | undefined, nowMs: number): boolean {
+  if (!last) return true;
+  return nowMs - last.getTime() >= LAST_ACTIVE_REFRESH_MS;
 }
 
 /**
@@ -799,9 +734,20 @@ export async function authenticateWidget(
           // Upsert the widget_user under auth_source='runhq' so this row
           // never collides with an app-path row for the same human.
           const externalUserId = `runhq:${verified.userId}`;
+          const nowMs = Date.now();
           let widgetUserId: string;
+          // New RunHQ teammates default to 'staff' — they're internal staff.
+          // The admin can downgrade an individual in the Members tab; existing
+          // rows keep whatever tier was set.
+          let resolvedTier = 'staff';
           const [existing] = await db
-            .select({ id: widgetUsers.id })
+            .select({
+              id: widgetUsers.id,
+              name: widgetUsers.name,
+              email: widgetUsers.email,
+              permissionTier: widgetUsers.permissionTier,
+              lastActiveAt: widgetUsers.lastActiveAt,
+            })
             .from(widgetUsers)
             .where(
               and(
@@ -812,7 +758,7 @@ export async function authenticateWidget(
             )
             .limit(1);
 
-          // Pull fresh display name from users table on every auth — name
+          // Pull fresh display name/email from users table on every auth — name
           // changes in console should reflect immediately in the widget UI.
           const [user] = await db
             .select({ name: users.name, email: users.email })
@@ -820,13 +766,18 @@ export async function authenticateWidget(
             .where(eq(users.id, verified.userId))
             .limit(1);
           const displayName = user?.name || user?.email || 'RunHQ user';
+          const userEmail = user?.email ?? undefined;
 
           if (existing) {
             widgetUserId = existing.id;
-            await db
-              .update(widgetUsers)
-              .set({ name: displayName })
-              .where(eq(widgetUsers.id, existing.id));
+            resolvedTier = existing.permissionTier;
+            const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+            if (displayName !== existing.name) patch.name = displayName;
+            if (userEmail && userEmail !== existing.email) patch.email = userEmail;
+            if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+            if (Object.keys(patch).length > 0) {
+              await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+            }
           } else {
             const [inserted] = await db
               .insert(widgetUsers)
@@ -835,23 +786,17 @@ export async function authenticateWidget(
                 externalUserId,
                 authSource: 'runhq',
                 name: displayName,
+                email: userEmail,
+                permissionTier: 'staff',
+                lastActiveAt: new Date(nowMs),
               })
-              .returning({ id: widgetUsers.id });
+              .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
             widgetUserId = inserted.id;
+            resolvedTier = inserted.permissionTier;
           }
 
-          // Spec §2.2: route through derivePermissions using a synthetic JWT
-          // payload. Workspace owners/admins map to the staff roles
-          // (see RUNHQ_ADMIN_WIDGET_ROLES); non-admin members map to no roles.
-          // This means admins get whatever the project maps `staff`/`team_member`
-          // to, plus any `'*'` wildcard grants — exactly consistent with the
-          // JWT path.
-          const isAdmin = isOwnerOrAdmin(membership);
-          const claimName = project.widgetRoleClaimName || 'runhq_roles';
-          const syntheticPayload: jose.JWTPayload = {
-            [claimName]: isAdmin ? [...RUNHQ_ADMIN_WIDGET_ROLES] : [],
-          };
-          const { permissions, matchedRoles } = derivePermissions(project, syntheticPayload);
+          // Effective permissions resolve from the stored per-user tier.
+          const permissions = permissionsForTier(resolvedTier);
 
           return {
             projectId: project.id,
@@ -859,7 +804,7 @@ export async function authenticateWidget(
             widgetUserId,
             authenticated: true,
             permissions,
-            matchedRoles,
+            matchedRoles: [],
             authSource: 'runhq',
             runhqUserId: verified.userId,
             csrfToken: csrfTokenFor(verified.userId, verified.iat),
@@ -973,9 +918,20 @@ export async function authenticateWidget(
         ? String(payload.sub)
         : undefined;
   const name = typeof payload.name === 'string' ? payload.name : undefined;
+  const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
+  // Default tier for a brand-new app user. Effective permissions are resolved
+  // from the stored tier, not from JWT roles (see permissionsForTier).
+  let resolvedTier = 'app_user';
   if (sub) {
+    const nowMs = Date.now();
     const [existing] = await db
-      .select({ id: widgetUsers.id })
+      .select({
+        id: widgetUsers.id,
+        name: widgetUsers.name,
+        email: widgetUsers.email,
+        permissionTier: widgetUsers.permissionTier,
+        lastActiveAt: widgetUsers.lastActiveAt,
+      })
       .from(widgetUsers)
       .where(
         and(
@@ -987,13 +943,17 @@ export async function authenticateWidget(
       .limit(1);
 
     if (existing) {
-      if (name) {
-        await db
-          .update(widgetUsers)
-          .set({ name })
-          .where(eq(widgetUsers.id, existing.id));
-      }
       widgetUserId = existing.id;
+      resolvedTier = existing.permissionTier;
+      // Only write when something actually changed — keeps the common
+      // already-fresh request read-only.
+      const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+      if (name && name !== existing.name) patch.name = name;
+      if (email && email !== existing.email) patch.email = email;
+      if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+      if (Object.keys(patch).length > 0) {
+        await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+      }
     } else {
       const [inserted] = await db
         .insert(widgetUsers)
@@ -1002,20 +962,23 @@ export async function authenticateWidget(
           externalUserId: sub,
           authSource: 'app',
           name,
+          email,
+          lastActiveAt: new Date(nowMs),
         })
-        .returning({ id: widgetUsers.id });
+        .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
       widgetUserId = inserted.id;
+      resolvedTier = inserted.permissionTier;
     }
   }
 
-  const { permissions, matchedRoles } = derivePermissions(project, payload);
+  const permissions = permissionsForTier(resolvedTier);
   return {
     projectId: project.id,
     projectSlug: project.slug,
     widgetUserId,
     authenticated: true,
     permissions,
-    matchedRoles,
+    matchedRoles: [],
     authSource: 'app',
     displayName: name,
   };
@@ -2909,6 +2872,93 @@ export async function getPreviewWidgetFlag(
   }
 
   return { shouldInject: true, projectSlug: project.slug };
+}
+
+// ============================================================================
+// Members — per-user widget participants and their permission tiers.
+// Backs the project-level "Members" tab. Admin-gated at the route layer.
+// ============================================================================
+
+export interface WidgetMember {
+  id: string;
+  externalUserId: string;
+  authSource: 'app' | 'runhq';
+  name: string | null;
+  email: string | null;
+  permissionTier: WidgetPermissionTier;
+  createdAt: string;
+  lastActiveAt: string | null;
+}
+
+/** Resolve the widget_projects.id for a (serverId, lookup) pair, or null. */
+async function resolveWidgetProjectId(serverId: string, lookup: WidgetLookup): Promise<string | null> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
+  const [row] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(and(...conditions))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/**
+ * List every widget user for a project, newest activity first. Returns null
+ * when the project has no widget configured (the caller renders an empty/setup
+ * state rather than an error).
+ */
+export async function listWidgetMembers(
+  serverId: string,
+  lookup: WidgetLookup,
+): Promise<WidgetMember[] | null> {
+  const projectId = await resolveWidgetProjectId(serverId, lookup);
+  if (!projectId) return null;
+  const rows = await db
+    .select({
+      id: widgetUsers.id,
+      externalUserId: widgetUsers.externalUserId,
+      authSource: widgetUsers.authSource,
+      name: widgetUsers.name,
+      email: widgetUsers.email,
+      permissionTier: widgetUsers.permissionTier,
+      createdAt: widgetUsers.createdAt,
+      lastActiveAt: widgetUsers.lastActiveAt,
+    })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.projectId, projectId))
+    .orderBy(sql`${widgetUsers.lastActiveAt} DESC NULLS LAST`, desc(widgetUsers.createdAt));
+  return rows.map((r) => ({
+    id: r.id,
+    externalUserId: r.externalUserId,
+    authSource: r.authSource === 'runhq' ? 'runhq' : 'app',
+    name: r.name,
+    email: r.email,
+    permissionTier: isWidgetPermissionTier(r.permissionTier) ? r.permissionTier : 'app_user',
+    createdAt: r.createdAt.toISOString(),
+    lastActiveAt: r.lastActiveAt ? r.lastActiveAt.toISOString() : null,
+  }));
+}
+
+/**
+ * Set one widget user's permission tier. Scoped to the resolved project so a
+ * cross-tenant member id can't be edited. Returns 'no_project' when the widget
+ * is missing and 'not_found' when the member isn't in this project.
+ */
+export async function updateWidgetMemberTier(
+  serverId: string,
+  lookup: WidgetLookup,
+  memberId: string,
+  tier: WidgetPermissionTier,
+): Promise<'ok' | 'no_project' | 'not_found'> {
+  const projectId = await resolveWidgetProjectId(serverId, lookup);
+  if (!projectId) return 'no_project';
+  const updated = await db
+    .update(widgetUsers)
+    .set({ permissionTier: tier })
+    .where(and(eq(widgetUsers.id, memberId), eq(widgetUsers.projectId, projectId)))
+    .returning({ id: widgetUsers.id });
+  return updated.length > 0 ? 'ok' : 'not_found';
 }
 
 export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup) {

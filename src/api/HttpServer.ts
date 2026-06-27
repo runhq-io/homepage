@@ -6381,7 +6381,7 @@ export function createHttpApp() {
         // Opt-in attach_image RBAC: once a project grants the permission to any
         // role, only users who hold it may attach. Skipped when no files were
         // sent (a multipart submit without attachments is just a normal ticket).
-        if (files.length > 0 && !(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+        if (files.length > 0 && !auth.permissions.has('attach_image')) {
           return c.json({ error: 'attach_image_permission_required' }, 403);
         }
         const result = await WidgetService.createTicketWithAttachments(
@@ -6668,8 +6668,9 @@ export function createHttpApp() {
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
     if (limited) return limited;
-    // Opt-in attach_image RBAC — see POST /api/widget/tickets.
-    if (!(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+    // attach_image is a tier permission (granted to both app_user and staff);
+    // anonymous callers have no permissions and cannot attach.
+    if (!auth.permissions.has('attach_image')) {
       return c.json({ error: 'attach_image_permission_required' }, 403);
     }
     try {
@@ -6764,8 +6765,9 @@ export function createHttpApp() {
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
     if (limited) return limited;
-    // Opt-in attach_image RBAC — see POST /api/widget/tickets.
-    if (!(await WidgetService.canAttachImages(auth.projectId, auth.permissions))) {
+    // attach_image is a tier permission (granted to both app_user and staff);
+    // anonymous callers have no permissions and cannot attach.
+    if (!auth.permissions.has('attach_image')) {
       return c.json({ error: 'attach_image_permission_required' }, 403);
     }
     try {
@@ -7094,6 +7096,50 @@ export function createHttpApp() {
     // audit logs); we don't branch on it here.
     void result;
 
+    return c.json({ success: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Widget Members — per-user participants + permission tiers (workspace-admin
+  // surface, backs the project-level "Members" tab). Auth mirrors the widget
+  // settings routes: runhq session Bearer → extractUserIdFromToken, then
+  // requireWidgetAdmin (owner/workspace-admin). projectId = the WORKSPACE
+  // project id; serverId pins the tenant.
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/widget/members', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
+    if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
+    const members = await WidgetService.listWidgetMembers(serverId, lookup);
+    // `data: null` distinguishes "no widget configured" (client shows a setup
+    // prompt) from `data: []` ("widget enabled, no members yet").
+    return c.json({ success: true, data: members });
+  });
+
+  app.put('/api/widget/members/:memberId', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const memberId = c.req.param('memberId');
+    const { serverId, projectId, permissionTier } = await c.req.json();
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
+    if (!WidgetService.isWidgetPermissionTier(permissionTier)) {
+      return c.json({ error: 'invalid permissionTier' }, 400);
+    }
+    if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
+    const result = await WidgetService.updateWidgetMemberTier(serverId, lookup, memberId, permissionTier);
+    if (result === 'no_project') return c.json({ error: 'widget not found' }, 404);
+    if (result === 'not_found') return c.json({ error: 'member not found' }, 404);
     return c.json({ success: true });
   });
 
