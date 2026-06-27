@@ -8,9 +8,9 @@ import heroScreenshotSm from '../assets/smaller_screenshot.png';
 const HOME_T = {
   en: {
     // Hero
-    heroH1Line1: 'Agentic automation for',
-    heroH1Line2: 'fast-moving founders.',
-    heroLede: 'RunHQ lets anyone on your team hand off work to agents. Research, ops, code, and beyond.',
+    heroH1Line1: 'Your autonomous dev team,',
+    heroH1Line2: 'powered by Claude Code.',
+    heroLede: 'Stop prompting. RunHQ turns user feedback, telemetry events, and product signals into completed PRs ready for your review.',
     ctaStartFree: 'Start free',
     ctaWatchDemo: 'Watch Demo',
     heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
@@ -103,9 +103,9 @@ const HOME_T = {
   },
   ko: {
     // Hero
-    heroH1Line1: '빠르게 움직이는 창업자를 위한',
-    heroH1Line2: '에이전트 자동화.',
-    heroLede: 'RunHQ는 팀 누구나 에이전트에게 일을 맡길 수 있게 해줍니다. 리서치, 운영, 코드, 그 외 무엇이든.',
+    heroH1Line1: 'Claude Code로 구동되는',
+    heroH1Line2: '자율 개발 팀.',
+    heroLede: '프롬프트는 그만. RunHQ는 사용자 피드백, 텔레메트리 이벤트, 제품 신호를 검토할 준비가 된 완성된 PR로 바꿔줍니다.',
     ctaStartFree: '무료로 시작하기',
     ctaWatchDemo: '데모 보기',
     heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
