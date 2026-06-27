@@ -249,21 +249,12 @@ export interface PushPayload {
   };
 }
 
-export interface PushEventDeps {
+export interface PushEventDeps extends ReadyPullRequestDeps {
   findByOwnerRepo: (owner: string, repo: string) => Promise<Array<{ serverId: string; projectId: string; installationId: number }>>;
   parseTaskShareId: (input: string) => TaskShareIdQuery | null;
   resolveTaskCandidates: (query: TaskShareIdQuery) => Promise<TaskCandidate[]>;
-  /** List activity entries for a task (used for idempotency). */
-  listActivity: (taskId: string) => Promise<Array<{ id: string; type: ActivityType; metadata?: Record<string, any> | null }>>;
-  /** Append an activity entry to a task. */
-  addActivity: (serverId: string, taskId: string, input: {
-    type: ActivityType;
-    content?: string | null;
-    metadata?: Record<string, unknown> | null;
-    createdByType?: 'member' | 'external' | 'system' | 'agent';
-    createdById?: string | null;
-    createdByName?: string | null;
-  }) => Promise<void>;
+  /** Fetch a task's persistent fields for platform-owned logic (e.g. useWorktree). */
+  getTask: (serverId: string, taskId: string) => Promise<{ useWorktree: boolean } | null>;
 }
 
 /**
@@ -333,11 +324,25 @@ export async function handlePushEvent(
       createdByType: 'system',
     });
     console.info('[github/push] recorded pushed ticket branch', { owner, repo, branch, taskId: task.taskId });
-    return 'recorded';
   } catch (err) {
     console.warn('[github/push] failed to record pushed ticket branch', { owner, repo, branch, err: (err as Error)?.message });
     return 'error';
   }
+
+  // Recording succeeded — the function is now committed to returning 'recorded'.
+  // Platform-owned PR creation: a pushed isolated-branch task gets a draft PR,
+  // independent of whether the agent ever runs `runhq ready-for-review`. The
+  // useWorktree lookup + draft open is a fully self-contained fire-and-forget:
+  // BOTH a getTask rejection (e.g. transient DB error) and an open failure are
+  // caught here, so neither can change the return value or throw after the
+  // branch_pushed activity was already written.
+  void (async () => {
+    const full = await deps.getTask(task.serverId, task.taskId);
+    if (full?.useWorktree) {
+      await openPullRequestForReadyTask(task.serverId, task.taskId, deps, { mode: 'draft' });
+    }
+  })().catch((err) => console.warn('[github/push] draft PR open failed', { taskId: task.taskId, err: (err as Error)?.message }));
+  return 'recorded';
 }
 
 export interface ReadyPullRequestDeps {
@@ -351,12 +356,13 @@ export interface ReadyPullRequestDeps {
     createdByName?: string | null;
   }) => Promise<void>;
   updateTask: (serverId: string, taskId: string, input: { status: CanonicalTaskStatus }) => Promise<void>;
-  findOpenPullRequestByHead: (installationId: number, owner: string, repo: string, head: string) => Promise<{ number: number; url: string } | null>;
-  createPullRequest: (installationId: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string }) => Promise<{ number: number; url: string }>;
+  findOpenPullRequestByHead: (installationId: number, owner: string, repo: string, head: string) => Promise<{ number: number; url: string; nodeId: string; isDraft: boolean } | null>;
+  createPullRequest: (installationId: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string; draft?: boolean }) => Promise<{ number: number; url: string; nodeId: string }>;
+  markPullRequestReady: (installationId: number, nodeId: string) => Promise<void>;
   /** Optional — push a live `pr:linked` notification to the workspace server so
    *  its "PR #N" chip updates without a page refresh. Best-effort; failures must
    *  never break PR creation. */
-  notifyPrLinked?: (input: { branch: string; number: number; url: string; state: 'open' | 'closed' | 'merged' }) => Promise<void>;
+  notifyPrLinked?: (serverId: string, input: { branch: string; number: number; url: string; state: 'open' | 'closed' | 'merged' }) => Promise<void>;
 }
 
 function readString(value: unknown): string | null {
@@ -399,28 +405,31 @@ function hasOpenLinkedPr(
  * *why* nothing opened instead of failing silently.
  */
 export type ReadyPrResult =
-  | { status: 'opened' | 'linked_existing'; prNumber: number; url: string }
+  | { status: 'opened' | 'linked_existing' | 'marked_ready'; prNumber: number; url: string }
   | { status: 'skipped'; reason: string }
   | { status: 'error'; message: string };
 
 /**
- * Open/link a PR for a task that has been explicitly marked ready. This uses
- * the latest branch recorded by the push webhook, so repeated pushes before
- * readiness do not create noisy under-progress PRs.
+ * Open/link a PR for a task whose branch was pushed or marked ready.
+ *
+ * mode='draft'  (push webhook): ensure a draft PR exists; do NOT change task
+ *               status. Idempotent — returns 'linked_existing' when an open PR
+ *               is already present, 'skipped' when pr_linked is already recorded.
+ *
+ * mode='ready'  (done-signal, default): un-draft an existing PR if needed,
+ *               ensure pr_linked is written, then set status to needs_review.
+ *               The early existingLinked short-circuit is intentionally absent
+ *               here so that a draft opened on push is always promoted.
  */
 export async function openPullRequestForReadyTask(
   serverId: string,
   taskId: string,
   deps: ReadyPullRequestDeps,
+  opts?: { mode?: 'draft' | 'ready'; createIfMissing?: boolean },
 ): Promise<ReadyPrResult> {
+  const mode = opts?.mode ?? 'ready';
+  const createIfMissing = opts?.createIfMissing ?? true;
   const activity = await deps.listActivity(taskId);
-  // Skip only while an *open* PR is still linked — a merged/closed PR is
-  // terminal, so continued work after a merge opens a brand-new PR rather than
-  // silently no-op'ing. `findOpenPullRequestByHead` below is the safety net
-  // against duplicates when GitHub still has an open PR for the branch.
-  if (hasOpenLinkedPr(activity)) {
-    return { status: 'skipped', reason: 'A pull request is already open for this branch.' };
-  }
 
   const branchActivity = [...activity].reverse().find((a) => a.type === 'branch_pushed' && a.metadata);
   const metadata = branchActivity?.metadata ?? null;
@@ -441,53 +450,94 @@ export async function openPullRequestForReadyTask(
 
   try {
     const existing = await deps.findOpenPullRequestByHead(installationId, owner, repo, branch);
-    const pr = existing ?? await deps.createPullRequest(installationId, owner, repo, {
-      title,
-      head: branch,
-      base,
-      body: `Automated pull request for widget ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ after the coding agent marked its ticket branch ready for review.`,
-    });
 
-    const latestActivity = await deps.listActivity(taskId);
-    const alreadyLinked = latestActivity.some((a) => a.type === 'pr_linked' && a.metadata?.number === pr.number);
-    if (!alreadyLinked) {
-      await deps.addActivity(serverId, taskId, {
-        type: 'pr_linked',
-        content: `Pull request #${pr.number} opened`,
-        metadata: {
-          number: pr.number,
-          url: pr.url,
-          state: 'open',
-          repoBranch: branch,
-        },
-        createdByType: 'system',
-      });
-    }
-
-    await deps.updateTask(serverId, taskId, { status: 'needs_review' });
-
-    // Push a live notification to the workspace so the PR chip updates without a
-    // refresh. Best-effort — must never fail the PR flow.
-    if (deps.notifyPrLinked) {
-      try {
-        await deps.notifyPrLinked({ branch, number: pr.number, url: pr.url, state: 'open' });
-      } catch (err) {
-        console.warn('[github/ready] pr-linked workspace notify failed', { taskId, branch, err: (err as Error)?.message });
+    // ── DRAFT mode (push webhook): ensure a draft PR exists, no status change ──
+    if (mode === 'draft') {
+      if (existing) {
+        return { status: 'linked_existing', prNumber: existing.number, url: existing.url };
       }
+      if (hasOpenLinkedPr(activity, branch)) {
+        return { status: 'skipped', reason: 'A pull request is already open for this branch.' };
+      }
+      const pr = await deps.createPullRequest(installationId, owner, repo, {
+        title,
+        head: branch,
+        base,
+        draft: true,
+        body: `Automated draft pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ when the ticket branch was pushed. It is marked ready for review when the agent signals completion.`,
+      });
+      await writePrLinked(serverId, taskId, branch, pr.number, pr.url, deps);
+      await notify(deps, serverId, branch, pr.number, pr.url);
+      console.info('[github/draft] opened draft PR for ticket branch', { owner, repo, branch, taskId, pr: pr.number });
+      return { status: 'opened', prNumber: pr.number, url: pr.url };
     }
 
-    console.info(existing ? '[github/ready] linked existing PR for ready ticket branch' : '[github/ready] opened PR for ready ticket branch', {
+    // ── READY mode (done-signal): un-draft if needed, ensure linked, set status ──
+    let number: number;
+    let url: string;
+    let resultStatus: 'opened' | 'marked_ready';
+    if (existing) {
+      number = existing.number;
+      url = existing.url;
+      if (existing.isDraft) {
+        await deps.markPullRequestReady(installationId, existing.nodeId);
+      }
+      resultStatus = 'marked_ready';
+    } else {
+      // createIfMissing:false is used for heuristic job-completion: only promote
+      // an EXISTING draft PR, never open one from a plain 'done' signal.
+      if (!createIfMissing) {
+        return { status: 'skipped', reason: 'No open pull request to mark ready.' };
+      }
+      const pr = await deps.createPullRequest(installationId, owner, repo, {
+        title,
+        head: branch,
+        base,
+        draft: false,
+        body: `Automated pull request for widget ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ after the coding agent marked its ticket branch ready for review.`,
+      });
+      number = pr.number;
+      url = pr.url;
+      resultStatus = 'opened';
+    }
+
+    const latest = await deps.listActivity(taskId);
+    if (!latest.some((a) => a.type === 'pr_linked' && a.metadata?.number === number)) {
+      await writePrLinked(serverId, taskId, branch, number, url, deps);
+    }
+    await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+    await notify(deps, serverId, branch, number, url);
+
+    console.info(existing ? '[github/ready] marked PR ready for review for ticket branch' : '[github/ready] opened PR for ready ticket branch', {
       owner,
       repo,
       branch,
       taskId,
-      pr: pr.number,
+      pr: number,
     });
-    return { status: existing ? 'linked_existing' : 'opened', prNumber: pr.number, url: pr.url };
+    return { status: resultStatus, prNumber: number, url };
   } catch (err) {
     const message = (err as Error)?.message || 'GitHub rejected the request.';
-    console.warn('[github/ready] failed to open PR for ready ticket branch', { owner, repo, branch, taskId, err: message });
+    console.warn('[github/ready] failed to open/ready PR for ticket branch', { owner, repo, branch, taskId, err: message });
     return { status: 'error', message };
+  }
+}
+
+async function writePrLinked(serverId: string, taskId: string, branch: string, number: number, url: string, deps: ReadyPullRequestDeps): Promise<void> {
+  await deps.addActivity(serverId, taskId, {
+    type: 'pr_linked',
+    content: `Pull request #${number} opened`,
+    metadata: { number, url, state: 'open', repoBranch: branch },
+    createdByType: 'system',
+  });
+}
+
+async function notify(deps: ReadyPullRequestDeps, serverId: string, branch: string, number: number, url: string): Promise<void> {
+  if (!deps.notifyPrLinked) return;
+  try {
+    await deps.notifyPrLinked(serverId, { branch, number, url, state: 'open' });
+  } catch (err) {
+    console.warn('[github/ready] pr-linked workspace notify failed', { branch, err: (err as Error)?.message });
   }
 }
 

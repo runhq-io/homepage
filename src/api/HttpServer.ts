@@ -5432,33 +5432,53 @@ export function createHttpApp() {
       actor,
     );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    // Open a PR when the task is explicitly marked ready (status=done +
-    // readyForReview) OR when the user clicked Open/New PR (openPullRequest).
+    // Open/promote a PR depending on what signal triggered this update.
     // The result is awaited and returned as `prResult` so the caller can surface
     // the real outcome — a silent fire-and-forget left the UI with no feedback.
     let prResult: ReadyPrResult | undefined;
-    const shouldOpenPr = isGithubAppConfigured()
-      && (openPullRequest || (readyForReview && isRecord(body) && body.status === 'done'));
-    if (shouldOpenPr) {
-      prResult = await openPullRequestForReadyTask(server.id, task.id, {
+    if (isGithubAppConfigured()) {
+      const prDeps = {
         listActivity: WorkspaceTaskService.listActivity,
-        addActivity: async (serverId, taskId, input) => {
+        addActivity: async (serverId: string, taskId: string, input: Parameters<typeof WorkspaceTaskService.addActivity>[2]) => {
           await WorkspaceTaskService.addActivity(serverId, taskId, input);
         },
-        updateTask: async (serverId, taskId, input) => {
+        updateTask: async (serverId: string, taskId: string, input: Parameters<typeof WorkspaceTaskService.updateTask>[2]) => {
           await WorkspaceTaskService.updateTask(serverId, taskId, input);
         },
-        findOpenPullRequestByHead: (id, owner, repo, head) =>
+        findOpenPullRequestByHead: (id: number, owner: string, repo: string, head: string) =>
           getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
-        createPullRequest: (id, owner, repo, args) =>
+        createPullRequest: (id: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string; draft?: boolean }) =>
           getGitHubAppService().createPullRequest(id, owner, repo, args),
-        notifyPrLinked: (input) =>
+        markPullRequestReady: (id: number, nodeId: string) =>
+          getGitHubAppService().markPullRequestReady(id, nodeId),
+        notifyPrLinked: (_serverId: string, input: { branch: string; number: number; url: string; state: 'open' | 'closed' | 'merged' }) =>
           ServerService.serverTokenFetch(server, '/api/internal/pr-linked', input).then(() => undefined),
-      }).catch((err) => {
-        const message = (err as Error)?.message || 'Failed to open pull request';
-        console.warn('[HttpServer] ready PR creation failed', err);
-        return { status: 'error', message } as ReadyPrResult;
-      });
+      };
+      if (openPullRequest) {
+        // User clicked "Open/New PR" — open a draft PR immediately for this branch.
+        prResult = await openPullRequestForReadyTask(server.id, task.id, prDeps, { mode: 'draft' }).catch((err) => {
+          const message = (err as Error)?.message || 'Failed to open pull request';
+          console.warn('[HttpServer] manual draft PR creation failed', err);
+          return { status: 'error', message } as ReadyPrResult;
+        });
+      } else if (readyForReview && isRecord(body) && body.status === 'done') {
+        // Explicit ready-for-review signal from the workspace server.
+        prResult = await openPullRequestForReadyTask(server.id, task.id, prDeps, { mode: 'ready' }).catch((err) => {
+          const message = (err as Error)?.message || 'Failed to open pull request';
+          console.warn('[HttpServer] ready PR creation failed', err);
+          return { status: 'error', message } as ReadyPrResult;
+        });
+      } else if (isRecord(body) && body.status === 'done' && task.useWorktree) {
+        // An isolated-branch task reached 'done' (typically the coder job
+        // completed) WITHOUT an explicit ready-for-review. Agents don't reliably
+        // run that command, so promote the draft PR opened on push to ready —
+        // making it mergeable and landing the task in needs_review, exactly as
+        // the ready path would. createIfMissing:false → never open a PR from a
+        // plain heuristic 'done'; only promote one that already exists.
+        void openPullRequestForReadyTask(server.id, task.id, prDeps, { mode: 'ready', createIfMissing: false }).catch((err) => {
+          console.warn('[HttpServer] worktree done un-draft failed', err);
+        });
+      }
     }
     // Ship the emitted notification (if any) back to the calling per-server
     // so it can push to its connected WS clients.
@@ -7610,6 +7630,29 @@ export function createHttpApp() {
         listActivity: WorkspaceTaskService.listActivity,
         addActivity: async (serverId, taskId, input) => {
           await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
+        getTask: async (serverId, taskId) => {
+          const t = await WorkspaceTaskService.getTaskById(serverId, taskId);
+          return t ? { useWorktree: t.useWorktree ?? false } : null;
+        },
+        updateTask: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.updateTask(serverId, taskId, input);
+        },
+        findOpenPullRequestByHead: (id, owner, repo, head) =>
+          getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
+        createPullRequest: (id, owner, repo, args) =>
+          getGitHubAppService().createPullRequest(id, owner, repo, args),
+        markPullRequestReady: (id, nodeId) =>
+          getGitHubAppService().markPullRequestReady(id, nodeId),
+        // Push-path PRs are opened from a deps object built once at registration,
+        // so (unlike the request-scoped ready path) there's no `server` in scope —
+        // resolve it per-call from the serverId threaded through notifyPrLinked so
+        // the draft-on-push chip updates live via WS, not just on the next fetch.
+        notifyPrLinked: async (serverId, input) => {
+          const target = await ServerService.getServer(serverId);
+          if (target) {
+            await ServerService.serverTokenFetch(target, '/api/internal/pr-linked', input);
+          }
         },
       },
     });

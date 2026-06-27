@@ -25,6 +25,7 @@ export interface InstallationAccount {
 interface OctokitLike {
   paginate(route: string, params?: Record<string, unknown>): Promise<any[]>;
   request(route: string, params?: Record<string, unknown>): Promise<{ data: any }>;
+  graphql(query: string, params?: Record<string, unknown>): Promise<any>;
 }
 
 export interface GitHubAppDeps {
@@ -107,6 +108,7 @@ export class GitHubAppService {
       headRef: p.head?.ref ?? '',
       baseRef: p.base?.ref ?? '',
       url: p.html_url,
+      nodeId: p.node_id as string,
     }));
   }
 
@@ -138,13 +140,13 @@ export class GitHubAppService {
     installationId: number,
     owner: string,
     repo: string,
-    args: { title: string; head: string; base: string; body?: string },
-  ): Promise<{ number: number; url: string; headRef: string }> {
+    args: { title: string; head: string; base: string; body?: string; draft?: boolean },
+  ): Promise<{ number: number; url: string; headRef: string; nodeId: string }> {
     const okit = await this.octokitFor(installationId);
     const { data } = await okit.request('POST /repos/{owner}/{repo}/pulls', {
-      owner, repo, title: args.title, head: args.head, base: args.base, body: args.body ?? '',
+      owner, repo, title: args.title, head: args.head, base: args.base, body: args.body ?? '', draft: args.draft ?? false,
     });
-    return { number: data.number, url: data.html_url, headRef: data.head?.ref ?? args.head };
+    return { number: data.number, url: data.html_url, headRef: data.head?.ref ?? args.head, nodeId: data.node_id };
   }
 
   /** Find an OPEN PR whose head branch is `head`, or null. Used for idempotency before creating one. */
@@ -153,10 +155,19 @@ export class GitHubAppService {
     owner: string,
     repo: string,
     head: string,
-  ): Promise<{ number: number; url: string } | null> {
+  ): Promise<{ number: number; url: string; nodeId: string; isDraft: boolean } | null> {
     const prs = await this.listPullRequests(installationId, owner, repo, 'open');
     const match = prs.find((p) => p.headRef === head);
-    return match ? { number: match.number, url: match.url } : null;
+    return match ? { number: match.number, url: match.url, nodeId: match.nodeId, isDraft: match.isDraft } : null;
+  }
+
+  /** Convert a draft PR to ready-for-review. REST cannot do this; GitHub requires GraphQL. */
+  async markPullRequestReady(installationId: number, nodeId: string): Promise<void> {
+    const okit = await this.octokitFor(installationId);
+    await okit.graphql(
+      'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { id isDraft } } }',
+      { id: nodeId },
+    );
   }
 
   async createOrgRepo(installationId: number, org: string, name: string, isPrivate: boolean): Promise<InstallationRepo> {
