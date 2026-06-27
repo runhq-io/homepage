@@ -26,17 +26,9 @@ import type {
   CanonicalTaskStatus,
 } from '@runhq/server-protocol';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
-import { CommunityPointsService } from './CommunityPointsService';
-
-// ---------------------------------------------------------------------------
-// Community points singleton
-// ---------------------------------------------------------------------------
-// publish is a no-op stub — Task 7b will wire this to broadcastToSubscribers.
-// TODO(7b): replace this stub with the real HttpServer broadcast when available.
-const communityPointsService = new CommunityPointsService({
-  db,
-  publish: (_topic: string, _payload: unknown) => { /* TODO(7b): wire to broadcastToSubscribers */ },
-});
+// Shared instance wired to real WS broadcasting (see communityServices/communityBroadcaster).
+// This is the single canonical awarding path: every task status update flows through updateTask.
+import { communityPointsService } from './communityServices';
 
 type CreateWorkspaceTaskInput = {
   workspaceProjectId?: string | null;

@@ -2242,6 +2242,51 @@ export interface CommunityWidgetUserSubscribedMessage {
   timestamp: number;
 }
 
+/**
+ * Broadcast to the `community:{projectId}` topic whenever a member's balance
+ * (and possibly rank) changes — auto-completion award, admin grant, or reversal.
+ * Staff leaderboard subscribers use this to live-update without a refetch.
+ */
+export interface CommunityBalanceChangedMessage {
+  type: 'community_balance_changed';
+  /** widget_projects.id */
+  projectId: string;
+  /** widget_users.id */
+  widgetUserId: string;
+  oldBalance: number;
+  newBalance: number;
+  oldRank: number | null;
+  newRank: number | null;
+  /** point_grants.id of the grant (or reversal) that caused the change */
+  grantId: string;
+  /** Set when this change was produced by a reversal — the grant it cancels. */
+  reversesGrantId?: string;
+}
+
+/**
+ * Broadcast to the `community:widget_user:{widgetUserId}` topic when a new
+ * notification is created for that user (e.g. points awarded / bonus). Widget
+ * clients use this to light up the bell without polling.
+ */
+export interface CommunityNotificationMessage {
+  type: 'community_notification';
+  /** widget_projects.id */
+  projectId: string;
+  /** widget_users.id */
+  widgetUserId: string;
+  /** widget_user_notifications.id */
+  notificationId: string;
+}
+
+/**
+ * Union of community events that are published to WS topics (server → client).
+ * These are the only payloads `communityPublish` / `broadcastToTopic` carry for
+ * the community feature.
+ */
+export type CommunityBroadcastMessage =
+  | CommunityBalanceChangedMessage
+  | CommunityNotificationMessage;
+
 // ============================================================================
 // Cloud WebSocket Union Types
 // ============================================================================
@@ -2321,4 +2366,6 @@ export type CloudToDesktopMessage =
   | ActionResultMessage
   | AuthWidgetResultMessage
   | CommunitySubscribedMessage
-  | CommunityWidgetUserSubscribedMessage;
+  | CommunityWidgetUserSubscribedMessage
+  | CommunityBalanceChangedMessage
+  | CommunityNotificationMessage;

@@ -194,17 +194,22 @@ describe('awardForCompletion', () => {
     expect(published).toHaveLength(2);
     const communityEvt = published.find((p: any) => p.topic === `community:${PROJECT_ID}`) as any;
     expect(communityEvt).toBeDefined();
-    expect(communityEvt.payload.type).toBe('balance_changed');
+    expect(communityEvt.payload.type).toBe('community_balance_changed');
+    expect(communityEvt.payload.projectId).toBe(PROJECT_ID);
     expect(communityEvt.payload.widgetUserId).toBe(WIDGET_USER_ID);
     expect(typeof communityEvt.payload.oldBalance).toBe('number');
     expect(typeof communityEvt.payload.newBalance).toBe('number');
     expect(communityEvt.payload.newBalance).toBe(12);
+    expect(communityEvt.payload.grantId).toBe(result.grantId);
 
     const userEvt = published.find(
       (p: any) => p.topic === `community:widget_user:${WIDGET_USER_ID}`,
     ) as any;
     expect(userEvt).toBeDefined();
-    expect(userEvt.payload.type).toBe('notification');
+    expect(userEvt.payload.type).toBe('community_notification');
+    expect(userEvt.payload.projectId).toBe(PROJECT_ID);
+    expect(userEvt.payload.widgetUserId).toBe(WIDGET_USER_ID);
+    expect(typeof userEvt.payload.notificationId).toBe('string');
   });
 
   it('is idempotent: second call with same ticketId returns {applied:false}, no duplicates', async () => {
@@ -324,11 +329,13 @@ describe('grantBonus', () => {
     // PubSub
     expect(published).toHaveLength(2);
     const communityEvt = published.find((p: any) => p.topic === `community:${PROJECT_ID}`) as any;
-    expect(communityEvt.payload.type).toBe('balance_changed');
+    expect(communityEvt.payload.type).toBe('community_balance_changed');
+    expect(communityEvt.payload.projectId).toBe(PROJECT_ID);
     const userEvt = published.find(
       (p: any) => p.topic === `community:widget_user:${WIDGET_USER_ID}`,
     ) as any;
     expect(userEvt).toBeDefined();
+    expect(userEvt.payload.type).toBe('community_notification');
   });
 
   it('is idempotent on clientRequestId: second call returns same grant, no double-credit', async () => {
@@ -501,7 +508,7 @@ describe('reverseGrant', () => {
         grantedByUserId: USER_ID,
         clientRequestId: `rev5-${randomBytes(4).toString('hex')}`,
       }),
-    ).rejects.toThrow('Cannot reverse a reversal grant');
+    ).rejects.toMatchObject({ code: 'cannot_reverse_reversal' });
   });
 
   it('throws on missing grant', async () => {
@@ -514,7 +521,7 @@ describe('reverseGrant', () => {
         grantedByUserId: USER_ID,
         clientRequestId: `rev6-${randomBytes(4).toString('hex')}`,
       }),
-    ).rejects.toThrow('Grant not found');
+    ).rejects.toMatchObject({ code: 'grant_not_found' });
   });
 
   it('is idempotent on clientRequestId: second reversal call returns same reversal row', async () => {
@@ -619,7 +626,7 @@ describe('reverseGrant cross-tenant guard', () => {
         grantedByUserId: USER_ID,
         clientRequestId: `cross-rev-${randomBytes(4).toString('hex')}`,
       }),
-    ).rejects.toThrow('Grant does not belong to this project');
+    ).rejects.toMatchObject({ code: 'cross_tenant_grant' });
 
     // Verify no reversal row was inserted under either project
     const reversalsInA = await db
@@ -694,7 +701,7 @@ describe('grantBonus cross-tenant guard', () => {
         reason: 'Cross-tenant attack',
         clientRequestId: `cross-bonus-${randomBytes(4).toString('hex')}`,
       }),
-    ).rejects.toThrow('Widget user does not belong to this project');
+    ).rejects.toMatchObject({ code: 'cross_tenant_user' });
 
     // No grant row inserted under either project
     const grantsInA = await db
@@ -731,7 +738,7 @@ describe('grantBonus pubsub payload', () => {
       (p: any) => p.topic === `community:widget_user:${WIDGET_USER_ID}`,
     ) as any;
     expect(userEvt).toBeDefined();
-    expect(userEvt.payload.type).toBe('notification');
+    expect(userEvt.payload.type).toBe('community_notification');
     expect(typeof userEvt.payload.notificationId).toBe('string');
     expect(userEvt.payload.notificationId).toBeTruthy();
 

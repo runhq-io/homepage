@@ -78,29 +78,34 @@ vi.mock('./services/TaskAttachmentStorageService', () => ({
   TaskAttachmentStorageService: class { isConfigured() { return false; } },
 }));
 
-// Community services — use hoisted vi.fn() singletons so tests can configure
-// the exact same function objects that the service instances inside createHttpApp use.
-vi.mock('./services/CommunityPointsService', () => ({
-  CommunityPointsService: class {
-    awardForCompletion = mockAwardForCompletion;
-    grantBonus = mockGrantBonus;
-    reverseGrant = mockReverseGrant;
-  },
-}));
+// Community services — the routes consume shared singletons from
+// ./services/communityServices, so we mock that module with the hoisted vi.fn()s.
+// We also provide a real CommunityPointsError (routes map its `code` → status).
+vi.mock('./services/CommunityPointsService', () => {
+  class CommunityPointsError extends Error {
+    constructor(public readonly code: string, message: string) {
+      super(message);
+      this.name = 'CommunityPointsError';
+    }
+  }
+  return { CommunityPointsError };
+});
 
-vi.mock('./services/CommunityNotificationService', () => ({
-  CommunityNotificationService: class {
-    list = mockNotifList;
-    markRead = mockMarkRead;
-    markAllRead = mockMarkAllRead;
-    unreadCount = mockUnreadCount;
+vi.mock('./services/communityServices', () => ({
+  communityPointsService: {
+    awardForCompletion: mockAwardForCompletion,
+    grantBonus: mockGrantBonus,
+    reverseGrant: mockReverseGrant,
   },
-}));
-
-vi.mock('./services/CommunityLeaderboardService', () => ({
-  CommunityLeaderboardService: class {
-    listMembers = mockListMembers;
-    getMember = mockGetMember;
+  communityNotificationService: {
+    list: mockNotifList,
+    markRead: mockMarkRead,
+    markAllRead: mockMarkAllRead,
+    unreadCount: mockUnreadCount,
+  },
+  communityLeaderboardService: {
+    listMembers: mockListMembers,
+    getMember: mockGetMember,
   },
 }));
 
@@ -175,6 +180,7 @@ import * as ServerService from './services/ServerService';
 import * as WidgetService from './services/WidgetService';
 import { extractUserIdFromToken } from './auth/jwt';
 import { db } from '../db/index';
+import { CommunityPointsError } from './services/CommunityPointsService';
 
 // ============================================================================
 // Typed db handle for test setup
@@ -280,119 +286,6 @@ function setupWidgetSession(widgetUserId = 'wu-1', projectId = 'proj-1') {
     projectId, projectSlug: 'test', widgetUserId, authenticated: true,
   });
 }
-
-// ============================================================================
-// Task 7b: POST /api/server/community/events
-// ============================================================================
-
-describe('POST /api/server/community/events', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    resetCommunityMocks();
-    dbMock.insert.mockReturnValue({
-      values: vi.fn().mockReturnValue({ onConflictDoNothing: vi.fn().mockResolvedValue([]) }),
-    });
-    dbMock.update.mockReturnValue({
-      set: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }),
-    });
-  });
-
-  it('401 when X-Server-Token is absent', async () => {
-    const app = makeApp();
-    const res = await post(app, '/api/server/community/events', { events: [] });
-    expect(res.status).toBe(401);
-  });
-
-  it('401 when X-Server-Token is invalid', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(null as any);
-    const app = makeApp();
-    const res = await post(app, '/api/server/community/events', { events: [] }, { 'X-Server-Token': 'bad' });
-    expect(res.status).toBe(401);
-  });
-
-  it('400 when body is malformed JSON', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(mockServer as any);
-    const app = makeApp();
-    const res = await app.request('http://localhost/api/server/community/events', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Server-Token': 'tok' },
-      body: '{{not-json',
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it('400 when body.events is not an array', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(mockServer as any);
-    const app = makeApp();
-    const res = await post(app, '/api/server/community/events', { events: 'wrong' }, { 'X-Server-Token': 'tok' });
-    expect(res.status).toBe(400);
-  });
-
-  it('200 with todo.status_changed event — delegates to awardForCompletion', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(mockServer as any);
-    mockAwardForCompletion.mockResolvedValue({ applied: true, amount: 10 });
-
-    const app = makeApp();
-    const event = {
-      type: 'todo.status_changed',
-      payload: {
-        ticketId: 'ticket-1', projectId: 'proj-1', sourceType: 'widget',
-        externalUserId: 'ext-1', oldStatus: 'in_progress', newStatus: 'done',
-        upvoteCountAtTransition: 0, selfUpvoted: false, occurredAt: new Date().toISOString(),
-      },
-    };
-    const res = await post(app, '/api/server/community/events', { events: [event] }, { 'X-Server-Token': 'tok' });
-    expect(res.status).toBe(200);
-    const body = await res.json() as any;
-    expect(body.results[0]).toEqual({ idx: 0, ok: true });
-    expect(mockAwardForCompletion).toHaveBeenCalledOnce();
-  });
-
-  it('200 with widget_user.interacted — upserts widget user via db', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(mockServer as any);
-    const insertValues = vi.fn().mockReturnValue({ onConflictDoNothing: vi.fn().mockResolvedValue([]) });
-    const updateSet = vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) });
-    dbMock.insert.mockReturnValue({ values: insertValues });
-    dbMock.update.mockReturnValue({ set: updateSet });
-
-    const app = makeApp();
-    const event = { type: 'widget_user.interacted', payload: { projectId: 'proj-1', externalUserId: 'ext-42', name: 'Bob' } };
-    const res = await post(app, '/api/server/community/events', { events: [event] }, { 'X-Server-Token': 'tok' });
-    expect(res.status).toBe(200);
-    const body = await res.json() as any;
-    expect(body.results[0].ok).toBe(true);
-    expect(dbMock.insert).toHaveBeenCalled();
-    expect(dbMock.update).toHaveBeenCalled();
-  });
-
-  it('200 with unknown event type — records error at that index', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(mockServer as any);
-    const app = makeApp();
-    const res = await post(app, '/api/server/community/events', { events: [{ type: 'bogus', payload: {} }] }, { 'X-Server-Token': 'tok' });
-    expect(res.status).toBe(200);
-    const body = await res.json() as any;
-    expect(body.results[0].ok).toBe(false);
-    expect(body.results[0].error).toMatch(/unknown event type/);
-  });
-
-  it('200 — service errors recorded per-event, rest still processes', async () => {
-    vi.mocked(ServerService.getServerByToken).mockResolvedValue(mockServer as any);
-    mockAwardForCompletion.mockRejectedValueOnce(new Error('DB error')).mockResolvedValueOnce({ applied: true });
-
-    const event1 = {
-      type: 'todo.status_changed',
-      payload: { ticketId: 't1', projectId: 'p1', sourceType: 'widget', externalUserId: 'e1', oldStatus: 'pending', newStatus: 'done', upvoteCountAtTransition: 0, selfUpvoted: false, occurredAt: new Date().toISOString() },
-    };
-    const event2 = { ...event1, payload: { ...event1.payload, ticketId: 't2' } };
-    const app = makeApp();
-    const res = await post(app, '/api/server/community/events', { events: [event1, event2] }, { 'X-Server-Token': 'tok' });
-    expect(res.status).toBe(200);
-    const body = await res.json() as any;
-    expect(body.results[0].ok).toBe(false);
-    expect(body.results[0].error).toBe('DB error');
-    expect(body.results[1].ok).toBe(true);
-  });
-});
 
 // ============================================================================
 // Task 8: Staff / project-admin routes
@@ -558,7 +451,7 @@ describe('POST /api/community/:projectId/members/:widgetUserId/grants', () => {
 
   it('400 when widget user does not belong to project', async () => {
     setupAdmin();
-    mockGrantBonus.mockRejectedValue(new Error('Widget user does not belong to this project'));
+    mockGrantBonus.mockRejectedValue(new CommunityPointsError('cross_tenant_user', 'Widget user does not belong to this project'));
     const app = makeApp();
     const res = await post(app, '/api/community/proj-1/members/wu-1/grants', validGrantBody, { Authorization: ADMIN_BEARER });
     expect(res.status).toBe(400);
@@ -605,9 +498,9 @@ describe('POST /api/community/:projectId/grants/:grantId/reversals', () => {
     }));
   });
 
-  it('400 when service throws "Cannot reverse a reversal"', async () => {
+  it('400 when service throws cannot_reverse_reversal', async () => {
     setupAdmin();
-    mockReverseGrant.mockRejectedValue(new Error('Cannot reverse a reversal'));
+    mockReverseGrant.mockRejectedValue(new CommunityPointsError('cannot_reverse_reversal', 'Cannot reverse a reversal grant'));
     const app = makeApp();
     const res = await post(app, '/api/community/proj-1/grants/grant-1/reversals', validBody, { Authorization: ADMIN_BEARER });
     expect(res.status).toBe(400);
@@ -616,7 +509,7 @@ describe('POST /api/community/:projectId/grants/:grantId/reversals', () => {
 
   it('404 when grant not found', async () => {
     setupAdmin();
-    mockReverseGrant.mockRejectedValue(new Error('Grant not found'));
+    mockReverseGrant.mockRejectedValue(new CommunityPointsError('grant_not_found', 'Grant not found'));
     const app = makeApp();
     const res = await post(app, '/api/community/proj-1/grants/grant-1/reversals', validBody, { Authorization: ADMIN_BEARER });
     expect(res.status).toBe(404);
@@ -624,7 +517,7 @@ describe('POST /api/community/:projectId/grants/:grantId/reversals', () => {
 
   it('400 when grant belongs to a different project', async () => {
     setupAdmin();
-    mockReverseGrant.mockRejectedValue(new Error('Grant does not belong to this project'));
+    mockReverseGrant.mockRejectedValue(new CommunityPointsError('cross_tenant_grant', 'Grant does not belong to this project'));
     const app = makeApp();
     const res = await post(app, '/api/community/proj-1/grants/grant-1/reversals', validBody, { Authorization: ADMIN_BEARER });
     expect(res.status).toBe(400);

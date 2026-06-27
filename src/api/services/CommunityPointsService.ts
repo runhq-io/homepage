@@ -17,6 +17,7 @@
 
 import { eq, and, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import type { CommunityBroadcastMessage } from '@runhq/server-protocol';
 import * as schema from '../../db/schema';
 import {
   widgetUsers,
@@ -36,6 +37,30 @@ import {
 } from './communityAwardingPolicy';
 
 // ---------------------------------------------------------------------------
+// Typed errors
+//
+// The service throws these instead of bare Error so the HTTP layer can map a
+// stable `code` to a status without brittle message-string matching. A code
+// is part of the service's contract; the human `message` is for logs only.
+// ---------------------------------------------------------------------------
+
+export type CommunityPointsErrorCode =
+  | 'grant_not_found'
+  | 'cannot_reverse_reversal'
+  | 'cross_tenant_grant'
+  | 'cross_tenant_user';
+
+export class CommunityPointsError extends Error {
+  constructor(
+    public readonly code: CommunityPointsErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'CommunityPointsError';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Dependency injection interface
 // ---------------------------------------------------------------------------
 
@@ -43,7 +68,7 @@ export interface PointsServiceDeps {
   /** Drizzle db instance (or a mock-compatible substitute for unit tests). */
   db: NodePgDatabase<typeof schema>;
   /** Pubsub publish function — called post-commit, never inside the transaction. */
-  publish: (topic: string, payload: unknown) => void;
+  publish: (topic: string, message: CommunityBroadcastMessage) => void;
   /** Injectable clock; defaults to `() => new Date()`. */
   now?: () => Date;
 }
@@ -73,7 +98,7 @@ export interface ReverseGrantResult {
 
 export class CommunityPointsService {
   private readonly db: NodePgDatabase<typeof schema>;
-  private readonly publish: (topic: string, payload: unknown) => void;
+  private readonly publish: (topic: string, message: CommunityBroadcastMessage) => void;
   private readonly now: () => Date;
 
   constructor(deps: PointsServiceDeps) {
@@ -221,17 +246,20 @@ export class CommunityPointsService {
 
     // Post-commit pubsub — never inside the transaction.
     this.publish(`community:${event.projectId}`, {
-      type: 'balance_changed',
+      type: 'community_balance_changed',
+      projectId: event.projectId,
       widgetUserId,
       oldBalance,
       newBalance,
       oldRank,
       newRank,
-      grantId,
+      grantId: grantId!,
     });
     this.publish(`community:widget_user:${widgetUserId}`, {
-      type: 'notification',
-      notificationId,
+      type: 'community_notification',
+      projectId: event.projectId,
+      widgetUserId,
+      notificationId: notificationId!,
     });
 
     return { applied: true, amount, grantId };
@@ -278,7 +306,7 @@ export class CommunityPointsService {
           ),
         );
       if (!verifiedUser) {
-        throw new Error('Widget user does not belong to this project');
+        throw new CommunityPointsError('cross_tenant_user', 'Widget user does not belong to this project');
       }
 
       // Idempotent insert
@@ -385,7 +413,8 @@ export class CommunityPointsService {
     // Post-commit pubsub — only on fresh insert
     if (!isIdempotentHit) {
       this.publish(`community:${args.projectId}`, {
-        type: 'balance_changed',
+        type: 'community_balance_changed',
+        projectId: args.projectId,
         widgetUserId: args.widgetUserId,
         oldBalance,
         newBalance: newBalanceValue,
@@ -394,8 +423,10 @@ export class CommunityPointsService {
         grantId: grant!.id,
       });
       this.publish(`community:widget_user:${args.widgetUserId}`, {
-        type: 'notification',
-        notificationId,
+        type: 'community_notification',
+        projectId: args.projectId,
+        widgetUserId: args.widgetUserId,
+        notificationId: notificationId!,
       });
     }
 
@@ -433,11 +464,13 @@ export class CommunityPointsService {
       // Load and validate the original grant INSIDE the transaction to prevent
       // non-repeatable reads and to enforce the cross-tenant ownership check atomically.
       const [orig] = await tx.select().from(pointGrants).where(eq(pointGrants.id, args.grantId));
-      if (!orig) throw new Error('Grant not found');
+      if (!orig) throw new CommunityPointsError('grant_not_found', 'Grant not found');
       if (orig.projectId !== args.projectId) {
-        throw new Error('Grant does not belong to this project');
+        throw new CommunityPointsError('cross_tenant_grant', 'Grant does not belong to this project');
       }
-      if (orig.source === 'reversal') throw new Error('Cannot reverse a reversal grant');
+      if (orig.source === 'reversal') {
+        throw new CommunityPointsError('cannot_reverse_reversal', 'Cannot reverse a reversal grant');
+      }
       original = orig;
 
       const [inserted] = await tx
@@ -516,7 +549,8 @@ export class CommunityPointsService {
     // Post-commit pubsub — balance_changed only (no per-user notification topic)
     if (!isIdempotentHit) {
       this.publish(`community:${args.projectId}`, {
-        type: 'balance_changed',
+        type: 'community_balance_changed',
+        projectId: args.projectId,
         widgetUserId: original!.widgetUserId,
         oldBalance,
         newBalance,

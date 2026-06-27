@@ -329,41 +329,7 @@ export async function authenticateWidget(
   const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
   const providedName = rawName.length > 0 ? rawName : undefined;
   if (sub) {
-    const [existing] = await db
-      .select({ id: widgetUsers.id })
-      .from(widgetUsers)
-      .where(
-        and(
-          eq(widgetUsers.projectId, project.id),
-          eq(widgetUsers.externalUserId, sub)
-        )
-      )
-      .limit(1);
-
-    if (existing) {
-      // Only overwrite an existing name when the JWT carries a real one.
-      // Re-signing without 'name' must not clobber a previously-stored real name.
-      if (providedName) {
-        await db
-          .update(widgetUsers)
-          .set({ name: providedName })
-          .where(eq(widgetUsers.id, existing.id));
-      }
-      widgetUserId = existing.id;
-    } else {
-      // First-sight insert: fall back to a stable pseudonymous label so every
-      // member has a distinguishable display string in the leaderboard / drawer.
-      const insertName = providedName ?? fallbackDisplayName(sub);
-      const [inserted] = await db
-        .insert(widgetUsers)
-        .values({
-          projectId: project.id,
-          externalUserId: sub,
-          name: insertName,
-        })
-        .returning({ id: widgetUsers.id });
-      widgetUserId = inserted.id;
-    }
+    widgetUserId = await resolveWidgetUserOnAuth(project.id, sub, providedName);
   }
 
   return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
@@ -412,37 +378,7 @@ export async function verifyWidgetUserJwt(token: string): Promise<WidgetAuthResu
   const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
   const providedName = rawName.length > 0 ? rawName : undefined;
   if (sub) {
-    const [existing] = await db
-      .select({ id: widgetUsers.id })
-      .from(widgetUsers)
-      .where(
-        and(
-          eq(widgetUsers.projectId, project.id),
-          eq(widgetUsers.externalUserId, sub)
-        )
-      )
-      .limit(1);
-
-    if (existing) {
-      if (providedName) {
-        await db
-          .update(widgetUsers)
-          .set({ name: providedName })
-          .where(eq(widgetUsers.id, existing.id));
-      }
-      widgetUserId = existing.id;
-    } else {
-      const insertName = providedName ?? fallbackDisplayName(sub);
-      const [inserted] = await db
-        .insert(widgetUsers)
-        .values({
-          projectId: project.id,
-          externalUserId: sub,
-          name: insertName,
-        })
-        .returning({ id: widgetUsers.id });
-      widgetUserId = inserted.id;
-    }
+    widgetUserId = await resolveWidgetUserOnAuth(project.id, sub, providedName);
   }
 
   return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
@@ -1370,6 +1306,49 @@ function deriveFingerprint(secret: string): string {
 export function fallbackDisplayName(externalUserId: string): string {
   const suffix = createHash('sha256').update(externalUserId).digest('hex').slice(0, 6);
   return `Anonymous (${suffix})`;
+}
+
+/**
+ * Upsert a widget user on authentication and return its id.
+ *
+ * Single source of truth for both auth paths (HTTP `authenticateWidget` and WS
+ * `verifyWidgetUserJwt`). On every authenticated interaction this refreshes
+ * `last_seen_at` — the column the leaderboard "recent" sort relies on — which
+ * is why it lives here (the natural point a widget user "interacts") rather than
+ * behind a separate server→BE event.
+ *
+ * Name handling: a real `providedName` always wins; absent it, an existing
+ * stored name is preserved and a first-sight insert gets a stable pseudonym.
+ */
+export async function resolveWidgetUserOnAuth(
+  projectId: string,
+  externalUserId: string,
+  providedName: string | undefined,
+): Promise<string> {
+  const [existing] = await db
+    .select({ id: widgetUsers.id })
+    .from(widgetUsers)
+    .where(and(eq(widgetUsers.projectId, projectId), eq(widgetUsers.externalUserId, externalUserId)))
+    .limit(1);
+
+  if (existing) {
+    // Always refresh last_seen_at; only overwrite the name when the JWT carries
+    // a real one (re-signing without 'name' must not clobber a stored name).
+    await db
+      .update(widgetUsers)
+      .set({ lastSeenAt: new Date(), ...(providedName ? { name: providedName } : {}) })
+      .where(eq(widgetUsers.id, existing.id));
+    return existing.id;
+  }
+
+  // First-sight insert: fall back to a stable pseudonymous label so every member
+  // has a distinguishable display string in the leaderboard / drawer.
+  const insertName = providedName ?? fallbackDisplayName(externalUserId);
+  const [inserted] = await db
+    .insert(widgetUsers)
+    .values({ projectId, externalUserId, name: insertName })
+    .returning({ id: widgetUsers.id });
+  return inserted.id;
 }
 
 function generateSlug(name: string, suffix: string): string {

@@ -45,10 +45,13 @@ import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
 import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, widgetProjects, widgetUsers, widgetUserBalances, widgetUserNotifications, pointGrants } from '../db/schema';
 import { eq, lt, sql, and } from 'drizzle-orm';
-import { CommunityPointsService } from './services/CommunityPointsService';
-import { CommunityNotificationService } from './services/CommunityNotificationService';
-import { CommunityLeaderboardService, type SortKey } from './services/CommunityLeaderboardService';
-import type { StatusChangeEvent } from './services/communityAwardingPolicy';
+import { CommunityPointsError } from './services/CommunityPointsService';
+import { type SortKey } from './services/CommunityLeaderboardService';
+import {
+  communityPointsService,
+  communityNotificationService,
+  communityLeaderboardService,
+} from './services/communityServices';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -4107,20 +4110,12 @@ export function createHttpApp() {
   const taskAttachmentStorage = new TaskAttachmentStorageService();
 
   // ============================================================================
-  // Community Channel Points — service singletons
+  // Community Channel Points
   // ============================================================================
   //
-  // TODO: wire publish to the real WS subscriber broadcaster once wsHandlers
-  // exposes a broadcastToSubscribers / publish function. For now we log the
-  // would-be event so the route layer is testable without a live WS server.
-  const communityPointsService = new CommunityPointsService({
-    db,
-    publish: (topic: string, payload: unknown) => {
-      console.log('[community] would publish', topic, JSON.stringify(payload));
-    },
-  });
-  const communityNotificationService = new CommunityNotificationService({ db });
-  const communityLeaderboardService = new CommunityLeaderboardService({ db });
+  // Service instances are shared singletons (see ./services/communityServices),
+  // wired to real WS topic delivery via communityBroadcaster. The same instances
+  // back the canonical awarding path in WorkspaceTaskService.
 
   // ============================================================================
   // Community helpers
@@ -5218,77 +5213,6 @@ export function createHttpApp() {
   // workspace_tasks is now the single source of truth.
 
   // ============================================================================
-  // Task 7b: Community inbox — server → BE event delivery
-  // ============================================================================
-  //
-  // Authenticated with X-Server-Token; accepts a batch of typed events and fans
-  // them out to the appropriate community services.
-
-  type CommunityInboxEvent =
-    | { type: 'todo.status_changed'; payload: StatusChangeEvent }
-    | { type: 'widget_user.interacted'; payload: { projectId: string; externalUserId: string; name?: string | null } };
-
-  app.post('/api/server/community/events', async (c) => {
-    const serverToken = c.req.header('X-Server-Token');
-    if (!serverToken) return c.json({ error: 'unauthorized' }, 401);
-    const server = await ServerService.getServerByToken(serverToken);
-    if (!server) return c.json({ error: 'unauthorized' }, 401);
-
-    const body = await c.req.json<{ events: CommunityInboxEvent[] }>().catch(() => null);
-    if (!body || !Array.isArray(body.events)) {
-      return c.json({ error: 'invalid payload' }, 400);
-    }
-
-    const results: Array<{ idx: number; ok: boolean; error?: string }> = [];
-    for (let i = 0; i < body.events.length; i++) {
-      const event = body.events[i];
-      try {
-        switch (event.type) {
-          case 'todo.status_changed':
-            await communityPointsService.awardForCompletion(event.payload);
-            break;
-          case 'widget_user.interacted': {
-            // Upsert the widget user; insert on first sight, always update last_seen_at.
-            // The UNIQUE constraint is on (project_id, external_user_id).
-            const { projectId, externalUserId, name } = event.payload;
-            const newName = typeof name === 'string' && name.trim().length > 0 ? name.trim() : null;
-            await db
-              .insert(widgetUsers)
-              .values({
-                projectId,
-                externalUserId,
-                name: newName ?? externalUserId, // fallback to externalUserId on first insert
-              })
-              .onConflictDoNothing();
-            // Always refresh last_seen_at; only overwrite name if the caller provides a real one.
-            await db
-              .update(widgetUsers)
-              .set({
-                lastSeenAt: new Date(),
-                ...(newName ? { name: newName } : {}),
-              })
-              .where(
-                and(
-                  eq(widgetUsers.projectId, projectId),
-                  eq(widgetUsers.externalUserId, externalUserId),
-                )
-              );
-            break;
-          }
-          default:
-            results.push({ idx: i, ok: false, error: `unknown event type: ${(event as any).type}` });
-            continue;
-        }
-        results.push({ idx: i, ok: true });
-      } catch (err) {
-        console.error('community inbox event error', { event, err });
-        results.push({ idx: i, ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    }
-    return c.json({ results });
-  });
-
-  // ============================================================================
   // Task 8: Staff / project-admin routes
   // ============================================================================
 
@@ -5355,7 +5279,7 @@ export function createHttpApp() {
       });
       return c.json(result);
     } catch (err) {
-      if (err instanceof Error && err.message.includes('does not belong to this project')) {
+      if (err instanceof CommunityPointsError && err.code === 'cross_tenant_user') {
         return c.json({ error: 'widget user does not belong to this project' }, 400);
       }
       throw err;
@@ -5386,10 +5310,15 @@ export function createHttpApp() {
       });
       return c.json(result);
     } catch (err) {
-      if (err instanceof Error) {
-        if (err.message === 'Grant not found') return c.json({ error: 'grant not found' }, 404);
-        if (err.message === 'Cannot reverse a reversal') return c.json({ error: 'cannot reverse a reversal' }, 400);
-        if (err.message === 'Grant does not belong to this project') return c.json({ error: 'grant does not belong to this project' }, 400);
+      if (err instanceof CommunityPointsError) {
+        switch (err.code) {
+          case 'grant_not_found':
+            return c.json({ error: 'grant not found' }, 404);
+          case 'cannot_reverse_reversal':
+            return c.json({ error: 'cannot reverse a reversal' }, 400);
+          case 'cross_tenant_grant':
+            return c.json({ error: 'grant does not belong to this project' }, 400);
+        }
       }
       throw err;
     }
