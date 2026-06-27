@@ -54,6 +54,7 @@ beforeAll(async () => {
   const [app] = await db.insert(widgetUsers).values({
     projectId, externalUserId: 'app-1', authSource: 'app', name: 'App One',
     email: 'app1@test.invalid', permissionTier: 'app_user', lastActiveAt: older,
+    metadata: { company: 'Acme', plan: 'pro' },
   }).returning({ id: widgetUsers.id });
   appUserId = app.id;
   const [staff] = await db.insert(widgetUsers).values({
@@ -105,6 +106,15 @@ describe('listWidgetMembers', () => {
     expect(staff.lastActiveAt).toMatch(/\dT\d/);
     const none = res!.find((m) => m.id === noActivityUserId)!;
     expect(none.lastActiveAt).toBeNull();
+  });
+
+  it('returns captured metadata, defaulting to {} when none', () => {
+    return listWidgetMembers(SERVER_ID, lookup).then((res) => {
+      const app = res!.find((m) => m.id === appUserId)!;
+      expect(app.metadata).toEqual({ company: 'Acme', plan: 'pro' });
+      const staff = res!.find((m) => m.id === staffUserId)!;
+      expect(staff.metadata).toEqual({});
+    });
   });
 });
 

@@ -1446,6 +1446,11 @@ export const widgetUsers = pgTable('widget_users', {
   // Refreshed (throttled) on each widget auth so the Members tab can surface
   // recent activity without a separate analytics store.
   lastActiveAt: timestamp('last_active_at'),
+  // Identifying claims carried by the customer's JWT beyond sub/name/email
+  // (e.g. company, plan, account_id). Reserved/security claims are stripped.
+  // Refreshed on each auth and surfaced as auto-columns in the Members tab so
+  // admins can identify who a widget user actually is. Varies per project.
+  metadata: jsonb('metadata').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [
   { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
