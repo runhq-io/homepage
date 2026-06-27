@@ -664,6 +664,54 @@ function shouldRefreshLastActive(last: Date | null | undefined, nowMs: number): 
   return nowMs - last.getTime() >= LAST_ACTIVE_REFRESH_MS;
 }
 
+// Standard JWT + RunHQ-widget reserved claims that must never be stored as
+// member metadata: they're either security-sensitive, captured elsewhere
+// (sub→externalUserId, name, email), or pure transport noise.
+const RESERVED_WIDGET_CLAIMS: ReadonlySet<string> = new Set([
+  'sub', 'name', 'email', 'fp', 'type',
+  'iat', 'exp', 'nbf', 'iss', 'aud', 'jti',
+]);
+
+/**
+ * Pull the customer's identifying claims out of a verified widget JWT for the
+ * Members tab. Everything that isn't reserved, the configured roles claim, or
+ * the default `runhq_roles` claim is kept verbatim (values stay as-is so the
+ * client can render scalars as columns and nested values in a detail view).
+ * Returns null when there's nothing extra to store, so callers can skip the
+ * write entirely.
+ */
+export function extractWidgetMetadata(
+  payload: jose.JWTPayload,
+  roleClaimName: string | null | undefined,
+): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (RESERVED_WIDGET_CLAIMS.has(key)) continue;
+    if (key === 'runhq_roles' || (roleClaimName && key === roleClaimName)) continue;
+    if (value === undefined) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Order-independent deep-equality for plain JSON values (metadata change check). */
+function sameJson(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown): string => {
+    const seen = (val: unknown): unknown => {
+      if (val === null || typeof val !== 'object') return val;
+      if (Array.isArray(val)) return val.map(seen);
+      return Object.keys(val as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = seen((val as Record<string, unknown>)[k]);
+          return acc;
+        }, {});
+    };
+    return JSON.stringify(seen(v));
+  };
+  return norm(a) === norm(b);
+}
+
 /**
  * Parses a single named cookie out of a `Cookie:` header. Hono's
  * `getCookie` helper requires the Context, but `authenticateWidget`
@@ -919,6 +967,7 @@ export async function authenticateWidget(
         : undefined;
   const name = typeof payload.name === 'string' ? payload.name : undefined;
   const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
+  const metadata = extractWidgetMetadata(payload, project.widgetRoleClaimName);
   // Default tier for a brand-new app user. Effective permissions are resolved
   // from the stored tier, not from JWT roles (see permissionsForTier).
   let resolvedTier = 'app_user';
@@ -931,6 +980,7 @@ export async function authenticateWidget(
         email: widgetUsers.email,
         permissionTier: widgetUsers.permissionTier,
         lastActiveAt: widgetUsers.lastActiveAt,
+        metadata: widgetUsers.metadata,
       })
       .from(widgetUsers)
       .where(
@@ -950,6 +1000,10 @@ export async function authenticateWidget(
       const patch: Partial<typeof widgetUsers.$inferInsert> = {};
       if (name && name !== existing.name) patch.name = name;
       if (email && email !== existing.email) patch.email = email;
+      // Refresh metadata when the token's claims changed (cheap stable-stringify
+      // compare). Null metadata (token dropped its custom claims) is left as-is
+      // so we never wipe previously-captured identity on a sparse token.
+      if (metadata && !sameJson(metadata, existing.metadata)) patch.metadata = metadata;
       if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
       if (Object.keys(patch).length > 0) {
         await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
@@ -963,6 +1017,7 @@ export async function authenticateWidget(
           authSource: 'app',
           name,
           email,
+          metadata: metadata ?? undefined,
           lastActiveAt: new Date(nowMs),
         })
         .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
@@ -2888,6 +2943,9 @@ export interface WidgetMember {
   permissionTier: WidgetPermissionTier;
   createdAt: string;
   lastActiveAt: string | null;
+  // Non-reserved JWT claims captured for identification (company, plan, …).
+  // Empty object when the token carried nothing extra. Keys vary per project.
+  metadata: Record<string, unknown>;
 }
 
 /** Resolve the widget_projects.id for a (serverId, lookup) pair, or null. */
@@ -2924,6 +2982,7 @@ export async function listWidgetMembers(
       permissionTier: widgetUsers.permissionTier,
       createdAt: widgetUsers.createdAt,
       lastActiveAt: widgetUsers.lastActiveAt,
+      metadata: widgetUsers.metadata,
     })
     .from(widgetUsers)
     .where(eq(widgetUsers.projectId, projectId))
@@ -2937,6 +2996,7 @@ export async function listWidgetMembers(
     permissionTier: isWidgetPermissionTier(r.permissionTier) ? r.permissionTier : 'app_user',
     createdAt: r.createdAt.toISOString(),
     lastActiveAt: r.lastActiveAt ? r.lastActiveAt.toISOString() : null,
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
   }));
 }
 
