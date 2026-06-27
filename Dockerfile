@@ -19,7 +19,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/packages/protocol/node_modules ./packages/protocol/node_modules
 COPY . .
 
-# Protocol package is pre-built (dist/ included in context)
+# Build the @runhq/server-protocol workspace package — its dist/ is gitignored,
+# so the source-tree COPY above does not bring it in. Without this, tsx in the
+# runner stage cannot resolve `@runhq/server-protocol` runtime imports.
+RUN pnpm --filter @runhq/server-protocol build
 
 # Build Next.js (pages + SSR)
 # Provide dummy secrets so build-time page collection doesn't crash
@@ -59,4 +62,9 @@ EXPOSE 8080
 ENV PORT=8080
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["npx", "tsx", "src/server.ts"]
+# Run pending DB migrations before starting the server. A schema-vs-code
+# mismatch fails fast at startup here rather than silently 500-ing on the
+# first query that references the missing column — better to refuse to
+# serve than to serve broken. Idempotent: scripts/run-migration.js tracks
+# applied migrations in the schema_migrations table.
+CMD ["sh", "-c", "node scripts/run-migration.js && exec npx tsx src/server.ts"]

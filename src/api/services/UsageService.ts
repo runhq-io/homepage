@@ -15,11 +15,13 @@ import {
   usageAdjustments,
   plans,
   adminUsers,
+  servers,
   type PlanId,
   type Subscription,
   type Plan,
 } from '../../db/schema';
 import type { TokenCounts } from './pricing';
+import type { ProviderId } from './providers/types';
 
 // ============================================================================
 // Types
@@ -55,6 +57,59 @@ export interface UsageTrackResult {
 // Default Plan Configuration (credit-based)
 // ============================================================================
 
+/**
+ * Sentinel value for unlimited servers. Stored as `-1` in `PLAN_CONFIG.maxServers`
+ * so the value JSON-serializes safely (cf. `Number.POSITIVE_INFINITY` → `null`).
+ * Use `isUnlimitedServers()` and `hasReachedServerLimit()` instead of comparing
+ * directly.
+ */
+export const UNLIMITED_SERVERS = -1;
+
+export function isUnlimitedServers(maxServers: number): boolean {
+  return maxServers === UNLIMITED_SERVERS;
+}
+
+export function hasReachedServerLimit(currentCount: number, maxServers: number): boolean {
+  if (isUnlimitedServers(maxServers)) return false;
+  return currentCount >= maxServers;
+}
+
+/**
+ * The single machine tier available to free-plan users. Matches the
+ * "Lowest-tier machine only" promise on the Free plan in the pricing page.
+ * The legacy 1 GB / 2 GB tiers were retired — `shared-4x-4gb` is now the
+ * lowest tier we offer, so the free plan maps to it.
+ * Paid plans can pick any tier from `FlyService.TIER_CONFIGS`.
+ */
+export const FREE_PLAN_TIER = 'shared-4x-4gb';
+
+export function isTierAllowedForPlan(planId: PlanId, tier: string): boolean {
+  if (planId === 'free') return tier === FREE_PLAN_TIER;
+  return true;
+}
+
+/**
+ * Whether plan-based quotas (server limit + tier allowlist) apply when
+ * provisioning to a given provider. Providers with no usage-based cost — i.e.
+ * all `HOURLY_RATES[provider][tier] === 0` — are exempt: they're local-dev
+ * helpers, not paid infrastructure, so gating them by billing plan would
+ * arbitrarily block free-plan developers from testing the feature locally.
+ *
+ * DockerProvider is the only such provider today (all tier rates $0 in
+ * `providers/registry.ts`).
+ */
+export function enforcesPlanLimits(providerId: ProviderId): boolean {
+  return providerId !== 'docker';
+}
+
+/**
+ * Mirrors the public pricing page (`homepage/src/pages/PricingPage.tsx`). Two
+ * facts to keep aligned by hand: (1) the monthly `monthlyPriceCents` here is
+ * the headline platform fee; (2) `seatPriceCents` is the per-additional-seat
+ * surcharge described as "+ $X/seat" on the pricing page. Stripe Price IDs
+ * (in env vars) are the source of truth for what's actually charged; these
+ * numbers drive what the Settings page displays.
+ */
 export const PLAN_CONFIG: Record<PlanId, {
   id: PlanId;
   name: string;
@@ -62,7 +117,9 @@ export const PLAN_CONFIG: Record<PlanId, {
   monthlyPriceCents: number;
   monthlyCreditsCents: number;  // Credits given each month
   maxConcurrentAgents: number;
-  maxServers: number;            // Max servers a user can own
+  maxServers: number;            // Max servers a user can own; -1 = unlimited (see UNLIMITED_SERVERS)
+  /** Per-additional-seat surcharge, in cents. 0 for plans without seat-based pricing. */
+  seatPriceCents: number;
   signupBonusCents: number;     // One-time bonus for first subscription
   features: string[];
   isActive: boolean;
@@ -70,49 +127,74 @@ export const PLAN_CONFIG: Record<PlanId, {
   free: {
     id: 'free',
     name: 'Free',
-    description: 'Get started for free',
+    description: 'Kick the tires',
     monthlyPriceCents: 0,
     monthlyCreditsCents: 500,    // $5 free credits
     maxConcurrentAgents: 1,
     maxServers: 1,
+    seatPriceCents: 0,
     signupBonusCents: 0,
-    features: ['$5 monthly credits', '1 concurrent worker', '1 server'],
+    features: [
+      '$5 monthly agent credit',
+      '1 user · no invites',
+      'Lowest-tier machine only',
+      'Unlimited concurrent runs',
+    ],
     isActive: true,
   },
   starter: {
     id: 'starter',
     name: 'Starter',
-    description: 'For individuals',
-    monthlyPriceCents: 2000,    // $20/month
-    monthlyCreditsCents: 2500,  // $25 in credits
+    description: 'Best for new teams',
+    monthlyPriceCents: 10000,    // $100/month
+    monthlyCreditsCents: 7500,   // $75 in credits
     maxConcurrentAgents: 3,
-    maxServers: 3,
-    signupBonusCents: 500,      // $5 signup bonus
-    features: ['$25 monthly credits', '3 concurrent workers', '3 servers', '$5 signup bonus'],
+    maxServers: UNLIMITED_SERVERS,
+    seatPriceCents: 1500,        // +$15/seat
+    signupBonusCents: 500,       // $5 signup bonus
+    features: [
+      '$75 monthly agent credit',
+      'All machine tiers',
+      'Unlimited servers',
+      'Internal feedback widget',
+      '$5 signup bonus',
+    ],
     isActive: true,
   },
   pro: {
     id: 'pro',
     name: 'Pro',
-    description: 'For power users',
-    monthlyPriceCents: 10000,   // $100/month
-    monthlyCreditsCents: 12500, // $125 in credits
+    description: 'Best for shipping teams',
+    monthlyPriceCents: 25000,    // $250/month
+    monthlyCreditsCents: 20000,  // $200 in credits
     maxConcurrentAgents: 5,
-    maxServers: 10,
-    signupBonusCents: 1000,     // $10 signup bonus
-    features: ['$125 monthly credits', '5 concurrent workers', '10 servers', '$10 signup bonus'],
+    maxServers: UNLIMITED_SERVERS,
+    seatPriceCents: 2500,        // +$25/seat
+    signupBonusCents: 1000,      // $10 signup bonus
+    features: [
+      '$200 monthly agent credit',
+      'All machine tiers',
+      'Unlimited servers',
+      'Public user-facing widget',
+      'Graph-based agent flow',
+      '$10 signup bonus',
+    ],
     isActive: true,
   },
+  // 'team' is retained as a DB-level row for historical subscriptions but
+  // hidden from the public plan listing (isActive: false). The pricing page
+  // shows "Enterprise" instead, which is custom-priced and handled out-of-band.
   team: {
     id: 'team',
     name: 'Team',
     description: 'For teams',
-    monthlyPriceCents: 23900,   // $239/month
-    monthlyCreditsCents: 30000, // $300 in credits
+    monthlyPriceCents: 23900,
+    monthlyCreditsCents: 30000,
     maxConcurrentAgents: 10,
-    maxServers: 25,
-    signupBonusCents: 2500,     // $25 signup bonus
-    features: ['$300 monthly credits', '10 concurrent workers', '25 servers', '$25 signup bonus', 'Priority support'],
+    maxServers: UNLIMITED_SERVERS,
+    seatPriceCents: 0,
+    signupBonusCents: 2500,
+    features: ['$300 monthly credits', '10 concurrent workers', 'Unlimited servers', '$25 signup bonus', 'Priority support'],
     isActive: false,
   },
 };
@@ -121,7 +203,7 @@ export const PLAN_CONFIG: Record<PlanId, {
 // Helper Functions
 // ============================================================================
 
-function getBillingPeriod(date: Date = new Date()): { start: Date; end: Date } {
+export function getBillingPeriod(date: Date = new Date()): { start: Date; end: Date } {
   const start = new Date(date.getFullYear(), date.getMonth(), 1);
   const end = new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
   return { start, end };
@@ -275,13 +357,60 @@ export interface TrackUsageInput {
 }
 
 /**
- * Persist one Claude-call event and deduct the cost from the user's balance.
- * Both operations happen in one DB transaction — either both succeed or neither.
+ * Look up a server's owner. Returns null when serverId is null, a sentinel
+ * ('local'), or has no matching `servers` row (legacy events that stored a Fly
+ * machine id instead of a ws_ id).
+ */
+export async function getServerOwnerId(serverId: string | null): Promise<string | null> {
+  if (!serverId) return null;
+  const [row] = await db
+    .select({ ownerId: servers.ownerId })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  return row?.ownerId ?? null;
+}
+
+/**
+ * Owner-pays billing: AI usage on a server is billed to that server's OWNER,
+ * not the user who happened to run the agent. Resolve the billed user from the
+ * serverId; fall back to the acting user when the server/owner can't be
+ * resolved (no serverId, sentinel, or unknown server).
+ */
+export async function resolveBilledUserId(serverId: string | null, actorUserId: string): Promise<string> {
+  return (await getServerOwnerId(serverId)) ?? actorUserId;
+}
+
+/**
+ * Total usage cost (cents) recorded for a server since `sinceMs` (epoch ms).
+ * Backs the per-server spend cap (SettingsService.spendCapCents): a guardrail
+ * that stops runaway spend during testing. Returns 0 for a null/sentinel
+ * serverId or when no events exist in the window.
+ */
+export async function getServerSpendSinceCents(serverId: string | null, sinceMs: number): Promise<number> {
+  if (!serverId) return 0;
+  const rows = await db
+    .select({ total: sql<string>`coalesce(sum(${usageEvents.costCents}), 0)` })
+    .from(usageEvents)
+    .where(and(eq(usageEvents.serverId, serverId), gte(usageEvents.ts, new Date(sinceMs))));
+  return Number(rows[0]?.total ?? 0);
+}
+
+/**
+ * Persist one Claude-call event and deduct the cost from the BILLED user's
+ * balance. Both operations happen in one DB transaction — either both succeed
+ * or neither.
+ *
+ * `input.userId` is the ACTING user (request bearer). Under owner-pays we bill
+ * the server's owner instead, resolved from `context.serverId`; when the owner
+ * can't be resolved we fall back to the actor. Returns the billed user id so
+ * callers can report the correct post-deduct balance.
  *
  * Balance is clamped at 0 (existing behavior; debt is not tracked).
  */
-export async function trackUsage(input: TrackUsageInput): Promise<void> {
-  const { userId, model, tokens, costCents, context, anthropicRequestId } = input;
+export async function trackUsage(input: TrackUsageInput): Promise<{ billedUserId: string }> {
+  const { userId: actorUserId, model, tokens, costCents, context, anthropicRequestId } = input;
+  const billedUserId = await resolveBilledUserId(context.serverId, actorUserId);
 
   await db.transaction(async (tx) => {
     // Deduct balance atomically using SQL GREATEST(0, balance - cost).
@@ -292,11 +421,11 @@ export async function trackUsage(input: TrackUsageInput): Promise<void> {
         creditBalanceCents: sql`GREATEST(0, ${subscriptions.creditBalanceCents} - ${costCents.toFixed(4)}::numeric)`,
         updatedAt: new Date(),
       })
-      .where(eq(subscriptions.userId, userId));
+      .where(eq(subscriptions.userId, billedUserId));
 
-    // Insert the event with full precision cost.
+    // Insert the event with full precision cost. userId = the billed (owner) user.
     await tx.insert(usageEvents).values({
-      userId,
+      userId: billedUserId,
       serverId: context.serverId,
       ts: new Date(),
       model,
@@ -316,6 +445,8 @@ export async function trackUsage(input: TrackUsageInput): Promise<void> {
       anthropicRequestId,
     });
   });
+
+  return { billedUserId };
 }
 
 
@@ -369,23 +500,46 @@ export async function getCreditBalance(userToken: string): Promise<CreditBalance
 }
 
 
+/** CreditCheckResult for an unresolvable user (no/invalid token). */
+function noSubscriptionResult(): CreditCheckResult {
+  const { end } = getBillingPeriod();
+  return {
+    allowed: false,
+    reason: 'no_subscription',
+    balanceCents: 0,
+    plan: 'free',
+    hasPaymentMethod: false,
+    periodEnd: end,
+  };
+}
+
 /**
- * Check if user has enough credits
+ * Check if the request is allowed to incur cost, billing the SERVER OWNER under
+ * owner-pays. The gate must check the owner's balance (whoever actually pays),
+ * not the acting user's — otherwise a funded collaborator could drain a broke
+ * owner, or a broke collaborator could be blocked on a funded owner's server.
+ * Falls back to the actor when the server/owner can't be resolved.
+ */
+export async function checkCreditBalanceForServer(userToken: string, serverId: string | null): Promise<CreditCheckResult> {
+  const actorUserId = extractUserIdFromToken(userToken);
+  if (!actorUserId) return noSubscriptionResult();
+  const billedUserId = await resolveBilledUserId(serverId, actorUserId);
+  return checkCreditBalanceByUserId(billedUserId);
+}
+
+/**
+ * Check if user has enough credits (token-based; checks the token's own user).
  */
 export async function checkCreditBalance(userToken: string): Promise<CreditCheckResult> {
   const userId = extractUserIdFromToken(userToken);
-  if (!userId) {
-    const { end } = getBillingPeriod();
-    return {
-      allowed: false,
-      reason: 'no_subscription',
-      balanceCents: 0,
-      plan: 'free',
-      hasPaymentMethod: false,
-      periodEnd: end,
-    };
-  }
+  if (!userId) return noSubscriptionResult();
+  return checkCreditBalanceByUserId(userId);
+}
 
+/**
+ * Core credit check for a resolved userId.
+ */
+export async function checkCreditBalanceByUserId(userId: string): Promise<CreditCheckResult> {
   const subscription = await getOrCreateSubscription(userId);
   const hasPaymentMethod = !!subscription.stripeCustomerId;
   const periodEnd = subscription.currentPeriodEnd;
@@ -508,11 +662,21 @@ export async function seedPlans(): Promise<void> {
 }
 
 /**
- * Get all available plans
+ * Get all available plans. Augments each row with `seatPriceCents` from
+ * `PLAN_CONFIG` — the `plans` DB table has no column for it, so the in-code
+ * config is the source of truth. This keeps the API response and the
+ * pricing page in lockstep without a migration.
  */
-export async function getPlans(): Promise<Plan[]> {
-  return db.query.plans.findMany({
+export async function getPlans(): Promise<(Plan & { seatPriceCents: number })[]> {
+  const rows = await db.query.plans.findMany({
     where: eq(plans.isActive, true),
+  });
+  return rows.map((row) => {
+    const config = PLAN_CONFIG[row.id as PlanId];
+    return {
+      ...row,
+      seatPriceCents: config?.seatPriceCents ?? 0,
+    };
   });
 }
 

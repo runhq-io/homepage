@@ -10,3 +10,4 @@ export {
   isAnyProviderConfigured,
 } from './registry';
 export { FlyProvider, flyTierToTierId, tierIdToFlyTier } from './FlyProvider';
+export { DockerProvider } from './DockerProvider';

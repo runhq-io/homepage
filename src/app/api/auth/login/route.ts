@@ -135,6 +135,16 @@ export async function POST(request: NextRequest) {
     path: '/',
     maxAge: 30 * 24 * 60 * 60,
   });
+  // Parallel cookie for widget cross-origin recognition. Same JWT, different
+  // attributes (None+Secure, scoped to /api/widget/, 7d). See WidgetCookieAuth.
+  const isProd = process.env.NODE_ENV === 'production';
+  response.cookies.set('rw_session', token, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/api/widget/',
+    maxAge: 7 * 24 * 60 * 60,
+  });
 
   return response;
 }

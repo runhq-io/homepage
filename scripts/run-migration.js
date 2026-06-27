@@ -60,6 +60,17 @@ async function applyMigration(filename) {
 
 async function main() {
   await client.connect();
+
+  // The migration runner must write (create schema_migrations, run DDL/DML).
+  // The production database is Neon, whose sessions default to
+  // `default_transaction_read_only = on` — the role has write perms, but each
+  // new session is read-only until this is cleared. Without it the very first
+  // statement (CREATE TABLE schema_migrations) fails with Postgres 25006
+  // "cannot execute CREATE TABLE in a read-only transaction" and the server
+  // never boots. `default_transaction_read_only` is a standard Postgres GUC;
+  // on databases that aren't read-only by default this is an explicit no-op.
+  await client.query('SET SESSION default_transaction_read_only = off');
+
   await ensureMigrationsTable();
 
   const files = listMigrationFiles();

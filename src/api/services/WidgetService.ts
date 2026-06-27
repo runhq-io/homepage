@@ -20,37 +20,167 @@ import {
   workspaceTaskActivity,
   workspaceTaskAttachments,
   servers,
+  serverMembers,
+  users,
+  widgetExposedAgents,
+  widgetChatConversations,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
+import * as ServerService from './ServerService';
+import * as ClarifierService from './ClarifierService';
+import type { ClarificationQuestion } from './ClarifierService';
+import { deriveTicketMilestones, type Milestone, type PrState } from './ticketMilestones';
+import * as InjectionGuardService from './InjectionGuardService';
+import type { InjectionGuardImage, InjectionGuardImageMime } from './injectionGuardCore';
+import {
+  RW_SESSION_COOKIE,
+  verifyRwSession,
+  csrfTokenFor,
+  verifyCsrfToken,
+  normalizeOrigin,
+} from './WidgetCookieAuth';
 
 const attachmentStorage = new TaskAttachmentStorageService();
+
+/**
+ * Lookup key for widget rows.
+ *
+ * Widget identity is the project: admin routes resolve the row by
+ * (serverId, workspaceProjectId). `channelId` is the mutable target todo
+ * channel the widget feeds, not the lookup key.
+ */
+export type WidgetLookup = { workspaceProjectId: string };
+
+function widgetLookupCondition(lookup: WidgetLookup | undefined) {
+  if (!lookup) return undefined;
+  return eq(widgetProjects.workspaceProjectId, lookup.workspaceProjectId);
+}
+
+/**
+ * Maximum age of a widget_user JWT regardless of the `exp` value the
+ * customer's issuer sets. 24h matches what `signWidgetUserJwt` mints
+ * server-side; tokens minted by customer backends cannot exceed this even
+ * with a longer `exp`.
+ */
+export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 
 // ============================================================================
 // Types
 // ============================================================================
 
+export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image' | 'preview';
+export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
+
+/**
+ * Per-user permission tier. The single axis along which a widget user's
+ * capabilities are managed (in the RunHQ "Members" tab). Replaces the former
+ * JWT-role-derived permission resolution.
+ */
+export type WidgetPermissionTier = 'app_user' | 'staff';
+
+export const WIDGET_PERMISSION_TIERS: readonly WidgetPermissionTier[] = ['app_user', 'staff'];
+
+/**
+ * Single source of truth mapping each tier to the permissions it grants.
+ * `attach_image` is intentionally granted to BOTH tiers — every reporter can
+ * attach screenshots. Adding a tier later is a one-line change here.
+ */
+const TIER_PERMISSIONS: Record<WidgetPermissionTier, readonly WidgetPermission[]> = {
+  app_user: ['attach_image'],
+  staff: ['assign_agent', 'live_coder', 'preview', 'attach_image'],
+};
+
+export function isWidgetPermissionTier(v: unknown): v is WidgetPermissionTier {
+  return v === 'app_user' || v === 'staff';
+}
+
+/**
+ * Resolve a stored tier value to its permission set. Unknown/legacy values
+ * (e.g. a tier removed in a future migration) fall back to `app_user` so a
+ * stale row never silently grants elevated access.
+ */
+export function permissionsForTier(tier: string | null | undefined): ReadonlySet<WidgetPermission> {
+  const key: WidgetPermissionTier = isWidgetPermissionTier(tier) ? tier : 'app_user';
+  return new Set(TIER_PERMISSIONS[key]);
+}
+
+/**
+ * Does a widget role→permissions map grant `assign_agent` to ANY role
+ * (including the `*` everyone key)? This is the project-level "agent assignment
+ * is on" signal.
+ *
+ * The legacy `widget_agent_assignment_enabled` boolean is the denormalized
+ * cache of exactly this predicate: the new settings UI has no master-switch
+ * toggle — granting `assign_agent` in the Permissions matrix IS how an operator
+ * turns assignment on — so the column must be kept equal to this whenever the
+ * permission map is saved (and was backfilled for rows edited before that sync
+ * existed). Without that, the auto-assign orchestrator and the creation-time
+ * injection guard, which both gate on the column, silently never fire.
+ */
+export function roleMapGrantsAssignAgent(
+  map: Record<string, string[]> | null | undefined,
+): boolean {
+  if (!map) return false;
+  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('assign_agent'));
+}
+
 export interface WidgetAuthResult {
   projectId: string;
   projectSlug: string;
   widgetUserId?: string;
-  /** True when the request was authenticated via a signed JWT (customer's server vouched for it) */
+  /** True when the request was authenticated (signed JWT or rw_session cookie that resolved to a workspace member) */
   authenticated: boolean;
+  /** Permissions derived from JWT role claim ∩ project whitelist (or auto-granted for workspace admins on the runhq path). */
+  permissions: ReadonlySet<WidgetPermission>;
+  /** Subset of project's whitelist that this user's JWT carried — used for audit attribution. */
+  matchedRoles: string[];
+  /** Which of the three identity paths produced this result. Influences write-path CSRF requirements. */
+  authSource: WidgetAuthSource;
+  /**
+   * RunHQ user ID when authSource === 'runhq'. NOT exposed to the widget;
+   * used internally for audit attribution and admin checks.
+   */
+  runhqUserId?: string;
+  /** CSRF token for the cookie-authenticated session. Returned to the client; required on all writes when authSource === 'runhq'. */
+  csrfToken?: string;
+  /** Display name resolved from the underlying identity (RunHQ user, JWT name claim, etc.). */
+  displayName?: string;
+  /** Avatar URL (RunHQ users today; null for app users unless the JWT supplies it). */
+  avatarUrl?: string | null;
 }
 
 interface HonoRequest {
   header(name: string): string | undefined;
+  /**
+   * HTTP method — used by the cookie-auth path to decide when CSRF is required.
+   * Optional so unit tests can pass minimal mock requests for read-only paths.
+   */
+  method?: string;
+  raw?: { headers: Headers };
 }
+
+/** Methods that change server state and therefore require CSRF protection on the cookie path. */
+const CSRF_PROTECTED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 interface WidgetProjectContext {
   id: string;
   name: string;
   slug: string;
   widgetPosition: string | null;
+  widgetLanguage: string | null;
+  isPublic: boolean;
+  widgetLoginUrl: string | null;
+  allowedOrigins: string[];
+  autoRecognizeRunhqMembers: boolean;
+  widgetAgentAssignmentEnabled: boolean;
+  widgetRoleClaimName: string;
+  widgetRolePermissions: Record<string, string[]>;
   serverId: string;
   channelId: string | null;
+  widgetChatAgentEntityId: string | null;
 }
 
 type WidgetTicketResponse = {
@@ -71,6 +201,14 @@ type WidgetTicketResponse = {
   completedAt: Date | null;
   userVote: boolean | null;
   canVote: boolean;
+  /**
+   * Timestamp of the most recent activity on the ticket — the max of the task's
+   * own updatedAt, its latest comment, and its latest activity row. Unlike
+   * updatedAt (which only bumps on field/status changes), this reflects new
+   * comments too, so the widget launcher badge can light up for a team reply.
+   * Populated by listMyTickets; may be absent on other list shapes.
+   */
+  lastActivityAt?: Date | null;
 };
 
 type PublicAttachmentSummary = {
@@ -87,6 +225,10 @@ export type PublicTicketDetail = {
     createdByType: CanonicalTaskActorType;
     externalUserId: string | null;
     commentsDisabled: boolean;
+    /** Name of the currently-assigned agent, if any */
+    assignedAgentName: string | null;
+    /** The external user who last triggered an assignment, or null if it was internal */
+    lastTriager: { name: string | null; at: string } | null;
   };
   /** Whether the requesting user owns this ticket */
   isOwner: boolean;
@@ -108,11 +250,81 @@ export type PublicTicketDetail = {
     id: string;
     type: string;
     content?: string | null;
+    createdByType?: CanonicalTaskActorType | null;
     createdByName?: string | null;
     createdAt: string;
     metadata?: Record<string, unknown> | null;
     attachments?: PublicAttachmentSummary[] | null;
   }>;
+  /**
+   * The most recent clarification session for this ticket, or null if none exists.
+   *
+   * `openQuestions` is populated ONLY when the requester is the clarification's
+   * widgetUserId (the assigner who must answer) AND the status is 'asking'.
+   * All other viewers receive an empty array to prevent question-card leakage.
+   */
+  clarification: {
+    /** The clarification row id — required by the widget to POST /clarify-answer. */
+    id: string;
+    status: 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
+    round: number;
+    openQuestions: ClarificationQuestion[];
+    /**
+     * When status='duplicate': the id of the workspace_tasks row this ticket
+     * duplicates. Null otherwise. Populated from widget_clarifications.duplicate_of_task_id.
+     */
+    duplicateOf: string | null;
+  } | null;
+  /**
+   * The widget chat conversation that originated this ticket, if any.
+   * Exposed only when the ticket was created from a chat conversation.
+   * Staff with `live_coder` permission use this to send messages into the
+   * running job via POST /api/widget/chat/conversations/:id/live-message.
+   * null if the ticket was not created from a conversation.
+   */
+  chatConversationId: string | null;
+  /**
+   * Code-safe view of the linked pull request, derived from the most recent
+   * `pr_linked` activity. We expose ONLY the state — never the PR number, URL,
+   * or branch, which are internal locators that point at code. The state feeds
+   * the `in_review`/`shipped` milestones. null if no PR has been linked.
+   */
+  linkedPr: { state: PrState } | null;
+  /**
+   * Partner-facing progress stepper. The ONLY representation of agent/ticket
+   * progress shown externally — derived from a status enum, so it is incapable
+   * of leaking code. See deriveTicketMilestones.
+   */
+  milestones: Milestone[];
+  /**
+   * Whether the viewing staff member can launch an isolated preview for this
+   * ticket. True only when the viewer holds the `preview` permission AND the
+   * ticket has a linked PR/branch (i.e. `internalPr` is non-null). `preview` is
+   * a permission distinct from `live_coder`/`assign_agent` — a staff member who
+   * can assign or use Live session does NOT implicitly get worktree preview.
+   * Defaults to false for all other callers (no permissions passed).
+   */
+  canPreview: boolean;
+  /**
+   * Whether the viewer may manually assign a coding agent to this ticket — the
+   * widget shows the "Assign agent" button when true. True only when the viewer
+   * holds `assign_agent`, no agent is assigned yet (`assignedAgentName` is null),
+   * the ticket is in an actionable (non-terminal) status, AND the system is not
+   * already handling assignment — i.e. no open clarification card (questions /
+   * duplicate) and auto-assign is not still reviewing (`processing`). Defaults to
+   * false for callers that pass no permissions. The POST assign endpoint enforces
+   * the same authorization server-side — this flag is purely for showing/hiding UI.
+   */
+  canAssign: boolean;
+  /**
+   * True while the freshly-filed ticket is still being reviewed by auto-assign
+   * (the clarifier/agent picker runs server-side for a few seconds after
+   * creation). Lets the widget show a "reviewing your request" state instead of
+   * a silent, seemingly-idle ticket — the author might otherwise close it before
+   * the clarifying questions / assignment appear. Goes false the moment an
+   * outcome is recorded (questions, assignment, or a skip).
+   */
+  processing: boolean;
 };
 
 type PublicAttachmentLike = {
@@ -123,6 +335,20 @@ type PublicAttachmentLike = {
   url?: string | null;
 };
 
+export type CreateWidgetTicketInput = {
+  title?: string;
+  description?: string;
+  isPrivate?: boolean;
+  context?: unknown;
+};
+
+export type WidgetUploadFile = {
+  buffer: Buffer;
+  mimeType: string;
+  filename: string;
+  originalName?: string;
+};
+
 function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmentSummary {
   return {
     id: attachment.id,
@@ -131,6 +357,84 @@ function mapAttachmentSummary(attachment: PublicAttachmentLike): PublicAttachmen
     mimeType: attachment.mimeType,
     url: attachment.url ?? null,
   };
+}
+
+/**
+ * Strip code-revealing fields from activity metadata before it reaches an
+ * external widget viewer. The only known leak is `pr_linked`, whose metadata
+ * carries the PR number/url/branch — internal locators that point at code. We
+ * keep just the `state` (which the widget uses for a code-free review/ship
+ * label). All other activity types expose safe metadata (status from/to,
+ * agent name, etc.) and pass through unchanged.
+ */
+function sanitizeActivityMetadata(
+  type: string,
+  metadata: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  if (type === 'pr_linked') {
+    return { state: coercePrState(metadata.state) };
+  }
+  return metadata;
+}
+
+/**
+ * Activity types whose free-form `content` is safe to surface to an external
+ * widget viewer. `content` is the unsafe channel — historically it was passed
+ * through verbatim, which leaked internals (e.g. `branch_pushed`'s content
+ * `Branch session/job_<id>/ticket-<id> pushed` exposes the internal job id and
+ * branch naming). We now surface `content` ONLY for:
+ *   - `comment`       — authored by humans/agents for the thread.
+ *   - `status_change` — system-generated transition text ("started a review").
+ *   - `agent_update`  — agent-authored prose that ALREADY passed the runhq-side
+ *                       screening gate (charset → scrub → LLM screen).
+ * Every other type (branch_pushed, pr_linked, agent_assigned, …) renders from
+ * its `type` + sanitized `metadata`; its raw `content` is dropped.
+ */
+const CONTENT_SURFACE_ALLOWLIST: ReadonlySet<string> = new Set([
+  'comment',
+  'status_change',
+  'agent_update',
+]);
+
+export function surfaceActivityContent(type: string, content: string | null | undefined): string | null {
+  return CONTENT_SURFACE_ALLOWLIST.has(type) ? (content ?? null) : null;
+}
+
+/** Internal (un-trimmed) PR info derived from the activity feed. */
+type InternalLinkedPr = { number: number; url: string; state: PrState; repoBranch: string | null };
+
+function coercePrState(value: unknown): PrState {
+  return value === 'closed' || value === 'merged' ? value : 'open';
+}
+
+/**
+ * Derive the most recent linked PR from an activity feed (already loaded).
+ * Returns null if no valid pr_linked activity exists.
+ * Defensively validates that number is a number and url is a string.
+ *
+ * NOTE: the number/url/branch are internal and MUST NOT be sent to widget
+ * users — getPublicTicketDetail exposes only the `state` from this. They are
+ * retained here for internal milestone derivation and any internal callers.
+ */
+function deriveLinkedPr(
+  activity: Array<{ type: string; metadata?: Record<string, unknown> | null }>,
+): InternalLinkedPr | null {
+  // activity is ordered by createdAt asc; scan in reverse for the most recent
+  for (let i = activity.length - 1; i >= 0; i--) {
+    const entry = activity[i];
+    if (entry.type !== 'pr_linked') continue;
+    const m = entry.metadata;
+    if (!m) continue;
+    const number = m.number;
+    const url = m.url;
+    // Defensive validation — malformed metadata must not surface
+    if (typeof number !== 'number' || typeof url !== 'string') continue;
+    const state = coercePrState(m.state);
+    const repoBranch = typeof m.repoBranch === 'string' ? m.repoBranch : null;
+    return { number, url, state, repoBranch };
+  }
+  return null;
 }
 
 // ============================================================================
@@ -144,14 +448,95 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       name: widgetProjects.name,
       slug: widgetProjects.slug,
       widgetPosition: widgetProjects.widgetPosition,
+      widgetLanguage: widgetProjects.widgetLanguage,
+      isPublic: widgetProjects.isPublic,
+      widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      allowedOrigins: widgetProjects.allowedOrigins,
+      autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
+      widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
     .limit(1);
 
   return project ?? null;
+}
+
+/**
+ * Look up a project by its slug for cookie-auth pre-resolution. The cookie
+ * itself carries no project info, so the widget tells the server which
+ * project it's running for via `X-RW-Project: <slug>`.
+ */
+async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContext | null> {
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      name: widgetProjects.name,
+      slug: widgetProjects.slug,
+      widgetPosition: widgetProjects.widgetPosition,
+      widgetLanguage: widgetProjects.widgetLanguage,
+      isPublic: widgetProjects.isPublic,
+      widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      allowedOrigins: widgetProjects.allowedOrigins,
+      autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
+      serverId: widgetProjects.serverId,
+      channelId: widgetProjects.channelId,
+      widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+    })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.slug, slug), eq(widgetProjects.enabled, true)))
+    .limit(1);
+
+  return project ?? null;
+}
+
+/**
+ * Whether ANY enabled widget project lists this origin in its
+ * `allowed_origins`. Used by the HTTP layer to decide whether to echo
+ * credentialed CORS headers (Allow-Credentials + reflected Origin) for
+ * a given request. Per-project membership/auth is still enforced by
+ * `authenticateWidget`; this only widens the CORS envelope so the
+ * browser will SEND cookies in the first place.
+ */
+export async function isOriginAllowlisted(origin: string): Promise<boolean> {
+  // PostgreSQL `text[] @> ARRAY[$1]` checks if the column contains the
+  // supplied value. Faster than a sequential scan when the list is short.
+  const [match] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(
+      and(
+        eq(widgetProjects.enabled, true),
+        sql`${widgetProjects.allowedOrigins} @> ARRAY[${origin}]::text[]`,
+      ),
+    )
+    .limit(1);
+  return !!match;
+}
+
+/**
+ * Returns membership status (and admin flag) for a (server, user) pair.
+ * Returns null when the user is not a member at all.
+ */
+async function getServerMembership(
+  serverId: string,
+  userId: string,
+): Promise<{ role: string; isAdmin: boolean } | null> {
+  const [row] = await db
+    .select({
+      role: serverMembers.role,
+      isAdmin: serverMembers.isAdmin,
+    })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)))
+    .limit(1);
+  return row ?? null;
 }
 
 function getHomepageUrl(): string {
@@ -162,14 +547,31 @@ function getHomepageUrl(): string {
 }
 
 /**
+ * Whitelist-validates a URL provided by a project owner (currently
+ * widget_login_url). Allows only http: and https:; rejects javascript:,
+ * data:, file:, and any other scheme regardless of how the URL parses.
+ */
+function isSafeHttpUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+/**
  * Build a filter for tasks visible in the widget for a given project.
  * Includes both widget-submitted and workspace-created public tasks.
  */
 function buildWidgetVisibleFilter(project: WidgetProjectContext) {
+  // Moderation gating was removed — workflow status (pending/planned/
+  // in_progress/done/etc.) covers triage now. moderation_status stays
+  // as a column for back-compat but is no longer consulted.
   const baseConditions = [
     eq(workspaceTasks.serverId, project.serverId),
     isNull(workspaceTasks.deletedAt),
-    eq(workspaceTasks.moderationStatus, 'approved'),
   ];
 
   if (project.channelId) {
@@ -251,17 +653,320 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 // Auth
 // ============================================================================
 
+const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
+
+// Refresh widget_users.last_active_at at most this often, to avoid hot-row
+// write amplification under widget polling (every authenticated request would
+// otherwise issue an UPDATE).
+const LAST_ACTIVE_REFRESH_MS = 5 * 60 * 1000;
+function shouldRefreshLastActive(last: Date | null | undefined, nowMs: number): boolean {
+  if (!last) return true;
+  return nowMs - last.getTime() >= LAST_ACTIVE_REFRESH_MS;
+}
+
+// Standard JWT + RunHQ-widget reserved claims that must never be stored as
+// member metadata: they're either security-sensitive, captured elsewhere
+// (sub→externalUserId, name, email), or pure transport noise.
+const RESERVED_WIDGET_CLAIMS: ReadonlySet<string> = new Set([
+  'sub', 'name', 'email', 'fp', 'type',
+  'iat', 'exp', 'nbf', 'iss', 'aud', 'jti',
+]);
+
 /**
- * Authenticates a widget request using one of three modes:
- * 1. Public slug mode — no Authorization, X-RW-Project: {slug}
- * 2. Raw API key mode — Authorization: Bearer rw_xxx (no dot)
- * 3. Signed JWT mode — Authorization: Bearer {payload}.{signature}
+ * Pull the customer's identifying claims out of a verified widget JWT for the
+ * Members tab. Everything that isn't reserved, the configured roles claim, or
+ * the default `runhq_roles` claim is kept verbatim (values stay as-is so the
+ * client can render scalars as columns and nested values in a detail view).
+ * Returns null when there's nothing extra to store, so callers can skip the
+ * write entirely.
  */
+export function extractWidgetMetadata(
+  payload: jose.JWTPayload,
+  roleClaimName: string | null | undefined,
+): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (RESERVED_WIDGET_CLAIMS.has(key)) continue;
+    if (key === 'runhq_roles' || (roleClaimName && key === roleClaimName)) continue;
+    if (value === undefined) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Order-independent deep-equality for plain JSON values (metadata change check). */
+function sameJson(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown): string => {
+    const seen = (val: unknown): unknown => {
+      if (val === null || typeof val !== 'object') return val;
+      if (Array.isArray(val)) return val.map(seen);
+      return Object.keys(val as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = seen((val as Record<string, unknown>)[k]);
+          return acc;
+        }, {});
+    };
+    return JSON.stringify(seen(v));
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * Parses a single named cookie out of a `Cookie:` header. Hono's
+ * `getCookie` helper requires the Context, but `authenticateWidget`
+ * accepts a raw HonoRequest for unit-testability. Manual parse keeps
+ * the API surface narrow.
+ */
+function readCookie(req: HonoRequest, name: string): string | null {
+  const header = req.header('Cookie');
+  if (!header) return null;
+  const parts = header.split(';');
+  for (const part of parts) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    if (k === name) {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    }
+  }
+  return null;
+}
+
+/**
+ * Authenticates a widget request using one of four modes, in priority order.
+ *
+ * Identity precedence: runhq > app > anon. The cookie path is tried first; if
+ * it doesn't qualify (cookie absent, user not a member, origin not allowlisted,
+ * project not opted in), we fall through silently to the existing token paths.
+ *
+ *   0. RunHQ-member cookie — rw_session + X-RW-Project + Origin ∈ allowed_origins
+ *   1. Public slug         — no Authorization, X-RW-Project: {slug}
+ *   2. Raw API key         — Authorization: Bearer rw_xxx (no dot)
+ *   3. Signed JWT          — Authorization: Bearer {payload}.{signature}
+ */
+/**
+ * Verify a signed widget-user JWT outside a Hono request context (WebSocket auth).
+ *
+ * Mirrors authenticateWidget's Mode-3 (signed app JWT) path: validates the
+ * token against the project's secret, upserts the widget_user under
+ * auth_source='app', and (throttled) refreshes last_active_at. Returns only the
+ * identity the WS layer needs (widgetUserId + projectId), or null for any
+ * invalid/expired token or disabled project. Anonymous / API-key sessions carry
+ * no user identity and cannot authenticate over WS.
+ */
+export async function verifyWidgetUserJwt(
+  token: string,
+): Promise<{ widgetUserId: string; projectId: string } | null> {
+  const decoded = decodeJwtPayload(token);
+  if (!decoded || typeof decoded.fp !== 'string') return null;
+
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      enabled: widgetProjects.enabled,
+      apiSecretHash: widgetProjects.apiSecretHash,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.apiKey, decoded.fp))
+    .limit(1);
+  if (!project || !project.enabled) return null;
+
+  let payload: jose.JWTPayload;
+  try {
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
+      algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
+    });
+    if (verified.type !== 'widget_user') return null;
+    payload = verified;
+  } catch {
+    return null;
+  }
+
+  const sub =
+    typeof payload.sub === 'string' && payload.sub
+      ? payload.sub
+      : typeof payload.sub === 'number' && Number.isFinite(payload.sub)
+        ? String(payload.sub)
+        : undefined;
+  if (!sub) return null;
+
+  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
+  const metadata = extractWidgetMetadata(payload, project.widgetRoleClaimName);
+  const nowMs = Date.now();
+
+  const [existing] = await db
+    .select({
+      id: widgetUsers.id,
+      name: widgetUsers.name,
+      email: widgetUsers.email,
+      lastActiveAt: widgetUsers.lastActiveAt,
+      metadata: widgetUsers.metadata,
+    })
+    .from(widgetUsers)
+    .where(
+      and(
+        eq(widgetUsers.projectId, project.id),
+        eq(widgetUsers.externalUserId, sub),
+        eq(widgetUsers.authSource, 'app'),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    // Only write when something actually changed — keeps the common re-auth read-only.
+    const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+    if (name && name !== existing.name) patch.name = name;
+    if (email && email !== existing.email) patch.email = email;
+    if (metadata && !sameJson(metadata, existing.metadata)) patch.metadata = metadata;
+    if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+    if (Object.keys(patch).length > 0) {
+      await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+    }
+    return { widgetUserId: existing.id, projectId: project.id };
+  }
+
+  const [inserted] = await db
+    .insert(widgetUsers)
+    .values({
+      projectId: project.id,
+      externalUserId: sub,
+      authSource: 'app',
+      name,
+      email,
+      metadata: metadata ?? undefined,
+      lastActiveAt: new Date(nowMs),
+    })
+    .returning({ id: widgetUsers.id });
+  return { widgetUserId: inserted.id, projectId: project.id };
+}
+
 export async function authenticateWidget(
   req: HonoRequest
 ): Promise<WidgetAuthResult | null> {
   const authHeader = req.header('Authorization');
   const projectSlugHeader = req.header('X-RW-Project');
+  const originHeader = req.header('Origin');
+
+  // ---- Mode 0: rw_session cookie (RunHQ workspace member) ----
+  // Highest priority. Tried first so cookie-recognized members never get
+  // mis-attributed to the customer's JWT identity even when both are present.
+  const rwSession = readCookie(req, RW_SESSION_COOKIE);
+  if (rwSession && projectSlugHeader && originHeader) {
+    const verified = await verifyRwSession(rwSession);
+    if (verified) {
+      const project = await getWidgetProjectBySlug(projectSlugHeader);
+      if (
+        project &&
+        project.autoRecognizeRunhqMembers &&
+        project.allowedOrigins.includes(originHeader)
+      ) {
+        const membership = await getServerMembership(project.serverId, verified.userId);
+        if (membership) {
+          // CSRF check — required on all state-changing methods. We do this
+          // BEFORE the DB upsert so a forged write doesn't accidentally
+          // create/refresh a widget_users row. Reads (GET, plus the
+          // identity bootstrap itself) are exempt because they're idempotent
+          // and intrinsically CSRF-safe.
+          if (req.method && CSRF_PROTECTED_METHODS.has(req.method.toUpperCase())) {
+            const presented = req.header('X-RunHQ-CSRF');
+            if (!verifyCsrfToken(presented, verified.userId, verified.iat)) {
+              return null; // 401 from caller; treat invalid CSRF as auth failure
+            }
+          }
+
+          // Upsert the widget_user under auth_source='runhq' so this row
+          // never collides with an app-path row for the same human.
+          const externalUserId = `runhq:${verified.userId}`;
+          const nowMs = Date.now();
+          let widgetUserId: string;
+          // New RunHQ teammates default to 'staff' — they're internal staff.
+          // The admin can downgrade an individual in the Members tab; existing
+          // rows keep whatever tier was set.
+          let resolvedTier = 'staff';
+          const [existing] = await db
+            .select({
+              id: widgetUsers.id,
+              name: widgetUsers.name,
+              email: widgetUsers.email,
+              permissionTier: widgetUsers.permissionTier,
+              lastActiveAt: widgetUsers.lastActiveAt,
+            })
+            .from(widgetUsers)
+            .where(
+              and(
+                eq(widgetUsers.projectId, project.id),
+                eq(widgetUsers.externalUserId, externalUserId),
+                eq(widgetUsers.authSource, 'runhq'),
+              ),
+            )
+            .limit(1);
+
+          // Pull fresh display name/email from users table on every auth — name
+          // changes in console should reflect immediately in the widget UI.
+          const [user] = await db
+            .select({ name: users.name, email: users.email })
+            .from(users)
+            .where(eq(users.id, verified.userId))
+            .limit(1);
+          const displayName = user?.name || user?.email || 'RunHQ user';
+          const userEmail = user?.email ?? undefined;
+
+          if (existing) {
+            widgetUserId = existing.id;
+            resolvedTier = existing.permissionTier;
+            const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+            if (displayName !== existing.name) patch.name = displayName;
+            if (userEmail && userEmail !== existing.email) patch.email = userEmail;
+            if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+            if (Object.keys(patch).length > 0) {
+              await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+            }
+          } else {
+            const [inserted] = await db
+              .insert(widgetUsers)
+              .values({
+                projectId: project.id,
+                externalUserId,
+                authSource: 'runhq',
+                name: displayName,
+                email: userEmail,
+                permissionTier: 'staff',
+                lastActiveAt: new Date(nowMs),
+              })
+              .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
+            widgetUserId = inserted.id;
+            resolvedTier = inserted.permissionTier;
+          }
+
+          // Effective permissions resolve from the stored per-user tier.
+          const permissions = permissionsForTier(resolvedTier);
+
+          return {
+            projectId: project.id,
+            projectSlug: project.slug,
+            widgetUserId,
+            authenticated: true,
+            permissions,
+            matchedRoles: [],
+            authSource: 'runhq',
+            runhqUserId: verified.userId,
+            csrfToken: csrfTokenFor(verified.userId, verified.iat),
+            displayName,
+            avatarUrl: null,
+          };
+        }
+      }
+    }
+    // Cookie present but didn't qualify — fall through to the other modes.
+    // Crucially: do NOT short-circuit to anonymous. The same request might
+    // still carry a valid app JWT we should honor.
+  }
 
   // ---- Mode 1: Public slug (no auth header) ----
   if (!authHeader && projectSlugHeader) {
@@ -272,7 +977,14 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled || !project.isPublic) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
+    return {
+      projectId: project.id,
+      projectSlug: project.slug,
+      authenticated: false,
+      permissions: EMPTY_PERMISSIONS,
+      matchedRoles: [],
+      authSource: 'anon',
+    };
   }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
@@ -289,7 +1001,14 @@ export async function authenticateWidget(
       .limit(1);
 
     if (!project || !project.enabled) return null;
-    return { projectId: project.id, projectSlug: project.slug, authenticated: false };
+    return {
+      projectId: project.id,
+      projectSlug: project.slug,
+      authenticated: false,
+      permissions: EMPTY_PERMISSIONS,
+      matchedRoles: [],
+      authSource: 'anon',
+    };
   }
 
   // ---- Mode 3: Signed JWT (standard 3-part header.payload.signature) ----
@@ -303,6 +1022,10 @@ export async function authenticateWidget(
       slug: widgetProjects.slug,
       enabled: widgetProjects.enabled,
       apiSecretHash: widgetProjects.apiSecretHash,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.apiKey, decoded.fp))
@@ -310,12 +1033,19 @@ export async function authenticateWidget(
 
   if (!project || !project.enabled) return null;
 
-  // Verify signature, expiry, and type using jose
+  // Verify signature, expiry, and type using jose.
+  // - requiredClaims: ['exp'] forces customer issuers to set an expiry.
+  //   Without this, jose only rejects exp when present — a missing exp
+  //   would let leaked tokens live forever.
+  // - maxTokenAge caps how long any single token can be valid even if the
+  //   customer sets a longer exp (e.g. a 10-year exp by mistake).
   let payload: jose.JWTPayload;
   try {
-    const secret = new TextEncoder().encode(project.apiSecretHash);
-    const { payload: verified } = await jose.jwtVerify(token, secret, {
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
       algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
     });
     if (verified.type !== 'widget_user') return null;
     payload = verified;
@@ -325,32 +1055,132 @@ export async function authenticateWidget(
 
   // If sub is provided, upsert a widgetUser for identified submissions
   let widgetUserId: string | undefined;
-  const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
-  const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
-  const providedName = rawName.length > 0 ? rawName : undefined;
+  // Accept a numeric `sub` too. Integer user ids are ubiquitous (every
+  // PHP/SQL app: `'sub' => $user->id`). Previously a number sub was
+  // silently dropped here → authenticated-but-unidentified → 401 on every
+  // write, with no authError/diagnostic. Coerce to a string so the
+  // widget_users mapping is stable regardless of JSON number-vs-string.
+  const sub =
+    typeof payload.sub === 'string' && payload.sub
+      ? payload.sub
+      : typeof payload.sub === 'number' && Number.isFinite(payload.sub)
+        ? String(payload.sub)
+        : undefined;
+  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
+  const metadata = extractWidgetMetadata(payload, project.widgetRoleClaimName);
+  // Default tier for a brand-new app user. Effective permissions are resolved
+  // from the stored tier, not from JWT roles (see permissionsForTier).
+  let resolvedTier = 'app_user';
   if (sub) {
-    widgetUserId = await resolveWidgetUserOnAuth(project.id, sub, providedName);
+    const nowMs = Date.now();
+    const [existing] = await db
+      .select({
+        id: widgetUsers.id,
+        name: widgetUsers.name,
+        email: widgetUsers.email,
+        permissionTier: widgetUsers.permissionTier,
+        lastActiveAt: widgetUsers.lastActiveAt,
+        metadata: widgetUsers.metadata,
+      })
+      .from(widgetUsers)
+      .where(
+        and(
+          eq(widgetUsers.projectId, project.id),
+          eq(widgetUsers.externalUserId, sub),
+          eq(widgetUsers.authSource, 'app'),
+        )
+      )
+      .limit(1);
+
+    if (existing) {
+      widgetUserId = existing.id;
+      resolvedTier = existing.permissionTier;
+      // Only write when something actually changed — keeps the common
+      // already-fresh request read-only.
+      const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+      if (name && name !== existing.name) patch.name = name;
+      if (email && email !== existing.email) patch.email = email;
+      // Refresh metadata when the token's claims changed (cheap stable-stringify
+      // compare). Null metadata (token dropped its custom claims) is left as-is
+      // so we never wipe previously-captured identity on a sparse token.
+      if (metadata && !sameJson(metadata, existing.metadata)) patch.metadata = metadata;
+      if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+      if (Object.keys(patch).length > 0) {
+        await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+      }
+    } else {
+      const [inserted] = await db
+        .insert(widgetUsers)
+        .values({
+          projectId: project.id,
+          externalUserId: sub,
+          authSource: 'app',
+          name,
+          email,
+          metadata: metadata ?? undefined,
+          lastActiveAt: new Date(nowMs),
+        })
+        .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
+      widgetUserId = inserted.id;
+      resolvedTier = inserted.permissionTier;
+    }
   }
 
-  return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
+  const permissions = permissionsForTier(resolvedTier);
+  return {
+    projectId: project.id,
+    projectSlug: project.slug,
+    widgetUserId,
+    authenticated: true,
+    permissions,
+    matchedRoles: [],
+    authSource: 'app',
+    displayName: name,
+  };
 }
 
 /**
- * Verify a signed widget-user JWT without a Hono request context.
- * Only Mode 3 (signed JWT) is supported — anonymous/API-key sessions cannot
- * authenticate via WebSocket because they carry no user identity.
- *
- * Returns a WidgetAuthResult on success, or null if the token is invalid,
- * expired, or the project is disabled.
+ * Machine-readable reasons a presented widget Bearer JWT failed to
+ * authenticate. Surfaced (only) to the caller that presented the token,
+ * via /api/widget/identity, so a misconfigured embed reports the exact
+ * defect instead of silently degrading to anonymous. Explaining why the
+ * caller's *own* token is invalid is not an info leak (same contract as
+ * OAuth `invalid_token` error_description).
  */
-export async function verifyWidgetUserJwt(token: string): Promise<WidgetAuthResult | null> {
+export type WidgetAuthDiagnosis =
+  | 'malformed_jwt'      // not a 3-part JWT, undecodable, or missing `fp`
+  | 'unknown_project'    // `fp` matches no widget project (wrong secret/fingerprint)
+  | 'project_disabled'   // project exists but is disabled
+  | 'signature_invalid'  // wrong signing secret
+  | 'token_expired'      // `exp` in the past
+  | 'token_too_old'      // exceeds WIDGET_JWT_MAX_TOKEN_AGE
+  | 'missing_exp'        // required `exp` claim absent
+  | 'wrong_type'         // `type` !== 'widget_user'
+  | 'not_identified';    // verified but no `sub` (can't attribute submissions)
+
+/**
+ * When `authenticateWidget` returned no identity, classify *why* a
+ * presented Bearer JWT was rejected. Returns `null` when there is no
+ * Bearer token (genuine anonymous — nothing to report) or when the token
+ * actually verifies (caller should not have asked). Re-runs the same
+ * pipeline as the Mode 3 branch of `authenticateWidget`; kept separate so
+ * the hot auth path keeps its simple `null` contract.
+ */
+export async function diagnoseWidgetBearerAuth(
+  req: HonoRequest,
+): Promise<WidgetAuthDiagnosis | null> {
+  const authHeader = req.header('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7);
+  // Raw API-key embeds (no dot) are intentionally anonymous, not broken.
+  if (token.indexOf('.') === -1) return null;
+
   const decoded = decodeJwtPayload(token);
-  if (!decoded || typeof decoded.fp !== 'string') return null;
+  if (!decoded || typeof decoded.fp !== 'string') return 'malformed_jwt';
 
   const [project] = await db
     .select({
-      id: widgetProjects.id,
-      slug: widgetProjects.slug,
       enabled: widgetProjects.enabled,
       apiSecretHash: widgetProjects.apiSecretHash,
     })
@@ -358,35 +1188,71 @@ export async function verifyWidgetUserJwt(token: string): Promise<WidgetAuthResu
     .where(eq(widgetProjects.apiKey, decoded.fp))
     .limit(1);
 
-  if (!project || !project.enabled) return null;
+  if (!project) return 'unknown_project';
+  if (!project.enabled) return 'project_disabled';
 
   let payload: jose.JWTPayload;
   try {
-    const secret = new TextEncoder().encode(project.apiSecretHash);
-    const { payload: verified } = await jose.jwtVerify(token, secret, {
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
       algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
     });
-    if (verified.type !== 'widget_user') return null;
     payload = verified;
-  } catch {
-    return null;
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (code === 'ERR_JWT_EXPIRED') return 'token_expired';
+    if (code === 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED') return 'signature_invalid';
+    if (code === 'ERR_JWT_CLAIM_VALIDATION_FAILED') {
+      const claim = (err as { claim?: string })?.claim;
+      if (claim === 'iat') return 'token_too_old';
+      return 'missing_exp';
+    }
+    return 'signature_invalid';
   }
 
-  // Upsert the widget user so the session gets a stable widgetUserId.
-  let widgetUserId: string | undefined;
-  const sub = typeof payload.sub === 'string' ? payload.sub : undefined;
-  const rawName = typeof payload.name === 'string' ? payload.name.trim() : '';
-  const providedName = rawName.length > 0 ? rawName : undefined;
-  if (sub) {
-    widgetUserId = await resolveWidgetUserOnAuth(project.id, sub, providedName);
-  }
-
-  return { projectId: project.id, projectSlug: project.slug, widgetUserId, authenticated: true };
+  if (payload.type !== 'widget_user') return 'wrong_type';
+  // Mirror authenticateWidget: a finite numeric sub is usable (coerced),
+  // so only flag genuinely absent/empty subs as not_identified.
+  const hasUsableSub =
+    (typeof payload.sub === 'string' && !!payload.sub) ||
+    (typeof payload.sub === 'number' && Number.isFinite(payload.sub));
+  if (!hasUsableSub) return 'not_identified';
+  return null; // token is actually valid — nothing to diagnose
 }
 
 // ============================================================================
 // Ticket Operations
 // ============================================================================
+
+export interface WidgetChatBootstrapInfo {
+  enabled: boolean;
+  agentName: string | null;
+}
+
+/**
+ * Bootstrap `chat` field for widget.js: enabled iff a support agent is
+ * configured. The display name comes from the agent mirror REGARDLESS of the
+ * `exposed` flag — chat naming is independent of the "Hand to agent" roster,
+ * so a support agent can be named without widget-user assignment enabled.
+ * Null only when the agent isn't mirrored at all (widget falls back to a
+ * generic label).
+ */
+async function getChatBootstrapInfo(
+  project: Pick<WidgetProjectContext, 'id' | 'widgetChatAgentEntityId'> | null,
+): Promise<WidgetChatBootstrapInfo> {
+  if (!project?.widgetChatAgentEntityId) return { enabled: false, agentName: null };
+  const [agent] = await db
+    .select({ name: widgetExposedAgents.agentName })
+    .from(widgetExposedAgents)
+    .where(and(
+      eq(widgetExposedAgents.widgetProjectId, project.id),
+      eq(widgetExposedAgents.agentId, project.widgetChatAgentEntityId),
+    ))
+    .limit(1);
+  return { enabled: true, agentName: agent?.name ?? null };
+}
 
 export async function listTickets(projectId: string, widgetUserId?: string) {
   const project = await getWidgetProjectContext(projectId);
@@ -398,7 +1264,7 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
         .where(and(
           buildWidgetVisibleFilter(project),
           eq(workspaceTasks.visibility, 'public'),
-          sql`${workspaceTasks.status} in ('pending','planned','in_progress','needs_review')`,
+          sql`${workspaceTasks.status} in ('pending','planned','in_progress')`,
         ))
         .orderBy(desc(workspaceTasks.createdAt))
         .limit(50)
@@ -431,12 +1297,23 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     projectSlug: project?.slug ?? '',
     homepageUrl: getHomepageUrl(),
     position: project?.widgetPosition ?? null,
+    language: project?.widgetLanguage ?? 'en',
     isIdentified: !!widgetUserId,
+    isPublic: !!project?.isPublic,
+    // Only surface the configured login URL to anonymous viewers of public
+    // projects — that's the only audience that needs it. Authed users never
+    // get redirected, and non-public projects must not leak owner config.
+    loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
+    chat: await getChatBootstrapInfo(project),
+    // Drives whether the client shows image-attach affordances. The upload
+    // routes still return explicit errors, but bootstrap hides controls when
+    // storage is absent or the kill switch is off.
+    attachmentsEnabled: attachmentUploadsAvailable(),
     tickets,
   };
 }
 
-export async function listDoneTickets(projectId: string, widgetUserId?: string) {
+export async function listPublishedTickets(projectId: string, widgetUserId?: string) {
   const project = await getWidgetProjectContext(projectId);
 
   const rows = project
@@ -445,11 +1322,14 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
         .from(workspaceTasks)
         .where(and(
           buildWidgetVisibleFilter(project),
-          eq(workspaceTasks.visibility, 'public'),
-          sql`${workspaceTasks.status} in ('done', 'deployed')`,
-          isNotNull(workspaceTasks.completedAt),
+          eq(workspaceTasks.visibility, 'public'), // defense-in-depth: publishing auto-promotes visibility=public upstream; still gate here
+          eq(workspaceTasks.isPublished, true),
         ))
-        .orderBy(desc(workspaceTasks.completedAt))
+        // "Latest Updates" = recently shipped work. Sort by completedAt (when marked done),
+        // not updatedAt — otherwise flipping isPublished or any later edit/vote/comment
+        // would re-surface an old task to the top. Non-done published tickets keep
+        // appearing (status no longer gates the feed) but sink to the bottom.
+        .orderBy(sql`${workspaceTasks.completedAt} desc nulls last`)
         .limit(20)
     : [];
 
@@ -473,7 +1353,10 @@ export async function listDoneTickets(projectId: string, widgetUserId?: string) 
     projectSlug: project?.slug ?? '',
     homepageUrl: getHomepageUrl(),
     position: project?.widgetPosition ?? null,
+    language: project?.widgetLanguage ?? 'en',
     isIdentified: !!widgetUserId,
+    isPublic: !!project?.isPublic,
+    loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     tickets,
   };
 }
@@ -524,7 +1407,7 @@ function mapCommentToWidgetResponse(
 }
 
 
-export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string): Promise<PublicTicketDetail | null> {
+export async function getPublicTicketDetail(projectId: string, ticketId: string, widgetUserId?: string, permissions?: ReadonlySet<WidgetPermission>): Promise<PublicTicketDetail | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
@@ -534,7 +1417,6 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     .where(and(
       eq(workspaceTasks.id, ticketId),
       eq(workspaceTasks.serverId, project.serverId),
-      ne(workspaceTasks.moderationStatus, 'rejected'),
       isNull(workspaceTasks.deletedAt),
       ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
     ))
@@ -543,9 +1425,6 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   if (!task) return null;
 
   const isCreator = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
-
-  // Pending moderation tickets are only visible to their creator
-  if (task.moderationStatus === 'pending' && !isCreator) return null;
 
   // Private tasks are only visible to their creator
   if (task.visibility === 'private' && !isCreator) return null;
@@ -560,9 +1439,20 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   const isOwner = isCreator;
   const isEditable = isOwner
     && task.status === 'pending'
-    && task.moderationStatus !== 'rejected'
     && comments.length === 0
     && activity.length === 0;
+
+  // Look up the most recent agent_assigned activity for this ticket
+  const lastAssignment = await db
+    .select()
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.taskId, ticketId),
+      eq(workspaceTaskActivity.type, 'agent_assigned'),
+    ))
+    .orderBy(desc(workspaceTaskActivity.createdAt))
+    .limit(1);
+  const lastAssign = lastAssignment[0];
 
   const externalUserIdMap = await resolveExternalUserIds(project.id, [
     ...comments,
@@ -574,6 +1464,87 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       ? externalUserIdMap.get(task.createdById) ?? null
       : null;
 
+  // Fetch the most recent clarification for this ticket and conditionally
+  // expose open questions to the answerer (the assigner who initiated the
+  // clarification session).  Non-owners and non-answerers get status+round but
+  // an empty openQuestions array so question cards are never leaked.
+  const clar = await ClarifierService.getTicketClarification(task.id);
+  let clarification: PublicTicketDetail['clarification'] = null;
+  if (clar !== null) {
+    const isAnswerer = !!widgetUserId && widgetUserId === clar.widgetUserId;
+    const openQuestions =
+      isAnswerer && clar.status === 'asking'
+        ? await ClarifierService.listOpenQuestions(clar.id)
+        : [];
+    clarification = {
+      id: clar.id,
+      status: clar.status,
+      round: clar.round,
+      openQuestions,
+      duplicateOf: clar.duplicateOfTaskId ?? null,
+    };
+  }
+
+  // Derive the most recent linked PR from the already-loaded activity feed.
+  // Reuses the feed — no extra DB query needed. `internalPr` carries the full
+  // PR info (number/url/branch) for milestone derivation only; the response
+  // exposes ONLY its state.
+  const internalPr = deriveLinkedPr(activity);
+
+  // Partner-facing progress stepper — derived purely from a status enum, the
+  // clarification status, whether an agent was assigned, and the PR state.
+  const milestones = deriveTicketMilestones({
+    status: task.status,
+    clarificationStatus: clar?.status ?? null,
+    agentAssigned: !!lastAssign,
+    prState: internalPr?.state ?? null,
+  });
+
+  // Resolve the chat conversation that originated this ticket, if any.
+  // Used by staff with `live_coder` permission to send messages into the
+  // running job via the Live session UI.
+  const [originConv] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, task.id))
+    .limit(1);
+  const chatConversationId = originConv?.id ?? null;
+
+  const assignedAgentName = lastAssign?.metadata && (lastAssign.metadata as any).agentName
+    ? String((lastAssign.metadata as any).agentName)
+    : null;
+
+  // Auto-assign records an outcome on metadata.autoAssign only when it FINISHES
+  // (assigned / needs_clarification / skipped_* / failed). Until then — for a
+  // freshly-filed ticket on an assignment-enabled project, with no clarification
+  // row and no agent yet — it is still being reviewed (the clarifier model call
+  // takes a few seconds). Surface that so the widget can show a "reviewing"
+  // state rather than a silent ticket the author may close prematurely.
+  const autoAssignRecorded = !!(task.metadata && (task.metadata as Record<string, unknown>).autoAssign);
+  const processing =
+    project.widgetAgentAssignmentEnabled &&
+    !autoAssignRecorded &&
+    task.status === 'pending' &&
+    !clar &&
+    !assignedAgentName;
+
+  // A ticket is assignable only while it is still open work. Terminal statuses
+  // (shipped/closed) and the in-flight states already covered by an assigned
+  // agent must not show the manual "Assign agent" affordance. We ALSO hide it
+  // while the system is already handling assignment — an open clarification card
+  // (questions pending / duplicate notice) or auto-assign still reviewing — so
+  // the manual control doesn't clutter or compete with that flow.
+  const ASSIGNABLE_STATUSES: ReadonlySet<typeof task.status> = new Set([
+    'pending', 'planned', 'in_progress', 'needs_review',
+  ]);
+  const clarificationActive = clar?.status === 'asking' || clar?.status === 'duplicate';
+  const canAssign =
+    !!permissions?.has('assign_agent') &&
+    !assignedAgentName &&
+    !processing &&
+    !clarificationActive &&
+    ASSIGNABLE_STATUSES.has(task.status);
+
   return {
     ticket: {
       ...mapTaskToWidgetResponse(task),
@@ -581,6 +1552,10 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
       createdByType: task.createdByType,
       externalUserId: ticketExternalUserId,
       commentsDisabled: task.commentsDisabled,
+      assignedAgentName,
+      lastTriager: lastAssign?.createdByType === 'external'
+        ? { name: lastAssign.createdByName ?? null, at: lastAssign.createdAt.toISOString() }
+        : null,
     },
     isOwner,
     isEditable,
@@ -588,20 +1563,140 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     activity: activity.map((entry) => ({
       id: entry.id,
       type: entry.type,
-      content: entry.content ?? null,
+      content: surfaceActivityContent(entry.type, entry.content),
+      createdByType: entry.createdByType ?? null,
       createdByName: entry.createdByName ?? null,
       createdAt: entry.createdAt,
-      metadata: entry.metadata ?? null,
+      metadata: sanitizeActivityMetadata(entry.type, entry.metadata ?? null),
       attachments: (entry.attachments ?? []).map(mapAttachmentSummary),
     })),
+    clarification,
+    chatConversationId,
+    linkedPr: internalPr ? { state: internalPr.state } : null,
+    milestones,
+    canPreview: !!permissions?.has('preview') && !!internalPr,
+    canAssign,
+    processing,
   };
+}
+
+/**
+ * Find-or-create the widget chat conversation that backs a ticket's Live
+ * session. Chat-originated tickets already have one (linked via createdTaskId);
+ * a ticket assigned directly (auto-assign or manual triager assign) has none,
+ * so staff couldn't open a Live session against the running coder even though
+ * the workspace relay can target it by canonical task id. This lazily creates a
+ * conversation linked to the ticket (the relay container — `sendLiveCoderMessage`
+ * resolves the coder from `createdTaskId`), reusing any existing one so repeated
+ * opens are idempotent.
+ *
+ * Returns null when the ticket isn't a widget task visible in this project.
+ * Caller MUST have already checked the `live_coder` permission.
+ */
+export async function ensureTicketLiveConversation(
+  widgetProjectId: string,
+  ticketId: string,
+  widgetUserId: string,
+): Promise<{ conversationId: string } | null> {
+  const project = await getWidgetProjectContext(widgetProjectId);
+  if (!project) return null;
+
+  // The ticket must be a live widget task scoped to this project's server/channel.
+  const [task] = await db
+    .select({ id: workspaceTasks.id })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+  if (!task) return null;
+
+  // Reuse an existing conversation linked to this ticket (chat-originated or a
+  // previously-created live session) so we never spawn duplicates.
+  const [existing] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, ticketId))
+    .limit(1);
+  if (existing) return { conversationId: existing.id };
+
+  const [created] = await db
+    .insert(widgetChatConversations)
+    .values({ widgetProjectId, widgetUserId, createdTaskId: ticketId })
+    .returning({ id: widgetChatConversations.id });
+  return { conversationId: created!.id };
+}
+
+/**
+ * Resolve (find-or-create) the Live-session conversation for a ticket given only
+ * the workspace's serverId + the canonical task id — the context a coder's
+ * `runhq post-to-widget` carries. This lets the coder's outbound messages reach
+ * (and PERSIST in) the ticket's conversation even when no staff member has opened
+ * a Live session yet, instead of being dropped because the in-memory relay
+ * registry was never populated by an inbound message.
+ *
+ * The conversation is created owned by the ticket's external reporter (the widget
+ * user who filed it); `live_coder` staff read it via getConversationForViewer.
+ * Returns null when the task isn't a widget ticket on this server, has no widget
+ * project, or has no external reporter to own the conversation.
+ */
+export async function ensureLiveConversationForServerTask(
+  serverId: string,
+  canonicalTaskId: string,
+): Promise<{ conversationId: string } | null> {
+  const [task] = await db
+    .select({
+      id: workspaceTasks.id,
+      channelId: workspaceTasks.workspaceChannelId,
+      createdByType: workspaceTasks.createdByType,
+      createdById: workspaceTasks.createdById,
+    })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, canonicalTaskId),
+      eq(workspaceTasks.serverId, serverId),
+      isNull(workspaceTasks.deletedAt),
+    ))
+    .limit(1);
+  if (!task) return null;
+
+  // Reuse an existing conversation (chat-originated or staff-opened) so a coder
+  // post and a staff Live session always converge on the SAME conversation.
+  const [existing] = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, canonicalTaskId))
+    .limit(1);
+  if (existing) return { conversationId: existing.id };
+
+  // Need a widget project + an external reporter (a real widget_users row) to
+  // own a freshly-created conversation.
+  if (task.createdByType !== 'external' || !task.createdById) return null;
+  const [project] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      ...(task.channelId ? [eq(widgetProjects.channelId, task.channelId)] : []),
+    ))
+    .limit(1);
+  if (!project) return null;
+
+  const [created] = await db
+    .insert(widgetChatConversations)
+    .values({ widgetProjectId: project.id, widgetUserId: task.createdById, createdTaskId: canonicalTaskId })
+    .returning({ id: widgetChatConversations.id });
+  return { conversationId: created!.id };
 }
 
 async function resolveTicketVisibleToWidget(
   projectId: string,
   ticketId: string,
   widgetUserId: string,
-): Promise<{ serverId: string; commentsDisabled: boolean } | null> {
+): Promise<{ serverId: string; commentsDisabled: boolean; agentAssignmentEnabled: boolean } | null> {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return null;
 
@@ -621,7 +1716,6 @@ async function resolveTicketVisibleToWidget(
       eq(workspaceTasks.id, ticketId),
       eq(workspaceTasks.serverId, project.serverId),
       isNull(workspaceTasks.deletedAt),
-      ne(workspaceTasks.moderationStatus, 'rejected'),
       ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
     ))
     .limit(1);
@@ -630,14 +1724,22 @@ async function resolveTicketVisibleToWidget(
 
   const isOwner = task.createdByType === 'external' && task.createdById === widgetUserId;
 
-  // Public + approved → anyone identified can comment
-  if (task.visibility === 'public' && task.moderationStatus === 'approved') {
-    return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
+  // Public → anyone identified can comment.
+  if (task.visibility === 'public') {
+    return {
+      serverId: task.serverId,
+      commentsDisabled: task.commentsDisabled,
+      agentAssignmentEnabled: project.widgetAgentAssignmentEnabled,
+    };
   }
 
-  // Pending or private → owner only
+  // Private → owner only.
   if (isOwner) {
-    return { serverId: task.serverId, commentsDisabled: task.commentsDisabled };
+    return {
+      serverId: task.serverId,
+      commentsDisabled: task.commentsDisabled,
+      agentAssignmentEnabled: project.widgetAgentAssignmentEnabled,
+    };
   }
 
   return null;
@@ -650,8 +1752,8 @@ export async function addWidgetComment(
   content: string,
 ) {
   const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
-  if (!visible) throw new Error('Ticket not found');
-  if (visible.commentsDisabled) throw new Error('Comments are disabled for this task');
+  if (!visible) throw new WidgetError('ticket_not_found', 404);
+  if (visible.commentsDisabled) throw new WidgetError('comments_disabled', 403);
 
   const [widgetUser] = await db
     .select({ name: widgetUsers.name })
@@ -675,9 +1777,9 @@ async function loadAndAuthorizeWidgetComment(
   ticketId: string,
   commentId: string,
   widgetUserId: string,
-): Promise<{ serverId: string }> {
+): Promise<{ serverId: string; agentAssignmentEnabled: boolean }> {
   const visible = await resolveTicketVisibleToWidget(projectId, ticketId, widgetUserId);
-  if (!visible) throw new Error('Ticket not found');
+  if (!visible) throw new WidgetError('ticket_not_found', 404);
   const [row] = await db
     .select({
       id: workspaceTaskComments.id,
@@ -691,11 +1793,14 @@ async function loadAndAuthorizeWidgetComment(
       eq(workspaceTaskComments.taskId, ticketId),
     ))
     .limit(1);
-  if (!row || row.deletedAt) throw new Error('Comment not found');
+  if (!row || row.deletedAt) throw new WidgetError('comment_not_found', 404);
   if (row.createdByType !== 'external' || row.createdById !== widgetUserId) {
-    throw new Error('Not the comment author');
+    throw new WidgetError('comment_author_only', 403);
   }
-  return { serverId: visible.serverId };
+  return {
+    serverId: visible.serverId,
+    agentAssignmentEnabled: visible.agentAssignmentEnabled,
+  };
 }
 
 export async function updateWidgetComment(
@@ -707,7 +1812,7 @@ export async function updateWidgetComment(
 ) {
   const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
   const updated = await WorkspaceTaskService.updateComment(serverId, ticketId, commentId, { content });
-  if (!updated) throw new Error('Comment not found');
+  if (!updated) throw new WidgetError('comment_not_found', 404);
   const externalUserIdMap = await resolveExternalUserIds(projectId, [updated]);
   return mapCommentToWidgetResponse(updated, externalUserIdMap, widgetUserId);
 }
@@ -786,23 +1891,36 @@ function sanitizeWidgetMetadata(raw: unknown): Record<string, unknown> | null {
   return Object.keys(result).length > 0 ? result : null;
 }
 
-export async function createTicket(
+type WidgetTicketCreateProject = {
+  serverId: string;
+  channelId: string | null;
+  votingPeriodHours: number | null;
+  agentAssignmentEnabled: boolean;
+};
+
+type PreparedWidgetTicketCreate = {
+  project: WidgetTicketCreateProject;
+  values: typeof workspaceTasks.$inferInsert;
+  reviewTicket: { title: string; description: string | null };
+};
+
+async function prepareWidgetTicketCreate(
   projectId: string,
   widgetUserId: string | undefined,
-  opts: { title?: string; description?: string; isPrivate?: boolean; context?: unknown }
-) {
+  opts: CreateWidgetTicketInput,
+): Promise<PreparedWidgetTicketCreate> {
   const [project] = await db
     .select({
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
-      autoApprove: widgetProjects.autoApprove,
       votingPeriodHours: widgetProjects.votingPeriodHours,
+      agentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
     .limit(1);
 
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   let title = opts.title?.trim() || '';
   if (!title && opts.description) {
@@ -810,7 +1928,10 @@ export async function createTicket(
   }
   if (!title) title = 'Untitled';
 
-  const moderationStatus = project.autoApprove ? 'approved' : 'pending';
+  // Moderation gating was removed — every new ticket is immediately
+  // visible. Workflow status (pending/planned/in_progress) is the only
+  // triage axis now.
+  const moderationStatus = 'approved';
 
   let votingEndsAt: Date | undefined;
   if (project.votingPeriodHours && project.votingPeriodHours > 0) {
@@ -832,14 +1953,20 @@ export async function createTicket(
 
   const metadata = sanitizeWidgetMetadata(opts.context);
 
-  const [task] = await db
-    .insert(workspaceTasks)
-    .values({
+  return {
+    project,
+    reviewTicket: { title, description: opts.description ?? null },
+    values: {
       serverId: project.serverId,
       workspaceChannelId: project.channelId,
       title,
       description: opts.description,
       visibility: opts.isPrivate ? 'private' : 'public',
+      // Published by default (single source of truth: resolveCreateIsPublished).
+      // The published "Latest Updates" feed also gates on visibility='public',
+      // so a ticket submitted as private stays hidden from others. Admins can
+      // still unpublish later via PATCH /todos/:id.
+      isPublished: WorkspaceTaskService.resolveCreateIsPublished({ sourceType: 'widget' }),
       sourceType: 'widget',
       createdByType: 'external',
       createdById: widgetUserId ?? null,
@@ -847,17 +1974,56 @@ export async function createTicket(
       moderationStatus,
       votingEndsAt,
       metadata,
-    })
+    },
+  };
+}
+
+async function insertPreparedWidgetTicket(prepared: PreparedWidgetTicketCreate) {
+  const [task] = await db
+    .insert(workspaceTasks)
+    .values(prepared.values)
     .returning();
 
   return task;
+}
+
+async function requireSafeForAutoAssignment(
+  prepared: PreparedWidgetTicketCreate,
+): Promise<void> {
+  // Human-reviewed projects do not need AI availability at ticket creation.
+  // Auto-assigned projects do: an unreviewed ticket must not reach an agent.
+  if (!prepared.project.agentAssignmentEnabled) return;
+
+  const verdict = await InjectionGuardService.checkTicket(prepared.reviewTicket);
+  if (verdict.safe) return;
+
+  throw new WidgetError(
+    verdict.unavailable ? 'ticket_review_unavailable' : 'ticket_rejected',
+    verdict.unavailable ? 503 : 400,
+    verdict.reasons,
+  );
+}
+
+export async function createTicket(
+  projectId: string,
+  widgetUserId: string | undefined,
+  opts: CreateWidgetTicketInput,
+) {
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  await requireSafeForAutoAssignment(prepared);
+  return insertPreparedWidgetTicket(prepared);
 }
 
 /**
  * Check if a task can be edited/deleted by a widget user.
  * Returns the task row if editable, or throws with a reason.
  */
-async function requireEditableTask(taskId: string, serverId: string, widgetUserId: string) {
+async function requireEditableTask(
+  taskId: string,
+  serverId: string,
+  widgetUserId: string,
+  opts: { skipPostActivityChecks?: boolean } = {},
+) {
   const [task] = await db
     .select()
     .from(workspaceTasks)
@@ -868,12 +2034,16 @@ async function requireEditableTask(taskId: string, serverId: string, widgetUserI
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
-    throw new Error('Not the ticket owner');
+    throw new WidgetError('ticket_owner_only', 403);
   }
-  if (task.status !== 'pending') throw new Error('Ticket status is no longer pending');
-  if (task.moderationStatus === 'rejected') throw new Error('Ticket has been rejected');
+  // Visibility flips are exempt from the post-activity gate — toggling
+  // private/public is a personal disclosure choice the owner should
+  // retain regardless of triage state or comment count.
+  if (opts.skipPostActivityChecks) return;
+
+  if (task.status !== 'pending') throw new WidgetError('ticket_no_longer_editable', 409);
 
   const [commentCount] = await db
     .select({ count: sql<number>`count(*)` })
@@ -882,13 +2052,13 @@ async function requireEditableTask(taskId: string, serverId: string, widgetUserI
       eq(workspaceTaskComments.taskId, taskId),
       isNull(workspaceTaskComments.deletedAt),
     ));
-  if (Number(commentCount.count) > 0) throw new Error('Ticket has comments and cannot be modified');
+  if (Number(commentCount.count) > 0) throw new WidgetError('ticket_has_comments', 409);
 
   const [activityCount] = await db
     .select({ count: sql<number>`count(*)` })
     .from(workspaceTaskActivity)
     .where(eq(workspaceTaskActivity.taskId, taskId));
-  if (Number(activityCount.count) > 0) throw new Error('Ticket has activity and cannot be modified');
+  if (Number(activityCount.count) > 0) throw new WidgetError('ticket_has_activity', 409);
 
   return task;
 }
@@ -897,18 +2067,31 @@ export async function updateTicket(
   ticketId: string,
   projectId: string,
   widgetUserId: string,
-  opts: { title?: string; description?: string },
+  opts: { title?: string; description?: string; visibility?: 'public' | 'private' },
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
-  await requireEditableTask(ticketId, project.serverId, widgetUserId);
+  // Visibility-only edits bypass the post-activity lockout so the owner
+  // can flip private/public at any time. Title/description still require
+  // an untouched ticket (no triage actions, no comments).
+  const fields = Object.keys(opts).filter((k) => (opts as Record<string, unknown>)[k] !== undefined);
+  const visibilityOnly = fields.length > 0 && fields.every((k) => k === 'visibility');
+  await requireEditableTask(ticketId, project.serverId, widgetUserId, {
+    skipPostActivityChecks: visibilityOnly,
+  });
 
   const updates: Partial<typeof workspaceTasks.$inferInsert> = {
     updatedAt: new Date(),
   };
   if (opts.title !== undefined) updates.title = opts.title.trim() || 'Untitled';
   if (opts.description !== undefined) updates.description = opts.description;
+  if (opts.visibility !== undefined) {
+    if (opts.visibility !== 'public' && opts.visibility !== 'private') {
+      throw new WidgetError('invalid_visibility', 400);
+    }
+    updates.visibility = opts.visibility;
+  }
 
   const [updated] = await db
     .update(workspaceTasks)
@@ -925,7 +2108,7 @@ export async function deleteTicket(
   widgetUserId: string,
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   await requireEditableTask(ticketId, project.serverId, widgetUserId);
 
@@ -936,87 +2119,107 @@ export async function deleteTicket(
     .where(eq(workspaceTasks.id, ticketId));
 }
 
+// Widget image attachments are enabled by default now that uploads are reviewed
+// by the same fail-closed injection guard before the image is stored or exposed
+// to an auto-assigned coding agent. Keep the env flag as an emergency kill
+// switch: WIDGET_ATTACHMENTS_ENABLED=false fully closes upload routes.
+export function attachmentsEnabled(): boolean {
+  return process.env.WIDGET_ATTACHMENTS_ENABLED !== 'false';
+}
+
+export function attachmentUploadsAvailable(): boolean {
+  return attachmentsEnabled() && attachmentStorage.isConfigured();
+}
+
 const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
 const MAX_ATTACHMENTS_PER_TICKET = 5;
-const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+// SVG is intentionally excluded: SVG is XML and can carry inline <script>,
+// which becomes stored XSS if the asset is ever opened directly or rendered
+// via <object>/<iframe>. Re-enabling requires server-side sanitization.
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+const ALLOWED_IMAGE_TYPE_SET = new Set<string>(ALLOWED_IMAGE_TYPES);
 
-export async function uploadTicketAttachment(
-  ticketId: string,
-  projectId: string,
-  widgetUserId: string,
-  file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
-) {
-  const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
-
-  if (!attachmentStorage.isConfigured()) {
-    throw new Error('Attachment storage is not configured');
+function assertWidgetImageFile(file: WidgetUploadFile): asserts file is WidgetUploadFile & { mimeType: InjectionGuardImageMime } {
+  if (!ALLOWED_IMAGE_TYPE_SET.has(file.mimeType)) {
+    throw new WidgetError('attachment_unsupported_type', 400);
   }
-
-  // Validate image type
-  if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
-    throw new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)');
-  }
-
-  // Validate file size
   if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
-    throw new Error('File size exceeds 5MB limit');
+    throw new WidgetError('attachment_too_large', 413);
   }
+}
 
-  // Verify ownership — task must exist, belong to this user, and be on this server
-  const [task] = await db
-    .select()
-    .from(workspaceTasks)
-    .where(and(
-      eq(workspaceTasks.id, ticketId),
-      eq(workspaceTasks.serverId, project.serverId),
-      isNull(workspaceTasks.deletedAt),
-    ))
-    .limit(1);
-
-  if (!task) throw new Error('Ticket not found');
-  if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
-    throw new Error('Not the ticket owner');
+function assertWidgetImageFiles(files: WidgetUploadFile[], maxCount: number): asserts files is Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }> {
+  if (files.length > maxCount) {
+    throw new WidgetError('attachment_count_exceeded', 400);
   }
+  for (const file of files) assertWidgetImageFile(file);
+}
 
-  // Check attachment count limit
-  const [countRow] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(workspaceTaskAttachments)
-    .where(and(
-      eq(workspaceTaskAttachments.taskId, ticketId),
-      eq(workspaceTaskAttachments.ownerType, 'task'),
-    ));
-  if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_TICKET) {
-    throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_TICKET} attachments per ticket`);
-  }
-
-  // Upload to R2
-  const stored = await attachmentStorage.storeUpload({
-    serverId: project.serverId,
-    body: file.buffer,
+function toGuardImages(files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>): InjectionGuardImage[] {
+  return files.map((file) => ({
     mimeType: file.mimeType,
-    filename: file.filename,
-    originalName: file.originalName ?? file.filename,
+    dataBase64: file.buffer.toString('base64'),
+    filename: file.originalName ?? file.filename,
+  }));
+}
+
+async function requireSafeTicketAndImages(
+  ticket: { title: string; description: string | null },
+  files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>,
+  opts: { agentAssignmentEnabled: boolean },
+): Promise<void> {
+  const verdict = await InjectionGuardService.checkTicket(ticket, { images: toGuardImages(files) });
+  if (verdict.safe) return;
+  // If no agent can be auto-assigned, a guard outage should not block the
+  // reporter from creating a ticket that a human will review.
+  if (verdict.unavailable && !opts.agentAssignmentEnabled) return;
+
+  throw new WidgetError(
+    verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
+    verdict.unavailable ? 503 : 400,
+    verdict.reasons,
+  );
+}
+
+async function storeTaskAttachment(input: {
+  serverId: string;
+  ticketId: string;
+  file: WidgetUploadFile & { mimeType: InjectionGuardImageMime };
+}): Promise<PublicAttachmentSummary & { storageProvider: 'r2' | 's3'; storageKey: string }> {
+  const stored = await attachmentStorage.storeUpload({
+    serverId: input.serverId,
+    body: input.file.buffer,
+    mimeType: input.file.mimeType,
+    filename: input.file.filename,
+    originalName: input.file.originalName ?? input.file.filename,
     ownerType: 'task',
   });
 
-  // Insert attachment record
-  const [attachment] = await db
-    .insert(workspaceTaskAttachments)
-    .values({
-      serverId: project.serverId,
-      taskId: ticketId,
-      ownerType: 'task',
-      ownerId: ticketId,
+  let attachment: typeof workspaceTaskAttachments.$inferSelect;
+  try {
+    [attachment] = await db
+      .insert(workspaceTaskAttachments)
+      .values({
+        serverId: input.serverId,
+        taskId: input.ticketId,
+        ownerType: 'task',
+        ownerId: input.ticketId,
+        storageProvider: stored.storageProvider,
+        storageKey: stored.storageKey,
+        mimeType: stored.mimeType,
+        originalName: stored.originalName ?? null,
+      })
+      .returning();
+  } catch (err) {
+    await attachmentStorage.deleteStoredObject({
       storageProvider: stored.storageProvider,
       storageKey: stored.storageKey,
-      mimeType: stored.mimeType,
-      originalName: stored.originalName ?? null,
-    })
-    .returning();
+    }).catch((deleteErr) => {
+      console.warn('[WidgetService] failed to clean up stored attachment after DB insert failure:', deleteErr);
+    });
+    throw err;
+  }
 
-  // Generate download URL
   const url = await attachmentStorage.createDownloadUrl({
     storageProvider: stored.storageProvider,
     storageKey: stored.storageKey,
@@ -1029,7 +2232,126 @@ export async function uploadTicketAttachment(
     originalName: attachment.originalName,
     mimeType: attachment.mimeType,
     url,
+    storageProvider: stored.storageProvider,
+    storageKey: stored.storageKey,
   };
+}
+
+export async function createTicketWithAttachments(
+  projectId: string,
+  widgetUserId: string,
+  opts: CreateWidgetTicketInput,
+  files: WidgetUploadFile[],
+) {
+  if (files.length === 0) {
+    const ticket = await createTicket(projectId, widgetUserId, opts);
+    return { ticket, attachments: [] as PublicAttachmentSummary[] };
+  }
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+  if (!attachmentStorage.isConfigured()) throw new WidgetError('attachment_storage_unconfigured', 500);
+
+  assertWidgetImageFiles(files, MAX_ATTACHMENTS_PER_TICKET);
+
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  await requireSafeTicketAndImages(prepared.reviewTicket, files, {
+    agentAssignmentEnabled: prepared.project.agentAssignmentEnabled,
+  });
+
+  const ticket = await insertPreparedWidgetTicket(prepared);
+  const storedAttachments: Array<{ storageProvider: 'r2' | 's3'; storageKey: string }> = [];
+  try {
+    const attachments: Array<PublicAttachmentSummary & { storageProvider: 'r2' | 's3'; storageKey: string }> = [];
+    for (const file of files) {
+      const attachment = await storeTaskAttachment({
+        serverId: prepared.project.serverId,
+        ticketId: ticket.id,
+        file,
+      });
+      attachments.push(attachment);
+      storedAttachments.push({ storageProvider: attachment.storageProvider, storageKey: attachment.storageKey });
+    }
+    return {
+      ticket,
+      attachments: attachments.map(({ storageProvider: _storageProvider, storageKey: _storageKey, ...attachment }) => attachment),
+    };
+  } catch (err) {
+    for (const stored of storedAttachments) {
+      try {
+        await attachmentStorage.deleteStoredObject(stored);
+      } catch (deleteErr) {
+        console.warn('[WidgetService] failed to clean up stored attachment after create failure:', deleteErr);
+      }
+    }
+    await db.delete(workspaceTasks).where(eq(workspaceTasks.id, ticket.id)).catch(() => undefined);
+    throw err;
+  }
+}
+
+export async function uploadTicketAttachment(
+  ticketId: string,
+  projectId: string,
+  widgetUserId: string,
+  file: WidgetUploadFile,
+) {
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
+  if (!attachmentStorage.isConfigured()) {
+    throw new WidgetError('attachment_storage_unconfigured', 500);
+  }
+
+  assertWidgetImageFile(file);
+
+  // Verify ownership — task must exist, belong to this user, and be on this server
+  const [task] = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+    ))
+    .limit(1);
+
+  if (!task) throw new WidgetError('ticket_not_found', 404);
+  if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
+    throw new WidgetError('ticket_owner_only', 403);
+  }
+
+  const [activityCount] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskActivity)
+    .where(eq(workspaceTaskActivity.taskId, ticketId));
+  if (Number(activityCount.count) > 0) {
+    throw new WidgetError('ticket_has_activity', 409);
+  }
+
+  // Check attachment count limit
+  const [countRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workspaceTaskAttachments)
+    .where(and(
+      eq(workspaceTaskAttachments.taskId, ticketId),
+      eq(workspaceTaskAttachments.ownerType, 'task'),
+    ));
+  if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_TICKET) {
+    throw new WidgetError('attachment_count_exceeded', 400);
+  }
+
+  await requireSafeTicketAndImages(
+    { title: task.title, description: task.description ?? null },
+    [file],
+    { agentAssignmentEnabled: project.widgetAgentAssignmentEnabled },
+  );
+
+  const { storageProvider: _storageProvider, storageKey: _storageKey, ...attachment } = await storeTaskAttachment({
+    serverId: project.serverId,
+    ticketId,
+    file,
+  });
+  return attachment;
 }
 
 const MAX_ATTACHMENTS_PER_COMMENT = 5;
@@ -1039,18 +2361,15 @@ export async function addWidgetCommentAttachment(
   ticketId: string,
   commentId: string,
   widgetUserId: string,
-  file: { buffer: Buffer; mimeType: string; filename: string; originalName?: string },
+  file: WidgetUploadFile,
 ) {
-  const { serverId } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
 
-  if (!ALLOWED_IMAGE_TYPES.includes(file.mimeType)) {
-    throw new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)');
-  }
-  if (file.buffer.length > MAX_ATTACHMENT_SIZE) {
-    throw new Error('File size exceeds 5MB limit');
-  }
+  const { serverId, agentAssignmentEnabled } = await loadAndAuthorizeWidgetComment(projectId, ticketId, commentId, widgetUserId);
+
+  assertWidgetImageFile(file);
   if (!attachmentStorage.isConfigured()) {
-    throw new Error('Attachment storage is not configured');
+    throw new WidgetError('attachment_storage_unconfigured', 500);
   }
 
   const [countRow] = await db
@@ -1061,8 +2380,37 @@ export async function addWidgetCommentAttachment(
       eq(workspaceTaskAttachments.ownerId, commentId),
     ));
   if (Number(countRow.count) >= MAX_ATTACHMENTS_PER_COMMENT) {
-    throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_COMMENT} attachments per comment`);
+    throw new WidgetError('attachment_count_exceeded', 400);
   }
+
+  const [reviewContext] = await db
+    .select({
+      title: workspaceTasks.title,
+      description: workspaceTasks.description,
+      commentContent: workspaceTaskComments.content,
+    })
+    .from(workspaceTaskComments)
+    .innerJoin(workspaceTasks, eq(workspaceTaskComments.taskId, workspaceTasks.id))
+    .where(and(
+      eq(workspaceTaskComments.id, commentId),
+      eq(workspaceTaskComments.taskId, ticketId),
+      eq(workspaceTaskComments.serverId, serverId),
+      isNull(workspaceTaskComments.deletedAt),
+    ))
+    .limit(1);
+  if (!reviewContext) throw new WidgetError('comment_not_found', 404);
+
+  await requireSafeTicketAndImages(
+    {
+      title: reviewContext.title,
+      description: [
+        reviewContext.description,
+        `Comment being attached to:\n${reviewContext.commentContent}`,
+      ].filter(Boolean).join('\n\n') || null,
+    },
+    [file],
+    { agentAssignmentEnabled },
+  );
 
   const stored = await attachmentStorage.storeUpload({
     serverId,
@@ -1073,19 +2421,30 @@ export async function addWidgetCommentAttachment(
     ownerType: 'comment',
   });
 
-  const [attachment] = await db
-    .insert(workspaceTaskAttachments)
-    .values({
-      serverId,
-      taskId: ticketId,
-      ownerType: 'comment',
-      ownerId: commentId,
+  let attachment: typeof workspaceTaskAttachments.$inferSelect;
+  try {
+    [attachment] = await db
+      .insert(workspaceTaskAttachments)
+      .values({
+        serverId,
+        taskId: ticketId,
+        ownerType: 'comment',
+        ownerId: commentId,
+        storageProvider: stored.storageProvider,
+        storageKey: stored.storageKey,
+        mimeType: stored.mimeType,
+        originalName: stored.originalName ?? null,
+      })
+      .returning();
+  } catch (err) {
+    await attachmentStorage.deleteStoredObject({
       storageProvider: stored.storageProvider,
       storageKey: stored.storageKey,
-      mimeType: stored.mimeType,
-      originalName: stored.originalName ?? null,
-    })
-    .returning();
+    }).catch((deleteErr) => {
+      console.warn('[WidgetService] failed to clean up stored comment attachment after DB insert failure:', deleteErr);
+    });
+    throw err;
+  }
 
   const url = await attachmentStorage.createDownloadUrl({
     storageProvider: stored.storageProvider,
@@ -1109,7 +2468,7 @@ export async function deleteTicketAttachment(
   widgetUserId: string,
 ) {
   const project = await getWidgetProjectContext(projectId);
-  if (!project) throw new Error('Project not found');
+  if (!project) throw new WidgetError('project_not_found', 404);
 
   // Verify ownership
   const [task] = await db
@@ -1122,9 +2481,9 @@ export async function deleteTicketAttachment(
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.createdByType !== 'external' || task.createdById !== widgetUserId) {
-    throw new Error('Not the ticket owner');
+    throw new WidgetError('ticket_owner_only', 403);
   }
 
   // Find the attachment
@@ -1137,7 +2496,7 @@ export async function deleteTicketAttachment(
     ))
     .limit(1);
 
-  if (!attachment) throw new Error('Attachment not found');
+  if (!attachment) throw new WidgetError('attachment_not_found', 404);
 
   // Delete from object storage
   await attachmentStorage.deleteStoredObject({
@@ -1173,7 +2532,42 @@ export async function listMyTickets(
     .orderBy(desc(workspaceTasks.createdAt))
     .limit(50);
 
-  return rows.map((t) => mapTaskToWidgetResponse(t));
+  if (rows.length === 0) return [];
+
+  // Derive lastActivityAt = max(task.updatedAt, latest comment, latest activity)
+  // per ticket. Comments and activity rows do NOT bump workspaceTasks.updatedAt,
+  // so without this a team reply would never light the launcher badge.
+  const ids = rows.map((r) => r.id);
+  const [commentMax, activityMax] = await Promise.all([
+    db
+      .select({ taskId: workspaceTaskComments.taskId, max: sql<string>`max(${workspaceTaskComments.createdAt})` })
+      .from(workspaceTaskComments)
+      .where(and(inArray(workspaceTaskComments.taskId, ids), isNull(workspaceTaskComments.deletedAt)))
+      .groupBy(workspaceTaskComments.taskId),
+    db
+      .select({ taskId: workspaceTaskActivity.taskId, max: sql<string>`max(${workspaceTaskActivity.createdAt})` })
+      .from(workspaceTaskActivity)
+      .where(inArray(workspaceTaskActivity.taskId, ids))
+      .groupBy(workspaceTaskActivity.taskId),
+  ]);
+
+  const latest = new Map<string, number>();
+  const bump = (taskId: string, raw: string | null) => {
+    if (!raw) return;
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) return;
+    if (!(latest.has(taskId) && latest.get(taskId)! >= ms)) latest.set(taskId, ms);
+  };
+  for (const r of commentMax) bump(r.taskId, r.max);
+  for (const r of activityMax) bump(r.taskId, r.max);
+
+  return rows.map((t) => {
+    const dto = mapTaskToWidgetResponse(t);
+    const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
+    const activityMs = latest.get(t.id) ?? 0;
+    dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    return dto;
+  });
 }
 
 export async function getTicketStats(projectId: string) {
@@ -1187,7 +2581,6 @@ export async function getTicketStats(projectId: string) {
   const conditions = [
     eq(workspaceTasks.serverId, project.serverId),
     eq(workspaceTasks.visibility, 'public'),
-    eq(workspaceTasks.moderationStatus, 'approved'),
     isNull(workspaceTasks.deletedAt),
     ...(channelCondition ? [channelCondition] : []),
   ];
@@ -1227,30 +2620,31 @@ export async function getTicketStats(projectId: string) {
 }
 
 export async function castVote(
+  projectId: string,
   ticketId: string,
   widgetUserId: string,
   value: boolean
 ) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
   const [task] = await db
     .select({
       id: workspaceTasks.id,
       serverId: workspaceTasks.serverId,
-      moderationStatus: workspaceTasks.moderationStatus,
       votingEndsAt: workspaceTasks.votingEndsAt,
     })
     .from(workspaceTasks)
     .where(and(
       eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
       isNull(workspaceTasks.deletedAt),
     ))
     .limit(1);
 
-  if (!task) throw new Error('Ticket not found');
-  if (task.moderationStatus !== 'approved') {
-    throw new Error('Voting is only allowed on approved tickets');
-  }
+  if (!task) throw new WidgetError('ticket_not_found', 404);
   if (task.votingEndsAt && new Date() > task.votingEndsAt) {
-    throw new Error('Voting period has ended');
+    throw new WidgetError('voting_period_ended', 400);
   }
 
   await db
@@ -1270,12 +2664,24 @@ export async function castVote(
   await recountVotes(ticketId, task.serverId);
 }
 
-export async function retractVote(ticketId: string, widgetUserId: string) {
+export async function retractVote(
+  projectId: string,
+  ticketId: string,
+  widgetUserId: string,
+) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
   const [task] = await db
     .select({ serverId: workspaceTasks.serverId })
     .from(workspaceTasks)
-    .where(eq(workspaceTasks.id, ticketId))
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+    ))
     .limit(1);
+
+  if (!task) throw new WidgetError('ticket_not_found', 404);
 
   await db
     .delete(workspaceTaskVotes)
@@ -1286,9 +2692,7 @@ export async function retractVote(ticketId: string, widgetUserId: string) {
       )
     );
 
-  if (task) {
-    await recountVotes(ticketId, task.serverId);
-  }
+  await recountVotes(ticketId, task.serverId);
 }
 
 // ============================================================================
@@ -1298,57 +2702,6 @@ export async function retractVote(ticketId: string, widgetUserId: string) {
 /** Derive a fingerprint from the secret for JWT fp field / project lookup. */
 function deriveFingerprint(secret: string): string {
   return createHash('sha256').update(secret).digest('hex').slice(0, 32);
-}
-
-// Stable pseudonymous label for widget users whose host app didn't supply a JWT 'name'.
-// Must be deterministic: re-deriving on every interaction yields the same label.
-// Exported for unit tests.
-export function fallbackDisplayName(externalUserId: string): string {
-  const suffix = createHash('sha256').update(externalUserId).digest('hex').slice(0, 6);
-  return `Anonymous (${suffix})`;
-}
-
-/**
- * Upsert a widget user on authentication and return its id.
- *
- * Single source of truth for both auth paths (HTTP `authenticateWidget` and WS
- * `verifyWidgetUserJwt`). On every authenticated interaction this refreshes
- * `last_seen_at` — the column the leaderboard "recent" sort relies on — which
- * is why it lives here (the natural point a widget user "interacts") rather than
- * behind a separate server→BE event.
- *
- * Name handling: a real `providedName` always wins; absent it, an existing
- * stored name is preserved and a first-sight insert gets a stable pseudonym.
- */
-export async function resolveWidgetUserOnAuth(
-  projectId: string,
-  externalUserId: string,
-  providedName: string | undefined,
-): Promise<string> {
-  const [existing] = await db
-    .select({ id: widgetUsers.id })
-    .from(widgetUsers)
-    .where(and(eq(widgetUsers.projectId, projectId), eq(widgetUsers.externalUserId, externalUserId)))
-    .limit(1);
-
-  if (existing) {
-    // Always refresh last_seen_at; only overwrite the name when the JWT carries
-    // a real one (re-signing without 'name' must not clobber a stored name).
-    await db
-      .update(widgetUsers)
-      .set({ lastSeenAt: new Date(), ...(providedName ? { name: providedName } : {}) })
-      .where(eq(widgetUsers.id, existing.id));
-    return existing.id;
-  }
-
-  // First-sight insert: fall back to a stable pseudonymous label so every member
-  // has a distinguishable display string in the leaderboard / drawer.
-  const insertName = providedName ?? fallbackDisplayName(externalUserId);
-  const [inserted] = await db
-    .insert(widgetUsers)
-    .values({ projectId, externalUserId, name: insertName })
-    .returning({ id: widgetUsers.id });
-  return inserted.id;
 }
 
 function generateSlug(name: string, suffix: string): string {
@@ -1362,13 +2715,24 @@ function generateSlug(name: string, suffix: string): string {
 
 export async function enableWidget(
   serverId: string,
-  opts: { name: string; channelId?: string }
+  opts: { name: string; channelId: string; workspaceProjectId: string }
 ) {
-  // Check if a project already exists for this server (re-enable case)
+  if (!opts.workspaceProjectId) {
+    throw new Error('enableWidget: workspaceProjectId is required');
+  }
+  if (!opts.channelId) {
+    throw new Error('enableWidget: channelId is required');
+  }
+
+  // Re-enable case: a widget already exists for this (server, project) pair.
+  // Reusing the slug preserves the public project-page URL across re-enables.
   const [existing] = await db
     .select({ slug: widgetProjects.slug })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      eq(widgetProjects.workspaceProjectId, opts.workspaceProjectId),
+    ))
     .limit(1);
 
   const apiSecret = randomBytes(32).toString('base64url');
@@ -1380,6 +2744,7 @@ export async function enableWidget(
     .insert(widgetProjects)
     .values({
       serverId,
+      workspaceProjectId: opts.workspaceProjectId,
       name: opts.name,
       slug,
       apiKey,
@@ -1388,7 +2753,9 @@ export async function enableWidget(
       channelId: opts.channelId,
     })
     .onConflictDoUpdate({
-      target: widgetProjects.slug,
+      // Matches the partial unique index widget_projects_server_workspace_project_unique.
+      target: [widgetProjects.serverId, widgetProjects.workspaceProjectId],
+      targetWhere: isNotNull(widgetProjects.workspaceProjectId),
       set: {
         enabled: true,
         name: opts.name,
@@ -1403,20 +2770,26 @@ export async function enableWidget(
   return { ...project, apiSecret };
 }
 
-export async function disableWidget(serverId: string) {
+export async function disableWidget(serverId: string, lookup?: WidgetLookup) {
+  const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
   await db
     .update(widgetProjects)
     .set({ enabled: false, updatedAt: new Date() })
-    .where(eq(widgetProjects.serverId, serverId));
+    .where(and(...conditions));
 }
 
-export async function regenerateSecret(serverId: string) {
+export async function regenerateSecret(serverId: string, lookup?: WidgetLookup) {
   const newSecret = randomBytes(32).toString('base64url');
   const newFingerprint = deriveFingerprint(newSecret);
+  const conditions: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .update(widgetProjects)
     .set({ apiSecretHash: newSecret, apiKey: newFingerprint, updatedAt: new Date() })
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .returning({ id: widgetProjects.id });
 
   if (!project) throw new Error('Widget project not found');
@@ -1452,7 +2825,6 @@ export async function listPublicProjects() {
       .where(and(
         eq(workspaceTasks.serverId, p.serverId),
         eq(workspaceTasks.visibility, 'public'),
-        eq(workspaceTasks.moderationStatus, 'approved'),
         isNull(workspaceTasks.deletedAt),
         ...(channelCondition ? [channelCondition] : []),
       ));
@@ -1487,12 +2859,16 @@ export async function signWidgetUserJwt(params: {
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(params.userId)
     .setIssuedAt()
-    .setExpirationTime('24h')
+    .setExpirationTime(WIDGET_JWT_MAX_TOKEN_AGE)
     .sign(signingKey);
 }
 
 /**
  * Generate a signed widget JWT for an identified user, given the API secret.
+ *
+ * Role-gating removed: the token only IDENTIFIES the user. Whether that user can
+ * drive an agent is decided at auth time by the project's master switch alone
+ * (derivePermissions), so no workspace roles are baked in here.
  */
 export async function generateUserTokenBySecret(
   secret: string,
@@ -1505,6 +2881,7 @@ export async function generateUserTokenBySecret(
       apiKey: widgetProjects.apiKey,
       apiSecretHash: widgetProjects.apiSecretHash,
       enabled: widgetProjects.enabled,
+      slug: widgetProjects.slug,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.apiKey, fingerprint), eq(widgetProjects.enabled, true)))
@@ -1519,19 +2896,25 @@ export async function generateUserTokenBySecret(
     userName,
   });
 
-  return { token };
+  // `slug` lets the embedding host (e.g. the RunHQ console itself) initialise
+  // the widget with `project` + `useCookieAuth`, so a signed-in workspace
+  // member is recognised via the rw_session cookie path (Mode 0) and receives
+  // their RBAC roles (`staff`/`team_member`) — the bearer token alone carries
+  // no roles by design.
+  return { token, slug: project.slug };
 }
 
-export async function getWidgetIntegration(serverId: string) {
+export async function getWidgetIntegration(serverId: string, lookup?: WidgetLookup) {
+  const conditions = [
+    eq(widgetProjects.serverId, serverId),
+    eq(widgetProjects.enabled, true),
+  ];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .select()
     .from(widgetProjects)
-    .where(
-      and(
-        eq(widgetProjects.serverId, serverId),
-        eq(widgetProjects.enabled, true)
-      )
-    )
+    .where(and(...conditions))
     .limit(1);
 
   return project ?? null;
@@ -1562,7 +2945,12 @@ export async function generatePreviewWidgetBootstrap(
   serverId: string,
   userId: string,
   userName?: string,
+  workspaceProjectId?: string,
 ): Promise<PreviewWidgetBootstrap | null> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1573,9 +2961,10 @@ export async function generatePreviewWidgetBootstrap(
       widgetPosition: widgetProjects.widgetPosition,
       channelId: widgetProjects.channelId,
       autoApprove: widgetProjects.autoApprove,
+      serverId: widgetProjects.serverId,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
@@ -1603,11 +2992,26 @@ export async function generatePreviewWidgetBootstrap(
 /**
  * Report whether a server has auto-inject enabled (used by the preview proxy
  * to decide whether to include the bootstrap script in HTML responses).
+ *
+ * Keying: this is the workspace→BE preview path; the workspace preview proxy
+ * sends `?projectId=` (workspaceProjectId). The parameter mirrors
+ * `generatePreviewWidgetBootstrap` and is intentionally NOT a `WidgetLookup`
+ * — Phase 5 removed channel/project unification from that type, but this
+ * call site still legitimately keys by workspace project. When omitted, the
+ * function returns the server's first matching auto-inject row (legacy
+ * behavior preserved for callers that don't supply a project id).
  */
-export async function getPreviewWidgetFlag(serverId: string): Promise<{
+export async function getPreviewWidgetFlag(
+  serverId: string,
+  workspaceProjectId?: string,
+): Promise<{
   shouldInject: boolean;
   projectSlug?: string;
 }> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  if (workspaceProjectId) {
+    conditions.push(eq(widgetProjects.workspaceProjectId, workspaceProjectId));
+  }
   const [project] = await db
     .select({
       slug: widgetProjects.slug,
@@ -1616,7 +3020,7 @@ export async function getPreviewWidgetFlag(serverId: string): Promise<{
       channelId: widgetProjects.channelId,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project || !project.enabled || !project.autoInjectInPreview || !project.channelId) {
@@ -1626,19 +3030,125 @@ export async function getPreviewWidgetFlag(serverId: string): Promise<{
   return { shouldInject: true, projectSlug: project.slug };
 }
 
-export async function getWidgetSettings(serverId: string) {
+// ============================================================================
+// Members — per-user widget participants and their permission tiers.
+// Backs the project-level "Members" tab. Admin-gated at the route layer.
+// ============================================================================
+
+export interface WidgetMember {
+  id: string;
+  externalUserId: string;
+  authSource: 'app' | 'runhq';
+  name: string | null;
+  email: string | null;
+  permissionTier: WidgetPermissionTier;
+  createdAt: string;
+  lastActiveAt: string | null;
+  // Non-reserved JWT claims captured for identification (company, plan, …).
+  // Empty object when the token carried nothing extra. Keys vary per project.
+  metadata: Record<string, unknown>;
+}
+
+/** Resolve the widget_projects.id for a (serverId, lookup) pair, or null. */
+async function resolveWidgetProjectId(serverId: string, lookup: WidgetLookup): Promise<string | null> {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
+  const [row] = await db
+    .select({ id: widgetProjects.id })
+    .from(widgetProjects)
+    .where(and(...conditions))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/**
+ * List every widget user for a project, newest activity first. Returns null
+ * when the project has no widget configured (the caller renders an empty/setup
+ * state rather than an error).
+ */
+export async function listWidgetMembers(
+  serverId: string,
+  lookup: WidgetLookup,
+): Promise<WidgetMember[] | null> {
+  const projectId = await resolveWidgetProjectId(serverId, lookup);
+  if (!projectId) return null;
+  const rows = await db
+    .select({
+      id: widgetUsers.id,
+      externalUserId: widgetUsers.externalUserId,
+      authSource: widgetUsers.authSource,
+      name: widgetUsers.name,
+      email: widgetUsers.email,
+      permissionTier: widgetUsers.permissionTier,
+      createdAt: widgetUsers.createdAt,
+      lastActiveAt: widgetUsers.lastActiveAt,
+      metadata: widgetUsers.metadata,
+    })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.projectId, projectId))
+    .orderBy(sql`${widgetUsers.lastActiveAt} DESC NULLS LAST`, desc(widgetUsers.createdAt));
+  return rows.map((r) => ({
+    id: r.id,
+    externalUserId: r.externalUserId,
+    authSource: r.authSource === 'runhq' ? 'runhq' : 'app',
+    name: r.name,
+    email: r.email,
+    permissionTier: isWidgetPermissionTier(r.permissionTier) ? r.permissionTier : 'app_user',
+    createdAt: r.createdAt.toISOString(),
+    lastActiveAt: r.lastActiveAt ? r.lastActiveAt.toISOString() : null,
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+  }));
+}
+
+/**
+ * Set one widget user's permission tier. Scoped to the resolved project so a
+ * cross-tenant member id can't be edited. Returns 'no_project' when the widget
+ * is missing and 'not_found' when the member isn't in this project.
+ */
+export async function updateWidgetMemberTier(
+  serverId: string,
+  lookup: WidgetLookup,
+  memberId: string,
+  tier: WidgetPermissionTier,
+): Promise<'ok' | 'no_project' | 'not_found'> {
+  const projectId = await resolveWidgetProjectId(serverId, lookup);
+  if (!projectId) return 'no_project';
+  const updated = await db
+    .update(widgetUsers)
+    .set({ permissionTier: tier })
+    .where(and(eq(widgetUsers.id, memberId), eq(widgetUsers.projectId, projectId)))
+    .returning({ id: widgetUsers.id });
+  return updated.length > 0 ? 'ok' : 'not_found';
+}
+
+export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup) {
+  const conditions = [eq(widgetProjects.serverId, serverId)];
+  const extra = widgetLookupCondition(lookup);
+  if (extra) conditions.push(extra);
   const [project] = await db
     .select({
       autoApprove: widgetProjects.autoApprove,
       widgetPosition: widgetProjects.widgetPosition,
+      widgetLanguage: widgetProjects.widgetLanguage,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       isPublic: widgetProjects.isPublic,
+      widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      allowedOrigins: widgetProjects.allowedOrigins,
+      autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
       autoInjectInPreview: widgetProjects.autoInjectInPreview,
       channelId: widgetProjects.channelId,
       slug: widgetProjects.slug,
+      widgetAgentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetAssignRoles: widgetProjects.widgetAssignRoles,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+      widgetAssignRateLimitPerHour: widgetProjects.widgetAssignRateLimitPerHour,
+      widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
+      widgetLiveCoderEnabled: widgetProjects.widgetLiveCoderEnabled,
     })
     .from(widgetProjects)
-    .where(eq(widgetProjects.serverId, serverId))
+    .where(and(...conditions))
     .limit(1);
 
   if (!project) return null;
@@ -1646,11 +3156,22 @@ export async function getWidgetSettings(serverId: string) {
   return {
     auto_approve: project.autoApprove,
     widget_position: project.widgetPosition,
+    widget_language: project.widgetLanguage,
     voting_period_hours: project.votingPeriodHours,
     is_public: project.isPublic,
+    login_url: project.widgetLoginUrl,
+    allowed_origins: project.allowedOrigins,
+    auto_recognize_runhq_members: project.autoRecognizeRunhqMembers,
     auto_inject_in_preview: project.autoInjectInPreview,
     channel_id: project.channelId,
     slug: project.slug,
+    widget_agent_assignment_enabled: project.widgetAgentAssignmentEnabled,
+    widget_assign_roles: project.widgetAssignRoles,
+    widget_role_claim_name: project.widgetRoleClaimName,
+    widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
+    widgetChatAgentEntityId: project.widgetChatAgentEntityId,
+    widgetRolePermissions: project.widgetRolePermissions,
+    widgetLiveCoderEnabled: project.widgetLiveCoderEnabled,
   };
 }
 
@@ -1674,23 +3195,155 @@ export async function updateWidgetSettings(
   settings: {
     auto_approve?: boolean;
     widget_position?: string;
+    widget_language?: string | null;
     voting_period_hours?: number;
     is_public?: boolean;
+    login_url?: string | null;
+    allowed_origins?: string[];
+    auto_recognize_runhq_members?: boolean;
     auto_inject_in_preview?: boolean;
     slug?: string;
+    /** Target todo channel the widget feeds. Re-targets the widget when changed. */
+    channelId?: string;
+    // Triager assignment policy fields
+    widgetAgentAssignmentEnabled?: boolean;
+    widgetAssignRoles?: string[];
+    widgetRoleClaimName?: string;
+    widgetAssignRateLimitPerHour?: number;
+    // Chat-with-agent intake (camelCase per the widget-chat contract)
+    widgetChatAgentEntityId?: string | null;
+    // Role→permissions RBAC map + live-coder master switch
+    widgetRolePermissions?: Record<string, string[]>;
+    widgetLiveCoderEnabled?: boolean;
   },
+  opts?: WidgetLookup,
 ): Promise<UpdateWidgetSettingsResult> {
+  // Lookup key comes exclusively from `opts` — the second argument.
+  // Phase 5: channelId-only. The legacy positional-string and
+  // `workspaceProjectId` lookup forms have been removed.
+  const key = opts;
+
+  // Role-gating removed: enabling agent assignment no longer requires any role.
+  // The master switch alone authorizes auto-assign for identified (non-anon)
+  // widget users — see derivePermissions. (The legacy empty-roles guard here
+  // blocked enabling it now that the roles UI is gone.)
+
+  // Validate login_url shape on every update that touches it. The
+  // "required when public" check happens after we read existing state below.
+  if (settings.login_url !== undefined && settings.login_url !== null && settings.login_url !== '') {
+    if (!isSafeHttpUrl(settings.login_url)) {
+      throw new WidgetSettingsValidationError(
+        'Login URL must be a valid http:// or https:// URL.',
+      );
+    }
+  }
+
+  // Validate + normalize allowed_origins. Each entry must parse as
+  // http(s) URL; otherwise reject with a per-entry message. After
+  // normalization, duplicates collapse — two entries that differ only
+  // in trailing slash or default port resolve to the same origin.
+  let normalizedOrigins: string[] | undefined;
+  if (settings.allowed_origins !== undefined) {
+    if (!Array.isArray(settings.allowed_origins)) {
+      throw new WidgetSettingsValidationError('allowed_origins must be an array.');
+    }
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of settings.allowed_origins) {
+      const normalized = normalizeOrigin(raw);
+      if (!normalized) {
+        throw new WidgetSettingsValidationError(
+          `Invalid origin "${raw}". Origins must be http(s) URLs (e.g. https://acme.com).`,
+        );
+      }
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        out.push(normalized);
+      }
+    }
+    normalizedOrigins = out;
+  }
+
+  // Build a reusable conditions array for all three internal queries.
+  const projConds = (): ReturnType<typeof eq>[] => {
+    const c: ReturnType<typeof eq>[] = [eq(widgetProjects.serverId, serverId)];
+    const extra = widgetLookupCondition(key);
+    if (extra) c.push(extra);
+    return c;
+  };
+
   // Enabling auto-inject requires a channel already to be set on the project.
   // Without a channel the widget has nowhere to submit tickets.
   if (settings.auto_inject_in_preview === true) {
     const [current] = await db
       .select({ channelId: widgetProjects.channelId })
       .from(widgetProjects)
-      .where(eq(widgetProjects.serverId, serverId))
+      .where(and(...projConds()))
       .limit(1);
     if (!current?.channelId) {
       throw new WidgetSettingsValidationError(
         'Set a channel on the widget project before enabling auto-inject in preview URLs.',
+      );
+    }
+  }
+
+  // Required-when-public guard for login_url. We need to know the *resulting*
+  // state after this update is applied: if the row would end up with
+  // is_public=true but no login_url, reject. This blocks both
+  //   (a) flipping is_public on without supplying a URL when none is stored, and
+  //   (b) clearing login_url while is_public is already true.
+  if (settings.is_public === true || settings.login_url === '' || settings.login_url === null) {
+    const [current] = await db
+      .select({
+        isPublic: widgetProjects.isPublic,
+        widgetLoginUrl: widgetProjects.widgetLoginUrl,
+      })
+      .from(widgetProjects)
+      .where(and(...projConds()))
+      .limit(1);
+
+    const finalIsPublic =
+      settings.is_public !== undefined ? settings.is_public : !!current?.isPublic;
+    const finalLoginUrl =
+      settings.login_url !== undefined
+        ? (settings.login_url ?? '').trim()
+        : (current?.widgetLoginUrl ?? '').trim();
+
+    if (finalIsPublic && !finalLoginUrl) {
+      throw new WidgetSettingsValidationError(
+        'A Login URL is required when the project is public.',
+      );
+    }
+  }
+
+  // Required-when-auto-recognize guard for allowed_origins. Mirrors the
+  // login-URL pattern: the resulting state must have at least one origin
+  // when auto-recognize is on. Blocks both
+  //   (a) flipping auto-recognize on without supplying origins, and
+  //   (b) clearing origins while auto-recognize is already on.
+  if (
+    settings.auto_recognize_runhq_members === true ||
+    (normalizedOrigins !== undefined && normalizedOrigins.length === 0)
+  ) {
+    const [current] = await db
+      .select({
+        autoRecognizeRunhqMembers: widgetProjects.autoRecognizeRunhqMembers,
+        allowedOrigins: widgetProjects.allowedOrigins,
+      })
+      .from(widgetProjects)
+      .where(and(...projConds()))
+      .limit(1);
+
+    const finalAutoRecognize =
+      settings.auto_recognize_runhq_members !== undefined
+        ? settings.auto_recognize_runhq_members
+        : !!current?.autoRecognizeRunhqMembers;
+    const finalOrigins =
+      normalizedOrigins !== undefined ? normalizedOrigins : (current?.allowedOrigins ?? []);
+
+    if (finalAutoRecognize && finalOrigins.length === 0) {
+      throw new WidgetSettingsValidationError(
+        'Add at least one allowed origin before enabling RunHQ-member auto-recognition.',
       );
     }
   }
@@ -1701,7 +3354,7 @@ export async function updateWidgetSettings(
     const [current] = await db
       .select({ autoInjectInPreview: widgetProjects.autoInjectInPreview })
       .from(widgetProjects)
-      .where(eq(widgetProjects.serverId, serverId))
+      .where(and(...projConds()))
       .limit(1);
     if (current && current.autoInjectInPreview !== settings.auto_inject_in_preview) {
       autoInjectChanged = true;
@@ -1713,13 +3366,49 @@ export async function updateWidgetSettings(
     .set({
       ...(settings.auto_approve !== undefined && { autoApprove: settings.auto_approve }),
       ...(settings.widget_position !== undefined && { widgetPosition: settings.widget_position }),
+      ...(settings.widget_language !== undefined && { widgetLanguage: settings.widget_language }),
       ...(settings.voting_period_hours !== undefined && { votingPeriodHours: settings.voting_period_hours }),
       ...(settings.is_public !== undefined && { isPublic: settings.is_public }),
+      // Empty string is normalized to null so the DB has a single
+      // representation for "no login URL set".
+      ...(settings.login_url !== undefined && {
+        widgetLoginUrl: settings.login_url && settings.login_url.trim() ? settings.login_url.trim() : null,
+      }),
+      ...(normalizedOrigins !== undefined && { allowedOrigins: normalizedOrigins }),
+      ...(settings.auto_recognize_runhq_members !== undefined && {
+        autoRecognizeRunhqMembers: settings.auto_recognize_runhq_members,
+      }),
       ...(settings.auto_inject_in_preview !== undefined && { autoInjectInPreview: settings.auto_inject_in_preview }),
       ...(settings.slug !== undefined && { slug: settings.slug }),
+      // Re-target: only set when a non-empty channel is supplied (channel_id is
+      // NOT NULL in the DB, so never write an empty/null target).
+      ...(settings.channelId !== undefined && settings.channelId !== '' && { channelId: settings.channelId }),
+      // Triager assignment policy — only set when caller explicitly provides the field
+      ...(settings.widgetAgentAssignmentEnabled !== undefined && { widgetAgentAssignmentEnabled: settings.widgetAgentAssignmentEnabled }),
+      ...(settings.widgetAssignRoles !== undefined && { widgetAssignRoles: settings.widgetAssignRoles }),
+      ...(settings.widgetRoleClaimName !== undefined && { widgetRoleClaimName: settings.widgetRoleClaimName }),
+      ...(settings.widgetAssignRateLimitPerHour !== undefined && { widgetAssignRateLimitPerHour: settings.widgetAssignRateLimitPerHour }),
+      // Chat settings — empty string normalizes to null ("chat disabled" /
+      // "no extra instructions" have a single representation).
+      ...(settings.widgetChatAgentEntityId !== undefined && {
+        widgetChatAgentEntityId: settings.widgetChatAgentEntityId?.trim()
+          ? settings.widgetChatAgentEntityId.trim()
+          : null,
+      }),
+      // RBAC: role→permissions map and live-coder master switch
+      ...(settings.widgetRolePermissions !== undefined && {
+        widgetRolePermissions: settings.widgetRolePermissions,
+        // Keep the legacy master switch in lock-step with the permission map:
+        // the orchestrator + creation guard gate on the column, and the new UI
+        // has no separate toggle. Placed AFTER the explicit widgetAgentAssignmentEnabled
+        // set above so the permission map (the source of truth) wins when both
+        // are somehow supplied.
+        widgetAgentAssignmentEnabled: roleMapGrantsAssignAgent(settings.widgetRolePermissions),
+      }),
+      ...(settings.widgetLiveCoderEnabled !== undefined && { widgetLiveCoderEnabled: settings.widgetLiveCoderEnabled }),
       updatedAt: new Date(),
     })
-    .where(eq(widgetProjects.serverId, serverId));
+    .where(and(...projConds()));
 
   return { autoInjectChanged };
 }
@@ -1727,6 +3416,109 @@ export async function updateWidgetSettings(
 // ============================================================================
 // Title Generation
 // ============================================================================
+
+export interface ReconcileMaps {
+  channelToProject: Record<string, string>;
+  projectToPrimaryTodoChannel: Record<string, string>;
+}
+
+/**
+ * Two-pass idempotent backfill for widget_projects rows missing one of the
+ * two keys. Workspace POSTs both maps on each reconcile tick; we fill rows
+ * in-place. Rows where the relevant map has no entry are left untouched
+ * (e.g. the channel was deleted on the workspace).
+ *
+ * Rows with both `channel_id` and `workspace_project_id` NULL are
+ * intentionally left untouched — they're pre-rollout orphans that the
+ * Phase 4 migration surfaces for manual triage.
+ */
+export async function reconcileWidgetBindings(
+  serverId: string,
+  maps: ReconcileMaps,
+): Promise<{ updated: number }> {
+  let updated = 0;
+
+  // Pass 1: backfill workspace_project_id where NULL but channel_id is set.
+  const missingProject = await db
+    .select({ id: widgetProjects.id, channelId: widgetProjects.channelId })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.serverId, serverId), isNull(widgetProjects.workspaceProjectId)));
+  for (const row of missingProject) {
+    if (!row.channelId) continue;
+    const projId = maps.channelToProject[row.channelId];
+    if (!projId) continue;
+    await db.update(widgetProjects)
+      .set({ workspaceProjectId: projId, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+
+  // Pass 2: backfill channel_id where NULL but workspace_project_id is set.
+  const missingChannel = await db
+    .select({ id: widgetProjects.id, workspaceProjectId: widgetProjects.workspaceProjectId })
+    .from(widgetProjects)
+    .where(and(eq(widgetProjects.serverId, serverId), isNull(widgetProjects.channelId)));
+  for (const row of missingChannel) {
+    if (!row.workspaceProjectId) continue;
+    const chanId = maps.projectToPrimaryTodoChannel[row.workspaceProjectId];
+    if (!chanId) continue;
+    await db.update(widgetProjects)
+      .set({ channelId: chanId, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+
+  return { updated };
+}
+
+/**
+ * Sync workspace project metadata into widget_projects so widget UIs reflect
+ * workspace renames. The workspace POSTs the full list of its projects on
+ * every project change and on boot; BE updates `name` for each matching
+ * (serverId, workspaceProjectId) row whose name has actually changed.
+ *
+ * Scoped per `serverId`: rows on other servers are not touched, even if a
+ * workspace_project_id collides. Rows that have no `workspace_project_id`
+ * are skipped (those are pre-rollout rows; `reconcileWidgetBindings`
+ * handles backfilling them via channel mapping).
+ *
+ * Idempotent: re-sending the same payload is a no-op. The returned `updated`
+ * count reflects actual writes — useful for lightweight telemetry.
+ */
+export async function syncProjectMetadata(
+  serverId: string,
+  projects: Array<{ id: string; name: string }>,
+): Promise<{ updated: number }> {
+  if (projects.length === 0) return { updated: 0 };
+
+  const ids = projects.map((p) => p.id);
+  const existing = await db
+    .select({
+      id: widgetProjects.id,
+      workspaceProjectId: widgetProjects.workspaceProjectId,
+      name: widgetProjects.name,
+    })
+    .from(widgetProjects)
+    .where(and(
+      eq(widgetProjects.serverId, serverId),
+      inArray(widgetProjects.workspaceProjectId, ids),
+    ));
+
+  const desiredByWorkspaceProjectId = new Map(projects.map((p) => [p.id, p.name]));
+
+  let updated = 0;
+  for (const row of existing) {
+    if (!row.workspaceProjectId) continue;
+    const desired = desiredByWorkspaceProjectId.get(row.workspaceProjectId);
+    if (desired === undefined) continue;
+    if (desired === row.name) continue;
+    await db.update(widgetProjects)
+      .set({ name: desired, updatedAt: new Date() })
+      .where(eq(widgetProjects.id, row.id));
+    updated++;
+  }
+  return { updated };
+}
 
 export async function generateTitle(description: string): Promise<string> {
   const fallback = description.split('\n')[0].slice(0, 80).trim() || description.slice(0, 80).trim();
@@ -1748,10 +3540,12 @@ export async function generateTitle(description: string): Promise<string> {
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 60,
+      system:
+        'You are a labeling function. Given a feature request or bug report, output a concise title (max 10 words). IMPORTANT: Output the title in the SAME LANGUAGE as the input — do NOT translate. Do NOT interpret the report, do NOT respond conversationally, do NOT add quotes or trailing punctuation. Just output the title.\n\nExamples:\nInput: "Users keep getting logged out after 30 minutes of inactivity"\nOutput: Session timeout logs users out too quickly\n\nInput: "로그인 페이지에서 비밀번호 재설정이 안 되는 버그를 수정해주세요"\nOutput: 로그인 페이지 비밀번호 재설정 버그',
       messages: [
         {
           role: 'user',
-          content: `Generate a concise title (max 10 words) for this feature request or bug report. Reply with only the title, no quotes or punctuation at the end.\n\n${description}`,
+          content: `Input: "${description}"\nOutput:`,
         },
       ],
     });
@@ -1762,4 +3556,553 @@ export async function generateTitle(description: string): Promise<string> {
   } catch {
     return fallback;
   }
+}
+
+// ============================================================================
+// Exposed Agents
+// ============================================================================
+
+export interface ExposedAgentSummary {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
+/**
+ * Agents in the widget's "Hand to agent" roster. The mirror table carries ALL
+ * workspace agents (so names resolve for e.g. the chat support agent); only
+ * rows flagged `exposed` are assignable by widget users.
+ */
+export async function listExposedAgents(widgetProjectId: string): Promise<ExposedAgentSummary[]> {
+  return await db
+    .select({
+      id: widgetExposedAgents.agentId,
+      name: widgetExposedAgents.agentName,
+      description: widgetExposedAgents.agentDescription,
+    })
+    .from(widgetExposedAgents)
+    .where(and(
+      eq(widgetExposedAgents.widgetProjectId, widgetProjectId),
+      eq(widgetExposedAgents.exposed, true),
+    ))
+    .orderBy(widgetExposedAgents.agentName);
+}
+
+// ============================================================================
+// Agent Assignment
+// ============================================================================
+
+export interface AssignAgentRequest {
+  agentId: string;
+  command: string;
+  actor: {
+    widgetUserId: string;
+    externalUserId: string;
+    name: string | null;
+    matchedRoles: string[];
+  };
+  /** Clarification Q&A to seed the workspace coder with context. Absent when the ticket needed no clarification. */
+  qa?: Array<{ question: string; answer: string }>;
+}
+
+export interface AssignAgentResult {
+  jobId: string;
+}
+
+export class WidgetAssignError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number,
+    public readonly cause?: unknown,
+  ) {
+    super(code);
+    this.name = 'WidgetAssignError';
+  }
+}
+
+/**
+ * Stable error codes for the public widget API.
+ *
+ * Adding `as const` makes the codes a closed set so that route handlers
+ * can exhaustively map `.code` → HTTP status without catching arbitrary
+ * Error.message strings (which would risk leaking DB / driver internals
+ * to unauthenticated callers).
+ */
+export const WIDGET_ERROR_CODES = [
+  'project_not_found',
+  'ticket_not_found',
+  'comment_not_found',
+  'attachment_not_found',
+  'ticket_owner_only',
+  'comment_author_only',
+  'comments_disabled',
+  'ticket_no_longer_editable',
+  'ticket_has_comments',
+  'ticket_has_activity',
+  'invalid_visibility',
+  'voting_period_ended',
+  'ticket_rejected',
+  'ticket_review_unavailable',
+  'attachment_unsupported_type',
+  'attachment_too_large',
+  'attachment_count_exceeded',
+  'attachment_storage_unconfigured',
+  'attachment_rejected',
+  'attachment_review_unavailable',
+  'attachments_disabled',
+  'rate_limited',
+  // Widget chat (agent intake)
+  'chat_not_enabled',
+  'conversation_not_found',
+  'conversation_closed',
+  'message_required',
+  'message_too_long',
+  'turn_limit_reached',
+  'invalid_cursor',
+  'no_pending_proposal',
+  'invalid_proposal_draft',
+  // Agentless [Submit Ticket]
+  'ticket_already_created',
+  'agent_turns_present',
+  'no_user_messages',
+] as const;
+
+export type WidgetErrorCode = typeof WIDGET_ERROR_CODES[number];
+
+/**
+ * Service-layer error thrown by the public widget API. Routes map `.code`
+ * + `.status` to the response body; anything else that escapes is logged
+ * and reported as `{error: 'internal'}` to avoid leaking DB internals.
+ */
+export class WidgetError extends Error {
+  constructor(
+    public readonly code: WidgetErrorCode,
+    public readonly status: number,
+    public readonly cause?: unknown,
+  ) {
+    super(code);
+    this.name = 'WidgetError';
+  }
+}
+
+/**
+ * Forwards an authorized triager assignment to the workspace and records
+ * an activity entry. Caller MUST have already passed:
+ *   - JWT auth + assign_agent permission
+ *   - Agent exposure check
+ *   - Rate-limit check
+ */
+/** Fetch the rate-limit quota for a widget project (returns default 30 if not found). */
+export async function getWidgetProjectRateLimit(projectId: string): Promise<number> {
+  const [proj] = await db
+    .select({ limit: widgetProjects.widgetAssignRateLimitPerHour })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+  return proj?.limit ?? 30;
+}
+
+/** Fetch the external user details for audit attribution. */
+export async function getWidgetUserAuditInfo(
+  widgetUserId: string,
+): Promise<{ externalUserId: string; name: string | null } | null> {
+  const [wu] = await db
+    .select({ externalUserId: widgetUsers.externalUserId, name: widgetUsers.name })
+    .from(widgetUsers)
+    .where(eq(widgetUsers.id, widgetUserId))
+    .limit(1);
+  return wu ?? null;
+}
+
+// ============================================================================
+// Shared resolution helpers (used by getTicketForAssign and assignAgent)
+// ============================================================================
+
+/**
+ * Resolve the serverId for a widget project.
+ * Returns null when the project does not exist.
+ */
+async function resolveWidgetServerId(widgetProjectId: string): Promise<string | null> {
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  return proj?.serverId ?? null;
+}
+
+/**
+ * Load the title and description for a widget-sourced task scoped to a server.
+ * Returns null when no matching row exists (task missing, wrong server, wrong sourceType).
+ */
+async function getWidgetTaskRow(
+  serverId: string,
+  ticketId: string,
+): Promise<{ title: string; description: string | null } | null> {
+  const [task] = await db
+    .select({ title: workspaceTasks.title, description: workspaceTasks.description })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, serverId),
+    ))
+    .limit(1);
+  if (!task) return null;
+  return { title: task.title, description: task.description ?? null };
+}
+
+/**
+ * Exported wrapper around getWidgetTaskRow for the auto-assign orchestrator.
+ * Returns the widget ticket's title/description scoped to a server, or null.
+ */
+export async function getWidgetTaskForServer(
+  serverId: string,
+  ticketId: string,
+): Promise<{ title: string; description: string | null } | null> {
+  return getWidgetTaskRow(serverId, ticketId);
+}
+
+/**
+ * Resolve a widget project's server + whether agent auto-assignment is enabled
+ * for it. Used by the auto-assign orchestrator's feature/identity gates.
+ */
+export async function getAutoAssignProject(
+  widgetProjectId: string,
+): Promise<{ serverId: string; agentAssignmentEnabled: boolean } | null> {
+  const [proj] = await db
+    .select({
+      serverId: widgetProjects.serverId,
+      agentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  return proj ?? null;
+}
+
+/**
+ * Resolve the serverId + ticket title/description for an assign or clarification request.
+ * Returns null if the project or ticket cannot be found (caller should treat as 404).
+ */
+export async function getTicketForAssign(
+  widgetProjectId: string,
+  ticketId: string,
+): Promise<{ serverId: string; title: string; description: string | null } | null> {
+  const serverId = await resolveWidgetServerId(widgetProjectId);
+  if (!serverId) return null;
+
+  const task = await getWidgetTaskRow(serverId, ticketId);
+  if (!task) return null;
+
+  return { serverId, title: task.title, description: task.description };
+}
+
+export async function assignAgent(
+  widgetProjectId: string,
+  ticketId: string,
+  req: AssignAgentRequest,
+): Promise<AssignAgentResult> {
+  const serverId = await resolveWidgetServerId(widgetProjectId);
+  if (!serverId) throw new WidgetAssignError('project_not_found', 404);
+
+  const task = await getWidgetTaskRow(serverId, ticketId);
+  if (!task) throw new WidgetAssignError('ticket_not_found', 404);
+  const workspaceCommand = req.command.trim()
+    ? req.command
+    : `Work on this ticket: ${task.title}`;
+
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  if (!server) throw new WidgetAssignError('server_not_found', 404);
+
+  let res: { jobId?: string } | null = null;
+  try {
+    res = await ServerService.serverTokenFetch<{ jobId?: string }>(
+      server,
+      '/api/internal/widget-triager-assign',
+      {
+        ticketId,
+        agentId: req.agentId,
+        command: workspaceCommand,
+        actor: {
+          externalUserId: req.actor.externalUserId,
+          name: req.actor.name,
+          via: 'widget_triage',
+        },
+        ...(req.qa && req.qa.length > 0 ? { clarification: { qa: req.qa } } : {}),
+      },
+    );
+  } catch (err) {
+    // Distinguish "workspace reached but rejected the request" from "workspace
+    // unreachable" — collapsing both into a 503 hid real bad-request bugs (e.g.
+    // an empty command failing the workspace's validator surfaced as an opaque
+    // gateway 503). Always log the real reason so it is diagnosable.
+    if (err instanceof ServerService.ServerResponseError) {
+      console.error(
+        `[WidgetService] widget-triager-assign rejected by workspace ${serverId} ` +
+          `(ticket=${ticketId}, agent=${req.agentId}): HTTP ${err.status} ${err.body}`,
+      );
+      // The workspace was reachable and answered — this is an upstream error,
+      // not "unreachable". 502 (bad gateway) is accurate and non-retryable.
+      throw new WidgetAssignError('workspace_error', 502, err);
+    }
+    console.error(
+      `[WidgetService] widget-triager-assign could not reach workspace ${serverId} ` +
+        `(ticket=${ticketId}, agent=${req.agentId}):`,
+      err,
+    );
+    throw new WidgetAssignError('workspace_unreachable', 503, err);
+  }
+  if (!res?.jobId) {
+    console.error(
+      `[WidgetService] widget-triager-assign returned no jobId from workspace ${serverId} ` +
+        `(ticket=${ticketId}, agent=${req.agentId})`,
+    );
+    throw new WidgetAssignError('workspace_error', 502, res);
+  }
+
+  // The `agent_assigned` audit row is now written by the WORKSPACE inside the
+  // deferred tail of performWidgetTicketAssign (recordAssignmentActivity:true),
+  // carrying agentName (which the widget reads for assignedAgentName → the
+  // "Live session" affordance). Writing it here too would (a) duplicate the row
+  // and (b) be skipped entirely whenever this fetch timed out on a cold machine
+  // — the very failure that hid the Live session button. So the BE no longer
+  // writes it; the workspace's row lands regardless of this call's timeout.
+
+  return { jobId: res.jobId };
+}
+
+// ============================================================================
+// Assignment Suggestion
+// ============================================================================
+
+export interface SuggestAssignmentResult {
+  agentId: string | null;
+  command: string;
+  /**
+   * Set when the suggestion could not be obtained because the workspace was
+   * unreachable (suspended/cold/timeout/5xx) — i.e. we never got a verdict, as
+   * opposed to a genuine "no agent" answer (agentId:null, unavailable falsy).
+   * The auto-assign orchestrator records this as a transient `failed` outcome
+   * instead of the terminal, misleading `skipped_no_agent`.
+   */
+  unavailable?: boolean;
+}
+
+/**
+ * Ask the workspace's triager to suggest which exposed agent should handle
+ * the given ticket.
+ *
+ * Non-fatal: any forwarding failure returns { agentId: null, command: '' } so
+ * the modal stays usable even when the workspace is offline or the endpoint
+ * hasn't been deployed yet.
+ */
+export async function suggestAssignment(
+  widgetProjectId: string,
+  ticketId: string,
+): Promise<SuggestAssignmentResult> {
+  // Resolve calling project → server (cross-tenant guard)
+  const [proj] = await db
+    .select({ serverId: widgetProjects.serverId })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, widgetProjectId))
+    .limit(1);
+  if (!proj) return { agentId: null, command: '' };
+
+  // Resolve ticket → server, scoped to the calling project's server
+  const [task] = await db
+    .select({ serverId: workspaceTasks.serverId })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.sourceType, 'widget'),
+      eq(workspaceTasks.serverId, proj.serverId),
+    ))
+    .limit(1);
+  if (!task) return { agentId: null, command: '' };
+
+  // Only forward when there are agents exposed for this widget project
+  const exposed = await listExposedAgents(widgetProjectId);
+  if (exposed.length === 0) return { agentId: null, command: '' };
+  const agentIdAllowlist = exposed.map(a => a.id);
+
+  // Resolve server row (needed for URL + token hash)
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, task.serverId))
+    .limit(1);
+  if (!server) return { agentId: null, command: '' };
+
+  try {
+    const res = await ServerService.serverTokenFetch<{ agentId: string | null; command: string }>(
+      server,
+      '/api/internal/widget-triager-suggest',
+      { ticketId, agentIdAllowlist },
+    );
+    return {
+      agentId: typeof res?.agentId === 'string' ? res.agentId : null,
+      command: typeof res?.command === 'string' ? res.command : '',
+    };
+  } catch (err) {
+    // Could not reach the workspace (suspended/cold/timeout/5xx). This is NOT a
+    // genuine "no agent" answer — flag it `unavailable` so the orchestrator
+    // records a transient `failed` rather than the terminal `skipped_no_agent`.
+    console.warn('[WidgetService] suggestAssignment forward failed:', err);
+    return { agentId: null, command: '', unavailable: true };
+  }
+}
+
+/**
+ * Ensure the workspace machine backing `serverId` is awake before the
+ * auto-assign tail forwards the suggest + assign calls to it.
+ *
+ * Widget servers auto-suspend on idle (Fly machines), so a fire-and-forget
+ * auto-assign — which fires seconds after a ticket is created — routinely hits
+ * a cold machine. A single `serverTokenFetch` against a suspended machine
+ * exceeds its short timeout and fails, which previously surfaced as the
+ * terminal, misleading `skipped_no_agent` ("no matching agent for this
+ * request") even though the agent was exposed and mirrored. Waking first (and
+ * waiting until healthy) lets the suggestion actually reach a live triager.
+ *
+ * Local / self-hosted (Docker) servers are not Fly machines and are reachable
+ * whenever the BE can sign a request to them — nothing to wake, so they report
+ * reachable immediately.
+ */
+export async function ensureWorkspaceAwake(serverId: string): Promise<{ reachable: boolean }> {
+  const [server] = await db
+    .select()
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .limit(1);
+  if (!server) return { reachable: false };
+  if (server.deploymentType !== 'remote') return { reachable: true };
+
+  try {
+    const res = await ServerService.wakeRemoteServerInternal(server);
+    return { reachable: res.success === true || res.wasAlreadyRunning === true };
+  } catch (err) {
+    console.warn(`[WidgetService] ensureWorkspaceAwake failed for ${serverId}:`, err);
+    return { reachable: false };
+  }
+}
+
+// ============================================================================
+// Agent Mirror (pushed by workspace on every agent mutation and on boot).
+// Carries ALL agents; `exposed` marks the "Hand to agent" roster subset.
+// ============================================================================
+
+export interface SyncWidgetExposedAgentsInput {
+  workspaceProjectId: string;
+  // `exposed` is optional for back-compat: workspace servers predating the
+  // flag only pushed widget_exposed=true agents, so a missing value means true.
+  agents: Array<{ id: string; name: string; description: string | null; exposed?: boolean }>;
+}
+
+export interface SyncWidgetExposedAgentsResult {
+  upserted: number;
+  removed: number;
+}
+
+/**
+ * Full-replace per-(serverId, workspaceProjectId): atomic delete + insert.
+ * Projects in the input are replaced in their entirety; projects NOT in the
+ * input are left untouched (caller can sync incrementally).
+ *
+ * Silently skips projects that don't have a corresponding widget_projects row
+ * (widget hasn't been enabled for that workspace project yet).
+ */
+export async function syncWidgetExposedAgents(
+  serverId: string,
+  projects: SyncWidgetExposedAgentsInput[],
+): Promise<SyncWidgetExposedAgentsResult> {
+  let upserted = 0;
+  let removed = 0;
+
+  for (const proj of projects) {
+    const [wp] = await db
+      .select({ id: widgetProjects.id })
+      .from(widgetProjects)
+      .where(and(
+        eq(widgetProjects.serverId, serverId),
+        eq(widgetProjects.workspaceProjectId, proj.workspaceProjectId),
+      ))
+      .limit(1);
+    if (!wp) continue;
+
+    await db.transaction(async (tx) => {
+      const oldRows = await tx
+        .select({ agentId: widgetExposedAgents.agentId })
+        .from(widgetExposedAgents)
+        .where(eq(widgetExposedAgents.widgetProjectId, wp.id));
+      await tx.delete(widgetExposedAgents).where(eq(widgetExposedAgents.widgetProjectId, wp.id));
+      if (proj.agents.length > 0) {
+        await tx.insert(widgetExposedAgents).values(proj.agents.map(a => ({
+          widgetProjectId: wp.id,
+          agentId: a.id,
+          agentName: a.name,
+          agentDescription: a.description ?? null,
+          exposed: a.exposed ?? true,
+        })));
+      }
+      upserted += proj.agents.length;
+      removed += oldRows.length;
+    });
+  }
+
+  return { upserted, removed };
+}
+
+// ============================================================================
+// Preview branch + server resolution (for PR-preview forwarding)
+// ============================================================================
+
+/**
+ * Resolve the linked PR branch for a widget ticket (for PR-preview forwarding).
+ *
+ * Reuses the same `deriveLinkedPr` helper that `getPublicTicketDetail` uses —
+ * no extra DB query pattern beyond what already exists. Returns `null` when:
+ *   - the project or ticket doesn't exist / isn't visible
+ *   - no `pr_linked` activity exists on the ticket
+ *   - the linked PR has no `repoBranch` value
+ */
+export async function getTicketPreviewBranch(
+  projectId: string,
+  ticketId: string,
+): Promise<string | null> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+
+  const [task] = await db
+    .select({ id: workspaceTasks.id })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+
+  if (!task) return null;
+
+  const activity = await WorkspaceTaskService.listActivity(task.id);
+  const internalPr = deriveLinkedPr(activity);
+  return internalPr?.repoBranch ?? null;
+}
+
+/**
+ * Resolve the workspace Server for a widget project.
+ *
+ * Extracted so callers (route handlers) don't need to query the DB directly,
+ * keeping the server resolution mockable in route-level tests.
+ */
+export async function getProjectServer(projectId: string) {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return null;
+  return ServerService.getServer(project.serverId);
 }

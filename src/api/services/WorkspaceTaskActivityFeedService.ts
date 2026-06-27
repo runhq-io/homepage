@@ -2,6 +2,36 @@ import { and, count, eq, gt, gte, isNotNull, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import { workspaceTaskActivity, workspaceTaskComments, workspaceTasks } from '../../db/schema';
 
+// Canonicalises a creator's identity. A single human can show up under two
+// different `created_by_id` values:
+//   • as a logged-in member (`created_by_type = 'member'`, id = `users.id`)
+//   • via the public widget (`created_by_type = 'external'`, id = `widget_users.id`)
+// `widget_users.external_user_id` links the widget identity back to the
+// underlying account. Without this fragment, member/widget activity from the
+// same person would render as two separate legend entries with two colours.
+//
+// The fragment is a SQL string that resolves to the canonical user_id and the
+// preferred display name for a row in `workspace_task_activity` /
+// `workspace_task_comments`. Callers must alias the source row table as `src`.
+const CANONICAL_USER_SQL = {
+  joins: sql`
+    LEFT JOIN widget_users wu
+      ON wu.id::text = src.created_by_id
+      AND src.created_by_type = 'external'
+    LEFT JOIN users u
+      ON u.id::text = COALESCE(wu.external_user_id, src.created_by_id)
+  `,
+  userId: sql`COALESCE(wu.external_user_id, src.created_by_id)`,
+  // Prefer the user's current registered identity over the snapshotted
+  // `created_by_name`, so a rename in `users` is reflected immediately and
+  // member/widget rows for the same person render under one consistent name.
+  userName: sql`COALESCE(
+    max(u.username) FILTER (WHERE u.username IS NOT NULL),
+    max(u.name)     FILTER (WHERE u.name     IS NOT NULL),
+    max(src.created_by_name) FILTER (WHERE src.created_by_name IS NOT NULL)
+  )`,
+};
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface FeedFilters {
@@ -198,15 +228,17 @@ export interface MemberStat {
 /**
  * Returns per-member aggregated contribution stats for a given server.
  *
- * Each element represents one distinct creator (`createdById`) observed in
- * either workspace_task_activity or workspace_task_comments for the server.
- * Rows with a NULL `createdById` are skipped at the SQL level.
+ * Each element represents one distinct creator, keyed by their canonical
+ * identity (see CANONICAL_USER_SQL): member and widget activity from the same
+ * person collapses into a single row.  Rows with a NULL `createdById` are
+ * skipped at the SQL level.
  *
  * `isAgent` is true if ANY of the member's rows have `createdByType = 'agent'`.
  *
- * The display name (`userName`) is resolved as the lexicographic maximum of
- * all `createdByName` values observed for that user, making it stable even
- * when a user renames themselves between rows.
+ * The display name (`userName`) prefers the user's current registered name
+ * (`users.username || users.name`) and falls back to the snapshotted
+ * `createdByName` for entities without a `users` row (agents, anonymous
+ * external commenters), so renames in `users` are reflected immediately.
  *
  * Optional `startMs` / `endMs` (millisecond epoch) bound rows by `createdAt`
  * (both ends inclusive).
@@ -221,75 +253,87 @@ export async function memberStats(
   startMs?: number,
   endMs?: number,
 ): Promise<MemberStat[]> {
-  // Build WHERE predicates for each table
-  const activityPreds = [eq(workspaceTaskActivity.serverId, serverId)];
-  const commentsPreds = [eq(workspaceTaskComments.serverId, serverId)];
+  const startCond = startMs !== undefined ? sql`AND src.created_at >= ${new Date(startMs)}` : sql``;
+  const endCond   = endMs   !== undefined ? sql`AND src.created_at <= ${new Date(endMs)}`   : sql``;
 
-  // Exclude rows with NULL createdById at the SQL level so the DB never groups them.
-  activityPreds.push(isNotNull(workspaceTaskActivity.createdById));
-  commentsPreds.push(isNotNull(workspaceTaskComments.createdById));
+  type ActivityRow = {
+    user_id: string;
+    user_name: string | null;
+    is_agent: boolean;
+    tasks_created: number;
+    tasks_completed: number;
+    agents_assigned: number;
+  };
+  type CommentRow = {
+    user_id: string;
+    user_name: string | null;
+    is_agent: boolean;
+    comments: number;
+  };
 
-  if (startMs !== undefined) {
-    activityPreds.push(gte(workspaceTaskActivity.createdAt, new Date(startMs)));
-    commentsPreds.push(gte(workspaceTaskComments.createdAt, new Date(startMs)));
-  }
-  if (endMs !== undefined) {
-    activityPreds.push(lte(workspaceTaskActivity.createdAt, new Date(endMs)));
-    commentsPreds.push(lte(workspaceTaskComments.createdAt, new Date(endMs)));
-  }
-
-  const [activityAgg, commentAgg] = await Promise.all([
-    db
-      .select({
-        userId:         workspaceTaskActivity.createdById,
-        userName:       sql<string | null>`max(${workspaceTaskActivity.createdByName}) FILTER (WHERE ${workspaceTaskActivity.createdByName} IS NOT NULL)`,
-        isAgent:        sql<boolean>`bool_or(${workspaceTaskActivity.createdByType} = 'agent')`,
-        tasksCreated:   sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'task_created')::int`,
-        tasksCompleted: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'status_change' AND ${workspaceTaskActivity.metadata}->>'to' IN ('done', 'deployed', 'cancelled'))::int`,
-        agentsAssigned: sql<number>`count(*) FILTER (WHERE ${workspaceTaskActivity.type} = 'agent_assigned')::int`,
-      })
-      .from(workspaceTaskActivity)
-      .where(and(...activityPreds))
-      .groupBy(workspaceTaskActivity.createdById),
-    db
-      .select({
-        userId:   workspaceTaskComments.createdById,
-        userName: sql<string | null>`max(${workspaceTaskComments.createdByName}) FILTER (WHERE ${workspaceTaskComments.createdByName} IS NOT NULL)`,
-        isAgent:  sql<boolean>`bool_or(${workspaceTaskComments.createdByType} = 'agent')`,
-        comments: sql<number>`count(*)::int`,
-      })
-      .from(workspaceTaskComments)
-      .where(and(...commentsPreds))
-      .groupBy(workspaceTaskComments.createdById),
+  const [activityResult, commentResult] = await Promise.all([
+    db.execute<ActivityRow>(sql`
+      SELECT
+        ${CANONICAL_USER_SQL.userId} AS user_id,
+        ${CANONICAL_USER_SQL.userName} AS user_name,
+        bool_or(src.created_by_type = 'agent') AS is_agent,
+        count(*) FILTER (WHERE src.type = 'task_created')::int AS tasks_created,
+        count(*) FILTER (WHERE src.type = 'status_change' AND src.metadata->>'to' IN ('done', 'deployed', 'cancelled'))::int AS tasks_completed,
+        count(*) FILTER (WHERE src.type = 'agent_assigned')::int AS agents_assigned
+      FROM workspace_task_activity src
+      ${CANONICAL_USER_SQL.joins}
+      WHERE src.server_id     = ${serverId}
+        AND src.created_by_id IS NOT NULL
+        ${startCond}
+        ${endCond}
+      GROUP BY ${CANONICAL_USER_SQL.userId}
+    `),
+    db.execute<CommentRow>(sql`
+      SELECT
+        ${CANONICAL_USER_SQL.userId} AS user_id,
+        ${CANONICAL_USER_SQL.userName} AS user_name,
+        bool_or(src.created_by_type = 'agent') AS is_agent,
+        count(*)::int AS comments
+      FROM workspace_task_comments src
+      ${CANONICAL_USER_SQL.joins}
+      WHERE src.server_id     = ${serverId}
+        AND src.created_by_id IS NOT NULL
+        ${startCond}
+        ${endCond}
+      GROUP BY ${CANONICAL_USER_SQL.userId}
+    `),
   ]);
 
-  // Merge by userId (include rows from both queries)
+  // Merge by canonical userId (include rows from both queries)
   const byUser = new Map<string, MemberStat>();
 
-  for (const a of activityAgg) {
-    if (!a.userId) continue;
-    byUser.set(a.userId, {
-      userId:         a.userId,
-      userName:       a.userName ?? '',
-      isAgent:        !!a.isAgent,
-      tasksCreated:   a.tasksCreated ?? 0,
-      tasksCompleted: a.tasksCompleted ?? 0,
-      agentsAssigned: a.agentsAssigned ?? 0,
+  for (const a of activityResult.rows) {
+    if (!a.user_id) continue;
+    byUser.set(a.user_id, {
+      userId:         a.user_id,
+      userName:       a.user_name ?? '',
+      isAgent:        !!a.is_agent,
+      tasksCreated:   a.tasks_created ?? 0,
+      tasksCompleted: a.tasks_completed ?? 0,
+      agentsAssigned: a.agents_assigned ?? 0,
       comments:       0,
     });
   }
 
-  for (const c of commentAgg) {
-    if (!c.userId) continue;
-    const existing = byUser.get(c.userId);
+  for (const c of commentResult.rows) {
+    if (!c.user_id) continue;
+    const existing = byUser.get(c.user_id);
     if (existing) {
       existing.comments = c.comments ?? 0;
-      existing.isAgent  = existing.isAgent || !!c.isAgent;
+      existing.isAgent  = existing.isAgent || !!c.is_agent;
+      // Activity-side userName takes precedence (richer name pool); only fall
+      // back to the comment-side name if activity never resolved a name.
+      if (!existing.userName && c.user_name) existing.userName = c.user_name;
     } else {
-      byUser.set(c.userId, {
-        userId:         c.userId,
-        userName:       c.userName ?? '',
-        isAgent:        !!c.isAgent,
+      byUser.set(c.user_id, {
+        userId:         c.user_id,
+        userName:       c.user_name ?? '',
+        isAgent:        !!c.is_agent,
         tasksCreated:   0,
         tasksCompleted: 0,
         agentsAssigned: 0,
@@ -328,9 +372,9 @@ export interface MemberActivityBucket {
  * The `[startMs, endMs]` window is inclusive on both ends (>= and <=).
  * Rows with a NULL `created_by_id` are skipped at the SQL level.
  *
- * The display name (`user_name`) is resolved as `max(created_by_name)` within
- * each (period, user) group so that a user rename between rows does not
- * produce duplicate groups.
+ * The display name (`user_name`) prefers the user's current registered name
+ * from the `users` table (see CANONICAL_USER_SQL); snapshotted
+ * `created_by_name` is only used for entities without a `users` row.
  *
  * Implementation runs two queries in parallel (activity + comments) and merges
  * results in memory by (period, userId), matching the pattern established in
@@ -370,33 +414,35 @@ export async function memberActivity(
   const [activityResult, commentResult] = await Promise.all([
     db.execute<ActivityRow>(sql`
       SELECT
-        date_trunc(${sql.raw(`'${trunc}'`)}, created_at AT TIME ZONE 'UTC')::date AS period,
-        created_by_id   AS user_id,
-        max(created_by_name) FILTER (WHERE created_by_name IS NOT NULL) AS user_name,
-        bool_or(created_by_type = 'agent') AS is_agent,
-        count(*) FILTER (WHERE type = 'task_created')::int    AS created,
-        count(*) FILTER (WHERE type = 'status_change' AND metadata->>'to' IN ('done', 'deployed', 'cancelled'))::int AS completed,
-        count(*) FILTER (WHERE type = 'agent_assigned')::int  AS assigned
-      FROM workspace_task_activity
-      WHERE server_id     = ${serverId}
-        AND created_at   >= ${new Date(startMs)}
-        AND created_at   <= ${new Date(endMs)}
-        AND created_by_id IS NOT NULL
-      GROUP BY period, created_by_id
+        date_trunc(${sql.raw(`'${trunc}'`)}, src.created_at AT TIME ZONE 'UTC')::date AS period,
+        ${CANONICAL_USER_SQL.userId} AS user_id,
+        ${CANONICAL_USER_SQL.userName} AS user_name,
+        bool_or(src.created_by_type = 'agent') AS is_agent,
+        count(*) FILTER (WHERE src.type = 'task_created')::int    AS created,
+        count(*) FILTER (WHERE src.type = 'status_change' AND src.metadata->>'to' IN ('done', 'deployed', 'cancelled'))::int AS completed,
+        count(*) FILTER (WHERE src.type = 'agent_assigned')::int  AS assigned
+      FROM workspace_task_activity src
+      ${CANONICAL_USER_SQL.joins}
+      WHERE src.server_id     = ${serverId}
+        AND src.created_at   >= ${new Date(startMs)}
+        AND src.created_at   <= ${new Date(endMs)}
+        AND src.created_by_id IS NOT NULL
+      GROUP BY period, ${CANONICAL_USER_SQL.userId}
     `),
     db.execute<CommentRow>(sql`
       SELECT
-        date_trunc(${sql.raw(`'${trunc}'`)}, created_at AT TIME ZONE 'UTC')::date AS period,
-        created_by_id   AS user_id,
-        max(created_by_name) FILTER (WHERE created_by_name IS NOT NULL) AS user_name,
-        bool_or(created_by_type = 'agent') AS is_agent,
+        date_trunc(${sql.raw(`'${trunc}'`)}, src.created_at AT TIME ZONE 'UTC')::date AS period,
+        ${CANONICAL_USER_SQL.userId} AS user_id,
+        ${CANONICAL_USER_SQL.userName} AS user_name,
+        bool_or(src.created_by_type = 'agent') AS is_agent,
         count(*)::int AS comments
-      FROM workspace_task_comments
-      WHERE server_id     = ${serverId}
-        AND created_at   >= ${new Date(startMs)}
-        AND created_at   <= ${new Date(endMs)}
-        AND created_by_id IS NOT NULL
-      GROUP BY period, created_by_id
+      FROM workspace_task_comments src
+      ${CANONICAL_USER_SQL.joins}
+      WHERE src.server_id     = ${serverId}
+        AND src.created_at   >= ${new Date(startMs)}
+        AND src.created_at   <= ${new Date(endMs)}
+        AND src.created_by_id IS NOT NULL
+      GROUP BY period, ${CANONICAL_USER_SQL.userId}
     `),
   ]);
 

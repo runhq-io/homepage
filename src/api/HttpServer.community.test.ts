@@ -147,7 +147,7 @@ vi.mock('../db/schema', () => {
     widgetUsers: {
       id: col('id'), projectId: col('project_id'), externalUserId: col('external_user_id'),
       name: col('name'), username: col('username'), avatarUrl: col('avatar_url'),
-      status: col('status'), lastSeenAt: col('last_seen_at'),
+      status: col('status'), lastActiveAt: col('last_active_at'),
     },
     widgetUserBalances: {
       widgetUserId: col('widget_user_id'), projectId: col('project_id'),
@@ -282,9 +282,11 @@ function setupAdmin(project = mockProject) {
  * Configure WidgetService.authenticateWidget to return a valid widget session.
  */
 function setupWidgetSession(widgetUserId = 'wu-1', projectId = 'proj-1') {
+  // Cast: the route only reads widgetUserId/projectId; the full WidgetAuthResult
+  // (permissions/matchedRoles/authSource) is irrelevant to these unit tests.
   vi.mocked(WidgetService.authenticateWidget).mockResolvedValue({
     projectId, projectSlug: 'test', widgetUserId, authenticated: true,
-  });
+  } as any);
 }
 
 // ============================================================================
@@ -568,7 +570,7 @@ describe('GET /api/community/:projectId/members/:widgetUserId/export', () => {
     // Widget user is different from requested widgetUserId
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue({
       projectId: 'proj-1', projectSlug: 'test', widgetUserId: 'wu-DIFFERENT', authenticated: true,
-    });
+    } as any);
     const app = makeApp();
     const res = await get(app, '/api/community/proj-1/members/wu-1/export', { Authorization: ADMIN_BEARER });
     expect(res.status).toBe(403);
@@ -607,7 +609,7 @@ describe('GET /api/community/:projectId/members/:widgetUserId/export', () => {
     setupDbProjectLookup();
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue({
       projectId: 'proj-1', projectSlug: 'test', widgetUserId: 'wu-ATTACKER', authenticated: true,
-    });
+    } as any);
     const app = makeApp();
     const res = await get(app, '/api/community/proj-1/members/wu-1/export', { Authorization: WIDGET_BEARER });
     expect(res.status).toBe(403);
@@ -635,7 +637,7 @@ describe('GET /api/community/:projectId/members/:widgetUserId/export', () => {
 
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue({
       projectId: 'proj-1', projectSlug: 'test', widgetUserId: 'wu-1', authenticated: true,
-    });
+    } as any);
 
     const app = makeApp();
     const res = await get(app, '/api/community/proj-1/members/wu-1/export', { Authorization: WIDGET_BEARER });
@@ -673,7 +675,7 @@ describe('GET /api/widget/me/community', () => {
   it('401 when auth has no widgetUserId (anonymous project key)', async () => {
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue({
       projectId: 'proj-1', projectSlug: 'test', authenticated: false,
-    });
+    } as any);
     const app = makeApp();
     const res = await get(app, '/api/widget/me/community', { Authorization: 'Bearer proj-key' });
     expect(res.status).toBe(401);

@@ -1,6 +1,6 @@
--- Extend widget_users with last_seen_at and status (for GDPR soft-delete)
+-- Add a soft-delete tombstone to widget_users for GDPR erasure.
+-- ("Last seen" is provided by master's last_active_at column — not duplicated here.)
 ALTER TABLE widget_users
-  ADD COLUMN last_seen_at timestamp NOT NULL DEFAULT now(),
   ADD COLUMN status text NOT NULL DEFAULT 'active';
 
 ALTER TABLE widget_users

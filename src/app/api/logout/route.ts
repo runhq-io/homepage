@@ -14,5 +14,16 @@ export async function GET() {
     path: '/',
     maxAge: 0, // Expire immediately
   });
+  // Clear the parallel widget cookie. Path/sameSite/secure must match the
+  // attributes used at SET time, otherwise the browser leaves the original
+  // cookie in place.
+  const isProd = process.env.NODE_ENV === 'production';
+  response.cookies.set('rw_session', '', {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/api/widget/',
+    maxAge: 0,
+  });
   return response;
 }

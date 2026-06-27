@@ -9,6 +9,7 @@ import {
   getBreakdownByTask,
   getBreakdownByAgent,
   getBreakdownByJob,
+  getBreakdownByDay,
 } from './UsageReportService';
 import { inArray } from 'drizzle-orm';
 
@@ -135,5 +136,25 @@ describe('UsageReportService', () => {
     // job-1: 10 + 30 = 40, job-2: 5
     expect(byJob['job-1']).toBeCloseTo(40, 3);
     expect(byJob['job-2']).toBeCloseTo(5, 3);
+  });
+
+  it('getBreakdownByDay returns only active days (no zero-fill), newest-first, with token sums', async () => {
+    const rows = await getBreakdownByDay({ ...filter, userIds: [u1, u2], excludePreCutover: true });
+    // Only the three days that actually had events — unlike getDailyTotals, no zero-fill.
+    expect(rows.map((r) => r.day)).toEqual(['2026-04-15', '2026-04-12', '2026-04-10']);
+
+    const byDay = Object.fromEntries(rows.map((r) => [r.day, r]));
+    expect(byDay['2026-04-10'].totalCostCents).toBeCloseTo(10, 3);
+    expect(byDay['2026-04-10'].inputTokens).toBe(1000);
+    expect(byDay['2026-04-10'].outputTokens).toBe(500);
+    expect(byDay['2026-04-10'].requestCount).toBe(1);
+
+    expect(byDay['2026-04-12'].totalCostCents).toBeCloseTo(30, 3);
+    expect(byDay['2026-04-12'].inputTokens).toBe(2000);
+    expect(byDay['2026-04-12'].outputTokens).toBe(1000);
+
+    expect(byDay['2026-04-15'].totalCostCents).toBeCloseTo(5, 3);
+    expect(byDay['2026-04-15'].inputTokens).toBe(500);
+    expect(byDay['2026-04-15'].outputTokens).toBe(250);
   });
 });

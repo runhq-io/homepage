@@ -355,15 +355,15 @@ describe('listMembers — sort=name', () => {
 });
 
 describe('listMembers — sort=recent', () => {
-  it('orders by lastSeenAt DESC', async () => {
+  it('orders by lastActiveAt DESC', async () => {
     const svc = makeService();
 
     const past = new Date('2024-01-01T00:00:00Z');
     const now = new Date();
 
-    // Update lastSeenAt to known values
-    await db.update(widgetUsers).set({ lastSeenAt: now }).where(eq(widgetUsers.id, WU_BOB_ID));
-    await db.update(widgetUsers).set({ lastSeenAt: past }).where(eq(widgetUsers.id, WU_ALICE_ID));
+    // Update lastActiveAt to known values
+    await db.update(widgetUsers).set({ lastActiveAt: now }).where(eq(widgetUsers.id, WU_BOB_ID));
+    await db.update(widgetUsers).set({ lastActiveAt: past }).where(eq(widgetUsers.id, WU_ALICE_ID));
 
     const { members } = await svc.listMembers({
       projectId: PROJECT_A_ID,

@@ -7,8 +7,7 @@
  * - Usage tracking
  */
 
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
+import { Hono, type Context } from 'hono';
 import { serve } from '@hono/node-server';
 import Anthropic from '@anthropic-ai/sdk';
 import oauth from './oauth/index';
@@ -17,10 +16,20 @@ import * as path from 'node:path';
 import { createToken, verifyToken, extractUserIdFromToken } from './auth/jwt';
 import { getSettings } from './services/SettingsService';
 import * as UsageService from './services/UsageService';
+import * as UsageReportService from './services/UsageReportService';
 import * as StripeService from './services/StripeService';
 import * as InviteService from './services/InviteService';
+import { assertActivated } from '../lib/signupGating';
 import * as TelemetryService from './services/TelemetryService';
 import * as ServerService from './services/ServerService';
+import { openPullRequestForReadyTask, registerGithubRoutes, type ReadyPrResult } from './github/githubRoutes';
+import { registerInternalGithubRoutes } from './github/internalGithubRoutes';
+import { resolveGithubActingUser } from './github/resolveActingUser';
+import { getGithubAppConfig, isGithubAppConfigured } from './github/config';
+import * as GithubInstallationsService from './services/GithubInstallationsService';
+import * as GithubProjectReposService from './services/GithubProjectReposService';
+import { aggregateForUser } from './services/GithubAggregationService';
+import { getGitHubAppService } from './services/GitHubAppService';
 import * as ServerAdminMirrorService from './services/ServerAdminMirrorService';
 import * as AutoHealService from './services/AutoHealService';
 import * as ServerSessionService from './services/ServerSessionService';
@@ -28,6 +37,14 @@ import { getServerSessionKeyPair } from './auth/serverSessionKeys';
 import * as PublicPortService from './services/PublicPortService';
 import * as MachineUsageService from './services/MachineUsageService';
 import * as WidgetService from './services/WidgetService';
+import * as WidgetAutoAssign from './services/WidgetAutoAssign';
+import * as ClarifierService from './services/ClarifierService';
+import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
+import * as WidgetChatService from './services/WidgetChatService';
+import { subscribeToTicket } from './services/WidgetTicketEvents';
+import { streamSSE } from 'hono/streaming';
+import { setCookie } from 'hono/cookie';
+import { RW_SESSION_COOKIE, rwSessionCookieOptions } from './services/WidgetCookieAuth';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -38,13 +55,20 @@ import {
 import { TaskAttachmentStorageService } from './services/TaskAttachmentStorageService';
 import * as PreviewCoordinator from './services/PreviewCoordinator';
 import { getProvider, hasProvider, getDefaultProviderId, isAnyProviderConfigured } from './services/providers/registry';
+import { inferRegionFromCountry, DEFAULT_REGION } from './services/regionInference';
 import type { ProviderId } from './services/providers/types';
 import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, widgetProjects, widgetUsers, widgetUserBalances, widgetUserNotifications, pointGrants } from '../db/schema';
-import { eq, lt, sql, and } from 'drizzle-orm';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, widgetProjects, widgetUsers, widgetUserBalances, widgetUserNotifications, pointGrants, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions } from '../db/schema';
+import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
+import { serializeNotification } from '../notifications/serialize';
+import { getOrCreatePreferences } from '../notifications/gates';
+import { insertNotificationWithDeliveries, deriveServerTokenActor } from '../notifications/emitTaskNotification';
+import { dispatchNotification } from '../notifications/dispatch';
+import { broadcastToUser } from '../notifications/wsBroadcast';
+import { wsServer as getWsServer } from '../notifications/wsRegistry';
 import { CommunityPointsError } from './services/CommunityPointsService';
 import { type SortKey } from './services/CommunityLeaderboardService';
 import {
@@ -60,6 +84,8 @@ import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
+import * as InjectionGuardService from './services/InjectionGuardService';
+import { forwardLiveMessage } from './services/LiveCoderForward';
 
 type BuildInfo = {
   gitSha?: string;
@@ -67,6 +93,31 @@ type BuildInfo = {
   runNumber?: number;
   builtAt?: string;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function prepareServerWorkspaceTaskPatchBody(input: unknown): {
+  body: unknown;
+  readyForReview: boolean;
+  openPullRequest: boolean;
+} {
+  if (!isRecord(input)) {
+    return { body: input, readyForReview: false, openPullRequest: false };
+  }
+
+  const body = { ...input };
+  const readyForReview = body.readyForReview === true;
+  delete body.readyForReview;
+  // `openPullRequest` is an explicit "open a PR for this branch now" command
+  // (the job-header Open/New PR button) — distinct from readyForReview, and it
+  // must NOT require status=done so it works for continued work after a merge.
+  const openPullRequest = body.openPullRequest === true;
+  delete body.openPullRequest;
+  delete body.actingUserId;
+  return { body, readyForReview, openPullRequest };
+}
 
 let cachedBuildInfo: BuildInfo | null | undefined;
 
@@ -177,12 +228,68 @@ interface ClaudeAnalyzeResponse {
 export function createHttpApp() {
   const app = new Hono();
 
-  // Enable CORS for all routes
-  app.use('*', cors({
-    origin: '*',
-    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-RW-Project', 'X-Server-Token'],
-  }));
+  /**
+   * Unified CORS middleware (replaces the prior `hono/cors` global).
+   *
+   * Two response shapes, chosen per request:
+   *
+   * 1. **Widget cookie-auth path** — when the request is on `/api/widget/*`
+   *    and its `Origin` matches an entry in some enabled project's
+   *    `allowed_origins`: echo `Access-Control-Allow-Origin: <origin>`
+   *    plus `Allow-Credentials: true` and `Vary: Origin`. This is the
+   *    ONLY shape browsers will accept alongside `credentials: include`,
+   *    so it's how the rw_session cookie + X-RunHQ-CSRF traffic flows.
+   *
+   * 2. **Legacy `*` path** — everything else: `Access-Control-Allow-Origin: *`,
+   *    no credentials. Token-bearer widgets, the public widget.js script
+   *    asset, and the rest of the cloud API all keep working unchanged.
+   *
+   * Why not use hono/cors with an `origin` function: the allowlist check is
+   * async (DB lookup) and hono/cors's origin callback is sync. We could
+   * cache the allowlist in memory, but the lookup is a single indexed
+   * `text[] @> ARRAY[$1]::text[]` query — cheap enough to do per request,
+   * and skipping the cache avoids stale-allowlist windows when an owner
+   * adds/removes an origin.
+   *
+   * Headers list intentionally includes `X-RunHQ-CSRF`. Without it, the
+   * browser strips the header at the preflight stage and our CSRF gate
+   * sees no token → write requests on the cookie path 403 even when the
+   * client is doing everything right.
+   */
+  app.use('*', async (c, next) => {
+    const origin = c.req.header('Origin');
+    const isWidgetPath = c.req.path.startsWith('/api/widget/');
+
+    let allowOriginValue = '*';
+    let withCredentials = false;
+    if (isWidgetPath && origin) {
+      // isOriginAllowlisted returns true iff any enabled project lists this
+      // origin. Per-project enforcement of "which user can authenticate
+      // here" happens later in authenticateWidget Mode 0; this only widens
+      // the CORS envelope so the browser will send cookies in the first place.
+      if (await WidgetService.isOriginAllowlisted(origin)) {
+        allowOriginValue = origin;
+        withCredentials = true;
+      }
+    }
+
+    c.header('Access-Control-Allow-Origin', allowOriginValue);
+    if (withCredentials) {
+      c.header('Access-Control-Allow-Credentials', 'true');
+      c.header('Vary', 'Origin');
+    }
+    c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    c.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, Cache-Control, X-RW-Project, X-RunHQ-CSRF, X-Server-Token',
+    );
+
+    if (c.req.method === 'OPTIONS') {
+      return c.body(null, 204);
+    }
+
+    await next();
+  });
 
   // Serve widget.js with the canonical status registry injected at the
   // top of the body. The widget reads from window.__RW_CONSTANTS__.status
@@ -192,9 +299,30 @@ export function createHttpApp() {
     const filePath = path.join(process.cwd(), 'public', 'widget.js');
     const widgetSource = fs.readFileSync(filePath, 'utf-8');
     const body = renderWidgetConstantsHeader() + widgetSource;
-    c.header('Content-Type', 'application/javascript');
-    c.header('Cache-Control', 'public, max-age=3600');
+    // The charset matters: widget.js contains UTF-8 strings (Korean
+    // locale tables, em dashes, smart quotes). Without it the browser
+    // falls back to Latin-1 and renders the bytes as � replacement
+    // characters. Next.js's static handler set this automatically; the
+    // Hono route has to be explicit.
+    // Strong ETag over the exact bytes we'd send (constants header + widget
+    // source). Combined with `no-cache`, this gives correct propagation:
+    // browsers and the CDN MAY store the response but MUST revalidate with
+    // the origin before each use. When the content is unchanged the
+    // revalidation is a tiny conditional 304 (no body), so steady-state
+    // bandwidth is unchanged; the moment we ship a widget fix every embed
+    // picks it up on its next load instead of being pinned to a stale copy
+    // for up to an hour. `no-cache` does NOT mean "don't store" — it means
+    // "store but always revalidate", which is exactly right for an
+    // embeddable, URL-loaded bootstrap script that must stay current.
+    const etag = '"' + createHash('sha256').update(body).digest('base64url') + '"';
+    c.header('Content-Type', 'application/javascript; charset=utf-8');
+    c.header('Cache-Control', 'no-cache');
+    c.header('ETag', etag);
     c.header('Access-Control-Allow-Origin', '*');
+    const inm = c.req.header('if-none-match');
+    if (inm && inm === etag) {
+      return c.body(null, 304);
+    }
     return c.body(body);
   });
 
@@ -490,7 +618,7 @@ export function createHttpApp() {
       }
 
       // Check credit balance before proceeding
-      const creditCheck = await UsageService.checkCreditBalance(token);
+      const creditCheck = await UsageService.checkCreditBalanceForServer(token, readContextHeaders(c).serverId);
       if (!creditCheck.allowed) {
         const code =
           creditCheck.reason === 'past_due' ? 'PAYMENT_PAST_DUE' :
@@ -510,6 +638,29 @@ export function createHttpApp() {
           periodEnd: creditCheck.periodEnd.toISOString(),
         };
         return c.json(errorResponse, 402);
+      }
+
+      // Per-server spend cap (test guardrail). When SettingsService.spendCapCents
+      // > 0, reject once the server's usage cost since spendCapResetTs reaches the
+      // cap — stops runaway spend during testing without touching real credits.
+      {
+        const capSettings = await getSettings();
+        if (capSettings.spendCapCents > 0) {
+          const spentCents = await UsageService.getServerSpendSinceCents(
+            readContextHeaders(c).serverId,
+            capSettings.spendCapResetTs,
+          );
+          if (spentCents >= capSettings.spendCapCents) {
+            console.warn(`[HttpServer] spend cap reached: server spent ${spentCents}¢ ≥ cap ${capSettings.spendCapCents}¢`);
+            return c.json({
+              error: `Spend cap reached: $${(spentCents / 100).toFixed(2)} spent ≥ $${(capSettings.spendCapCents / 100).toFixed(2)} cap. Raise or reset the cap to continue.`,
+              code: 'SPEND_CAP_REACHED',
+              reason: 'spend_cap_reached',
+              spentCents,
+              capCents: capSettings.spendCapCents,
+            }, 402);
+          }
+        }
       }
 
       // Parse request body
@@ -671,6 +822,22 @@ export function createHttpApp() {
         if (error.message.includes('rate_limit')) {
           return c.json({ error: 'Rate limit exceeded - please wait before trying again' }, 429);
         }
+        // Anthropic org-level credit exhaustion: the PLATFORM key is out of
+        // prepaid credits. This is distinct from a user's own RunHQ balance
+        // (which surfaces as a 402 CreditLimitError) and from a rate limit.
+        // Anthropic returns a 400 invalid_request with this message; passing it
+        // through as a raw 400 reached agents as a cryptic error. Surface it as
+        // a clear, correctly-categorized 503 so callers can tell "platform out
+        // of AI credits" apart from user billing and rate limits.
+        if (error.message.includes('credit balance is too low')) {
+          return c.json(
+            {
+              error: 'AI provider temporarily unavailable: the platform AI credit balance is exhausted. Please top up the Anthropic key or contact support.',
+              code: 'PLATFORM_CREDITS_EXHAUSTED',
+            },
+            503,
+          );
+        }
         if (error.message.includes('invalid_api_key')) {
           return c.json({ error: 'Server configuration error' }, 500);
         }
@@ -785,7 +952,7 @@ export function createHttpApp() {
         }
 
         // Check credit balance before proceeding
-        const creditCheck = await UsageService.checkCreditBalance(token);
+        const creditCheck = await UsageService.checkCreditBalanceForServer(token, readContextHeaders(c).serverId);
         if (!creditCheck.allowed) {
           const code =
             creditCheck.reason === 'past_due' ? 'PAYMENT_PAST_DUE' :
@@ -808,6 +975,31 @@ export function createHttpApp() {
         }
       } else if (!token) {
         console.log('[HttpServer] Dev mode: allowing unauthenticated Claude tools request');
+      }
+
+      // Per-server spend cap (test guardrail). Applies in BOTH dev and prod —
+      // testing happens in dev, and this exists to stop runaway spend during
+      // tests without touching the real credit balance. When
+      // SettingsService.spendCapCents > 0, reject once the server's usage cost
+      // since spendCapResetTs reaches the cap.
+      {
+        const capSettings = await getSettings();
+        if (capSettings.spendCapCents > 0) {
+          const spentCents = await UsageService.getServerSpendSinceCents(
+            readContextHeaders(c).serverId,
+            capSettings.spendCapResetTs,
+          );
+          if (spentCents >= capSettings.spendCapCents) {
+            console.warn(`[HttpServer] spend cap reached (tools): server spent ${spentCents}¢ ≥ cap ${capSettings.spendCapCents}¢`);
+            return c.json({
+              error: `Spend cap reached: $${(spentCents / 100).toFixed(2)} spent ≥ $${(capSettings.spendCapCents / 100).toFixed(2)} cap. Raise or reset the cap to continue.`,
+              code: 'SPEND_CAP_REACHED',
+              reason: 'spend_cap_reached',
+              spentCents,
+              capCents: capSettings.spendCapCents,
+            }, 402);
+          }
+        }
       }
 
       // Parse request body
@@ -965,22 +1157,27 @@ export function createHttpApp() {
       let newBalanceCents = 0;
       if (userId) {
         const anthropicRequestId = (response as any)?.id ?? null;
+        // Under owner-pays the cost lands on the server owner, not necessarily
+        // `userId` (the actor). trackUsage resolves and returns the billed user
+        // so we report the balance that actually changed.
+        let billedUserId = userId;
         try {
-          await trackUsage({
+          const r = await trackUsage({
             userId, model, tokens, costCents, context, anthropicRequestId,
           });
+          billedUserId = r.billedUserId;
         } catch (err) {
           // Log but do NOT fail the response — the user already got their Claude answer.
           console.error('[HttpServer] trackUsage failed', err);
         }
 
-        // Fetch the post-deduct balance for the response. trackUsage returns void
-        // now, so we query subscriptions directly (primary-key lookup, trivially fast).
+        // Fetch the post-deduct balance (of the billed user) for the response —
+        // primary-key lookup, trivially fast.
         try {
           const [sub] = await db
             .select({ b: subscriptions.creditBalanceCents })
             .from(subscriptions)
-            .where(eq(subscriptions.userId, userId))
+            .where(eq(subscriptions.userId, billedUserId))
             .limit(1);
           // creditBalanceCents is numeric(12,4) — Drizzle returns it as a string.
           newBalanceCents = sub?.b !== undefined ? Number(sub.b) : 0;
@@ -1016,6 +1213,22 @@ export function createHttpApp() {
       if (error instanceof Error) {
         if (error.message.includes('rate_limit')) {
           return c.json({ error: 'Rate limit exceeded - please wait before trying again' }, 429);
+        }
+        // Anthropic org-level credit exhaustion: the PLATFORM key is out of
+        // prepaid credits. This is distinct from a user's own RunHQ balance
+        // (which surfaces as a 402 CreditLimitError) and from a rate limit.
+        // Anthropic returns a 400 invalid_request with this message; passing it
+        // through as a raw 400 reached agents as a cryptic error. Surface it as
+        // a clear, correctly-categorized 503 so callers can tell "platform out
+        // of AI credits" apart from user billing and rate limits.
+        if (error.message.includes('credit balance is too low')) {
+          return c.json(
+            {
+              error: 'AI provider temporarily unavailable: the platform AI credit balance is exhausted. Please top up the Anthropic key or contact support.',
+              code: 'PLATFORM_CREDITS_EXHAUSTED',
+            },
+            503,
+          );
         }
         if (error.message.includes('invalid_api_key')) {
           return c.json({ error: 'Server configuration error' }, 500);
@@ -1295,6 +1508,67 @@ export function createHttpApp() {
     }
   });
 
+  // Comprehensive usage breakdown for the authenticated user, scoped to the
+  // current billing period. Powers the "Usage" tables on the Settings page.
+  // Reuses the same getBillingPeriod() window as /api/billing/subscription so
+  // the totals reconcile with the "Spent This Period" figure shown there.
+  app.get('/api/billing/usage-breakdown', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const { start, end } = UsageService.getBillingPeriod();
+      // Scope strictly to this user's own events on servers THIS user owns.
+      //  - userIds: events billed to this user (under owner-pays, userId == owner)
+      //  - ownedBy: only servers currently owned by this user — this is what
+      //    guarantees the report never shows a server you don't own. It drops
+      //    legacy pre-cutover events that were actor-billed onto someone else's
+      //    server (e.g. a collaborator's workspace before owner-pays went live).
+      //  - excludePreCutover: drops the synthetic 'pre-cutover-rollup' summary row.
+      const filter = {
+        start,
+        end,
+        userIds: [userId],
+        ownedBy: userId,
+        excludePreCutover: true,
+      };
+
+      const [byJob, byServer, byDay, series] = await Promise.all([
+        UsageReportService.getBreakdownByTask(filter),
+        UsageReportService.getBreakdownByServer(filter),
+        UsageReportService.getBreakdownByDay(filter),
+        // Zero-filled daily series (every day in the period, $0 on idle days) to
+        // drive the usage graph — distinct from byDay, which lists only active
+        // days for the table.
+        UsageReportService.getDailyTotals(filter, 'day'),
+      ]);
+
+      return c.json({
+        periodStart: start.toISOString(),
+        periodEnd: end.toISOString(),
+        byJob,
+        byServer,
+        byDay,
+        series,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`[HttpServer] /api/billing/usage-breakdown FAILED | Error: ${message}`);
+      if (message === 'Invalid token') {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+      return c.json({ error: 'Failed to get usage breakdown' }, 500);
+    }
+  });
+
   // Stripe webhook endpoint
   app.post('/api/stripe/webhook', async (c) => {
     try {
@@ -1452,6 +1726,144 @@ export function createHttpApp() {
       console.error('[HttpServer] Admin check error:', error);
       return c.json({ error: 'Failed to check admin status' }, 500);
     }
+  });
+
+  // ============================================================================
+  // /tests Harness Cases — shared editable test suite
+  // ============================================================================
+  // GET is open to any authenticated user. Writes (POST/PUT/DELETE) are gated
+  // by the global `adminUsers` flag (same as /api/admin/*) so a per-workspace
+  // admin can't mutate the global suite from a workspace they're admin in.
+
+  const HARNESS_LIMITS = { label: 200, prompt: 8 * 1024, expectedOutcome: 16 * 1024 } as const;
+
+  const parseHarnessBody = async (
+    c: Context,
+  ): Promise<
+    | { ok: true; value: { label: string; prompt: string; expectedOutcome: string } }
+    | { ok: false; error: string }
+  > => {
+    let raw: any;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return { ok: false, error: 'Invalid JSON body' };
+    }
+    const labelRaw = typeof raw?.label === 'string' ? raw.label.trim() : '';
+    const promptRaw = typeof raw?.prompt === 'string' ? raw.prompt.trim() : '';
+    const expectedRaw =
+      typeof raw?.expectedOutcome === 'string' ? raw.expectedOutcome.trim() : '';
+    if (!labelRaw) return { ok: false, error: 'label is required' };
+    if (!promptRaw) return { ok: false, error: 'prompt is required' };
+    if (!expectedRaw) return { ok: false, error: 'expectedOutcome is required' };
+    if (labelRaw.length > HARNESS_LIMITS.label)
+      return { ok: false, error: `label exceeds ${HARNESS_LIMITS.label} chars` };
+    if (promptRaw.length > HARNESS_LIMITS.prompt)
+      return { ok: false, error: `prompt exceeds ${HARNESS_LIMITS.prompt} chars` };
+    if (expectedRaw.length > HARNESS_LIMITS.expectedOutcome)
+      return { ok: false, error: `expectedOutcome exceeds ${HARNESS_LIMITS.expectedOutcome} chars` };
+    return { ok: true, value: { label: labelRaw, prompt: promptRaw, expectedOutcome: expectedRaw } };
+  };
+
+  const harnessToDTO = (row: {
+    id: string;
+    label: string;
+    prompt: string;
+    expectedOutcome: string;
+    createdBy: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }) => ({
+    id: row.id,
+    label: row.label,
+    prompt: row.prompt,
+    expectedOutcome: row.expectedOutcome,
+    createdBy: row.createdBy ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
+
+  /** Returns the user id of an authenticated caller, or a Response 401. */
+  const harnessRequireUser = async (c: Context): Promise<string | Response> => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      return c.json({ error: 'Authentication required' }, 401);
+    }
+    const userId = await extractUserIdFromToken(authHeader.slice(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    return userId;
+  };
+
+  /** Like harnessRequireUser but also enforces global admin. */
+  const harnessRequireAdmin = async (c: Context): Promise<string | Response> => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    if (!(await UsageService.isAdmin(userIdOrRes))) {
+      return c.json({ error: 'Admin only' }, 403);
+    }
+    return userIdOrRes;
+  };
+
+  app.get('/api/harness-cases', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const rows = await db.select().from(harnessCases).orderBy(asc(harnessCases.createdAt));
+    return c.json({ data: rows.map(harnessToDTO) });
+  });
+
+  app.post('/api/harness-cases', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const parsed = await parseHarnessBody(c);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const now = new Date();
+    const [row] = await db
+      .insert(harnessCases)
+      .values({
+        id: crypto.randomUUID(),
+        label: parsed.value.label,
+        prompt: parsed.value.prompt,
+        expectedOutcome: parsed.value.expectedOutcome,
+        createdBy: userIdOrRes,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return c.json({ data: harnessToDTO(row) }, 201);
+  });
+
+  app.put('/api/harness-cases/:id', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const id = c.req.param('id');
+    if (!id) return c.json({ error: 'id is required' }, 400);
+    const parsed = await parseHarnessBody(c);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const rows = await db
+      .update(harnessCases)
+      .set({
+        label: parsed.value.label,
+        prompt: parsed.value.prompt,
+        expectedOutcome: parsed.value.expectedOutcome,
+        updatedAt: new Date(),
+      })
+      .where(eq(harnessCases.id, id))
+      .returning();
+    if (rows.length === 0) return c.json({ error: 'Case not found' }, 404);
+    return c.json({ data: harnessToDTO(rows[0]) });
+  });
+
+  app.delete('/api/harness-cases/:id', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const id = c.req.param('id');
+    if (!id) return c.json({ error: 'id is required' }, 400);
+    const rows = await db
+      .delete(harnessCases)
+      .where(eq(harnessCases.id, id))
+      .returning({ id: harnessCases.id });
+    if (rows.length === 0) return c.json({ error: 'Case not found' }, 404);
+    return c.json({ ok: true });
   });
 
   // ============================================================================
@@ -1658,6 +2070,85 @@ export function createHttpApp() {
     }
   });
 
+  // List remote servers that still live on the legacy shared Fly app
+  // (fly_app_name IS NULL). Drives the bulk per-tenant migration runner.
+  app.get('/api/admin/legacy-workspaces', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const rows = await ServerService.listLegacyWorkspaceServerIds();
+      return c.json({ servers: rows });
+    } catch (error) {
+      console.error('[HttpServer] List legacy workspaces error:', error);
+      return c.json({ error: 'Failed to list legacy workspaces' }, 500);
+    }
+  });
+
+  // Migrate one legacy workspace from the shared Fly app to its own per-tenant
+  // app + 6PN network. See docs/per-app-isolation-migration.md. Synchronous —
+  // takes ~2–3 minutes per workspace including snapshot + restore + health.
+  app.post('/api/admin/migrate-workspace/:serverId', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const serverId = c.req.param('serverId');
+      if (!serverId) {
+        return c.json({ error: 'serverId required' }, 400);
+      }
+
+      const result = await ServerService.migrateWorkspaceToOwnApp(serverId);
+      return c.json({ success: true, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[HttpServer] Migrate workspace error:`, error);
+      return c.json({ success: false, error: message }, 500);
+    }
+  });
+
+  // Distinct list of per-tenant Fly app names across the fleet — drives the
+  // deploy script's per-app fan-out so that an image update reaches every
+  // workspace app, not just the legacy shared one (see
+  // docs/per-app-isolation-migration.md). Legacy rows with fly_app_name=NULL
+  // are excluded here; the deploy script handles the legacy shared app
+  // directly via the env-default it built against.
+  app.get('/api/admin/all-workspace-apps', async (c) => {
+    try {
+      const deploySecret = process.env.DEPLOY_SECRET;
+      if (!deploySecret) {
+        return c.json({ error: 'DEPLOY_SECRET not configured' }, 500);
+      }
+      const authHeader = c.req.header('Authorization');
+      if (authHeader !== `Bearer ${deploySecret}`) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+
+      const rows = await db
+        .selectDistinct({ flyAppName: servers.flyAppName })
+        .from(servers)
+        .where(and(
+          eq(servers.deploymentType, 'remote'),
+          isNotNull(servers.flyAppName),
+        ));
+      const apps = rows.map(r => r.flyAppName).filter((x): x is string => !!x);
+      return c.json({ apps });
+    } catch (error) {
+      console.error('[HttpServer] List workspace apps error:', error);
+      return c.json({ error: 'Failed to list workspace apps' }, 500);
+    }
+  });
+
   // Backfill tunnel DNS records for all remote servers
   app.post('/api/admin/backfill-tunnel-dns', async (c) => {
     try {
@@ -1679,17 +2170,38 @@ export function createHttpApp() {
       const withMachine = remoteServers.filter(s => s.machineId);
       console.log(`[HttpServer] Backfilling tunnel DNS for ${withMachine.length} remote servers (${remoteServers.length} total remote)`);
 
-      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string }> = [];
+      const results: Array<{ serverId: string; machineId: string; name: string | null; status: string; warnings?: string[] }> = [];
       for (const server of withMachine) {
         try {
           const result = await ServerService.ensureServerTunnelConnector(server.id);
+          if (!result) {
+            results.push({
+              serverId: server.id,
+              machineId: server.machineId!,
+              name: server.name,
+              status: 'skipped',
+            });
+            console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): skipped`);
+            continue;
+          }
+          // Per-server status reflects partial success: any non-fatal warning
+          // collected by ensureServerTunnelConnector (e.g. allocateIPs failure
+          // for a per-tenant workspace) is surfaced here so the operator
+          // doesn't see a blanket "ok" when public ingress wasn't actually
+          // healed.
+          const hasWarnings = result.warnings.length > 0;
           results.push({
             serverId: server.id,
             machineId: server.machineId!,
             name: server.name,
-            status: result ? `ok (tunnel=${result.tunnelId})` : 'skipped',
+            status: hasWarnings
+              ? `partial (tunnel=${result.tunnelId})`
+              : `ok (tunnel=${result.tunnelId})`,
+            warnings: hasWarnings ? result.warnings : undefined,
           });
-          console.log(`[HttpServer] Backfill ${server.id} (${server.machineId}): ${result ? 'ok' : 'skipped'}`);
+          console.log(
+            `[HttpServer] Backfill ${server.id} (${server.machineId}): ${hasWarnings ? `partial (${result.warnings.length} warnings)` : 'ok'}`,
+          );
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -1757,6 +2269,61 @@ export function createHttpApp() {
   // Server Management (authenticated)
   // ==========================================================================
 
+  // Resolve a task share-link id to the server + channel + task that owns it.
+  //
+  // Links are minted client-side as `app.runhq.io/task/<shortId>` (the first 8
+  // hex of the task UUID); old links use `/?todo=<full-uuid>`. Neither carries
+  // server context, so the web app asks the cloud — which mirrors every task in
+  // workspace_tasks — to resolve the id before routing. Access is gated to
+  // servers the user can actually reach (the same set as GET /api/servers); a
+  // task on a server the user can't see returns 404 (not 403) so we never leak
+  // which server a task lives on. Returning channelId lets the client route
+  // straight to the owning channel, avoiding the store-hydration race in the
+  // `/server/:id/todo/:id` path.
+  app.get('/api/tasks/:shortId/resolve', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      let userId: string | null = null;
+      if (authHeader?.startsWith('Bearer ')) {
+        userId = await extractUserIdFromToken(authHeader.substring(7));
+      }
+      if (!userId && process.env.NODE_ENV !== 'production') {
+        const [firstUser] = await db.select({ id: users.id }).from(users).limit(1);
+        userId = firstUser?.id || null;
+      }
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const query = WorkspaceTaskService.parseTaskShareId(c.req.param('shortId'));
+      if (!query) {
+        return c.json({ error: 'Invalid task id' }, 400);
+      }
+
+      const candidates = await WorkspaceTaskService.resolveTaskCandidates(query);
+      const userServers = await ServerService.getUserServers(userId);
+      const accessible = new Set(userServers.map((s) => s.id));
+      const { resolved, ambiguous } = WorkspaceTaskService.selectResolvedTask(
+        candidates,
+        accessible,
+        query,
+      );
+      if (ambiguous) {
+        console.warn(
+          `[HttpServer] Ambiguous task share id "${c.req.param('shortId')}" → ${resolved?.taskId}`,
+        );
+      }
+      if (!resolved) {
+        return c.json({ error: 'Task not found' }, 404);
+      }
+
+      return c.json({ data: resolved });
+    } catch (error) {
+      console.error('[HttpServer] Resolve task error:', error);
+      return c.json({ error: 'Failed to resolve task' }, 500);
+    }
+  });
+
   // List user's servers (with server status)
   app.get('/api/servers', async (c) => {
     try {
@@ -1791,28 +2358,26 @@ export function createHttpApp() {
 
       const servers = await ServerService.getUserServers(userId);
 
-      // Fetch live machine states from each provider for all servers with machines
-      // This allows the UI to show accurate running/stopped status for each server
-      let machineStateMap: Map<string, string> = new Map();
+      // Fetch live machine states for all servers with machines.
+      //
+      // We can't use listMachines() once workspaces are spread across
+      // per-tenant Fly apps (see docs/per-app-isolation-migration.md) — a
+      // single list call only sees one app. Instead, fetch each server's
+      // state in parallel, scoped to its own flyAppName when present (and
+      // falling back to the legacy shared app for older rows).
+      const machineStateMap: Map<string, string> = new Map();
       const serversWithMachines = servers.filter(w => w.machineId);
       if (serversWithMachines.length > 0) {
-        // Group servers by provider so we call listMachines() once per provider
-        const providerIds = new Set<string>();
-        for (const s of serversWithMachines) {
-          providerIds.add(s.provider || 'fly');
-        }
-        for (const pid of providerIds) {
+        await Promise.all(serversWithMachines.map(async (s) => {
           try {
-            const provider = getProvider(pid as ProviderId);
-            const machines = await provider.listMachines();
-            for (const machine of machines) {
-              machineStateMap.set(machine.id, machine.state);
-            }
+            const provider = getProvider((s.provider || 'fly') as ProviderId);
+            const state = await provider.getMachineState(s.machineId!, s.flyAppName);
+            machineStateMap.set(s.machineId!, state);
           } catch (err) {
-            // Don't fail the whole request if we can't get machine states
-            console.warn(`[HttpServer] Could not fetch ${pid} machine states:`, err);
+            // Don't fail the whole request if any one machine can't be reached
+            console.warn(`[HttpServer] Could not fetch state for machine ${s.machineId}:`, err);
           }
-        }
+        }));
       }
 
       // Transform servers: don't expose hash, but indicate if token exists
@@ -1821,7 +2386,7 @@ export function createHttpApp() {
         let serverUrl = w.serverUrl;
         if (w.machineId) {
           const provider = getProvider((w.provider || 'fly') as ProviderId);
-          const routingUrl = provider.getRoutingInfo(w.machineId).serverUrl;
+          const routingUrl = provider.getRoutingInfo(w.machineId, w.flyAppName).serverUrl;
           if (routingUrl) serverUrl = routingUrl;
         }
         return {
@@ -1961,6 +2526,12 @@ export function createHttpApp() {
   // Create a new server
   app.post('/api/servers', async (c) => {
     try {
+      const settings = await getSettings();
+      if (settings.serverCreationDisabled) {
+        console.warn('[HttpServer] Server create blocked: kill-switch enabled');
+        return c.json({ error: settings.serverCreationDisabledMessage }, 503);
+      }
+
       const authHeader = c.req.header('Authorization');
       let userId: string | null = null;
 
@@ -2001,6 +2572,13 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid token' }, 401);
       }
 
+      // Invite-gating chokepoint: provisioning is the only costly action an
+      // unactivated user could trigger. assertActivated is a no-op when
+      // REQUIRE_SIGNUP_INVITE is off.
+      if (!(await assertActivated(userId))) {
+        return c.json({ error: 'activation_required' }, 403);
+      }
+
       const body = await c.req.json();
       const { name, deploymentType, region, tier, templateId, provider: requestedProvider } = body;
       if (!name || typeof name !== 'string') {
@@ -2014,6 +2592,10 @@ export function createHttpApp() {
 
       // Validate and resolve provider
       const providerId = requestedProvider || getDefaultProviderId();
+      try {
+        const { appendFileSync } = await import('node:fs');
+        appendFileSync('/tmp/be-create-server.log', `${new Date().toISOString()} requestedProvider=${requestedProvider ?? '(none)'} providerId=${providerId} tier=${tier ?? '(none)'} bodyKeys=${Object.keys(body).join(',')}\n`);
+      } catch {}
       if (requestedProvider && !hasProvider(requestedProvider)) {
         return c.json({ error: `Provider '${requestedProvider}' is not available` }, 400);
       }
@@ -2033,18 +2615,50 @@ export function createHttpApp() {
         return c.json({ error: `Invalid tier. Must be one of: ${validTiers.join(', ')}` }, 400);
       }
 
-      // Enforce server limit per plan (admins bypass)
+      // Resolve region: 'auto' (or empty for remote deployments) → infer from
+      // Cloudflare's CF-IPCountry header so the auto-provisioned signup flow
+      // doesn't have to make the user pick a region. Local deployments keep
+      // the legacy 'ash' default.
+      let resolvedRegion: string;
+      if (deploymentType === 'remote' || (region && region !== '')) {
+        if (!region || region === 'auto') {
+          resolvedRegion = inferRegionFromCountry(c.req.header('cf-ipcountry') ?? c.req.header('CF-IPCountry'));
+        } else {
+          resolvedRegion = region;
+        }
+      } else {
+        resolvedRegion = region || 'ash';
+      }
+
+      // Enforce server limit + tier-vs-plan rules per plan. Admins bypass.
+      // Providers with no usage cost (DockerProvider — all tier rates $0)
+      // also bypass: plan gating is a billing construct, and free-plan
+      // developers must be able to exercise local docker workspaces.
       const userIsAdmin = await UsageService.isAdmin(userId);
-      if (!userIsAdmin) {
+      if (!userIsAdmin && UsageService.enforcesPlanLimits(providerId)) {
         const subscription = await UsageService.getOrCreateSubscription(userId);
-        const planConfig = UsageService.PLAN_CONFIG[subscription.planId as keyof typeof UsageService.PLAN_CONFIG] || UsageService.PLAN_CONFIG.free;
+        const planId = subscription.planId as keyof typeof UsageService.PLAN_CONFIG;
+        const planConfig = UsageService.PLAN_CONFIG[planId] || UsageService.PLAN_CONFIG.free;
+
         const [countResult] = await db.select({ count: sql<number>`count(*)` }).from(servers).where(eq(servers.ownerId, userId));
         const currentCount = Number(countResult?.count ?? 0);
-        if (currentCount >= planConfig.maxServers) {
+        if (UsageService.hasReachedServerLimit(currentCount, planConfig.maxServers)) {
           return c.json({
             error: 'Server limit reached',
             maxServers: planConfig.maxServers,
             currentCount,
+          }, 403);
+        }
+
+        // Free plan is locked to the lowest-tier machine. Reject anything else
+        // before we hit the provider — surfaces a clear upgrade message rather
+        // than a billing/quota failure deeper in.
+        if (tier && !UsageService.isTierAllowedForPlan(planId, tier)) {
+          return c.json({
+            error: `The ${planConfig.name} plan is limited to the ${UsageService.FREE_PLAN_TIER} machine. Upgrade to choose a larger tier.`,
+            plan: planId,
+            requestedTier: tier,
+            allowedTier: UsageService.FREE_PLAN_TIER,
           }, 403);
         }
       }
@@ -2055,7 +2669,7 @@ export function createHttpApp() {
         id: serverId,
         name,
         deploymentType: deploymentType || 'local',
-        region: region || 'ash',
+        region: resolvedRegion,
         tier: tier || 'micro',
         provider: providerId,
       });
@@ -2130,17 +2744,18 @@ export function createHttpApp() {
       let volumeSizeGb: number | null = null;
       if (server.machineId) {
         const provider = getProvider((server.provider || 'fly') as ProviderId);
-        const routingUrl = provider.getRoutingInfo(server.machineId).serverUrl;
+        const routingUrl = provider.getRoutingInfo(server.machineId, server.flyAppName).serverUrl;
         if (routingUrl) serverUrl = routingUrl;
 
         // Fetch current volume size if volume exists
         if (server.volumeId) {
           try {
-            const volume = await provider.getVolume(server.volumeId);
+            const volume = await provider.getVolume(server.volumeId, server.flyAppName);
             if (volume) volumeSizeGb = volume.sizeGb;
           } catch { /* ignore - volume info is optional */ }
         }
       }
+      const provisionEvents = await ServerService.getProvisionEvents(serverId);
       return c.json({
         server: {
           id: server.id,
@@ -2149,6 +2764,12 @@ export function createHttpApp() {
           deploymentType: server.deploymentType,
           serverUrl,
           status: server.status,
+          provisionStep: server.provisionStep ?? null,
+          provisionEvents: provisionEvents.map(e => ({
+            step: e.step,
+            message: e.message,
+            createdAt: e.createdAt instanceof Date ? e.createdAt.toISOString() : e.createdAt,
+          })),
           lastSeen: server.lastSeen,
           machineId: server.machineId,
           region: server.region,
@@ -2587,12 +3208,27 @@ export function createHttpApp() {
       const serverId = c.req.param('serverId');
       const memberId = c.req.param('memberId');
 
-      // Support server-token auth (fishtank server proxying leave/kick requests)
+      // Support server-token auth (fishtank server proxying self-leave only).
+      // The server-token path is constrained to self-leave: the workspace must
+      // also forward the requesting user's session JWT as X-Actor-Token, and
+      // memberId must match its userId claim. This prevents a leaked server
+      // token alone from removing arbitrary members.
       const serverToken = c.req.header('X-Server-Token');
       if (serverToken) {
         const server = await ServerService.getServerByToken(serverToken);
         if (!server || server.id !== serverId) {
           return c.json({ error: 'Invalid server token' }, 401);
+        }
+        const actorToken = c.req.header('X-Actor-Token');
+        if (!actorToken) {
+          return c.json({ error: 'Actor token required' }, 401);
+        }
+        const actor = await ServerSessionService.verifyServerSessionToken(actorToken);
+        if (!actor || actor.serverId !== serverId) {
+          return c.json({ error: 'Invalid actor token' }, 401);
+        }
+        if (actor.userId !== memberId) {
+          return c.json({ error: 'Server-token path supports self-leave only' }, 403);
         }
         const success = await ServerService.leaveServer(serverId, memberId);
         return c.json({ success });
@@ -3218,6 +3854,159 @@ export function createHttpApp() {
     }
   });
 
+  // Sync workspace project metadata (currently: name) into widget_projects so
+  // widget UIs reflect renames. Authenticated with X-Server-Token; serverId in
+  // URL must match the token's server. Called by the workspace's
+  // ProjectMirrorPush on every project mutation and on boot.
+  app.post('/api/internal/servers/:serverId/projects/sync', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) {
+        return c.json({ error: 'X-Server-Token required' }, 401);
+      }
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) {
+        return c.json({ error: 'Invalid server token' }, 401);
+      }
+
+      const body = await c.req.json().catch(() => null) as { projects?: unknown } | null;
+      if (
+        !body ||
+        !Array.isArray(body.projects) ||
+        !body.projects.every((p: unknown): p is { id: string; name: string } =>
+          typeof p === 'object' &&
+          p !== null &&
+          typeof (p as { id?: unknown }).id === 'string' &&
+          typeof (p as { name?: unknown }).name === 'string',
+        )
+      ) {
+        return c.json({ error: 'body.projects must be Array<{ id: string; name: string }>' }, 400);
+      }
+
+      const result = await WidgetService.syncProjectMetadata(serverId, body.projects);
+      return c.json(result);
+    } catch (error) {
+      console.error('[HttpServer] Project mirror sync error:', error);
+      return c.json({ error: 'Failed to sync projects' }, 500);
+    }
+  });
+
+  /**
+   * Workspace → BE agent-mirror push (ALL agents, with per-agent `exposed`
+   * marking the "Hand to agent" roster). Called by WidgetAgentMirrorPush on
+   * every agent mutation and on boot.
+   * Auth: X-Server-Token; serverId in URL must match the token's server.
+   * Body: { projects: [{ workspaceProjectId, agents: [{ id, name, description, exposed? }] }] }
+   * `exposed` is optional for back-compat: pre-flag workspace servers only
+   * pushed widget_exposed=true agents, so a missing value means true.
+   * Semantics: full-replace per workspaceProjectId.
+   */
+  app.post('/api/internal/servers/:serverId/widget-agents/sync', async (c) => {
+    try {
+      const serverId = c.req.param('serverId');
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server || server.id !== serverId) return c.json({ error: 'Invalid server token' }, 401);
+
+      type Body = { projects?: Array<{ workspaceProjectId?: unknown; agents?: unknown }> };
+      const body = await c.req.json().catch(() => null) as Body | null;
+      if (
+        !body ||
+        !Array.isArray(body.projects) ||
+        !body.projects.every(p =>
+          typeof p?.workspaceProjectId === 'string' &&
+          Array.isArray(p?.agents) &&
+          (p.agents as unknown[]).every((a: any) =>
+            typeof a?.id === 'string' &&
+            typeof a?.name === 'string' &&
+            (a?.description === null || a?.description === undefined || typeof a?.description === 'string') &&
+            (a?.exposed === undefined || typeof a?.exposed === 'boolean')
+          )
+        )
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+
+      const result = await WidgetService.syncWidgetExposedAgents(
+        serverId,
+        body.projects as WidgetService.SyncWidgetExposedAgentsInput[],
+      );
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      console.error('[HttpServer] widget-agents sync error:', err);
+      return c.json({ error: 'sync failed' }, 500);
+    }
+  });
+
+  /**
+   * Workspace → BE turn-event callback for widget chat.
+   * Auth: X-Server-Token (same as the widget-agents sync); body.serverId must
+   * match the token's server, and WidgetChatService re-checks that the
+   * conversation's project belongs to that server (cross-tenant guard).
+   * Events upsert idempotently on (turn_id, seq) — retries are safe.
+   */
+  app.post('/api/internal/widget-chat/events', async (c) => {
+    try {
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+      const body = await c.req.json().catch(() => null) as {
+        serverId?: unknown; conversationId?: unknown; turnId?: unknown; events?: unknown;
+      } | null;
+      if (
+        !body ||
+        typeof body.serverId !== 'string' ||
+        typeof body.conversationId !== 'string' ||
+        typeof body.turnId !== 'string' ||
+        !Array.isArray(body.events) ||
+        body.events.length > 200
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+      if (body.serverId !== server.id) return c.json({ error: 'serverId mismatch' }, 403);
+
+      const result = await WidgetChatService.ingestTurnEvents(server.id, {
+        conversationId: body.conversationId,
+        turnId: body.turnId,
+        events: body.events as WidgetChatService.TurnEventInput[],
+      });
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetError) return c.json({ error: err.code }, err.status as any);
+      console.error('[HttpServer] widget-chat events error:', err);
+      return c.json({ error: 'ingest failed' }, 500);
+    }
+  });
+
+  // Resolve (find-or-create) the Live-session conversation for a canonical task.
+  // Called by the workspace `runhq post-to-widget` path so a coder's outbound
+  // messages reach + persist in the ticket's conversation even when no staff
+  // Live session is open yet (the in-memory relay registry would otherwise drop
+  // them). Auth: X-Server-Token, scoped to the calling server's own tasks.
+  app.post('/api/internal/widget-chat/resolve-conversation', async (c) => {
+    try {
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+      const body = await c.req.json().catch(() => null) as { canonicalTaskId?: unknown } | null;
+      if (!body || typeof body.canonicalTaskId !== 'string') {
+        return c.json({ error: 'canonicalTaskId required' }, 400);
+      }
+      const result = await WidgetService.ensureLiveConversationForServerTask(server.id, body.canonicalTaskId);
+      if (!result) return c.json({ error: 'not_found' }, 404);
+      return c.json({ conversationId: result.conversationId });
+    } catch (err) {
+      console.error('[HttpServer] resolve-conversation error:', err);
+      return c.json({ error: 'resolve failed' }, 500);
+    }
+  });
+
   // Get server info for a server (called by client)
   app.get('/api/servers/:serverId/server', async (c) => {
     try {
@@ -3507,10 +4296,26 @@ export function createHttpApp() {
         return c.json({ error: 'Server mismatch' }, 403);
       }
 
+      const body = await c.req.json().catch(() => ({}));
+      const projectId: string | undefined = body?.projectId;
+      if (!projectId) return c.json({ error: 'No widget for this preview' }, 404);
+
+      // Do NOT trust `payload.userName` — preview tokens are mintable by any
+      // server member with their own claimed name. Resolve the canonical name
+      // from the DB by userId so widget tickets/comments cannot be authored
+      // under a spoofed display name.
+      const [user] = await db
+        .select({ name: users.name, username: users.username })
+        .from(users)
+        .where(eq(users.id, payload.userId))
+        .limit(1);
+      const canonicalName = user?.name ?? user?.username ?? undefined;
+
       const bootstrap = await WidgetService.generatePreviewWidgetBootstrap(
         payload.serverId,
         payload.userId,
-        payload.userName,
+        canonicalName,
+        projectId,
       );
       if (!bootstrap) return c.json({ error: 'Widget auto-inject not enabled' }, 404);
 
@@ -3540,7 +4345,10 @@ export function createHttpApp() {
         return c.json({ error: 'Server mismatch' }, 403);
       }
 
-      const flag = await WidgetService.getPreviewWidgetFlag(payload.serverId);
+      const projectId = c.req.query('projectId');
+      if (!projectId) return c.json({ shouldInject: false });
+
+      const flag = await WidgetService.getPreviewWidgetFlag(payload.serverId, projectId);
       return c.json(flag);
     } catch (error) {
       console.error('[HttpServer] Preview widget-config error:', error);
@@ -3626,6 +4434,35 @@ export function createHttpApp() {
     } catch (error) {
       console.error('[HttpServer] Restart server error:', error);
       return c.json({ error: 'Failed to restart server' }, 500);
+    }
+  });
+
+  // Rebuild a remote server's machine: tear down the current machine + reprovision
+  // a fresh one (volume reattached). The "Rebuild machine" button calls this, and
+  // it is the supported recovery for a wedged/destroyed machine.
+  app.post('/api/servers/:serverId/server/rebuild', async (c) => {
+    try {
+      const authHeader = c.req.header('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+      const token = authHeader.substring(7);
+      const userId = await extractUserIdFromToken(token);
+      if (!userId) {
+        return c.json({ error: 'Invalid token' }, 401);
+      }
+
+      const serverId = c.req.param('serverId');
+      const result = await ServerService.rebuildRemoteServer(serverId, userId);
+
+      if (!result.success) {
+        return c.json({ error: result.error }, result.error === 'Access denied' ? 403 : 400);
+      }
+
+      return c.json({ success: true, status: 'provisioning' });
+    } catch (error) {
+      console.error('[HttpServer] Rebuild server error:', error);
+      return c.json({ error: 'Failed to rebuild server' }, 500);
     }
   });
 
@@ -3777,7 +4614,7 @@ export function createHttpApp() {
       ) {
         console.log(`[HttpServer] Fast-path session for server ${serverId} (lastSeen ${Math.round((Date.now() - server.lastSeen.getTime()) / 1000)}s ago)`);
         const provider = getProvider((server.provider || 'fly') as ProviderId);
-        const routing = provider.getRoutingInfo(server.machineId);
+        const routing = provider.getRoutingInfo(server.machineId, server.flyAppName);
         const [serverSessionToken, latestServerVersion] = await Promise.all([
           ServerSessionService.generateServerSessionToken(userId, serverId, tokenExpirySeconds, sessionTokenOpts),
           getLatestServerVersion(),
@@ -3785,7 +4622,13 @@ export function createHttpApp() {
         return c.json({
           success: true,
           serverSessionToken,
-          machineId: server.machineId,
+          // Only advertise machineId to the client when the provider's routing
+          // actually needs it (Fly uses it as `fly_instance_id`). For
+          // DockerProvider the host port already disambiguates and exposing
+          // the container id makes the runhq client append `fly_instance_id`,
+          // which the host machine's WS upgrade router would then reject as
+          // misdirected.
+          machineId: routing.requiresRoutingHeaders ? server.machineId : null,
           serverUrl: routing.serverUrl || server.serverUrl,
           expiresIn: tokenExpirySeconds,
           serverName: server.name,
@@ -3798,8 +4641,10 @@ export function createHttpApp() {
       // For remote servers, ensure the machine is awake and server is ready
       let needsRefetch = false;
       if (server.deploymentType === 'remote' && isAnyProviderConfigured()) {
-        // If server is still provisioning (e.g. during region change), don't try to connect yet
-        if (server.status === 'provisioning') {
+        // If server is still provisioning (e.g. during region change), don't try to connect yet.
+        // migrationInProgress covers per-tenant migration where heartbeat /
+        // register can clobber status='provisioning' to 'online' mid-flow.
+        if (server.status === 'provisioning' || server.migrationInProgress) {
           return c.json({ error: 'Server is still provisioning. Please try again shortly.', serverName: server.name }, 503);
         }
 
@@ -3861,7 +4706,7 @@ export function createHttpApp() {
       let serverUrl = latestServer.serverUrl;
       if (latestServer.machineId) {
         const provider = getProvider((latestServer.provider || 'fly') as ProviderId);
-        const routingUrl = provider.getRoutingInfo(latestServer.machineId).serverUrl;
+        const routingUrl = provider.getRoutingInfo(latestServer.machineId, latestServer.flyAppName).serverUrl;
         if (routingUrl) serverUrl = routingUrl;
       }
 
@@ -3874,6 +4719,12 @@ export function createHttpApp() {
       }
 
       let routingMachineId = latestServer.machineId || null;
+      // Whether this provider needs the machineId surfaced to the client for
+      // routing (Fly → yes, Docker → no). Captured here so the response below
+      // can drop machineId when the provider doesn't need it; without that,
+      // the runhq client appends `fly_instance_id=<value>` to every WS upgrade
+      // and the host runhq's upgrade router rejects mismatched ids with 421.
+      let providerNeedsRoutingId = false;
 
       // Verify machine identity to detect stale routing.
       // If mismatch, return error — the correct fix is reprovisioning, not scanning all machines.
@@ -3881,7 +4732,8 @@ export function createHttpApp() {
       if (latestServer.deploymentType === 'remote' && routingMachineId) {
         try {
           const provider = getProvider((latestServer.provider || 'fly') as ProviderId);
-          const routing = provider.getRoutingInfo(routingMachineId);
+          const routing = provider.getRoutingInfo(routingMachineId, latestServer.flyAppName);
+          providerNeedsRoutingId = routing.requiresRoutingHeaders;
           const routingHeaders: Record<string, string> = { 'cache-control': 'no-cache' };
           // Only add provider-specific routing headers when required (e.g. Fly's fly-force-instance-id)
           if (routing.requiresRoutingHeaders && routing.routingToken) {
@@ -3931,7 +4783,9 @@ export function createHttpApp() {
       return c.json({
         success: true,
         serverSessionToken,
-        machineId: routingMachineId,
+        // See `providerNeedsRoutingId` above — drop machineId for providers
+        // (DockerProvider) that don't need fly_instance_id-style routing.
+        machineId: providerNeedsRoutingId ? routingMachineId : null,
         serverUrl,
         expiresIn: latestTokenExpiry,
         serverName: latestServer.name,
@@ -4204,6 +5058,87 @@ export function createHttpApp() {
     return c.json({ success: true, data: tasks });
   });
 
+  // Fields a server member is allowed to set on task create. Identity-bearing
+  // fields (createdBy*), moderation-bearing fields, and migration-internal
+  // fields are intentionally excluded — they are server-controlled.
+  // Fields a server member is allowed to set on task create. Identity-bearing
+  // fields, moderation/source/upvote/legacy fields, and attachments are
+  // intentionally excluded.
+  //
+  // Why no attachments here: client-supplied storageProvider/storageKey are
+  // persisted verbatim (see WorkspaceTaskService.createTask). Without an
+  // ownership check, a member could attach another user's R2/S3 object as
+  // theirs, then later trigger storage deletion via a deleteComment-style
+  // path. Legitimate attachment uploads go through the server-token
+  // /api/server/workspace-task-attachments/upload endpoint, which is the
+  // trust boundary that owns storage references.
+  const TASK_CREATE_MEMBER_FIELDS = [
+    'workspaceProjectId',
+    'workspaceChannelId',
+    'title',
+    'description',
+    'status',
+    'visibility',
+    'type',
+    'schedule',
+    'scheduledAt',
+    'timezone',
+    'commentsDisabled',
+    'useWorktree',
+  ] as const;
+
+  // Fields a server member is allowed to update on a task. archivedAt and
+  // deletedAt are excluded (ownership-sensitive). Attachments are excluded
+  // for the same reason as on create — see TASK_CREATE_MEMBER_FIELDS.
+  const TASK_UPDATE_MEMBER_FIELDS = [
+    'workspaceProjectId',
+    'workspaceChannelId',
+    'title',
+    'description',
+    'status',
+    'visibility',
+    // 'isPublished' intentionally EXCLUDED: admin-only. It must flow only via the
+    // trusted server-token route (/api/server/workspace-tasks/:taskId, no allowlist)
+    // where the runhq server enforces the admin (manage_todos) gate upstream in
+    // PATCH /todos/:id. The user-bearer /api/servers/:serverId/... route is only
+    // edit-gated, so allowing isPublished here would let a non-admin editor publish
+    // tasks + force visibility public, bypassing the gate.
+    'type',
+    'schedule',
+    'scheduledAt',
+    'timezone',
+    'completedAt',
+    'commentsDisabled',
+  ] as const;
+
+  function pickFields<T extends string>(body: unknown, allowed: readonly T[]): Record<T, unknown> {
+    const out = {} as Record<T, unknown>;
+    if (!body || typeof body !== 'object') return out;
+    for (const key of allowed) {
+      if (key in (body as Record<string, unknown>)) {
+        out[key] = (body as Record<string, unknown>)[key];
+      }
+    }
+    return out;
+  }
+
+  async function resolveMemberIdentity(userId: string): Promise<{
+    createdByType: 'member';
+    createdById: string;
+    createdByName: string | null;
+  }> {
+    const [user] = await db
+      .select({ name: users.name, username: users.username })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return {
+      createdByType: 'member',
+      createdById: userId,
+      createdByName: user?.name ?? user?.username ?? null,
+    };
+  }
+
   app.post('/api/servers/:serverId/workspace-tasks', async (c) => {
     const userId = await requireAuthenticatedUser(c);
     if (!userId) return c.json({ error: 'Unauthorized' }, 401);
@@ -4213,7 +5148,17 @@ export function createHttpApp() {
     if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
-    const task = await WorkspaceTaskService.createTask(serverId, body);
+    if (typeof (body as { title?: unknown })?.title !== 'string' || !(body as { title: string }).title.trim()) {
+      return c.json({ error: 'title is required' }, 400);
+    }
+
+    const safe = pickFields(body, TASK_CREATE_MEMBER_FIELDS);
+    const identity = await resolveMemberIdentity(userId);
+    const task = await WorkspaceTaskService.createTask(serverId, {
+      ...safe,
+      ...identity,
+      sourceType: 'workspace',
+    } as Parameters<typeof WorkspaceTaskService.createTask>[1]);
     return c.json({ success: true, data: task }, 201);
   });
 
@@ -4226,9 +5171,19 @@ export function createHttpApp() {
     if (!gate.ok) return c.json(gate.body, gate.status);
 
     const body = await c.req.json();
-    const task = await WorkspaceTaskService.updateTask(serverId, c.req.param('taskId'), body);
+    const MEMBER_FIELDS_WITH_INTERACTOR = [...TASK_UPDATE_MEMBER_FIELDS, 'lastInteractorUserId'] as const;
+    const safe = pickFields(body, MEMBER_FIELDS_WITH_INTERACTOR);
+    const { task, notification } = await WorkspaceTaskService.updateTask(
+      serverId,
+      c.req.param('taskId'),
+      safe as Parameters<typeof WorkspaceTaskService.updateTask>[2],
+      { type: 'user', userId },
+    );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    return c.json({ success: true, data: task });
+    // `notification` (when present) is shipped to the calling per-server so it
+    // can push to its connected WS clients — sub-second in-app delivery
+    // without a separate browser-to-BE WebSocket connection.
+    return c.json({ success: true, data: task, notification });
   });
 
   app.post('/api/servers/:serverId/workspace-tasks/:taskId/upvote', async (c) => {
@@ -4293,8 +5248,19 @@ export function createHttpApp() {
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
+
     const body = await c.req.json();
-    const comment = await WorkspaceTaskService.addComment(serverId, task.id, body);
+    const content = (body as { content?: unknown })?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      return c.json({ error: 'content is required' }, 400);
+    }
+    // Attachments are not accepted from the user-token path — see comment on
+    // TASK_CREATE_MEMBER_FIELDS for the storage-ownership rationale.
+    const identity = await resolveMemberIdentity(userId);
+    const comment = await WorkspaceTaskService.addComment(serverId, task.id, {
+      content,
+      ...identity,
+    });
     return c.json({ success: true, data: comment }, 201);
   });
 
@@ -4309,8 +5275,12 @@ export function createHttpApp() {
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
 
-    const deleted = await WorkspaceTaskService.deleteComment(serverId, task.id, c.req.param('commentId'));
-    if (!deleted) return c.json({ error: 'Comment not found' }, 404);
+    const result = await WorkspaceTaskService.deleteComment(serverId, task.id, c.req.param('commentId'), {
+      actorId: userId,
+      actorType: 'member',
+    });
+    if (result === 'not_found') return c.json({ error: 'Comment not found' }, 404);
+    if (result === 'forbidden') return c.json({ error: 'Forbidden' }, 403);
     return c.json({ success: true });
   });
 
@@ -4338,8 +5308,21 @@ export function createHttpApp() {
 
     const task = await WorkspaceTaskService.getTaskById(serverId, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
+
     const body = await c.req.json();
-    const activity = await WorkspaceTaskService.addActivity(serverId, task.id, body);
+    const activityType = (body as { type?: unknown })?.type;
+    if (typeof activityType !== 'string' || !activityType) {
+      return c.json({ error: 'type is required' }, 400);
+    }
+    const identity = await resolveMemberIdentity(userId);
+    // Attachments are not accepted from the user-token path — see comment on
+    // TASK_CREATE_MEMBER_FIELDS for the storage-ownership rationale.
+    const activity = await WorkspaceTaskService.addActivity(serverId, task.id, {
+      type: activityType as Parameters<typeof WorkspaceTaskService.addActivity>[2]['type'],
+      content: typeof (body as { content?: unknown })?.content === 'string' ? (body as { content: string }).content : null,
+      metadata: ((body as { metadata?: unknown })?.metadata as Record<string, unknown> | null) ?? null,
+      ...identity,
+    });
     return c.json({ success: true, data: activity }, 201);
   });
 
@@ -4500,10 +5483,77 @@ export function createHttpApp() {
     const server = await ServerService.getServerByToken(serverToken);
     if (!server) return c.json({ error: 'Invalid server token' }, 401);
 
-    const body = await c.req.json();
-    const task = await WorkspaceTaskService.updateTask(server.id, c.req.param('taskId'), body);
+    const rawBody = await c.req.json();
+    // The workspace server proxies user-initiated updates via this route (it's
+    // the broker between the browser and the BE). When the user triggers the
+    // change it includes `actingUserId` so we can build a user actor and
+    // self-suppression fires — without this the user gets a notification for
+    // their own action. Without `actingUserId` the call is autonomous (agent
+    // loop / job archival sweeper / etc.) and actor = agent.
+    const actor = deriveServerTokenActor(rawBody);
+    // Strip wire-only fields so they don't leak into the task update input.
+    // `readyForReview` is an explicit command signal from the workspace server;
+    // plain status=done can be produced by heuristic job completion and must not
+    // open a PR by itself.
+    const { body, readyForReview, openPullRequest } = prepareServerWorkspaceTaskPatchBody(rawBody);
+    const { task, notification } = await WorkspaceTaskService.updateTask(
+      server.id,
+      c.req.param('taskId'),
+      body as Parameters<typeof WorkspaceTaskService.updateTask>[2],
+      actor,
+    );
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    return c.json({ success: true, data: task });
+    // Open/promote a PR depending on what signal triggered this update.
+    // The result is awaited and returned as `prResult` so the caller can surface
+    // the real outcome — a silent fire-and-forget left the UI with no feedback.
+    let prResult: ReadyPrResult | undefined;
+    if (isGithubAppConfigured()) {
+      const prDeps = {
+        listActivity: WorkspaceTaskService.listActivity,
+        addActivity: async (serverId: string, taskId: string, input: Parameters<typeof WorkspaceTaskService.addActivity>[2]) => {
+          await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
+        updateTask: async (serverId: string, taskId: string, input: Parameters<typeof WorkspaceTaskService.updateTask>[2]) => {
+          await WorkspaceTaskService.updateTask(serverId, taskId, input);
+        },
+        findOpenPullRequestByHead: (id: number, owner: string, repo: string, head: string) =>
+          getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
+        createPullRequest: (id: number, owner: string, repo: string, args: { title: string; head: string; base: string; body?: string; draft?: boolean }) =>
+          getGitHubAppService().createPullRequest(id, owner, repo, args),
+        markPullRequestReady: (id: number, nodeId: string) =>
+          getGitHubAppService().markPullRequestReady(id, nodeId),
+        notifyPrLinked: (_serverId: string, input: { branch: string; number: number; url: string; state: 'open' | 'closed' | 'merged' }) =>
+          ServerService.serverTokenFetch(server, '/api/internal/pr-linked', input).then(() => undefined),
+      };
+      if (openPullRequest) {
+        // User clicked "Open/New PR" — open a draft PR immediately for this branch.
+        prResult = await openPullRequestForReadyTask(server.id, task.id, prDeps, { mode: 'draft' }).catch((err) => {
+          const message = (err as Error)?.message || 'Failed to open pull request';
+          console.warn('[HttpServer] manual draft PR creation failed', err);
+          return { status: 'error', message } as ReadyPrResult;
+        });
+      } else if (readyForReview && isRecord(body) && body.status === 'done') {
+        // Explicit ready-for-review signal from the workspace server.
+        prResult = await openPullRequestForReadyTask(server.id, task.id, prDeps, { mode: 'ready' }).catch((err) => {
+          const message = (err as Error)?.message || 'Failed to open pull request';
+          console.warn('[HttpServer] ready PR creation failed', err);
+          return { status: 'error', message } as ReadyPrResult;
+        });
+      } else if (isRecord(body) && body.status === 'done' && task.useWorktree) {
+        // An isolated-branch task reached 'done' (typically the coder job
+        // completed) WITHOUT an explicit ready-for-review. Agents don't reliably
+        // run that command, so promote the draft PR opened on push to ready —
+        // making it mergeable and landing the task in needs_review, exactly as
+        // the ready path would. createIfMissing:false → never open a PR from a
+        // plain heuristic 'done'; only promote one that already exists.
+        void openPullRequestForReadyTask(server.id, task.id, prDeps, { mode: 'ready', createIfMissing: false }).catch((err) => {
+          console.warn('[HttpServer] worktree done un-draft failed', err);
+        });
+      }
+    }
+    // Ship the emitted notification (if any) back to the calling per-server
+    // so it can push to its connected WS clients.
+    return c.json({ success: true, data: task, notification, prResult });
   });
 
   app.post('/api/server/workspace-tasks/:taskId/upvote', async (c) => {
@@ -4566,8 +5616,14 @@ export function createHttpApp() {
 
     const task = await WorkspaceTaskService.getTaskById(server.id, c.req.param('taskId'));
     if (!task) return c.json({ error: 'Task not found' }, 404);
-    const deleted = await WorkspaceTaskService.deleteComment(server.id, task.id, c.req.param('commentId'));
-    if (!deleted) return c.json({ error: 'Comment not found' }, 404);
+    // Server-token path: the workspace server has already authorized the action
+    // locally. Authoring identity is opaque to the BE here.
+    const result = await WorkspaceTaskService.deleteComment(server.id, task.id, c.req.param('commentId'), {
+      actorId: 'server-token',
+      actorType: 'system',
+      override: true,
+    });
+    if (result === 'not_found') return c.json({ error: 'Comment not found' }, 404);
     return c.json({ success: true });
   });
 
@@ -4819,17 +5875,463 @@ export function createHttpApp() {
   // Widget Public API (called by widget.js from customer websites)
   // ==========================================================================
 
-  app.options('/api/widget/*', (c) => {
-    c.header('Access-Control-Allow-Origin', '*');
-    c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-RW-Project, X-Server-Token');
-    return c.body(null, 204);
-  });
+  /**
+   * Map a thrown error from the WidgetService layer onto an HTTP response.
+   *
+   * `WidgetError` / `WidgetAssignError` carry a stable `.code` and `.status`
+   * — callers can rely on these strings. Anything else is logged and reported
+   * as `{error: 'internal'}` so DB / driver internals don't leak to the
+   * unauthenticated public widget caller.
+   */
+  function widgetErrorResponse(c: any, err: unknown) {
+    if (err instanceof WidgetService.WidgetError || err instanceof WidgetService.WidgetAssignError) {
+      return c.json({ error: err.code }, err.status as any);
+    }
+    console.error('[widget] unhandled error:', err);
+    return c.json({ error: 'internal' }, 500);
+  }
+
+  /**
+   * Apply the per-action rate limit using the default limit table. Returns
+   * a 429 response if the user is over quota, or `null` to let the caller
+   * proceed.
+   */
+  function widgetRateLimit(
+    c: any,
+    projectId: string,
+    widgetUserId: string,
+    action: WidgetAction,
+  ) {
+    const rl = widgetRateLimiter.checkDefault(projectId, widgetUserId, action);
+    if (!rl.allowed) {
+      c.header('Retry-After', String(rl.retryAfterSec));
+      return c.json({ error: 'rate_limited' }, 429);
+    }
+    return null;
+  }
+
+  // CORS for /api/widget/* (preflight, credentialed echo, X-RunHQ-CSRF
+  // header allowlisting) is handled by the unified global middleware
+  // registered at the top of createHttpApp. Per-route helpers are no
+  // longer needed.
 
   // Public: list all public widget projects (no auth needed)
   app.get('/api/widget/projects', async (c) => {
     const projects = await WidgetService.listPublicProjects();
     return c.json({ projects });
+  });
+
+  app.get('/api/widget/me', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    return c.json({
+      widgetUserId: auth.widgetUserId ?? null,
+      permissions: Array.from(auth.permissions),
+      matchedRoles: auth.matchedRoles,
+      isTriager: auth.permissions.has('assign_agent'),
+    });
+  });
+
+  /**
+   * Bootstrap identity endpoint for the widget.
+   *
+   * Always returns 200 with an `identity` object describing whichever
+   * auth path resolved (runhq | app | null). The widget calls this once
+   * at init time to decide which header set to use on subsequent
+   * requests (Authorization vs cookie+CSRF). A null identity means the
+   * viewer is anonymous — callers should fall back to public-read or
+   * the configured login-URL redirect flow.
+   *
+   * `csrfToken` is present iff identity.source === 'runhq'. Bearer auth
+   * doesn't need CSRF (token is in a header, not a cookie).
+   *
+   * Distinct from /api/widget/me which 401s on unauth — that's the
+   * legacy contract, kept for backward compatibility with already-
+   * deployed widget bundles.
+   */
+  app.get('/api/widget/identity', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) {
+      // Classify *why* a presented Bearer token was rejected so a
+      // misconfigured embed can report the exact defect instead of
+      // silently looking "anonymous". null = genuine anon (no token).
+      const authError = await WidgetService.diagnoseWidgetBearerAuth(c.req);
+      return c.json({ identity: null, csrfToken: null, authError });
+    }
+    return c.json({
+      identity: {
+        source: auth.authSource === 'runhq' ? 'runhq'
+              : auth.authSource === 'app'   ? 'app'
+              : null,
+        widgetUserId: auth.widgetUserId ?? null,
+        displayName: auth.displayName ?? null,
+        avatarUrl: auth.avatarUrl ?? null,
+      },
+      permissions: Array.from(auth.permissions),
+      matchedRoles: auth.matchedRoles,
+      isTriager: auth.permissions.has('assign_agent'),
+      csrfToken: auth.csrfToken ?? null,
+    });
+  });
+
+
+  // ---------------------------------------------------------------------------
+  // Widget Chat — agent-intake conversations ("Chat with Agent" home card).
+  // Same auth/CSRF/rate-limit middleware as ticket routes (authenticateWidget
+  // enforces CSRF on cookie-auth writes). All conversation routes are
+  // privacy-scoped: WidgetChatService verifies ownership and answers
+  // conversation_not_found for non-owners (existence never leaks).
+  // Anonymous gating mirrors ticket submission; per the chat contract anon
+  // gets 403 (the widget shows its login-prompt path).
+  // ---------------------------------------------------------------------------
+
+  function chatMessageDto(m: WidgetChatService.ChatMessageRow) {
+    return {
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      payload: m.payload ?? null,
+      turnId: m.turnId ?? null,
+      seq: m.seq ?? null,
+      createdAt: m.createdAt.toISOString(),
+    };
+  }
+
+  function chatConversationDto(conv: {
+    id: string; status: string; createdTaskId: string | null;
+    userTurnCount: number; pendingTurnId: string | null;
+    createdAt: Date; updatedAt: Date;
+  }, hasAgentTurns: boolean) {
+    return {
+      id: conv.id,
+      status: conv.status,
+      createdTaskId: conv.createdTaskId,
+      userTurnCount: conv.userTurnCount,
+      pendingTurnId: conv.pendingTurnId,
+      // Derived flag for the agentless affordance: true once ANY agent turn
+      // has touched the conversation (pending or persisted). The widget shows
+      // the collect-prompt/[Submit Ticket] UI only while this is false.
+      hasAgentTurns,
+      createdAt: conv.createdAt.toISOString(),
+      updatedAt: conv.updatedAt.toISOString(),
+    };
+  }
+
+  /** Shared gate: identified widget user required (403 for anon per chat contract). */
+  async function requireChatUser(c: any): Promise<
+    | { auth: Awaited<ReturnType<typeof WidgetService.authenticateWidget>> & { widgetUserId: string } }
+    | { response: Response }
+  > {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return { response: c.json({ error: 'Unauthorized' }, 401) };
+    if (!auth.authenticated || !auth.widgetUserId) {
+      return { response: c.json({ error: 'identified_user_required' }, 403) };
+    }
+    return { auth: auth as any };
+  }
+
+  // Start-or-resume the user's active conversation (+ last 50 messages).
+  app.post('/api/widget/chat/conversations', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const { conversation, messages, hasAgentTurns } = await WidgetChatService.getOrCreateActiveConversation(
+        auth.projectId, auth.widgetUserId,
+      );
+      return c.json({
+        conversation: chatConversationDto(conversation, hasAgentTurns),
+        messages: messages.map(chatMessageDto),
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  app.get('/api/widget/chat/conversations/active', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const bundle = await WidgetChatService.getActiveConversation(auth.projectId, auth.widgetUserId);
+      if (!bundle) return c.json({ error: 'not_found' }, 404);
+      return c.json({
+        conversation: chatConversationDto(bundle.conversation, bundle.hasAgentTurns),
+        messages: bundle.messages.map(chatMessageDto),
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Polling fallback: ?after=<message id> returns strictly newer rows.
+  app.get('/api/widget/chat/conversations/:id/messages', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const messages = await WidgetChatService.listMessages(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, c.req.query('after') || undefined,
+      );
+      return c.json({ messages: messages.map(chatMessageDto) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Send a user message → triggers a workspace turn.
+  app.post('/api/widget/chat/conversations/:id/messages', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'chat_message');
+    if (limited) return limited;
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'content required' }, 400);
+    try {
+      const message = await WidgetChatService.sendUserMessage(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, body.content,
+      );
+      return c.json({ message: chatMessageDto(message) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Anti-AI-jail escape hatch: force the next turn to propose a ticket.
+  app.post('/api/widget/chat/conversations/:id/force-proposal', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'chat_message');
+    if (limited) return limited;
+    try {
+      await WidgetChatService.forceProposal(c.req.param('id'), auth.projectId, auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // User confirmed the proposal card (possibly edited).
+  app.post('/api/widget/chat/conversations/:id/create-ticket', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
+    if (limited) return limited;
+    const body = await c.req.json().catch(() => null) as { title?: unknown; description?: unknown } | null;
+    if (!body || typeof body.title !== 'string' || typeof body.description !== 'string') {
+      return c.json({ error: 'title and description required' }, 400);
+    }
+    try {
+      const result = await WidgetChatService.createTicketFromChat(
+        c.req.param('id'), auth.projectId, auth.widgetUserId,
+        { title: body.title, description: body.description },
+        auth.permissions.has('assign_agent'),
+      );
+      return c.json({ ticketId: result.ticketId });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Agentless [Submit Ticket]: the BE derives the draft from the stored user
+  // messages (no body), creates the ticket born-ready, and closes the
+  // conversation. 409s (distinct codes) for agent-driven / closed /
+  // already-ticketed / empty conversations.
+  app.post('/api/widget/chat/conversations/:id/submit-ticket', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
+    if (limited) return limited;
+    try {
+      const result = await WidgetChatService.submitTicketFromConversation(
+        c.req.param('id'), auth.projectId, auth.widgetUserId,
+        auth.permissions.has('assign_agent'),
+      );
+      return c.json({ ticketId: result.ticketId });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  app.post('/api/widget/chat/conversations/:id/dismiss-proposal', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      await WidgetChatService.dismissProposal(c.req.param('id'), auth.projectId, auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/chat/conversations/:id/live-message
+  //
+  // Staff-to-agent forward: a widget-authenticated staff member with the
+  // `live_coder` permission sends an instruction into the running job via the
+  // workspace Runtime Operator front door.
+  //
+  // Auth: widget auth (same as other /api/widget/chat/conversations/... routes).
+  // RBAC: requires permissions.has('live_coder') → 403 otherwise.
+  //
+  // Flow:
+  //   1. Persist the staff message (role='user') via sendLiveCoderMessage.
+  //   2. Screen + forward via forwardLiveMessage.
+  //   3. On 'flagged': append a rejection event row.
+  //   4. Return { status } to the client.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/chat/conversations/:id/live-message', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+
+    // RBAC gate: live_coder permission required.
+    if (!auth.permissions.has('live_coder')) {
+      return c.json({ error: 'live_coder_permission_required' }, 403);
+    }
+
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') {
+      return c.json({ error: 'content required' }, 400);
+    }
+
+    const conversationId = c.req.param('id');
+    const text = body.content;
+
+    try {
+      // Persist the staff message and resolve the job channel id.
+      const { message, jobChannelId, canonicalTaskId } = await WidgetChatService.sendLiveCoderMessage(
+        conversationId, auth.projectId, text,
+      );
+
+      // Resolve the server for HMAC forwarding.
+      const [wp] = await db
+        .select({ serverId: widgetProjects.serverId })
+        .from(widgetProjects)
+        .where(eq(widgetProjects.id, auth.projectId))
+        .limit(1);
+
+      const server = wp ? await ServerService.getServer(wp.serverId) : null;
+
+      // Build the default screen + sendToWorkspace deps.
+      const screenDep = async (t: string) =>
+        InjectionGuardService.checkTicket({ title: t, description: null });
+
+      const sendToWorkspaceDep = async (p: {
+        jobChannelId: string;
+        text: string;
+        actor: { externalUserId: string; name?: string | null };
+        conversationId: string;
+      }) => {
+        if (!server) throw new Error('no_server');
+        await ServerService.serverTokenFetch(server, '/internal/live-coder/message', {
+          jobChannelId: p.jobChannelId,
+          text: p.text,
+          actor: p.actor,
+          conversationId: p.conversationId,
+          // Stable key for the running coder job on the workspace — the coder
+          // runs in its own per-job channel, not this ticket's jobChannelId.
+          ...(canonicalTaskId ? { canonicalTaskId } : {}),
+        });
+        return { ok: true };
+      };
+
+      const actor = {
+        externalUserId: auth.widgetUserId ?? `runhq:${auth.runhqUserId ?? 'unknown'}`,
+        name: auth.displayName ?? null,
+      };
+
+      const result = await forwardLiveMessage(
+        {
+          conversationId,
+          projectId: auth.projectId,
+          widgetUserId: auth.widgetUserId ?? '',
+          jobChannelId: jobChannelId ?? '',
+          text,
+          actor,
+        },
+        { screen: screenDep, sendToWorkspace: sendToWorkspaceDep },
+      );
+
+      if (result.status === 'flagged') {
+        await WidgetChatService.appendLiveCoderRejectionEvent(
+          conversationId,
+          'injection_guard',
+        );
+      }
+
+      // Return the authoritative message row (same shape the SSE stream emits)
+      // so the widget client merges by server id instead of falling back to an
+      // optimistic `local-` echo. Without this the echo can't be deduped against
+      // the SSE-delivered row (which often arrives BEFORE this POST resolves,
+      // since the BE awaits the forward), and the staff message renders TWICE.
+      return c.json({ status: result.status, messageId: message.id, message: chatMessageDto(message) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // SSE stream of new messages. EventSource cannot set headers, so app-JWT
+  // embeds pass ?token=<widget JWT> (shimmed into Authorization below);
+  // runhq cookie auth works natively (withCredentials). Heartbeat comment
+  // every 25s. ?after=<message id> replays rows the client may have missed
+  // between its last fetch and this subscription (clients dedupe by id).
+  app.get('/api/widget/chat/conversations/:id/events', async (c) => {
+    const tokenQ = c.req.query('token');
+    const reqForAuth = tokenQ && !c.req.header('Authorization')
+      ? {
+          header: (name: string) =>
+            name.toLowerCase() === 'authorization' ? `Bearer ${tokenQ}` : c.req.header(name),
+          method: 'GET',
+          raw: c.req.raw,
+        }
+      : c.req;
+    const auth = await WidgetService.authenticateWidget(reqForAuth as any);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.authenticated || !auth.widgetUserId) {
+      return c.json({ error: 'identified_user_required' }, 403);
+    }
+    const conversationId = c.req.param('id');
+    try {
+      await WidgetChatService.getConversationForViewer(conversationId, auth.projectId, auth.widgetUserId, auth.permissions);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+    const after = c.req.query('after') || undefined;
+    const widgetUserId = auth.widgetUserId;
+    const projectId = auth.projectId;
+    const permissions = auth.permissions;
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      const unsubscribe = WidgetChatService.subscribeToConversation(conversationId, (row) => {
+        void stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row)) });
+      });
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+      if (after) {
+        try {
+          const missed = await WidgetChatService.listMessages(conversationId, projectId, widgetUserId, permissions, after);
+          for (const m of missed) {
+            await stream.writeSSE({ event: 'message', id: m.id, data: JSON.stringify(chatMessageDto(m)) });
+          }
+        } catch {
+          // invalid cursor → client falls back to a full refetch via the messages endpoint
+        }
+      }
+      while (open) {
+        await stream.sleep(25_000);
+        if (!open) break;
+        await stream.write(': hb\n\n');
+      }
+    });
   });
 
   app.get('/api/widget/tickets', async (c) => {
@@ -4856,87 +6358,432 @@ export function createHttpApp() {
   app.get('/api/widget/tickets/updates', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const result = await WidgetService.listDoneTickets(auth.projectId, auth.widgetUserId);
+    const result = await WidgetService.listPublishedTickets(auth.projectId, auth.widgetUserId);
     return c.json(result);
   });
 
   app.get('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
-    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId);
+    const detail = await WidgetService.getPublicTicketDetail(auth.projectId, c.req.param('id'), auth.widgetUserId, auth.permissions);
     if (!detail) return c.json({ error: 'Ticket not found' }, 404);
     return c.json(detail);
   });
 
+  // Live ticket-status stream. Pushes the recomputed PublicTicketDetail to the
+  // widget whenever the ticket changes (status, activity, clarification),
+  // replacing the 5s detail poll with real-time updates. Mirrors the chat SSE
+  // route: EventSource cannot set an Authorization header, so the app-token
+  // path passes the JWT as ?token= (shimmed into Authorization below). The
+  // detail is recomputed PER VIEWER on each change because visibility
+  // (private tickets, clarifier open questions) is viewer-specific.
+  app.get('/api/widget/tickets/:id/events', async (c) => {
+    const tokenQ = c.req.query('token');
+    const reqForAuth = tokenQ && !c.req.header('Authorization')
+      ? {
+          header: (name: string) =>
+            name.toLowerCase() === 'authorization' ? `Bearer ${tokenQ}` : c.req.header(name),
+          method: 'GET',
+          raw: c.req.raw,
+        }
+      : c.req;
+    const auth = await WidgetService.authenticateWidget(reqForAuth as any);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    const ticketId = c.req.param('id');
+    const projectId = auth.projectId;
+    const widgetUserId = auth.widgetUserId;
+
+    // Reject up-front if the viewer cannot see the ticket right now.
+    const initial = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId, auth.permissions);
+    if (!initial) return c.json({ error: 'Ticket not found' }, 404);
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      let sending = false;
+      let pending = false;
+
+      const sendDetail = async (event: 'snapshot' | 'update') => {
+        const detail = await WidgetService.getPublicTicketDetail(projectId, ticketId, widgetUserId, auth.permissions);
+        // null => the viewer lost visibility (e.g. flipped to private). Skip.
+        if (detail) await stream.writeSSE({ event, data: JSON.stringify(detail) });
+      };
+
+      // Coalesce bursts (a status write + its status_change activity fire
+      // back-to-back) into a single recompute+send.
+      const flush = () => {
+        if (sending) { pending = true; return; }
+        sending = true;
+        void (async () => {
+          try {
+            do {
+              pending = false;
+              if (!open) break;
+              await sendDetail('update');
+            } while (pending);
+          } catch (err) {
+            console.warn('[widget-tickets/events] send failed:', err);
+          } finally {
+            sending = false;
+          }
+        })();
+      };
+
+      const unsubscribe = subscribeToTicket(ticketId, flush);
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+
+      // Initial snapshot reuses the visibility-checked `initial` payload.
+      await stream.writeSSE({ event: 'snapshot', data: JSON.stringify(initial) });
+
+      while (open) {
+        await stream.sleep(25_000);
+        if (!open) break;
+        await stream.write(': hb\n\n');
+      }
+    });
+  });
+
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
+    if (limited) return limited;
     try {
+      const contentType = c.req.header('content-type') || '';
+      if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+        if (!WidgetService.attachmentsEnabled()) return c.json({ error: 'attachments_disabled' }, 403);
+
+        const formData = await c.req.raw.formData();
+        const field = (name: string): string | undefined => {
+          const value = formData.get(name);
+          return typeof value === 'string' ? value : undefined;
+        };
+        const parseContext = (): unknown => {
+          const raw = field('context');
+          if (!raw) return undefined;
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return undefined;
+          }
+        };
+        const rawFiles = [
+          ...formData.getAll('files'),
+          ...formData.getAll('file'),
+        ];
+        const files: WidgetService.WidgetUploadFile[] = [];
+        for (const rawFile of rawFiles) {
+          if (!rawFile || typeof (rawFile as any).arrayBuffer !== 'function') continue;
+          const inputFile = rawFile as globalThis.File;
+          files.push({
+            buffer: Buffer.from(await inputFile.arrayBuffer()),
+            mimeType: inputFile.type || 'application/octet-stream',
+            filename: inputFile.name || 'attachment',
+            originalName: inputFile.name,
+          });
+        }
+        // Opt-in attach_image RBAC: once a project grants the permission to any
+        // role, only users who hold it may attach. Skipped when no files were
+        // sent (a multipart submit without attachments is just a normal ticket).
+        if (files.length > 0 && !auth.permissions.has('attach_image')) {
+          return c.json({ error: 'attach_image_permission_required' }, 403);
+        }
+        const result = await WidgetService.createTicketWithAttachments(
+          auth.projectId,
+          auth.widgetUserId,
+          {
+            title: field('title'),
+            description: field('description'),
+            isPrivate: field('isPrivate') === 'true',
+            context: parseContext(),
+          },
+          files,
+        );
+        // WidgetService reviewed text + images before insert when project
+        // auto-assignment is enabled, so avoid a duplicate guard call here.
+        // Only creators who themselves hold `assign_agent` trigger an automatic
+        // assignment; others' tickets wait for an authorized teammate.
+        void WidgetAutoAssign.autoAssignTicket(auth.projectId, result.ticket.id, auth.widgetUserId, {
+          skipGuard: true,
+          creatorCanAssign: auth.permissions.has('assign_agent'),
+        });
+        return c.json(result, 201);
+      }
+
+      const body = await c.req.json();
       const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
+      // Fire-and-forget auto-assign: WidgetService already ran the creation-time
+      // injection guard when project auto-assignment is enabled, so the
+      // orchestrator can skip its duplicate guard call here. Only creators who
+      // hold `assign_agent` trigger an automatic assignment.
+      void WidgetAutoAssign.autoAssignTicket(auth.projectId, ticket.id, auth.widgetUserId, {
+        skipGuard: true,
+        creatorCanAssign: auth.permissions.has('assign_agent'),
+      });
       return c.json({ ticket }, 201);
     } catch (err) {
-      return c.json({ error: String(err) }, 400);
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/clarify-answer
+  //
+  // The auto-assign clarifier gate (WidgetAutoAssign) holds a thin ticket in a
+  // `needs_clarification` state with open questions. The identified reporter
+  // answers them here. When the clarifier then resolves to READY, we run the
+  // assign tail (dedup -> pick agent -> assign) — so a clarified ticket starts
+  // its agent automatically, with no separate "assign" step.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/clarify-answer', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    const ticketId = c.req.param('id');
+    const body = await c.req.json().catch(() => null) as
+      | { clarificationId?: unknown; answers?: unknown }
+      | null;
+    if (!body || typeof body.clarificationId !== 'string' || !Array.isArray(body.answers)) {
+      return c.json({ error: 'clarificationId and answers[] required' }, 400);
+    }
+    const answers = body.answers as Array<{ questionId: string; answer: string | string[] }>;
+
+    // Ownership: the clarification must belong to THIS ticket + THIS reporter.
+    const owned = await ClarifierService.getOwnedClarification(body.clarificationId, {
+      taskId: ticketId,
+      widgetUserId: auth.widgetUserId,
+    });
+    if (!owned) return c.json({ error: 'clarification_not_found' }, 404);
+
+    let step: Awaited<ReturnType<typeof ClarifierService.answerClarification>>;
+    try {
+      step = await ClarifierService.answerClarification(body.clarificationId, answers);
+    } catch (err) {
+      if (err instanceof ClarifierService.ClarifierAnswerError) {
+        return c.json({ error: 'invalid_answers' }, 400);
+      }
+      console.error('[widget] clarify-answer failed:', err);
+      return c.json({ error: 'clarifier_unavailable' }, 503);
+    }
+
+    if (step.status === 'asking') {
+      return c.json({
+        clarification: { status: 'asking' as const, round: step.round, questions: step.questions },
+      });
+    }
+
+    // Ready — start the agent automatically via the shared assign tail.
+    try {
+      const outcome = await WidgetAutoAssign.finalizeAutoAssignTicket(
+        auth.projectId,
+        ticketId,
+        auth.widgetUserId,
+      );
+      return c.json({ clarification: { status: 'started' as const }, outcome });
+    } catch (err) {
+      console.error('[widget] clarify-answer finalize/assign failed:', err);
+      // The clarification IS resolved; the assign tail can be retried later.
+      return c.json({ clarification: { status: 'started' as const }, outcome: { status: 'failed' as const } });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/clarify-proceed
+  //
+  // Duplicate override. The dedup gate flagged this ticket as a duplicate of an
+  // existing one (clarification.status='duplicate', rendered by the widget as
+  // the duplicate-notice card). The reporter disagrees — "Not a duplicate —
+  // start anyway". Clear the flag and run the assign tail with dedup skipped:
+  // re-running dedup would just re-flag the same ticket.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/clarify-proceed', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+
+    const ticketId = c.req.param('id');
+    const body = await c.req.json().catch(() => null) as { clarificationId?: unknown } | null;
+    if (!body || typeof body.clarificationId !== 'string') {
+      return c.json({ error: 'clarificationId required' }, 400);
+    }
+
+    // Ownership: the clarification must belong to THIS ticket + THIS reporter.
+    const owned = await ClarifierService.getOwnedClarification(body.clarificationId, {
+      taskId: ticketId,
+      widgetUserId: auth.widgetUserId,
+    });
+    if (!owned) return c.json({ error: 'clarification_not_found' }, 404);
+    // 409 = already processed (the widget shows "already been processed").
+    if (owned.status !== 'duplicate') return c.json({ error: 'not_flagged_duplicate' }, 409);
+
+    await ClarifierService.overrideDuplicate(body.clarificationId);
+
+    try {
+      const outcome = await WidgetAutoAssign.finalizeAutoAssignTicket(
+        auth.projectId,
+        ticketId,
+        auth.widgetUserId,
+        { skipDedup: true },
+      );
+      return c.json({ clarification: { status: 'started' as const }, outcome });
+    } catch (err) {
+      console.error('[widget] clarify-proceed finalize/assign failed:', err);
+      // The override IS recorded; the assign tail can be retried later.
+      return c.json({ clarification: { status: 'started' as const }, outcome: { status: 'failed' as const } });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/assign
+  //
+  // Manual triager assignment. A ticket filed by an UNAUTHORIZED reporter (one
+  // whose role lacks `assign_agent`) is created but never auto-assigned — it
+  // waits here. A teammate who DOES hold `assign_agent` reviews the ticket in
+  // the widget and clicks "Assign agent": this runs the same suggest → assign
+  // tail the auto-flow uses (dedup skipped — a human reviewed it). Idempotent:
+  // a ticket that already has an assigned agent is rejected so a second click
+  // can never spawn a duplicate job.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/assign', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    // Authorization: only users granted `assign_agent` may trigger assignment.
+    if (!auth.permissions.has('assign_agent')) {
+      return c.json({ error: 'assign_agent_permission_required' }, 403);
+    }
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'triager_assign');
+    if (limited) return limited;
+
+    const ticketId = c.req.param('id');
+    // Reuse the visibility-checked detail to confirm the ticket exists, is
+    // visible to this viewer, and is still assignable (not already assigned,
+    // not terminal). `canAssign` already encodes permission + state.
+    const detail = await WidgetService.getPublicTicketDetail(
+      auth.projectId, ticketId, auth.widgetUserId, auth.permissions,
+    );
+    if (!detail) return c.json({ error: 'ticket_not_found' }, 404);
+    if (detail.ticket.assignedAgentName) return c.json({ error: 'already_assigned' }, 409);
+    if (!detail.canAssign) return c.json({ error: 'not_assignable' }, 409);
+
+    try {
+      const outcome = await WidgetAutoAssign.finalizeAutoAssignTicket(
+        auth.projectId,
+        ticketId,
+        auth.widgetUserId,
+        { skipDedup: true },
+      );
+      return c.json({ outcome });
+    } catch (err) {
+      console.error('[widget] triager assign failed:', err);
+      return c.json({ outcome: { status: 'failed' as const } }, 502);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/live-session
+  //
+  // Open (find-or-create) the Live-session conversation for a ticket. Lets staff
+  // with `live_coder` start a Live session against the running coder on ANY
+  // assigned ticket — not just chat-originated ones. Chat tickets already carry
+  // a conversation (returned as `chatConversationId` in the detail); a directly-
+  // assigned ticket has none, so this lazily creates the relay container linked
+  // to the ticket. Idempotent: repeated calls reuse the same conversation.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/live-session', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    if (!auth.permissions.has('live_coder')) {
+      return c.json({ error: 'live_coder_permission_required' }, 403);
+    }
+    try {
+      const result = await WidgetService.ensureTicketLiveConversation(
+        auth.projectId, c.req.param('id'), auth.widgetUserId,
+      );
+      if (!result) return c.json({ error: 'ticket_not_found' }, 404);
+      return c.json({ conversationId: result.conversationId });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    const { value } = await c.req.json();
+    if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
+    if (limited) return limited;
     try {
-      await WidgetService.castVote(c.req.param('id'), auth.widgetUserId, value);
+      const { value } = await c.req.json();
+      await WidgetService.castVote(auth.projectId, c.req.param('id'), auth.widgetUserId, value);
       return c.json({ ok: true });
     } catch (err) {
-      return c.json({ error: String(err) }, 400);
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    await WidgetService.retractVote(c.req.param('id'), auth.widgetUserId);
-    return c.json({ ok: true });
+    if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
+    if (limited) return limited;
+    try {
+      await WidgetService.retractVote(auth.projectId, c.req.param('id'), auth.widgetUserId);
+      return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
   });
 
   app.patch('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_update');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const ticket = await WidgetService.updateTicket(c.req.param('id'), auth.projectId, auth.widgetUserId, body);
       return c.json({ ticket });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_delete');
+    if (limited) return limited;
     try {
       await WidgetService.deleteTicket(c.req.param('id'), auth.projectId, auth.widgetUserId);
       return c.json({ ok: true });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/attachments', async (c) => {
+    // Image attachments are disabled (prompt-injection hardening) — reject
+    // before reading the multipart body so the surface is fully closed, not
+    // just hidden in the client. See WidgetService.attachmentsEnabled.
+    if (!WidgetService.attachmentsEnabled()) return c.json({ error: 'attachments_disabled' }, 403);
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
+    // attach_image is a tier permission (granted to both app_user and staff);
+    // anonymous callers have no permissions and cannot attach.
+    if (!auth.permissions.has('attach_image')) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
     try {
       const formData = await c.req.raw.formData();
       const file = formData.get('file');
       if (!file || typeof (file as any).arrayBuffer !== 'function') {
-        return c.json({ error: 'file field is required' }, 400);
+        return c.json({ error: 'file_required' }, 400);
       }
 
       const inputFile = file as globalThis.File;
@@ -4951,18 +6798,18 @@ export function createHttpApp() {
         { buffer, mimeType, filename, originalName: inputFile.name },
       );
       return c.json({ attachment }, 201);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id/attachments/:attachmentId', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    // Deletes share the upload bucket — they're cheap and rare; reuse the
+    // same budget rather than introduce a fourth attachment-related limit.
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
     try {
       await WidgetService.deleteTicketAttachment(
         c.req.param('id'),
@@ -4971,67 +6818,69 @@ export function createHttpApp() {
         auth.widgetUserId,
       );
       return c.json({ ok: true });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the ticket owner') return c.json({ error: msg }, 403);
-      if (msg === 'Attachment not found') return c.json({ error: msg }, 404);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/comments', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized — signed token required' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'comment_create');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const comment = await WidgetService.addWidgetComment(auth.projectId, c.req.param('id'), auth.widgetUserId, body.content);
       return c.json({ comment }, 201);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Comments are disabled for this task') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.patch('/api/widget/tickets/:id/comments/:commentId', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
-    const body = await c.req.json();
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'comment_update');
+    if (limited) return limited;
     try {
+      const body = await c.req.json();
       const comment = await WidgetService.updateWidgetComment(auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId, body.content);
       return c.json({ comment });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found' || msg === 'Comment not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.delete('/api/widget/tickets/:id/comments/:commentId', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'comment_delete');
+    if (limited) return limited;
     try {
       await WidgetService.deleteWidgetComment(auth.projectId, c.req.param('id'), c.req.param('commentId'), auth.widgetUserId);
       return c.json({ ok: true });
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Ticket not found' || msg === 'Comment not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
   });
 
   app.post('/api/widget/tickets/:id/comments/:commentId/attachments', async (c) => {
+    // See ticket-attachment route above — disabled for prompt-injection hardening.
+    if (!WidgetService.attachmentsEnabled()) return c.json({ error: 'attachments_disabled' }, 403);
     const auth = await WidgetService.authenticateWidget(c.req);
-    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
+    // attach_image is a tier permission (granted to both app_user and staff);
+    // anonymous callers have no permissions and cannot attach.
+    if (!auth.permissions.has('attach_image')) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
     try {
       const formData = await c.req.raw.formData();
       const file = formData.get('file');
       if (!file || typeof (file as any).arrayBuffer !== 'function') {
-        return c.json({ error: 'file field is required' }, 400);
+        return c.json({ error: 'file_required' }, 400);
       }
       const inputFile = file as globalThis.File;
       const buffer = Buffer.from(await inputFile.arrayBuffer());
@@ -5040,12 +6889,56 @@ export function createHttpApp() {
         { buffer, mimeType: inputFile.type || 'application/octet-stream', filename: inputFile.name || 'attachment', originalName: inputFile.name },
       );
       return c.json({ attachment }, 201);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      if (msg === 'Comment not found' || msg === 'Ticket not found') return c.json({ error: msg }, 404);
-      if (msg === 'Not the comment author') return c.json({ error: msg }, 403);
-      return c.json({ error: msg }, 400);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
     }
+  });
+
+  // POST /api/widget/tickets/:id/preview
+  //
+  // Live-preview bridge: a widget-authenticated staff member with the
+  // `preview` permission triggers (or polls) the PR preview for the given
+  // ticket. The workspace returns an async contract:
+  //   • preparing  — port not yet allocated; client should poll
+  //   • starting   — port allocated; publicUrl + token returned
+  //   • ready      — already running; publicUrl + token returned
+  //   • no_preview — no job/worktree for the linked branch
+  //
+  // Auth:  widget auth (same as other /api/widget/tickets/... routes).
+  // RBAC:  requires permissions.has('preview') → 403 otherwise. This is a
+  //        permission distinct from `live_coder` — assigning agents or using
+  //        Live session does NOT grant worktree preview.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/tickets/:id/preview', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('preview')) return c.json({ error: 'forbidden' }, 403);
+
+    const branch = await WidgetService.getTicketPreviewBranch(auth.projectId, c.req.param('id'));
+    if (!branch) return c.json({ ok: false, reason: 'no_preview' }, 200);
+
+    // Resolve the project's workspace Server via WidgetService helper so the
+    // server lookup stays mockable in route-level tests (no direct DB access here).
+    const server = await WidgetService.getProjectServer(auth.projectId);
+    if (!server) return c.json({ ok: false, reason: 'unavailable' }, 200);
+
+    const resp = await ServerService.serverTokenFetch<{
+      ok: boolean;
+      publicUrl?: string | null;
+      token?: string | null;
+      status?: string;
+      reason?: string;
+    }>(server, '/internal/preview/start', { branch });
+
+    if (!resp.ok) {
+      return c.json({ ok: false, reason: resp.reason ?? 'unavailable' }, 200);
+    }
+    if (resp.publicUrl) {
+      // Port is allocated — return the decorated URL so the widget can open it.
+      return c.json({ ok: true, url: `${resp.publicUrl}?__preview_token=${resp.token}`, status: resp.status });
+    }
+    // Preview is still booting (no port yet). Client should poll.
+    return c.json({ ok: true, status: resp.status ?? 'preparing' });
   });
 
   // ==========================================================================
@@ -5058,6 +6951,17 @@ export function createHttpApp() {
     return ServerService.checkCloudOpPermission(serverId, userId);
   }
 
+  // Build the project-keyed `WidgetLookup` from a request-supplied projectId
+  // (the workspaceProjectId), or return null so the caller can emit a uniform
+  // 400 `{ error: 'projectId required' }`. The widget is one-per-project;
+  // channelId is now the target list, carried separately in enable/settings bodies.
+  function parseWidgetLookup(
+    projectId: string | undefined | null,
+  ): WidgetService.WidgetLookup | null {
+    if (projectId) return { workspaceProjectId: projectId };
+    return null;
+  }
+
   // Fire-and-forget: tell the preview proxy to drop its widget config cache
   // for this server. Called after ANY widget mutation that could change the
   // shouldInject flag or the bootstrap payload — i.e. enable, disable,
@@ -5065,16 +6969,26 @@ export function createHttpApp() {
   // that booted with the widget disabled would keep injecting `false` after
   // a re-enable, because `auto_inject_in_preview` didn't change in the DB.
   //
+  // `projectId` is optional: when the admin route was hit via `?channelId=`
+  // (no projectId known to the BE), we omit the field from the JSON body
+  // entirely. The workspace-side handler (preview-internal.ts) then treats
+  // an absent projectId as "clear the whole server's widget cache", which
+  // is the intended fallback. Coercing to `''` would silently break this —
+  // the downstream cache helper treats `''` as a defined-but-no-match key
+  // and clears nothing. See PR review note on Issue #1.
+  //
   // Failures (machine stopped, network error) are intentionally swallowed:
   // the machine will re-fetch on its next boot anyway.
-  function pushInvalidateWidgetCache(serverId: string, userId: string): void {
+  function pushInvalidateWidgetCache(serverId: string, userId: string, projectId: string | undefined): void {
     (async () => {
       try {
         const server = await ServerService.getServer(serverId);
         if (!server?.serverUrl) return;
+        const body: { kind: 'widget'; projectId?: string } = { kind: 'widget' };
+        if (projectId !== undefined) body.projectId = projectId;
         await ServerService.fetchFromServer(server, userId, '/__preview/config-invalidate', {
           method: 'POST',
-          body: { kind: 'widget' },
+          body,
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -5090,8 +7004,10 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const integration = await WidgetService.getWidgetIntegration(serverId);
+    const integration = await WidgetService.getWidgetIntegration(serverId, lookup);
     return c.json({ success: true, data: integration });
   });
 
@@ -5100,11 +7016,41 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId, name, channelId } = await c.req.json();
+    const { serverId, projectId, name, channelId } = await c.req.json();
     if (!serverId || !name) return c.json({ error: 'serverId and name required' }, 400);
+    // Widget is one-per-project: projectId is the identity, channelId the target list.
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    if (!channelId) return c.json({ error: 'channelId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const result = await WidgetService.enableWidget(serverId, { name, channelId });
-    pushInvalidateWidgetCache(serverId, userId);
+    const result = await WidgetService.enableWidget(serverId, {
+      name,
+      channelId,
+      workspaceProjectId: projectId,
+    });
+    pushInvalidateWidgetCache(serverId, userId, projectId);
+    return c.json({ success: true, data: result });
+  });
+
+  app.post('/api/widget/reconcile', async (c) => {
+    const serverToken = c.req.header('X-Server-Token');
+    if (!serverToken) return c.json({ error: 'Server token required' }, 401);
+    const server = await ServerService.getServerByToken(serverToken);
+    if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+    const body = await c.req.json().catch(() => null);
+    const channelToProject = (body?.channelToProject ?? {}) as Record<string, string>;
+    const projectToPrimaryTodoChannel = (body?.projectToPrimaryTodoChannel ?? {}) as Record<string, string>;
+    if (typeof channelToProject !== 'object' || Array.isArray(channelToProject)) {
+      return c.json({ error: 'channelToProject must be object' }, 400);
+    }
+    if (typeof projectToPrimaryTodoChannel !== 'object' || Array.isArray(projectToPrimaryTodoChannel)) {
+      return c.json({ error: 'projectToPrimaryTodoChannel must be object' }, 400);
+    }
+
+    const result = await WidgetService.reconcileWidgetBindings(server.id, {
+      channelToProject,
+      projectToPrimaryTodoChannel,
+    });
     return c.json({ success: true, data: result });
   });
 
@@ -5115,9 +7061,18 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const projectId = c.req.query('projectId') ?? undefined;
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    await WidgetService.disableWidget(serverId);
-    pushInvalidateWidgetCache(serverId, userId);
+    await WidgetService.disableWidget(serverId, lookup);
+    // Preview-proxy cache invalidation: pass the projectId when the route
+    // received one (still read from the query for callers that supply it).
+    // When omitted, the helper drops the field from the payload so the
+    // workspace clears the whole server's widget cache (the correct
+    // fallback — there's no way to translate channelId→projectId here
+    // without an extra DB hop).
+    pushInvalidateWidgetCache(serverId, userId, projectId);
     return c.json({ success: true });
   });
 
@@ -5126,11 +7081,13 @@ export function createHttpApp() {
     if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
-    const { serverId } = await c.req.json();
+    const { serverId, projectId } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
     try {
-      const result = await WidgetService.regenerateSecret(serverId);
+      const result = await WidgetService.regenerateSecret(serverId, lookup);
       return c.json({ success: true, data: result });
     } catch (err) {
       return c.json({ error: String(err) }, 400);
@@ -5138,10 +7095,9 @@ export function createHttpApp() {
   });
 
   // Generate a signed widget JWT for the RunHQ feedback widget.
-  // Secret is server-side config — never accepted from the client.
-  // Uses FEEDBACK_WIDGET_SECRET env var, falling back to staging secret.
-  const FEEDBACK_WIDGET_SECRET = process.env.FEEDBACK_WIDGET_SECRET
-    || 'N21HtPoGxGBRPd_emBv-poLK8G2rlQsrv42ZjAClWPs';
+  // Secret is server-side config — never accepted from the client and never
+  // hard-coded. The endpoint reports 503 when the env var is missing.
+  const FEEDBACK_WIDGET_SECRET = process.env.FEEDBACK_WIDGET_SECRET ?? '';
 
   app.get('/api/widget/user-token', async (c) => {
     if (!FEEDBACK_WIDGET_SECRET) return c.json({ error: 'Feedback widget not configured' }, 503);
@@ -5152,6 +7108,19 @@ export function createHttpApp() {
     const [user] = await db.select({ name: users.name }).from(users).where(eq(users.id, userId)).limit(1);
     const result = await WidgetService.generateUserTokenBySecret(FEEDBACK_WIDGET_SECRET, userId, user?.name || undefined);
     if (!result) return c.json({ error: 'Feedback widget not enabled' }, 404);
+
+    // Mint the rw_session cookie so the feedback widget — embedded by the
+    // RunHQ console itself — can authenticate via the RunHQ-member cookie path
+    // (authenticateWidget Mode 0) instead of the role-less bearer path. This is
+    // the only login surface the SPA's token flow (returnToken:true) leaves
+    // without an rw_session cookie. We mint a fresh session JWT rather than
+    // reuse the incoming bearer because the bearer may be an opaque OAuth token
+    // (mobile), which verifyRwSession can't validate. The /api/widget/ CORS
+    // envelope already echoes the allowlisted origin + Allow-Credentials, so
+    // the browser stores and later sends this cookie cross-subdomain.
+    const sessionToken = await createToken(userId);
+    setCookie(c, RW_SESSION_COOKIE, sessionToken, rwSessionCookieOptions());
+
     return c.json({ success: true, data: result });
   });
 
@@ -5162,8 +7131,10 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const serverId = c.req.query('serverId');
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const settings = await WidgetService.getWidgetSettings(serverId);
+    const settings = await WidgetService.getWidgetSettings(serverId, lookup);
     return c.json({ success: true, data: settings });
   });
 
@@ -5174,21 +7145,44 @@ export function createHttpApp() {
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const {
       serverId,
+      projectId,
+      channelId,
       auto_approve,
       widget_position,
+      widget_language,
       voting_period_hours,
       is_public,
+      login_url,
+      allowed_origins,
+      auto_recognize_runhq_members,
       auto_inject_in_preview,
       slug,
+      widgetAgentAssignmentEnabled,
+      widgetAssignRoles,
+      widgetRoleClaimName,
+      widgetAssignRateLimitPerHour,
+      widgetChatAgentEntityId,
+      widgetRolePermissions,
+      widgetLiveCoderEnabled,
     } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
 
     let result: Awaited<ReturnType<typeof WidgetService.updateWidgetSettings>>;
     try {
       result = await WidgetService.updateWidgetSettings(serverId, {
-        auto_approve, widget_position, voting_period_hours, is_public, auto_inject_in_preview, slug,
-      });
+        auto_approve, widget_position, widget_language, voting_period_hours, is_public, login_url, allowed_origins, auto_recognize_runhq_members, auto_inject_in_preview, slug,
+        channelId,
+        widgetAgentAssignmentEnabled,
+        widgetAssignRoles,
+        widgetRoleClaimName,
+        widgetAssignRateLimitPerHour,
+        widgetChatAgentEntityId,
+        widgetRolePermissions,
+        widgetLiveCoderEnabled,
+      }, lookup);
     } catch (err) {
       if (err instanceof WidgetService.WidgetSettingsValidationError) {
         return c.json({ error: err.message }, 400);
@@ -5201,12 +7195,148 @@ export function createHttpApp() {
     // flow into the widget bootstrap payload, and limiting to the flag alone
     // misses re-enable-after-disable scenarios where the DB value didn't
     // change but the effective shouldInject did.
-    pushInvalidateWidgetCache(serverId, userId);
+    // When the route was hit via `channelId` only, `projectId` is undefined
+    // and the helper omits it — see pushInvalidateWidgetCache for details.
+    pushInvalidateWidgetCache(serverId, userId, projectId);
     // `result.autoInjectChanged` is returned for callers that care (telemetry,
     // audit logs); we don't branch on it here.
     void result;
 
     return c.json({ success: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Widget Members — per-user participants + permission tiers (workspace-admin
+  // surface, backs the project-level "Members" tab). Auth mirrors the widget
+  // settings routes: runhq session Bearer → extractUserIdFromToken, then
+  // requireWidgetAdmin (owner/workspace-admin). projectId = the WORKSPACE
+  // project id; serverId pins the tenant.
+  // ---------------------------------------------------------------------------
+
+  app.get('/api/widget/members', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(c.req.query('projectId'));
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
+    if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
+    const members = await WidgetService.listWidgetMembers(serverId, lookup);
+    // `data: null` distinguishes "no widget configured" (client shows a setup
+    // prompt) from `data: []` ("widget enabled, no members yet").
+    return c.json({ success: true, data: members });
+  });
+
+  app.put('/api/widget/members/:memberId', async (c) => {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return c.json({ error: 'Unauthorized' }, 401);
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return c.json({ error: 'Invalid token' }, 401);
+    const memberId = c.req.param('memberId');
+    const { serverId, projectId, permissionTier } = await c.req.json();
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const lookup = parseWidgetLookup(projectId);
+    if (!lookup) return c.json({ error: 'projectId required' }, 400);
+    if (!WidgetService.isWidgetPermissionTier(permissionTier)) {
+      return c.json({ error: 'invalid permissionTier' }, 400);
+    }
+    if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
+    const result = await WidgetService.updateWidgetMemberTier(serverId, lookup, memberId, permissionTier);
+    if (result === 'no_project') return c.json({ error: 'widget not found' }, 404);
+    if (result === 'not_found') return c.json({ error: 'member not found' }, 404);
+    return c.json({ success: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Widget Chat — team Conversations inbox (workspace-member surface).
+  // Auth mirrors the widget settings routes: runhq session Bearer token →
+  // extractUserIdFromToken, then server membership (ANY member — replying to
+  // visitors is support work, not admin work; checkServerPermission falls
+  // back to servers.ownerId like the settings path). Cross-tenant requests
+  // 403; unknown conversations 404 via the service's *_not_found mapping.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve the calling workspace member for a team-inbox route: 401 without
+   * a valid session token, 403 when not a member of `serverId`. Returns the
+   * member's display name (users.name, falling back to email) for team-reply
+   * attribution.
+   */
+  async function requireTeamMember(
+    c: any,
+    serverId: string,
+  ): Promise<{ userId: string; displayName: string } | { response: Response }> {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) return { response: c.json({ error: 'Unauthorized' }, 401) };
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) return { response: c.json({ error: 'Invalid token' }, 401) };
+    const isMember = await ServerService.checkServerPermission(serverId, userId, ['owner', 'member']);
+    if (!isMember) return { response: c.json({ error: 'Forbidden' }, 403) };
+    const [user] = await db
+      .select({ name: users.name, email: users.email })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return { userId, displayName: user?.name || user?.email || 'Team' };
+  }
+
+  // Inbox list: every conversation for the widget project (agent-driven
+  // included), newest activity first. projectId = the WORKSPACE project id
+  // (same vocabulary as GET /api/widget/settings); serverId pins the tenant.
+  app.get('/api/widget/team/conversations', async (c) => {
+    const serverId = c.req.query('serverId');
+    if (!serverId) return c.json({ error: 'serverId required' }, 400);
+    const projectId = c.req.query('projectId');
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+    const gate = await requireTeamMember(c, serverId);
+    if ('response' in gate) return gate.response;
+    try {
+      const conversations = await WidgetChatService.listTeamConversations(serverId, projectId);
+      return c.json({ conversations });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Full thread: summary header + every message row (all roles + events).
+  app.get('/api/widget/team/conversations/:id', async (c) => {
+    const conversationId = c.req.param('id');
+    const serverId = await WidgetChatService.getTeamConversationServerId(conversationId);
+    if (!serverId) return c.json({ error: 'conversation_not_found' }, 404);
+    const gate = await requireTeamMember(c, serverId);
+    if ('response' in gate) return gate.response;
+    try {
+      const detail = await WidgetChatService.getTeamConversation(serverId, conversationId);
+      return c.json({
+        conversation: detail.conversation,
+        messages: detail.messages.map(chatMessageDto),
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Team reply: appends a role='team' message attributed to the session
+  // member and pushes it onto the conversation's SSE stream. NEVER
+  // dispatches an agent turn.
+  app.post('/api/widget/team/conversations/:id/reply', async (c) => {
+    const conversationId = c.req.param('id');
+    const serverId = await WidgetChatService.getTeamConversationServerId(conversationId);
+    if (!serverId) return c.json({ error: 'conversation_not_found' }, 404);
+    const gate = await requireTeamMember(c, serverId);
+    if ('response' in gate) return gate.response;
+    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== 'string') return c.json({ error: 'content required' }, 400);
+    try {
+      const message = await WidgetChatService.sendTeamReply(
+        serverId, conversationId, gate.displayName, body.content,
+      );
+      return c.json({ message: chatMessageDto(message) });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
   });
 
   // Legacy sync endpoints (unsynced, mark-synced, status) removed —
@@ -5439,8 +7569,435 @@ export function createHttpApp() {
     return c.json(result);
   });
 
+  // ============================================================================
+  // Notification REST endpoints
+  // ============================================================================
+  //
+  // Auth pattern: reuse the established harnessRequireUser / harnessRequireAdmin
+  // helpers defined earlier in createHttpApp(). These closures are available
+  // because the routes are registered inside the same function body.
+
+  // GET /api/notifications?limit=200
+  app.get('/api/notifications', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const limit = Math.min(Number(c.req.query('limit') ?? 200), 500);
+    const rows = await db.query.notifications.findMany({
+      where: and(eq(notifications.userId, userId), isNull(notifications.archivedAt)),
+      orderBy: [desc(notifications.createdAt)],
+      limit,
+    });
+    return c.json({ notifications: rows.map(serializeNotification) });
+  });
+
+  // PATCH /api/notifications/:id  { read?: boolean, archived?: boolean }
+  // NOTE: constrain :id to a UUID. Without this, the param route shadows the
+  // static sibling routes registered after it (e.g. PATCH
+  // /api/notifications/preferences would match here with id="preferences",
+  // hit the no-read/archived-field branch, and 400 with "no_fields").
+  app.patch('/api/notifications/:id{[0-9a-fA-F-]{36}}', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const id = c.req.param('id');
+    const body = await c.req.json() as Record<string, unknown>;
+    const patch: Record<string, unknown> = {};
+    if (body.read === true)      patch.readAt = new Date();
+    if (body.read === false)     patch.readAt = null;
+    if (body.archived === true)  patch.archivedAt = new Date();
+    if (body.archived === false) patch.archivedAt = null;
+    if (!Object.keys(patch).length) return c.json({ error: 'no_fields' }, 400);
+    await db
+      .update(notifications)
+      .set(patch)
+      .where(and(eq(notifications.id, id), eq(notifications.userId, userId)));
+    return c.json({ ok: true });
+  });
+
+  // POST /api/notifications/mark-all-read
+  app.post('/api/notifications/mark-all-read', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    await db
+      .update(notifications)
+      .set({ readAt: new Date() })
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+    return c.json({ ok: true });
+  });
+
+  // POST /api/notifications/test
+  // Fires a real notification to the calling user through the full delivery
+  // pipeline (in_app toast via WS + web_push OS notification if a device is
+  // registered). Lets users self-verify their setup without orchestrating a
+  // real job transition — and unlike task notifications, it is intentionally
+  // NOT self-suppressed (you are deliberately notifying yourself).
+  app.post('/api/notifications/test', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+
+    // Reflect the user's real channel config so the test result is honest:
+    // a disabled channel is gated out exactly as it would be for a real ping.
+    const prefs = await getOrCreatePreferences(userId);
+    const subs = await db.query.pushSubscriptions.findMany({
+      where: eq(pushSubscriptions.userId, userId),
+    });
+    const hasWebPushDevice = subs.some((s) => s.platform === 'web_push');
+
+    let notificationId: string | null = null;
+    try {
+      await db.transaction(async (tx) => {
+        notificationId = await insertNotificationWithDeliveries(tx, {
+          userId,
+          // Synthetic server/project ids that match no mute and no real
+          // workspace. serverId/projectId are free-form text; taskId is a uuid
+          // column, so it must be a valid UUID even though no such task exists.
+          serverId: 'test',
+          serverName: 'Test',
+          projectId: '',
+          projectName: '',
+          taskId: crypto.randomUUID(),
+          taskTitle: 'This is a test notification 🔔',
+          channelId: null,
+          jobId: null,
+          eventType: 'completed',
+        });
+      });
+    } catch (err) {
+      console.error('[notif:test] insert failed', { userId }, err);
+      return c.json({ error: 'internal_error' }, 500);
+    }
+
+    if (!notificationId) return c.json({ error: 'not_created' }, 500);
+    void dispatchNotification(notificationId).catch((err) =>
+      console.warn('[notif:test] dispatch failed', err),
+    );
+
+    return c.json({
+      ok: true,
+      notification_id: notificationId,
+      // Tell the client what to expect so the UI can guide the user.
+      in_app: prefs.inAppEnabled,
+      web_push: prefs.pushEnabled && hasWebPushDevice,
+      web_push_no_device: prefs.pushEnabled && !hasWebPushDevice,
+    });
+  });
+
+  // GET /api/notifications/preferences
+  app.get('/api/notifications/preferences', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const prefs = await getOrCreatePreferences(userId);
+    return c.json({
+      preferences: {
+        in_app_enabled:  prefs.inAppEnabled,
+        browser_enabled: prefs.browserEnabled,
+        push_enabled:    prefs.pushEnabled,
+        email_enabled:   prefs.emailEnabled,
+      },
+    });
+  });
+
+  // PATCH /api/notifications/preferences
+  app.patch('/api/notifications/preferences', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json() as Record<string, unknown>;
+    } catch (err) {
+      console.error('[notif:prefs] bad JSON body', err);
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+    try {
+      const patch: Record<string, unknown> = { updatedAt: new Date() };
+      if (typeof body.in_app_enabled === 'boolean')  patch.inAppEnabled = body.in_app_enabled;
+      if (typeof body.browser_enabled === 'boolean') patch.browserEnabled = body.browser_enabled;
+      if (typeof body.push_enabled === 'boolean')    patch.pushEnabled = body.push_enabled;
+      if (typeof body.email_enabled === 'boolean')   patch.emailEnabled = body.email_enabled;
+      await db
+        .insert(userNotificationPreferences)
+        .values({ userId, ...(patch as any) })
+        .onConflictDoUpdate({ target: userNotificationPreferences.userId, set: patch as any });
+      const fresh = await getOrCreatePreferences(userId);
+      try {
+        broadcastToUser(getWsServer(), userId, {
+          type: 'notification:preferences-updated',
+          preferences: {
+            in_app_enabled:  fresh.inAppEnabled,
+            browser_enabled: fresh.browserEnabled,
+            push_enabled:    fresh.pushEnabled,
+            email_enabled:   fresh.emailEnabled,
+          },
+        });
+      } catch { /* WS not registered — API response suffices */ }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error('[notif:prefs] PATCH failed', { userId, body }, err);
+      return c.json({ error: 'internal_error' }, 500);
+    }
+  });
+
+  // GET /api/notifications/mutes
+  app.get('/api/notifications/mutes', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const rows = await db.query.notificationMutes.findMany({
+      where: eq(notificationMutes.userId, userId),
+    });
+    return c.json({
+      mutes: rows.map((r) => ({
+        scope_type: r.scopeType,
+        scope_id:   r.scopeId,
+        expires_at: r.expiresAt?.toISOString() ?? null,
+      })),
+    });
+  });
+
+  // POST /api/notifications/mutes
+  app.post('/api/notifications/mutes', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const body = await c.req.json() as { scope_type: 'server' | 'project'; scope_id: string; duration_ms: number | null };
+    const expiresAt = body.duration_ms === null ? null : new Date(Date.now() + Number(body.duration_ms));
+    await db
+      .insert(notificationMutes)
+      .values({ userId, scopeType: body.scope_type, scopeId: body.scope_id, expiresAt })
+      .onConflictDoUpdate({
+        target: [notificationMutes.userId, notificationMutes.scopeType, notificationMutes.scopeId],
+        set: { expiresAt },
+      });
+    try {
+      broadcastToUser(getWsServer(), userId, {
+        type: 'notification:mute-updated',
+        scope_type: body.scope_type,
+        scope_id:   body.scope_id,
+        expires_at: expiresAt?.toISOString() ?? null,
+      });
+    } catch { /* WS not registered */ }
+    return c.json({ ok: true });
+  });
+
+  // DELETE /api/notifications/mutes/:scope_type/:scope_id
+  app.delete('/api/notifications/mutes/:scope_type/:scope_id', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const scopeType = c.req.param('scope_type') as 'server' | 'project';
+    const scopeId   = c.req.param('scope_id');
+    await db
+      .delete(notificationMutes)
+      .where(
+        and(
+          eq(notificationMutes.userId, userId),
+          eq(notificationMutes.scopeType, scopeType),
+          eq(notificationMutes.scopeId, scopeId),
+        ),
+      );
+    try {
+      broadcastToUser(getWsServer(), userId, {
+        type: 'notification:mute-updated',
+        scope_type: scopeType,
+        scope_id:   scopeId,
+        expires_at: 'unmute',
+      });
+    } catch { /* WS not registered */ }
+    return c.json({ ok: true });
+  });
+
+  // POST /api/notifications/push-subscriptions
+  app.post('/api/notifications/push-subscriptions', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const body = await c.req.json() as {
+      platform: 'web_push' | 'apns' | 'fcm';
+      endpoint: string;
+      keys: unknown;
+      user_agent?: string;
+    };
+    await db
+      .insert(pushSubscriptions)
+      .values({
+        userId,
+        platform:  body.platform,
+        endpoint:  body.endpoint,
+        keys:      body.keys as any,
+        userAgent: body.user_agent ?? null,
+      })
+      .onConflictDoNothing();
+    return c.json({ ok: true });
+  });
+
+  // GET /api/notifications/push-subscriptions
+  app.get('/api/notifications/push-subscriptions', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const rows = await db.query.pushSubscriptions.findMany({
+      where: eq(pushSubscriptions.userId, userId),
+    });
+    return c.json({
+      subscriptions: rows.map((r) => ({
+        id:           r.id,
+        platform:     r.platform,
+        user_agent:   r.userAgent,
+        created_at:   r.createdAt.toISOString(),
+        last_used_at: r.lastUsedAt?.toISOString() ?? null,
+      })),
+    });
+  });
+
+  // DELETE /api/notifications/push-subscriptions/:endpoint
+  app.delete('/api/notifications/push-subscriptions/:endpoint', async (c) => {
+    const userIdOrRes = await harnessRequireUser(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const userId = userIdOrRes;
+    const endpoint = decodeURIComponent(c.req.param('endpoint'));
+    await db
+      .delete(pushSubscriptions)
+      .where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.endpoint, endpoint)));
+    return c.json({ ok: true });
+  });
+
+  // GET /admin/notifications/dead  (admin only)
+  app.get('/admin/notifications/dead', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const rows = await db.query.notificationDeliveries.findMany({
+      where: eq(notificationDeliveries.status, 'dead'),
+      orderBy: [desc(notificationDeliveries.createdAt)],
+      limit: 200,
+    });
+    return c.json({ rows });
+  });
+
+  // POST /admin/notifications/dead/:id/requeue  (admin only)
+  app.post('/admin/notifications/dead/:id/requeue', async (c) => {
+    const userIdOrRes = await harnessRequireAdmin(c);
+    if (typeof userIdOrRes !== 'string') return userIdOrRes;
+    const id = c.req.param('id');
+    await db
+      .update(notificationDeliveries)
+      .set({ status: 'pending', attempts: 0, nextAttemptAt: new Date(), lastError: null })
+      .where(eq(notificationDeliveries.id, id));
+    return c.json({ ok: true });
+  });
+
   // Mount OAuth routes
   app.route('/oauth', oauth);
+
+  if (isGithubAppConfigured()) {
+    registerGithubRoutes(app, {
+      config: getGithubAppConfig(),
+      // The /github/installed page is a CLIENT SPA route (app.runhq.io), not a
+      // BE-hosted one — must use CLIENT_URL. APP_URL is the BE's own origin
+      // (console.runhq.io in prod), which has no such route and bounces to login.
+      clientUrl: process.env.CLIENT_URL ?? 'https://app.runhq.io',
+      getServerByToken: (t) => ServerService.getServerByToken(t),
+      upsertInstallation: GithubInstallationsService.upsertInstallation,
+      removeInstallation: GithubInstallationsService.removeInstallation,
+      getInstallation: GithubInstallationsService.getInstallation,
+      associateWithWorkspace: GithubInstallationsService.associateWithWorkspace,
+      isAssociatedWithWorkspace: GithubInstallationsService.isAssociatedWithWorkspace,
+      mintInstallationToken: (id) => getGitHubAppService().mintInstallationToken(id),
+      fetchInstallationAccount: (id) => getGitHubAppService().getInstallationAccount(id),
+      prLinked: {
+        findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,
+        parseTaskShareId: WorkspaceTaskService.parseTaskShareId,
+        resolveTaskCandidates: WorkspaceTaskService.resolveTaskCandidates,
+        listActivity: WorkspaceTaskService.listActivity,
+        addActivity: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
+        updateTask: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.updateTask(serverId, taskId, input);
+        },
+        updateActivityMetadata: WorkspaceTaskService.updateActivityMetadata,
+      },
+      pushHandling: {
+        findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,
+        parseTaskShareId: WorkspaceTaskService.parseTaskShareId,
+        resolveTaskCandidates: WorkspaceTaskService.resolveTaskCandidates,
+        listActivity: WorkspaceTaskService.listActivity,
+        addActivity: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.addActivity(serverId, taskId, input);
+        },
+        getTask: async (serverId, taskId) => {
+          const t = await WorkspaceTaskService.getTaskById(serverId, taskId);
+          return t ? { useWorktree: t.useWorktree ?? false } : null;
+        },
+        updateTask: async (serverId, taskId, input) => {
+          await WorkspaceTaskService.updateTask(serverId, taskId, input);
+        },
+        findOpenPullRequestByHead: (id, owner, repo, head) =>
+          getGitHubAppService().findOpenPullRequestByHead(id, owner, repo, head),
+        createPullRequest: (id, owner, repo, args) =>
+          getGitHubAppService().createPullRequest(id, owner, repo, args),
+        markPullRequestReady: (id, nodeId) =>
+          getGitHubAppService().markPullRequestReady(id, nodeId),
+        // Push-path PRs are opened from a deps object built once at registration,
+        // so (unlike the request-scoped ready path) there's no `server` in scope —
+        // resolve it per-call from the serverId threaded through notifyPrLinked so
+        // the draft-on-push chip updates live via WS, not just on the next fetch.
+        notifyPrLinked: async (serverId, input) => {
+          const target = await ServerService.getServer(serverId);
+          if (target) {
+            await ServerService.serverTokenFetch(target, '/api/internal/pr-linked', input);
+          }
+        },
+      },
+    });
+    registerInternalGithubRoutes(app, {
+      stateSecret: getGithubAppConfig().stateSecret,
+      appSlug: getGithubAppConfig().appSlug,
+      getServerByToken: (t) => ServerService.getServerByToken(t),
+      // Identity for user-acting endpoints comes from the verified Bearer, not a
+      // request field — a leaked workspace server token must not be usable to
+      // impersonate another user (the container runs as root, so the token is
+      // reachable from a member's terminal). The Bearer the browser sends is its
+      // workspace server-session token (EdDSA), which the workspace forwards
+      // here; resolveGithubActingUser verifies that as well as a direct user
+      // session/OAuth token.
+      authenticateUser: resolveGithubActingUser,
+      canAccessServer: (serverId, userId) => ServerService.canAccessServer(serverId, userId),
+      listInstallationsForServer: GithubInstallationsService.listInstallationsForServer,
+      listInstallationsForUser: GithubInstallationsService.listInstallationsForUser,
+      getInstallation: GithubInstallationsService.getInstallation,
+      isAssociatedWithWorkspace: GithubInstallationsService.isAssociatedWithWorkspace,
+      associateWithWorkspace: GithubInstallationsService.associateWithWorkspace,
+      listInstallationRepos: (id) => getGitHubAppService().listInstallationRepos(id),
+      listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
+      getPullRequestDiff: (id, owner, repo, n) => getGitHubAppService().getPullRequestDiff(id, owner, repo, n),
+      mergePullRequest: (id, owner, repo, n, method) => getGitHubAppService().mergePullRequest(id, owner, repo, n, method),
+      closePullRequest: (id, owner, repo, n) => getGitHubAppService().closePullRequest(id, owner, repo, n),
+      upsertProjectRepo: GithubProjectReposService.upsertProjectRepo,
+      removeProjectRepo: GithubProjectReposService.removeProjectRepo,
+      backfillInstallationAccount: async (id) => {
+        const acct = await getGitHubAppService().getInstallationAccount(id);
+        if (!acct.accountLogin) return null;
+        await GithubInstallationsService.setInstallationAccount(id, acct);
+        return acct;
+      },
+    });
+
+    // User-scoped cross-server PR aggregate (Home hub "Pull Requests" page).
+    app.get('/api/github/pulls', async (c) => {
+      const userId = await requireAuthenticatedUser(c);
+      if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+      const pulls = await aggregateForUser(userId, {
+        listForUser: GithubProjectReposService.listForUser,
+        listPullRequests: (id, owner, repo, state) => getGitHubAppService().listPullRequests(id, owner, repo, state),
+      });
+      return c.json({ data: pulls });
+    });
+  }
 
   return app;
 }

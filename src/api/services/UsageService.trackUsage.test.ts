@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { db, users, subscriptions, usageEvents } from '@/db';
+import { db, users, subscriptions, usageEvents, servers } from '@/db';
 import { trackUsage } from './UsageService';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 
 describe('trackUsage', () => {
   const testUserId = '00000000-0000-0000-0000-000000000bbb';
@@ -134,5 +134,79 @@ describe('trackUsage', () => {
     // Drizzle returns numeric as string; cast.
     expect(Number(sub.creditBalanceCents)).toBeCloseTo(100 - (5 * 0.04), 3);
     // Would have failed at 100 (no drift detected) under the old integer+Math.round path.
+  });
+});
+
+describe('trackUsage owner-pays', () => {
+  const ownerId  = '00000000-0000-0000-0000-0000000000a1';
+  const memberId = '00000000-0000-0000-0000-0000000000a2';
+  const serverId = 'ws_ownerpays_test';
+
+  beforeEach(async () => {
+    await db.delete(usageEvents).where(inArray(usageEvents.userId, [ownerId, memberId]));
+    await db.delete(servers).where(eq(servers.id, serverId));
+    await db.delete(subscriptions).where(inArray(subscriptions.userId, [ownerId, memberId]));
+    await db.delete(users).where(inArray(users.id, [ownerId, memberId]));
+    await db.insert(users).values([
+      { id: ownerId,  email: 'owner-op@example.com' },
+      { id: memberId, email: 'member-op@example.com' },
+    ] as any);
+    await db.insert(subscriptions).values([
+      { userId: ownerId,  planId: 'free', status: 'active', creditBalanceCents: '1000.0000' },
+      { userId: memberId, planId: 'free', status: 'active', creditBalanceCents: '1000.0000' },
+    ] as any);
+    await db.insert(servers).values({ id: serverId, name: 'OwnerPays WS', ownerId } as any);
+  });
+
+  afterAll(async () => {
+    await db.delete(usageEvents).where(inArray(usageEvents.userId, [ownerId, memberId]));
+    await db.delete(servers).where(eq(servers.id, serverId));
+    await db.delete(subscriptions).where(inArray(subscriptions.userId, [ownerId, memberId]));
+    await db.delete(users).where(inArray(users.id, [ownerId, memberId]));
+  });
+
+  const tokens = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  const ctx = (sid: string | null) => ({
+    serverId: sid, taskId: null, taskLabel: null, jobId: null,
+    channelId: null, channelLabel: null, agentId: null, agentLabel: null, conversationId: null,
+  });
+
+  it('bills the SERVER OWNER for a run triggered by a member', async () => {
+    const r = await trackUsage({
+      userId: memberId,            // member is the actor
+      model: 'claude-sonnet-4-6',
+      tokens,
+      costCents: 25,
+      context: ctx(serverId),      // on a server owned by ownerId
+      anthropicRequestId: null,
+    });
+
+    // Billed user is the owner.
+    expect(r.billedUserId).toBe(ownerId);
+
+    // Event attributed to owner, not the member.
+    expect(await db.select().from(usageEvents).where(eq(usageEvents.userId, ownerId))).toHaveLength(1);
+    expect(await db.select().from(usageEvents).where(eq(usageEvents.userId, memberId))).toHaveLength(0);
+
+    // Owner's balance deducted; member's untouched.
+    const [ownerSub]  = await db.select().from(subscriptions).where(eq(subscriptions.userId, ownerId));
+    const [memberSub] = await db.select().from(subscriptions).where(eq(subscriptions.userId, memberId));
+    expect(Number(ownerSub.creditBalanceCents)).toBeCloseTo(975, 3);
+    expect(Number(memberSub.creditBalanceCents)).toBeCloseTo(1000, 3);
+  });
+
+  it('falls back to billing the actor when the server is unknown', async () => {
+    const r = await trackUsage({
+      userId: memberId,
+      model: 'claude-sonnet-4-6',
+      tokens,
+      costCents: 10,
+      context: ctx('ws_does_not_exist'),
+      anthropicRequestId: null,
+    });
+
+    expect(r.billedUserId).toBe(memberId);
+    const [memberSub] = await db.select().from(subscriptions).where(eq(subscriptions.userId, memberId));
+    expect(Number(memberSub.creditBalanceCents)).toBeCloseTo(990, 3);
   });
 });

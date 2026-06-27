@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, primaryKey, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
@@ -716,13 +716,28 @@ export const servers = pgTable('servers', {
   tokenHash: text('token_hash'), // SHA-256 hash of the server token (plaintext shown once at creation)
   serverUrl: text('server_url'), // URL of the registered server
   status: text('status').$type<ServerStatusType>(), // 'online' | 'offline' | 'suspended' | 'provisioning' | 'error'
+  provisionStep: text('provision_step'), // Coarse current provisioning step (see provisionSteps.ts); null once online
   lastSeen: timestamp('last_seen'), // Last heartbeat from server
   // Machine fields (for remote deployments)
   machineId: text('machine_id'), // Provider machine ID
   machineName: text('machine_name'), // Machine name
   region: text('region'), // Provider region (e.g., 'iad', 'fsn1')
   volumeId: text('volume_id'), // Provider volume ID for persistent storage
-  provider: text('provider').$type<'fly'>().notNull().default('fly'), // Infrastructure provider
+  provider: text('provider').$type<'fly' | 'docker'>().notNull().default('fly'), // Infrastructure provider
+  // Fly app + private network owning this workspace's machine. Per-tenant
+  // isolation: each workspace lives in its own Fly app on a dedicated 6PN
+  // network so peers cannot reach each other. Null = legacy machine in the
+  // shared FLY_APP_NAME app (see docs/per-app-isolation-migration.md).
+  flyAppName: text('fly_app_name'),
+  flyNetworkName: text('fly_network_name'),
+  // Structural-op flag: set true while migrateWorkspaceToOwnApp is running and
+  // cleared in finally. Distinct from `status` (which is operational state:
+  // online/offline/error/etc.) because the heartbeat + register handlers
+  // legitimately clobber `status` to 'online' whenever a process inside the
+  // workspace machine reaches the BE — and we need wake gates and the CF
+  // Worker to know "this workspace is structurally being moved" regardless of
+  // operational status. See docs/per-app-isolation-migration.md.
+  migrationInProgress: boolean('migration_in_progress').notNull().default(false),
   tier: text('tier').$type<ServerTier>().default('shared-cpu-1x'), // Machine tier based on hardware specs
   iconUrl: text('icon_url'), // Custom server icon (base64 data URL)
   // Auto-suspend settings
@@ -755,10 +770,29 @@ export const serversRelations = relations(servers, ({ one, many }) => ({
   invites: many(serverInvites),
   inviteLinks: many(serverInviteLinks),
   publicPorts: many(publicPorts),
+  provisionEvents: many(serverProvisionEvents),
 }));
 
 export type Server = typeof servers.$inferSelect;
 export type NewServer = typeof servers.$inferInsert;
+
+export const serverProvisionEvents = pgTable('server_provision_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverId: text('server_id').references(() => servers.id, { onDelete: 'cascade' }).notNull(),
+  step: text('step').notNull(),
+  message: text('message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const serverProvisionEventsRelations = relations(serverProvisionEvents, ({ one }) => ({
+  server: one(servers, {
+    fields: [serverProvisionEvents.serverId],
+    references: [servers.id],
+  }),
+}));
+
+export type ServerProvisionEvent = typeof serverProvisionEvents.$inferSelect;
+export type NewServerProvisionEvent = typeof serverProvisionEvents.$inferInsert;
 
 // ============================================================================
 // Server Members (team membership with roles)
@@ -1166,11 +1200,13 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   description: text('description'),
   status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled'>().default('pending'),
   visibility: text('visibility').notNull().$type<'public' | 'private'>().default('private'),
+  isPublished: boolean('is_published').notNull().default(false),
   sourceType: text('source_type').notNull().$type<'workspace' | 'widget'>().default('workspace'),
   createdByType: text('created_by_type').notNull().$type<'member' | 'external' | 'system' | 'agent'>().default('member'),
   createdById: text('created_by_id'),
   createdByName: text('created_by_name'),
   commentsDisabled: boolean('comments_disabled').notNull().default(false),
+  useWorktree: boolean('use_worktree').notNull().default(false),
   taskType: text('task_type').notNull().$type<'regular' | 'delayed' | 'scheduled'>().default('regular'),
   schedule: text('schedule'),
   scheduledAt: bigint('scheduled_at', { mode: 'number' }),
@@ -1185,6 +1221,8 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   votingEndsAt: timestamp('voting_ends_at'),
   legacyWorkspaceTodoId: text('legacy_workspace_todo_id'),
   lastMigratedAt: timestamp('last_migrated_at'),
+  lastInteractorUserId: text('last_interactor_user_id'),
+  lastInteractorAt: timestamp('last_interactor_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => [
@@ -1262,6 +1300,72 @@ export type NewWorkspaceTaskAttachment = typeof workspaceTaskAttachments.$inferI
 export type WorkspaceTaskVote = typeof workspaceTaskVotes.$inferSelect;
 export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 
+// A GitHub App installation is a connection to a GitHub account/org (one per
+// (app, account), keyed by GitHub's numeric installation_id). It is NOT owned
+// by a single workspace — it is workspace-SHARED via github_installation_workspaces.
+// connected_by_user_id records the RunHQ user who authorized it (audit only).
+export const githubAppInstallations = pgTable('github_app_installations', {
+  installationId: bigint('installation_id', { mode: 'number' }).primaryKey(),
+  connectedByUserId: uuid('connected_by_user_id').references(() => users.id),
+  accountLogin: text('account_login').notNull(),
+  accountType: text('account_type').notNull().$type<'User' | 'Organization'>(),
+  repositorySelection: text('repository_selection').$type<'all' | 'selected' | null>(),
+  suspendedAt: timestamp('suspended_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export type GithubAppInstallation = typeof githubAppInstallations.$inferSelect;
+export type NewGithubAppInstallation = typeof githubAppInstallations.$inferInsert;
+
+// Many-to-many: which workspaces an installation is "available in". An
+// installation can be associated with multiple workspaces; usage is gated by
+// workspace membership + manage_project, not by who connected it. ON DELETE
+// CASCADE removes associations when the installation or the server is deleted.
+export const githubInstallationWorkspaces = pgTable('github_installation_workspaces', {
+  installationId: bigint('installation_id', { mode: 'number' })
+    .notNull()
+    .references(() => githubAppInstallations.installationId, { onDelete: 'cascade' }),
+  serverId: text('server_id')
+    .notNull()
+    .references(() => servers.id, { onDelete: 'cascade' }),
+  addedByUserId: uuid('added_by_user_id').references(() => users.id),
+  addedAt: timestamp('added_at').defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.installationId, t.serverId] }),
+}));
+
+export type GithubInstallationWorkspace = typeof githubInstallationWorkspaces.$inferSelect;
+export type NewGithubInstallationWorkspace = typeof githubInstallationWorkspaces.$inferInsert;
+
+// Central mirror of "project X (on server S) is linked to GitHub repo owner/repo
+// via installation I". The authoritative link lives in each server machine's
+// local DB; servers sync it up here (on link/unlink + boot backfill) so the
+// cloud BE can aggregate open PRs across every server a user belongs to without
+// contacting individual machines. Treated as a CACHE: cascade-deletes with the
+// server or installation, and self-heals via the backfill. One repo per project
+// (PK = server+project).
+export const githubProjectRepos = pgTable('github_project_repos', {
+  serverId: text('server_id')
+    .notNull()
+    .references(() => servers.id, { onDelete: 'cascade' }),
+  projectId: text('project_id').notNull(),
+  installationId: bigint('installation_id', { mode: 'number' })
+    .notNull()
+    .references(() => githubAppInstallations.installationId, { onDelete: 'cascade' }),
+  owner: text('owner').notNull(),
+  repo: text('repo').notNull(),
+  projectName: text('project_name'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.serverId, t.projectId] }),
+  installIdx: index('github_project_repos_installation_idx').on(t.installationId),
+}));
+
+export type GithubProjectRepo = typeof githubProjectRepos.$inferSelect;
+export type NewGithubProjectRepo = typeof githubProjectRepos.$inferInsert;
+
 // ============================================================================
 // Widget — Embeddable voting/feedback widget
 // ============================================================================
@@ -1269,36 +1373,120 @@ export type NewWorkspaceTaskVote = typeof workspaceTaskVotes.$inferInsert;
 export const widgetProjects = pgTable('widget_projects', {
   id: uuid('id').primaryKey().defaultRandom(),
   serverId: text('server_id').notNull(),
+  workspaceProjectId: text('workspace_project_id'), // nullable during rollout; NOT NULL in follow-up migration
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   apiKey: text('api_key').notNull().unique(),
   apiSecretHash: text('api_secret_hash').notNull(),
   enabled: boolean('enabled').default(true).notNull(),
   isPublic: boolean('is_public').default(false).notNull(),
+  widgetLoginUrl: text('widget_login_url'),
   autoApprove: boolean('auto_approve').default(false).notNull(),
   autoInjectInPreview: boolean('auto_inject_in_preview').default(false).notNull(),
   widgetPosition: text('widget_position'),
+  widgetLanguage: text('widget_language'),
   votingPeriodHours: integer('voting_period_hours'),
+  widgetAgentAssignmentEnabled: boolean('widget_agent_assignment_enabled').default(false).notNull(),
+  widgetAssignRoles: text('widget_assign_roles').array().notNull().default(sql`ARRAY[]::text[]`),
+  widgetRoleClaimName: text('widget_role_claim_name').notNull().default('runhq_roles'),
+  widgetAssignRateLimitPerHour: integer('widget_assign_rate_limit_per_hour').notNull().default(30),
+  // Chat-with-agent intake: the support agent entity handling widget chat
+  // (null = chat disabled on the widget home screen) + an optional per-widget
+  // instruction layer the workspace stacks on top of the agent's own prompt.
+  widgetChatAgentEntityId: text('widget_chat_agent_entity_id'),
+  widgetChatInstructions: text('widget_chat_instructions'),
+  // Role→permissions RBAC map. Keys are JWT role names (or '*' for any
+  // authenticated user); values are arrays of WidgetPermission strings.
+  // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder","preview"] }
+  widgetRolePermissions: jsonb('widget_role_permissions').$type<Record<string, string[]>>().notNull().default({}),
+  // Feature flag enabling the live-coder UI for this widget project.
+  widgetLiveCoderEnabled: boolean('widget_live_coder_enabled').notNull().default(false),
+  // Origins (e.g. https://acme.com) where the widget is allowed to use
+  // cookie-based RunHQ-member auto-recognition. Required when
+  // autoRecognizeRunhqMembers is true; enforced at the CORS + auth layer.
+  allowedOrigins: text('allowed_origins').array().notNull().default(sql`ARRAY[]::text[]`),
+  // Opt-in toggle. When true, viewers with a valid rw_session cookie who are
+  // members of this project's serverId are identified as their RunHQ user.
+  // Identity precedence: runhq > app (customer JWT) > anonymous.
+  autoRecognizeRunhqMembers: boolean('auto_recognize_runhq_members').notNull().default(false),
   channelId: text('channel_id'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (t) => [
+  // One widget per (server, PROJECT): a project owns at most one widget.
+  // channel_id is now the mutable "target todo channel" the widget feeds,
+  // not the identity. Partial because the per-project migration orphans
+  // duplicate rows by setting workspace_project_id = NULL (Postgres treats
+  // NULLs as distinct, so orphans coexist under this index).
+  uniqueIndex('widget_projects_server_workspace_project_unique')
+    .on(t.serverId, t.workspaceProjectId)
+    .where(sql`${t.workspaceProjectId} IS NOT NULL`),
+]);
 
 export const widgetUsers = pgTable('widget_users', {
   id: uuid('id').primaryKey().defaultRandom(),
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   externalUserId: text('external_user_id').notNull(),
+  // Discriminates between identity sources so the same human authenticated
+  // via two paths produces two distinct rows (no silent identity merging).
+  // 'app'   = customer-issued JWT (sub claim)
+  // 'runhq' = workspace-member cookie auth (externalUserId = 'runhq:<userId>')
+  authSource: text('auth_source').notNull().default('app'),
   name: text('name'),
   username: text('username'),
   avatarUrl: text('avatar_url'),
+  // Per-user permission tier. Replaces JWT-role-derived permissions: a user's
+  // effective widget permissions are resolved from this tier, not from a
+  // project role map. 'app_user' = files tickets/chats + attaches images;
+  // 'staff' = full control (assign agents, live session, preview).
+  permissionTier: text('permission_tier').notNull().default('app_user'),
+  // Captured from the JWT `email` claim (app path) or users.email (runhq path)
+  // when available; null when the issuer doesn't provide it.
+  email: text('email'),
+  // Refreshed (throttled) on each widget auth so the Members tab can surface
+  // recent activity without a separate analytics store.
+  lastActiveAt: timestamp('last_active_at'),
+  // Identifying claims carried by the customer's JWT beyond sub/name/email
+  // (e.g. company, plan, account_id). Reserved/security claims are stripped.
+  // Refreshed on each auth and surfaced as auto-columns in the Members tab so
+  // admins can identify who a widget user actually is. Varies per project.
+  metadata: jsonb('metadata').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-  lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+  // Soft-delete tombstone for GDPR erasure (community feature). 'deleted' rows
+  // are excluded from leaderboard/member listings. Note: "last seen" lives in
+  // master's `lastActiveAt` above — the community feature reuses that, it does
+  // not maintain a separate column.
   status: text('status').$type<'active' | 'deleted'>().notNull().default('active'),
 }, (t) => [
-  { name: 'widget_users_project_external_unique', columns: [t.projectId, t.externalUserId], unique: true },
+  { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
   // widget_users_project_active_idx is a partial index (WHERE status = 'active')
   // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
 ]);
+
+// Mirror of workspace agent_entities rows (ALL agents, not just exposed ones).
+// Source of truth lives in workspace SQLite; BE caches for fast modal open and
+// for resolving agent display names (e.g. the chat support agent's header name)
+// without round-tripping a possibly-cold workspace machine.
+// Written only by /api/internal/servers/:serverId/widget-agents/sync.
+// `exposed` marks membership in the widget's "Hand to agent" roster — name
+// lookups (chat header, assigned events) intentionally ignore it so a support
+// agent can be named in chat without being assignable by widget users.
+export const widgetExposedAgents = pgTable('widget_exposed_agents', {
+  widgetProjectId: uuid('widget_project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id').notNull(),
+  agentName: text('agent_name').notNull(),
+  agentDescription: text('agent_description'),
+  // Defaults true: rows synced by pre-flag workspace servers were exposed by
+  // definition (those servers only pushed widget_exposed=true agents).
+  exposed: boolean('exposed').default(true).notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.widgetProjectId, t.agentId] }),
+  index('widget_exposed_agents_project_idx').on(t.widgetProjectId),
+]);
+
+export type WidgetExposedAgent = typeof widgetExposedAgents.$inferSelect;
+export type NewWidgetExposedAgent = typeof widgetExposedAgents.$inferInsert;
 
 // Legacy widget tables — kept in schema to prevent db:push from dropping them.
 // Data will be migrated to workspace_tasks, then these can be removed.
@@ -1392,9 +1580,8 @@ export const widgetUserNotifications = pgTable('widget_user_notifications', {
   // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
 }));
 
-export type WidgetProject = typeof widgetProjects.$inferSelect;
-export type NewWidgetProject = typeof widgetProjects.$inferInsert;
-export type WidgetUser = typeof widgetUsers.$inferSelect;
+// Community point-system types (WidgetProject / NewWidgetProject / WidgetUser
+// are defined below alongside master's WidgetChannel aliases — not duplicated here).
 export type NewWidgetUser = typeof widgetUsers.$inferInsert;
 
 export type PointGrant = typeof pointGrants.$inferSelect;
@@ -1405,3 +1592,303 @@ export type NewWidgetUserBalance = typeof widgetUserBalances.$inferInsert;
 
 export type WidgetUserNotification = typeof widgetUserNotifications.$inferSelect;
 export type NewWidgetUserNotification = typeof widgetUserNotifications.$inferInsert;
+
+// Clarification loop: one session per ticket, tracks the back-and-forth
+// between the widget user and the agent before the task is started.
+export const widgetClarifications = pgTable('widget_clarifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  serverId: text('server_id').notNull().references(() => servers.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id').notNull(),
+  command: text('command').notNull(),
+  status: text('status').notNull().$type<'asking' | 'ready' | 'skipped' | 'duplicate' | 'started'>().default('asking'),
+  round: integer('round').notNull().default(0),
+  /**
+   * When status='duplicate': the id of the workspace_tasks row that this ticket
+   * duplicates. Null otherwise.
+   */
+  duplicateOfTaskId: text('duplicate_of_task_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_clarifications_task_id_idx').on(t.taskId),
+]);
+
+export const widgetClarificationQuestions = pgTable('widget_clarification_questions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  clarificationId: uuid('clarification_id').notNull().references(() => widgetClarifications.id, { onDelete: 'cascade' }),
+  prompt: text('prompt').notNull(),
+  options: jsonb('options').$type<string[] | null>(),
+  multiselect: boolean('multiselect').notNull().default(false),
+  status: text('status').notNull().$type<'pending' | 'answered'>().default('pending'),
+  answer: jsonb('answer').$type<string | string[] | null>(),
+  round: integer('round').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  answeredAt: timestamp('answered_at'),
+}, (t) => [
+  index('widget_clarification_questions_clarification_id_idx').on(t.clarificationId),
+]);
+
+export type WidgetClarification = typeof widgetClarifications.$inferSelect;
+export type NewWidgetClarification = typeof widgetClarifications.$inferInsert;
+export type WidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferSelect;
+export type NewWidgetClarificationQuestion = typeof widgetClarificationQuestions.$inferInsert;
+
+// ============================================================================
+// Widget Chat (agent intake)
+// ============================================================================
+
+/**
+ * Inline event-card payloads in the widget chat transcript. Stored verbatim
+ * in widget_chat_messages.payload; the widget renders each kind as a card.
+ */
+export type WidgetChatEventPayload =
+  | { kind: 'proposal'; title: string; description: string; toolUseId: string }
+  | { kind: 'proposal_resolved'; created: boolean; ticketId?: string }
+  | { kind: 'ticket_link'; ticketId: string; title: string; status: string }
+  // The model-visible trace of a search_tickets call (query + the tool result
+  // text). render-only for the widget; the WORKSPACE reconstructs the
+  // search_tickets tool exchange from it each turn so the disposable agent loop
+  // remembers it already searched and does not re-run the deflection search
+  // (re-showing the same cards) on every visitor message.
+  | { kind: 'search_performed'; query: string; resultText: string }
+  | { kind: 'assigned'; ticketId: string; agentEntityId: string; agentName: string | null }
+  | { kind: 'system_notice'; code: string; text: string }
+  | { kind: 'force_proposal_requested' }
+  // Agentless intake: appended once after the first user message when no
+  // support agent is configured; the widget renders the "anything more?"
+  // bubble + persistent [Submit Ticket] affordance off it.
+  | { kind: 'collect_prompt' }
+  // Live-coder forward rejected by injection guard. The reason string carries
+  // a machine-readable code ('injection_guard') so the widget can show a
+  // localized error without parsing human text.
+  | { kind: 'live_coder_rejected'; reason: string };
+
+/**
+ * Attribution payload on role='team' rows (workspace-member replies from the
+ * Conversations inbox). Discriminated by the row's role, not a kind tag —
+ * role='team' rows always carry exactly this shape.
+ */
+export type WidgetChatTeamPayload = { authorName: string };
+
+/** Everything widget_chat_messages.payload can hold, across all roles. */
+export type WidgetChatMessagePayload = WidgetChatEventPayload | WidgetChatTeamPayload;
+
+// One agent-intake conversation per widget user at a time (status='active');
+// closed after ticket creation. BE Postgres is the source of truth — the
+// workspace rehydrates the transcript from here every turn.
+export const widgetChatConversations = pgTable('widget_chat_conversations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  widgetProjectId: uuid('widget_project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  status: text('status').notNull().$type<'active' | 'closed'>().default('active'),
+  /** The workspace_tasks row created from this conversation's proposal. */
+  createdTaskId: uuid('created_task_id'),
+  /** Abuse cap counter: number of user messages sent (30 max per conversation). */
+  userTurnCount: integer('user_turn_count').notNull().default(0),
+  /** The in-flight turn, if any. Cleared on turn_done / turn_error / timeout. */
+  pendingTurnId: uuid('pending_turn_id'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_chat_conversations_user_idx').on(t.widgetProjectId, t.widgetUserId),
+]);
+
+// Transcript rows. role='user' (widget visitor), 'agent' (model reply text),
+// 'team' (workspace-member reply; payload = WidgetChatTeamPayload), 'event'
+// (structured card — see WidgetChatEventPayload). The role column is
+// app-enforced (TEXT, no CHECK constraint) so widening it is a type-only
+// change. Workspace-reported rows carry (turn_id, seq) for idempotent
+// ingestion; user rows and BE-written notices leave seq null (notices keep
+// turn_id so a late turn_done can find and delete them).
+export const widgetChatMessages = pgTable('widget_chat_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id').notNull().references(() => widgetChatConversations.id, { onDelete: 'cascade' }),
+  role: text('role').notNull().$type<'user' | 'agent' | 'team' | 'event'>(),
+  content: text('content').notNull().default(''),
+  payload: jsonb('payload').$type<WidgetChatMessagePayload | null>(),
+  turnId: text('turn_id'),
+  seq: integer('seq'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_chat_messages_conversation_idx').on(t.conversationId, t.createdAt),
+  // Idempotency key for workspace event ingestion: retries upsert on
+  // (turn_id, seq) and cannot duplicate. Partial — rows without a turn_id
+  // (user messages) are exempt, and seq-null notices stay insertable because
+  // unique indexes treat NULLs as distinct.
+  uniqueIndex('widget_chat_messages_turn_seq_unique')
+    .on(t.turnId, t.seq)
+    .where(sql`${t.turnId} IS NOT NULL`),
+]);
+
+export type WidgetChatConversation = typeof widgetChatConversations.$inferSelect;
+export type NewWidgetChatConversation = typeof widgetChatConversations.$inferInsert;
+export type WidgetChatMessage = typeof widgetChatMessages.$inferSelect;
+export type NewWidgetChatMessage = typeof widgetChatMessages.$inferInsert;
+
+// Per-channel naming: the widget is now anchored to a single todo channel,
+// so the row type is named `WidgetChannel` (the underlying table keeps the
+// `widget_projects` name to avoid Drizzle / SQL churn).
+export type WidgetChannel = typeof widgetProjects.$inferSelect;
+export type NewWidgetChannel = typeof widgetProjects.$inferInsert;
+/** @deprecated Use `WidgetChannel`. Kept for one release while consumers update. */
+export type WidgetProject = WidgetChannel;
+/** @deprecated Use `NewWidgetChannel`. Kept for one release while consumers update. */
+export type NewWidgetProject = NewWidgetChannel;
+export type WidgetUser = typeof widgetUsers.$inferSelect;
+
+// ============================================================================
+// Workflow Cron Schedules
+// ============================================================================
+
+export const workflowCronSchedules = pgTable('workflow_cron_schedules', {
+  id: text('id').primaryKey(),
+  serverId: text('server_id').notNull(),
+  // Exactly one of agentId / jobId is set; enforced by CHECK constraint in SQL.
+  agentId: text('agent_id'),
+  jobId: text('job_id'),
+  workflowVersion: integer('workflow_version').notNull(),
+  triggerNodeId: text('trigger_node_id').notNull(),
+  schedule: text('schedule').notNull(),
+  timezone: text('timezone'),
+  nextFireAt: timestamp('next_fire_at', { withTimezone: true }).notNull(),
+  lastFiredAt: timestamp('last_fired_at', { withTimezone: true }),
+  enabled: boolean('enabled').notNull().default(true),
+}, (t) => ({
+  uniqServerAgentNode: uniqueIndex('uniq_server_agent_node')
+    .on(t.serverId, t.agentId, t.triggerNodeId)
+    .where(sql`agent_id IS NOT NULL`),
+  uniqServerJobNode: uniqueIndex('uniq_server_job_node')
+    .on(t.serverId, t.jobId, t.triggerNodeId)
+    .where(sql`job_id IS NOT NULL`),
+  nextFireIdx: index('idx_next_fire').on(t.nextFireAt).where(sql`enabled = true`),
+}));
+
+export type WorkflowCronScheduleRow = typeof workflowCronSchedules.$inferSelect;
+
+// ============================================================================
+// /tests harness cases — shared editable test suite
+// ============================================================================
+// The /tests harness's case definitions (prompt + AI-judge expectedOutcome).
+// One canonical suite, shared across every workspace. Reads are open to any
+// authenticated session; writes are gated by users.is_admin.
+
+export const harnessCases = pgTable('harness_cases', {
+  id: text('id').primaryKey(),
+  label: text('label').notNull(),
+  prompt: text('prompt').notNull(),
+  expectedOutcome: text('expected_outcome').notNull(),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type HarnessCaseRow = typeof harnessCases.$inferSelect;
+
+// ============================================================================
+// Notification Platform
+// ============================================================================
+
+export const userNotificationPreferences = pgTable('user_notification_preferences', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  inAppEnabled: boolean('in_app_enabled').notNull().default(true),
+  browserEnabled: boolean('browser_enabled').notNull().default(true),
+  pushEnabled: boolean('push_enabled').notNull().default(true),
+  emailEnabled: boolean('email_enabled').notNull().default(false),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type UserNotificationPreferences = typeof userNotificationPreferences.$inferSelect;
+
+export const notificationMutes = pgTable('notification_mutes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  scopeType: text('scope_type', { enum: ['server', 'project'] }).notNull(),
+  // scope_id holds heterogeneous, non-UUID identifiers: workspace server IDs
+  // (ws_<base36>_<random>) and free-form project IDs — the same kind of values
+  // stored in notifications.server_id / project_id. It must be text, not uuid,
+  // or the mute gate query (applyGates) coerces a serverId to uuid and Postgres
+  // throws, stalling every notification delivery. See migration 008 (same fix
+  // for the notifications table) and 2026-05-23-001 (this column).
+  scopeId: text('scope_id').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  uniqUserScope: uniqueIndex('notification_mutes_user_scope_unique').on(t.userId, t.scopeType, t.scopeId),
+  userExpires: index('notification_mutes_user_expires').on(t.userId, t.expiresAt),
+}));
+
+export type NotificationMute = typeof notificationMutes.$inferSelect;
+
+export const pushSubscriptions = pgTable('push_subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  platform: text('platform', { enum: ['web_push', 'apns', 'fcm'] }).notNull(),
+  endpoint: text('endpoint').notNull(),
+  keys: jsonb('keys'),
+  userAgent: text('user_agent'),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  uniqEndpoint: uniqueIndex('push_subscriptions_user_platform_endpoint_unique').on(t.userId, t.platform, t.endpoint),
+  userPlatform: index('push_subscriptions_user_platform').on(t.userId, t.platform),
+}));
+
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+
+export const notifications = pgTable('notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  eventId: text('event_id').notNull().unique(),
+  // server_id is text — workspace servers use a ws_<base36>_<random> format,
+  // not UUID. Corrected from uuid in migration 008.
+  serverId: text('server_id').notNull(),
+  serverName: text('server_name').notNull(),
+  // project_id is text — workspaceProjectId is a free-form string, not UUID.
+  // Corrected from uuid in migration 008.
+  projectId: text('project_id').notNull(),
+  projectName: text('project_name').notNull(),
+  taskId: uuid('task_id').notNull(),
+  taskTitle: text('task_title').notNull(),
+  // Workspace channel the task/job lives in, snapshot at emit time. Lets the
+  // client deep-link a notification to the job's chat. Nullable: tasks with no
+  // channel (and test notifications) have no deep-link target.
+  channelId: text('channel_id'),
+  // Workspace job/session the task is bound to (canonical_task_execution_states.
+  // job_id on the workspace server). Snapshot at emit time. When present the
+  // client deep-links to /session/:jobId (the running session, not the todo's
+  // channel). Nullable; the client falls back to channelId.
+  jobId: text('job_id'),
+  eventType: text('event_type', { enum: ['need_help', 'completed'] }).notNull(),
+  readAt: timestamp('read_at', { withTimezone: true }),
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type NotificationRow = typeof notifications.$inferSelect;
+
+export const notificationDeliveries = pgTable('notification_deliveries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  notificationId: uuid('notification_id').notNull().references(() => notifications.id, { onDelete: 'cascade' }),
+  channel: text('channel', { enum: ['in_app', 'browser_api', 'web_push', 'apns', 'fcm', 'email'] }).notNull(),
+  status: text('status', { enum: ['pending', 'sent', 'skipped', 'failed', 'dead'] }).notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+  deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type NotificationDelivery = typeof notificationDeliveries.$inferSelect;
+
+export const serverRateCounters = pgTable('server_rate_counters', {
+  serverId: uuid('server_id').notNull(),
+  bucketStart: timestamp('bucket_start', { withTimezone: true }).notNull(),
+  count: integer('count').notNull().default(0),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.serverId, t.bucketStart] }),
+  byTime: index('server_rate_counters_bucket').on(t.bucketStart),
+}));
+
+export type ServerRateCounter = typeof serverRateCounters.$inferSelect;

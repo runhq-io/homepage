@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { destroyMachines } from './actions';
+import { destroyInfra, deleteServers } from './actions';
+import type { InfraTarget } from './actions';
 import type { InfrastructureRow } from './page';
 
 type StatusFilter = 'all' | 'orphaned' | 'matched' | 'stale';
@@ -16,14 +17,13 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
     return true;
   });
 
-  const selectableRows = filtered.filter(r => r.status === 'orphaned');
-  const allSelectableSelected = selectableRows.length > 0 && selectableRows.every(r => selected.has(r.key));
+  const allSelectableSelected = filtered.length > 0 && filtered.every(r => selected.has(r.key));
 
   function toggleAll() {
     if (allSelectableSelected) {
       setSelected(new Set());
     } else {
-      setSelected(new Set(selectableRows.map(r => r.key)));
+      setSelected(new Set(filtered.map(r => r.key)));
     }
   }
 
@@ -38,16 +38,77 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
 
   function handleDestroy() {
     if (selected.size === 0) return;
-    if (!confirm(`Destroy ${selected.size} orphaned machine${selected.size > 1 ? 's' : ''} on the cloud provider? This cannot be undone.`)) return;
 
-    const machines = filtered
-      .filter(r => selected.has(r.key) && r.status === 'orphaned')
-      .map(r => ({ id: r.machineId, provider: r.provider }));
+    const selectedRows = filtered.filter(r => selected.has(r.key));
+    const matchedRows = selectedRows.filter(r => r.status === 'matched');
+    const orphanedRows = selectedRows.filter(r => r.status === 'orphaned');
+    const staleRows = selectedRows.filter(r => r.status === 'stale' && r.dbServerId);
+
+    // matched + orphaned both go through destroyInfra → tears down the Fly app
+    // (and machines/volumes/network it cascades to). matched additionally has
+    // a dbServerId so the DB row + CF tunnel get cleaned up too.
+    const infraTargets: InfraTarget[] = [...matchedRows, ...orphanedRows].map(r => ({
+      flyAppName: r.flyAppName,
+      dbServerId: r.dbServerId,
+    }));
+    const staleServerIds = staleRows.map(r => r.dbServerId!);
+
+    const parts: string[] = [];
+    if (matchedRows.length > 0) {
+      parts.push(`${matchedRows.length} LIVE user server${matchedRows.length > 1 ? 's' : ''}`);
+    }
+    if (orphanedRows.length > 0) {
+      parts.push(`${orphanedRows.length} orphaned Fly app${orphanedRows.length > 1 ? 's' : ''}`);
+    }
+    if (staleRows.length > 0) {
+      parts.push(`${staleRows.length} stale DB record${staleRows.length > 1 ? 's' : ''}`);
+    }
+
+    if (matchedRows.length > 0) {
+      const names = matchedRows
+        .map(r => `  • ${r.dbServerName || r.machineName} (${r.ownerEmail || 'unknown owner'})`)
+        .join('\n');
+      const others = [
+        orphanedRows.length > 0 ? `${orphanedRows.length} orphaned Fly app${orphanedRows.length > 1 ? 's' : ''}` : null,
+        staleRows.length > 0 ? `${staleRows.length} stale DB record${staleRows.length > 1 ? 's' : ''}` : null,
+      ].filter(Boolean).join(' and ');
+      const warning =
+        `⚠️  You are about to DESTROY ${matchedRows.length} live user server${matchedRows.length > 1 ? 's' : ''}:\n\n${names}\n\n` +
+        `This will delete the Fly app (machine + volume + network) AND the DB record. The user(s) will lose access immediately.` +
+        (others ? `\n\nPlus: ${others}` : '');
+      if (!confirm(warning)) return;
+      const phrase = `destroy ${matchedRows.length}`;
+      const typed = window.prompt(`Type "${phrase}" to confirm:`);
+      if (typed?.trim().toLowerCase() !== phrase) {
+        alert('Confirmation phrase did not match. Aborted.');
+        return;
+      }
+    } else {
+      if (!confirm(`Delete ${parts.join(' and ')}? This cannot be undone.`)) return;
+    }
 
     startTransition(async () => {
-      const result = await destroyMachines(machines);
-      if (result.errors.length > 0) {
-        alert(`Destroyed ${result.destroyed} machines.\nErrors:\n${result.errors.join('\n')}`);
+      const messages: string[] = [];
+
+      if (infraTargets.length > 0) {
+        const result = await destroyInfra(infraTargets);
+        messages.push(`Destroyed ${result.destroyed} Fly app${result.destroyed === 1 ? '' : 's'}.`);
+        if (result.errors.length > 0) {
+          messages.push(`Errors:\n${result.errors.join('\n')}`);
+        }
+      }
+
+      if (staleServerIds.length > 0) {
+        try {
+          const result = await deleteServers(staleServerIds);
+          messages.push(`Deleted ${result.count} stale DB record${result.count === 1 ? '' : 's'}.`);
+        } catch (err) {
+          messages.push(`Failed to delete stale DB records: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
+
+      if (messages.some(m => m.startsWith('Errors') || m.startsWith('Failed'))) {
+        alert(messages.join('\n'));
       }
       setSelected(new Set());
     });
@@ -75,7 +136,7 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
             disabled={isPending}
             className="ml-auto px-4 py-2 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
           >
-            {isPending ? 'Destroying...' : `Destroy ${selected.size} selected`}
+            {isPending ? 'Deleting...' : `Delete ${selected.size} selected`}
           </button>
         )}
       </div>
@@ -130,16 +191,12 @@ export function ServersTable({ rows }: { rows: InfrastructureRow[] }) {
                   className={`hover:bg-slate-700/30 ${selected.has(row.key) ? 'bg-slate-700/20' : ''} ${row.status === 'orphaned' ? 'bg-red-900/5' : ''}`}
                 >
                   <td className="px-4 py-3">
-                    {row.status === 'orphaned' ? (
-                      <input
-                        type="checkbox"
-                        checked={selected.has(row.key)}
-                        onChange={() => toggleOne(row.key)}
-                        className="rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
-                      />
-                    ) : (
-                      <span className="block w-4" />
-                    )}
+                    <input
+                      type="checkbox"
+                      checked={selected.has(row.key)}
+                      onChange={() => toggleOne(row.key)}
+                      className="rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                    />
                   </td>
                   <td className="px-4 py-3">
                     <ProviderBadge provider={row.provider} />

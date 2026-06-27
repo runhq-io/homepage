@@ -7,7 +7,7 @@
  */
 import 'dotenv/config';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../db/index';
 import {
@@ -16,6 +16,8 @@ import {
   workspaceTasks,
   workspaceTaskActivity,
   workspaceTaskComments,
+  widgetProjects,
+  widgetUsers,
 } from '../../db/schema';
 import { listFeed, countNew, memberStats, memberActivity } from './WorkspaceTaskActivityFeedService';
 
@@ -377,8 +379,9 @@ describe('WorkspaceTaskActivityFeedService.memberStats', () => {
       const aliceRows = stats.filter((s) => s.userId === ALICE_ID);
       expect(aliceRows.length).toBe(1);
 
-      // userName is max() of the two: 'Alice Smith' > 'Alice' lexicographically
-      expect(aliceRows[0].userName).toBe('Alice Smith');
+      // userName comes from `users.name` (current registered name), not the
+      // snapshotted createdByName, so renames in users propagate immediately.
+      expect(aliceRows[0].userName).toBe('Alice');
 
       // Both activity rows must be counted
       expect(aliceRows[0].tasksCreated).toBe(1);
@@ -576,8 +579,9 @@ describe('WorkspaceTaskActivityFeedService.memberActivity', () => {
       const aliceEntries = result.buckets[0].members.filter((m) => m.userId === ALICE_ID);
       expect(aliceEntries.length).toBe(1);
 
-      // userName is max() of the two names
-      expect(aliceEntries[0].userName).toBe('Alice Smith');
+      // userName comes from `users.name` (current registered name), not from
+      // the snapshotted createdByName, so renames in users propagate immediately.
+      expect(aliceEntries[0].userName).toBe('Alice');
 
       // Both rows counted
       expect(aliceEntries[0].created).toBe(1);
@@ -587,6 +591,106 @@ describe('WorkspaceTaskActivityFeedService.memberActivity', () => {
       await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, RENAME_SERVER));
       await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, RENAME_SERVER));
       await db.delete(servers).where(eq(servers.id, RENAME_SERVER));
+    }
+  });
+
+  it('collapses widget-user activity into the linked member account (widget_users.external_user_id)', async () => {
+    // Repro of the prod bug where the same human shows up as two legend entries:
+    //   • a 'member'  row (created_by_id = users.id, created_by_name = "Admin")
+    //   • an 'external' row from a widget comment
+    //     (created_by_id = widget_users.id, created_by_name = "J N",
+    //      widget_users.external_user_id pointing back to users.id)
+    // The chart legend must show one entry under one colour for this person.
+    const WIDGET_SERVER  = `ws_widget_act_${RUN_HEX}`;
+    const WIDGET_PROJECT = randomBytes(8).toString('hex');
+
+    await db
+      .insert(servers)
+      .values({ id: WIDGET_SERVER, name: `Widget Activity Test ${RUN_HEX}`, ownerId: ALICE_ID })
+      .onConflictDoNothing();
+
+    const widgetProjectResult = await db.execute<{ id: string }>(sql`
+      INSERT INTO widget_projects (server_id, name, slug, api_key, api_secret_hash)
+      VALUES (
+        ${WIDGET_SERVER},
+        ${`Widget Project ${RUN_HEX}`},
+        ${`widget-${RUN_HEX}-${WIDGET_PROJECT}`},
+        ${`apikey-${RUN_HEX}-${WIDGET_PROJECT}`},
+        ${`secret-${RUN_HEX}-${WIDGET_PROJECT}`}
+      )
+      RETURNING id
+    `);
+    const [widgetProject] = widgetProjectResult.rows;
+    if (!widgetProject) throw new Error('Failed to insert widget project');
+
+    // Widget user whose external_user_id is ALICE_ID — same human as the member row below.
+    const aliceWidgetResult = await db.execute<{ id: string }>(sql`
+      INSERT INTO widget_users (project_id, external_user_id, name)
+      VALUES (${widgetProject.id}, ${ALICE_ID}, ${'J N'})
+      RETURNING id
+    `);
+    const [aliceWidget] = aliceWidgetResult.rows;
+    if (!aliceWidget) throw new Error('Failed to insert widget user');
+
+    const [task] = await db
+      .insert(workspaceTasks)
+      .values({ serverId: WIDGET_SERVER, title: `Widget Task ${RUN_HEX}` })
+      .returning({ id: workspaceTasks.id });
+    if (!task) throw new Error('Failed to insert task');
+
+    const base = Date.now() - 3000;
+
+    await db.insert(workspaceTaskActivity).values([
+      {
+        serverId: WIDGET_SERVER,
+        taskId: task.id,
+        type: 'task_created',
+        createdByType: 'member',
+        createdById: ALICE_ID,
+        createdByName: 'Admin',
+        createdAt: new Date(base),
+      },
+      {
+        serverId: WIDGET_SERVER,
+        taskId: task.id,
+        type: 'agent_assigned',
+        createdByType: 'external',
+        createdById: aliceWidget.id,
+        createdByName: 'J N',
+        createdAt: new Date(base + 1000),
+      },
+    ]);
+
+    try {
+      const startMs = base - 5000;
+      const endMs   = base + 60_000;
+      const result = await memberActivity(WIDGET_SERVER, startMs, endMs, 'day');
+
+      expect(result.buckets.length).toBe(1);
+
+      // Both rows must collapse to a single member entry under ALICE_ID
+      // (the canonical user_id), not split into two by member vs external.
+      const aliceEntries = result.buckets[0].members.filter((m) => m.userId === ALICE_ID);
+      expect(aliceEntries.length).toBe(1);
+
+      // The widget_users.id must NOT appear as a separate member.
+      const widgetEntry = result.buckets[0].members.find((m) => m.userId === aliceWidget.id);
+      expect(widgetEntry).toBeUndefined();
+
+      // Display name comes from users.name ('Alice'), not the snapshotted
+      // 'Admin' or 'J N' — keeps the legend in sync with the user's profile.
+      expect(aliceEntries[0].userName).toBe('Alice');
+
+      // Both rows counted under the merged entry
+      expect(aliceEntries[0].created).toBe(1);
+      expect(aliceEntries[0].assigned).toBe(1);
+      expect(aliceEntries[0].total).toBe(2);
+    } finally {
+      await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.serverId, WIDGET_SERVER));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, WIDGET_SERVER));
+      await db.delete(widgetUsers).where(eq(widgetUsers.projectId, widgetProject.id));
+      await db.delete(widgetProjects).where(eq(widgetProjects.id, widgetProject.id));
+      await db.delete(servers).where(eq(servers.id, WIDGET_SERVER));
     }
   });
 

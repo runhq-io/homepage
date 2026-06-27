@@ -49,7 +49,7 @@ export interface LeaderboardMember {
   name: string | null;
   avatarUrl: string | null;
   createdAt: Date;
-  lastSeenAt: Date;
+  lastActiveAt: Date | null;
   balance: number;
   payoutsCount: number;
   rank: number | null;
@@ -118,7 +118,7 @@ export class CommunityLeaderboardService {
    *  - 'rank'    → coalesce(rank, 999999999) ASC, name ASC  (no-rank → bottom)
    *  - 'balance' → coalesce(balance, 0) DESC, name ASC
    *  - 'name'    → name ASC
-   *  - 'recent'  → last_seen_at DESC, name ASC
+   *  - 'recent'  → last_active_at DESC NULLS LAST, name ASC
    */
   async listMembers(args: {
     projectId: string;
@@ -153,7 +153,7 @@ export class CommunityLeaderboardService {
         name: widgetUsers.name,
         avatarUrl: widgetUsers.avatarUrl,
         createdAt: widgetUsers.createdAt,
-        lastSeenAt: widgetUsers.lastSeenAt,
+        lastActiveAt: widgetUsers.lastActiveAt,
         balance: balanceExpr,
         payoutsCount: payoutsCountExpr,
         rank: widgetUserBalances.rank,
@@ -211,7 +211,7 @@ export class CommunityLeaderboardService {
         name: widgetUsers.name,
         avatarUrl: widgetUsers.avatarUrl,
         createdAt: widgetUsers.createdAt,
-        lastSeenAt: widgetUsers.lastSeenAt,
+        lastActiveAt: widgetUsers.lastActiveAt,
         status: widgetUsers.status,
         balance: balanceExpr,
         payoutsCount: payoutsCountExpr,
@@ -253,7 +253,7 @@ export class CommunityLeaderboardService {
       name: row.name,
       avatarUrl: row.avatarUrl,
       createdAt: row.createdAt,
-      lastSeenAt: row.lastSeenAt,
+      lastActiveAt: row.lastActiveAt,
       status: row.status,
       balance: row.balance,
       payoutsCount: row.payoutsCount,
@@ -289,8 +289,10 @@ function buildOrderBy(sort: SortKey): SQL[] {
     case 'name':
       return [asc(widgetUsers.name)];
     case 'recent':
+      // lastActiveAt is nullable (a user who never re-authenticated). NULLS LAST
+      // so never-active members sort to the bottom of "recent", not the top.
       return [
-        desc(widgetUsers.lastSeenAt),
+        sql`${widgetUsers.lastActiveAt} DESC NULLS LAST`,
         asc(widgetUsers.name),
       ];
   }

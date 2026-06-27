@@ -90,6 +90,14 @@ export async function POST(request: NextRequest) {
     path: '/',
     maxAge: 30 * 24 * 60 * 60,
   });
+  const isProd = process.env.NODE_ENV === 'production';
+  response.cookies.set('rw_session', sessionToken, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/api/widget/',
+    maxAge: 7 * 24 * 60 * 60,
+  });
   return response;
 }
 

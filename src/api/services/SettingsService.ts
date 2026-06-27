@@ -6,7 +6,21 @@ export interface SystemSettings {
   claudeApiKey: string;
   claudeModel: string;
   systemPrompt: string;
+  serverCreationDisabled: boolean;
+  serverCreationDisabledMessage: string;
+  /**
+   * Per-server rolling spend cap in cents (0 = disabled). When > 0, the
+   * /api/claude/tools proxy rejects inference for a server once its summed
+   * usage cost since `spendCapResetTs` reaches this value — a guardrail to
+   * stop runaway spend during testing without touching the real credit balance.
+   */
+  spendCapCents: number;
+  /** Epoch ms; only usage at/after this instant counts toward `spendCapCents`. */
+  spendCapResetTs: number;
 }
+
+export const DEFAULT_SERVER_CREATION_DISABLED_MESSAGE =
+  'Server creation is temporarily disabled. Please try again later.';
 
 // Default global system prompt - applies to ALL agents
 export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `You are an AI virtual employee. You don't just assist - you actually DO the work yourself.
@@ -22,6 +36,10 @@ function getDefaults(): SystemSettings {
     claudeApiKey: process.env.ANTHROPIC_API_KEY || '',
     claudeModel: 'claude-sonnet-4-6',
     systemPrompt: DEFAULT_GLOBAL_SYSTEM_PROMPT,
+    serverCreationDisabled: false,
+    serverCreationDisabledMessage: DEFAULT_SERVER_CREATION_DISABLED_MESSAGE,
+    spendCapCents: 0,
+    spendCapResetTs: 0,
   };
 }
 
@@ -39,10 +57,16 @@ export async function getSettings(): Promise<SystemSettings> {
     const rows = await db.select().from(systemSettings);
     const settingsMap = new Map(rows.map((r) => [r.key, r.value]));
 
+    const defaults = getDefaults();
     cachedSettings = {
-      claudeApiKey: settingsMap.get('claude_api_key') || getDefaults().claudeApiKey,
-      claudeModel: settingsMap.get('claude_model') || getDefaults().claudeModel,
-      systemPrompt: settingsMap.get('system_prompt') || getDefaults().systemPrompt,
+      claudeApiKey: settingsMap.get('claude_api_key') || defaults.claudeApiKey,
+      claudeModel: settingsMap.get('claude_model') || defaults.claudeModel,
+      systemPrompt: settingsMap.get('system_prompt') || defaults.systemPrompt,
+      serverCreationDisabled: settingsMap.get('server_creation_disabled') === 'true',
+      serverCreationDisabledMessage:
+        settingsMap.get('server_creation_disabled_message') || defaults.serverCreationDisabledMessage,
+      spendCapCents: Number(settingsMap.get('spend_cap_cents') ?? '') || 0,
+      spendCapResetTs: Number(settingsMap.get('spend_cap_reset_ts') ?? '') || 0,
     };
     cacheTime = Date.now();
 

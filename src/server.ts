@@ -29,6 +29,12 @@ import { setCommunityBroadcastSink } from './api/services/communityBroadcaster';
 import { initProviders } from './api/services/providers/registry';
 import * as MachineUsageService from './api/services/MachineUsageService';
 import * as ServerService from './api/services/ServerService';
+import { registerCronSyncRoute } from './api/internal/cron-sync';
+import { WorkflowCronScheduler } from './api/services/WorkflowCronScheduler';
+import { ServerRegistry } from './api/services/ServerRegistry';
+import { startPgBoss, stopPgBoss } from './notifications/pgBoss';
+import { setWsServer } from './notifications/wsRegistry';
+import { DeliveryPoller } from './notifications/workers/poller';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -61,6 +67,27 @@ async function main() {
   // ── Hono app (API routes) ────────────────────────────────────────────
   const honoApp = createHttpApp();
 
+  // ── Workflow cron subsystem (feature-gated) ───────────────────────────
+  const WORKFLOWS_V1 = process.env.WORKFLOWS_V1 === 'true' || process.env.WORKFLOWS_V1 === '1';
+  let cronScheduler: WorkflowCronScheduler | null = null;
+
+  if (WORKFLOWS_V1) {
+    const serverRegistry = new ServerRegistry(db);
+
+    registerCronSyncRoute(honoApp, {
+      db,
+      getServerToken: (serverId) => serverRegistry.getServerToken(serverId),
+    });
+
+    cronScheduler = new WorkflowCronScheduler({
+      db,
+      serverRegistry,
+    });
+    cronScheduler.start();
+
+    console.log('[workflow] cron subsystem wired (WORKFLOWS_V1=true)');
+  }
+
   // ── Next.js app ──────────────────────────────────────────────────────
   // Dynamic import so the server-only modules don't fail during tsc
   const next = (await import('next')).default;
@@ -72,9 +99,24 @@ async function main() {
   await nextApp.prepare();
   const nextHandler = nextApp.getRequestHandler();
 
+  // ── pg-boss (notification queue) ─────────────────────────────────────
+  try {
+    await startPgBoss();
+    console.log('[be] pg-boss started');
+  } catch (err) {
+    console.error('[be] pg-boss failed to start (notifications will use poller fallback):', err);
+  }
+
+  // ── Delivery poller (fallback / catch-all) ────────────────────────────
+  const deliveryPoller = new DeliveryPoller();
+  deliveryPoller.start();
+
   // ── WebSocket server (noServer mode) ─────────────────────────────────
   const wsServer = new RunHQWebSocketServer({ noServer: true });
   registerWsHandlers(wsServer);
+
+  // Register WS server in the notification registry so channel workers can push.
+  setWsServer(wsServer);
 
   // Wire community-points events to WS topic delivery. The community services
   // are constructed at module-load time (before this server exists), so they
@@ -100,8 +142,14 @@ async function main() {
     //   /health
     //   /billing/*
     //   /oauth/*
+    //   /widget.js  — must go to Hono so the route handler can prepend
+    //                 window.__RW_CONSTANTS__ before serving the file. If
+    //                 it falls through to Next.js, public/widget.js is
+    //                 served raw and the status registry is missing
+    //                 (regression: status_change events fall back to
+    //                 the generic "changed status" label).
     const isHonoApiRoute = url.startsWith('/api/') && !isNextAuthRoute && !isNextAdminCsvRoute;
-    const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/') || url.startsWith('/oauth/');
+    const isHonoRoute = isHonoApiRoute || url.startsWith('/health') || url.startsWith('/billing/') || url.startsWith('/oauth/') || url === '/widget.js' || url.startsWith('/widget.js?');
 
     if (isHonoRoute) {
       // Convert Node.js IncomingMessage to a Fetch API Request for Hono
@@ -198,6 +246,9 @@ async function main() {
   // ── Graceful shutdown ────────────────────────────────────────────────
   const shutdown = () => {
     console.log('\n[be] Shutting down...');
+    cronScheduler?.stop();
+    deliveryPoller.stop().catch(console.error);
+    stopPgBoss().catch(console.error);
     server.close();
     wsServer.close();
     process.exit(0);

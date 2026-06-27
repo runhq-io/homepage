@@ -308,7 +308,13 @@ export type ActivityType =
   | 'agent_unassigned'
   | 'task_archived'
   | 'task_unarchived'
-  | 'task_deleted';
+  | 'task_deleted'
+  | 'branch_pushed'
+  | 'pr_linked'
+  // Agent-authored, customer-facing ticket status update. The ONLY activity
+  // type whose free-form `content` is surfaced to external widget viewers; it
+  // is produced exclusively through the runhq-side screening gate.
+  | 'agent_update';
 
 export interface ActivityLogEntry {
   id: string;
@@ -356,11 +362,14 @@ export interface CanonicalTask {
   description?: string | null;
   status: CanonicalTaskStatus;
   visibility: CanonicalTaskVisibility;
+  isPublished: boolean;
   sourceType: CanonicalTaskSourceType;
   createdByType: CanonicalTaskActorType;
   createdById?: string | null;
   createdByName?: string | null;
   commentsDisabled: boolean;
+  /** When true, this task's coding job runs in an isolated git worktree+branch. */
+  useWorktree?: boolean;
   type: CanonicalTaskType;
   schedule?: string | null;
   scheduledAt?: number | null;

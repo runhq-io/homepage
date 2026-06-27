@@ -9,6 +9,38 @@ type DownloadableAttachment = {
   originalName?: string | null;
 };
 
+const METADATA_VALUE_MAX_LENGTH = 1024;
+const STORAGE_FILENAME_MAX_LENGTH = 160;
+
+function toSafeHeaderValue(value: string | null | undefined, maxLength = METADATA_VALUE_MAX_LENGTH): string {
+  if (!value) return '';
+  return value.replace(/[^\x20-\x7E]/g, '_').slice(0, maxLength);
+}
+
+function sanitizeStorageFilename(input: string | null | undefined): string {
+  const leaf = String(input || '').split(/[\\/]/).filter(Boolean).pop() || 'attachment';
+  const sanitized = leaf
+    .replace(/[^\x20-\x7E]/g, '_')
+    .replace(/[<>:"|?*]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+/, '')
+    .trim();
+  return (sanitized || 'attachment').slice(0, STORAGE_FILENAME_MAX_LENGTH);
+}
+
+function encodeRFC5987Value(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/['()]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/\*/g, '%2A');
+}
+
+function contentDispositionForFilename(originalName: string): string {
+  const fallback = toSafeHeaderValue(originalName, STORAGE_FILENAME_MAX_LENGTH)
+    .replace(/[\\"]/g, '_')
+    .trim() || 'attachment';
+  return `inline; filename="${fallback}"; filename*=UTF-8''${encodeRFC5987Value(originalName)}`;
+}
+
 export class TaskAttachmentStorageService {
   private client: S3Client | null = null;
 
@@ -48,7 +80,7 @@ export class TaskAttachmentStorageService {
     const requestedTtl = Number(process.env.TASK_ATTACHMENT_STORAGE_PRESIGN_TTL_SECONDS || '604800');
     const expiresIn = Math.max(60, Math.min(Number.isFinite(requestedTtl) ? requestedTtl : 604800, 604800));
     const disposition = attachment.originalName
-      ? `inline; filename="${attachment.originalName.replace(/"/g, '')}"`
+      ? contentDispositionForFilename(attachment.originalName)
       : undefined;
 
     return getSignedUrl(
@@ -84,11 +116,12 @@ export class TaskAttachmentStorageService {
 
     const storageProvider = process.env.TASK_ATTACHMENT_STORAGE_PROVIDER as 'r2' | 's3';
     const bucket = process.env.TASK_ATTACHMENT_STORAGE_BUCKET!;
+    const storageFilename = sanitizeStorageFilename(params.filename);
     const ext = (() => {
-      const idx = params.filename.lastIndexOf('.');
-      return idx >= 0 ? params.filename.slice(idx) : '';
+      const idx = storageFilename.lastIndexOf('.');
+      return idx > 0 ? storageFilename.slice(idx) : '';
     })();
-    const base = ext ? params.filename.slice(0, -ext.length) : params.filename;
+    const base = ext ? storageFilename.slice(0, -ext.length) : storageFilename;
     const key = params.mode === 'migration' && params.ownerType && params.ownerLegacyId
       ? [
           'servers',
@@ -96,7 +129,7 @@ export class TaskAttachmentStorageService {
           'workspace-task-migration',
           params.ownerType,
           params.ownerLegacyId,
-          params.filename,
+          storageFilename,
         ].join('/')
       : [
           'servers',
@@ -111,9 +144,9 @@ export class TaskAttachmentStorageService {
       Body: params.body instanceof ArrayBuffer ? Buffer.from(params.body) : params.body,
       ContentType: params.mimeType,
       Metadata: {
-        filename: params.filename,
-        originalname: params.originalName ?? '',
-        serverid: params.serverId,
+        filename: toSafeHeaderValue(storageFilename),
+        originalname: toSafeHeaderValue(params.originalName ?? params.filename),
+        serverid: toSafeHeaderValue(params.serverId),
       },
     }));
 

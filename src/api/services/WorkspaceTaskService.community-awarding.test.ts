@@ -134,8 +134,8 @@ describe('status update triggers community awarding', () => {
     const taskId = await insertWidgetTask({ status: 'in_progress' });
 
     const updated = await updateTask(SERVER_ID, taskId, { status: 'done' });
-    expect(updated).not.toBeNull();
-    expect(updated!.status).toBe('done');
+    expect(updated.task).not.toBeNull();
+    expect(updated.task!.status).toBe('done');
 
     const grants = await db
       .select()
@@ -295,8 +295,8 @@ describe('status update triggers community awarding', () => {
     const result = await updateTask(SERVER_ID, taskId, { status: 'done' });
 
     // The status update must have succeeded regardless
-    expect(result).not.toBeNull();
-    expect(result!.status).toBe('done');
+    expect(result.task).not.toBeNull();
+    expect(result.task!.status).toBe('done');
   });
 
   it('updates workspace_task.status even if awarding finds no widgetUser for the creator', async () => {
@@ -319,8 +319,8 @@ describe('status update triggers community awarding', () => {
     // Should not throw; awarding silently no-ops
     const result = await updateTask(SERVER_ID, taskId, { status: 'done' });
 
-    expect(result).not.toBeNull();
-    expect(result!.status).toBe('done');
+    expect(result.task).not.toBeNull();
+    expect(result.task!.status).toBe('done');
 
     // No grant inserted because widgetUser resolution failed
     const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));

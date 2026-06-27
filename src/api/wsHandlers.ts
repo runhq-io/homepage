@@ -74,8 +74,10 @@ import * as TaskService from './services/TaskService';
 import * as OrganizationService from './services/OrganizationService';
 import * as ServerService from './services/ServerService';
 import { db } from '../db/index';
-import { users, widgetProjects } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { users, widgetProjects, notifications } from '../db/schema';
+import { eq, and, isNull } from 'drizzle-orm';
+import { broadcastToUser } from '../notifications/wsBroadcast';
+import { wsServer as getWsServer } from '../notifications/wsRegistry';
 
 export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
   // Handle get_agents request from desktop
@@ -1097,6 +1099,52 @@ export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
       timestamp: Date.now(),
     };
     wsServer.send(client, response);
+  });
+
+  // ============================================================================
+  // Notification WS handlers (client→BE)
+  // ============================================================================
+
+  // notification:mark-read — mark a single notification as read and echo back.
+  wsServer.onMessage('notification:mark-read', async (client, _message) => {
+    const msg = _message as any;
+    if (!client.userId || !msg.id) return;
+    await db
+      .update(notifications)
+      .set({ readAt: new Date() })
+      .where(and(eq(notifications.id, msg.id), eq(notifications.userId, client.userId)));
+    try {
+      broadcastToUser(getWsServer(), client.userId, {
+        type: 'notification:read',
+        id: msg.id,
+        read_at: new Date().toISOString(),
+      });
+    } catch { /* WS not yet registered during test bootstrap */ }
+  });
+
+  // notification:mark-all-read — mark all unread notifications as read.
+  wsServer.onMessage('notification:mark-all-read', async (client, _message) => {
+    if (!client.userId) return;
+    await db
+      .update(notifications)
+      .set({ readAt: new Date() })
+      .where(and(eq(notifications.userId, client.userId), isNull(notifications.readAt)));
+  });
+
+  // notification:archive — archive a single notification and echo back.
+  wsServer.onMessage('notification:archive', async (client, _message) => {
+    const msg = _message as any;
+    if (!client.userId || !msg.id) return;
+    await db
+      .update(notifications)
+      .set({ archivedAt: new Date() })
+      .where(and(eq(notifications.id, msg.id), eq(notifications.userId, client.userId)));
+    try {
+      broadcastToUser(getWsServer(), client.userId, {
+        type: 'notification:archived',
+        id: msg.id,
+      });
+    } catch { /* WS not yet registered during test bootstrap */ }
   });
 
   // Get server members

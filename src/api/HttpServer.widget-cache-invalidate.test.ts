@@ -84,6 +84,7 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('POST', '/api/widget/enable', {
       serverId: 'srv_1',
+      projectId: 'proj_1',
       name: 'Widget Project',
       channelId: 'ch_1',
     });
@@ -97,14 +98,16 @@ describe('widget cache invalidation route wiring', () => {
       mockServer,
       'user_1',
       '/__preview/config-invalidate',
-      { method: 'POST', body: { kind: 'widget' } },
+      { method: 'POST', body: { kind: 'widget', projectId: 'proj_1' } },
     );
   });
 
   it('DELETE /api/widget/disable push-invalidates preview widget cache', async () => {
     (WidgetService.disableWidget as any).mockResolvedValue(undefined);
 
-    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1');
+    // Phase 5: channelId is required; projectId is still extracted from the
+    // query so it can be forwarded into the cache-invalidate payload.
+    const res = await sendJson('DELETE', '/api/widget/disable?serverId=srv_1&channelId=ch_1&projectId=proj_1');
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ success: true });
@@ -115,7 +118,7 @@ describe('widget cache invalidation route wiring', () => {
       mockServer,
       'user_1',
       '/__preview/config-invalidate',
-      { method: 'POST', body: { kind: 'widget' } },
+      { method: 'POST', body: { kind: 'widget', projectId: 'proj_1' } },
     );
   });
 
@@ -124,6 +127,8 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('PUT', '/api/widget/settings', {
       serverId: 'srv_1',
+      channelId: 'ch_1',
+      projectId: 'proj_1',
       auto_approve: true,
       widget_position: 'bottom-right',
       is_public: true,
@@ -140,9 +145,17 @@ describe('widget cache invalidation route wiring', () => {
       mockServer,
       'user_1',
       '/__preview/config-invalidate',
-      { method: 'POST', body: { kind: 'widget' } },
+      { method: 'POST', body: { kind: 'widget', projectId: 'proj_1' } },
     );
   });
+
+  // NOTE: the former "channelId-only admin lookup omits projectId" cases were
+  // removed in the per-project migration. The admin routes (/disable, /settings)
+  // now require `projectId` and return 400 before reaching the cache-invalidate
+  // path, so a channelId-only call can no longer produce an invalidate body.
+  // The `pushInvalidateWidgetCache` helper still omits an absent projectId from
+  // the payload — that contract is now exercised by the projectId-bearing cases
+  // above and is structurally guaranteed by `if (projectId !== undefined)`.
 
   it('does not push-invalidate when widget settings validation fails', async () => {
     (WidgetService.updateWidgetSettings as any).mockRejectedValue(
@@ -151,6 +164,8 @@ describe('widget cache invalidation route wiring', () => {
 
     const res = await sendJson('PUT', '/api/widget/settings', {
       serverId: 'srv_1',
+      channelId: 'ch_1',
+      projectId: 'proj_1',
       auto_inject_in_preview: true,
     });
 

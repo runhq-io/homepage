@@ -1,27 +1,45 @@
 import { db, servers, users } from '@/db';
 import { eq, desc } from 'drizzle-orm';
-import { listFlyMachines, isFlyConfigured } from '@/lib/fly-api';
+import {
+  listAppsInOrg,
+  listMachines,
+  isConfigured as isFlyConfigured,
+  type FlyMachine,
+} from '@/api/services/FlyService';
 import { ServersTable } from './ServersTable';
-import type { FlyMachine } from '@/lib/fly-api';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * One row per piece of server infrastructure to manage.
+ *
+ * Each user "server" lives in its own Fly app under per-app isolation
+ * (`workspaceAppName(serverId)` in FlyService.ts). The status field categorizes
+ * each row by which side of the (Fly app ↔ DB row) join is missing.
+ */
 export type InfrastructureRow = {
-  /** Unique key for React (provider:machineId or db:serverId) */
+  /** Stable React key (`fly:<app>` or `stale:<serverId>`) */
   key: string;
   provider: 'fly';
+  /** Per-tenant Fly app name (always set; equals `workspaceAppName(serverId)` for matched rows) */
+  flyAppName: string;
+  /** First machine in the app, if any */
   machineId: string;
   machineName: string;
   machineState: string;
   region: string;
   createdAt: string;
   cpuInfo?: string;
-  /** If matched to a DB server */
+  /** DB-side fields (only when status=matched|stale) */
   dbServerId?: string;
   dbServerName?: string;
   ownerName?: string;
   ownerEmail?: string;
-  /** 'orphaned' = provider machine with no DB record, 'matched' = has DB record, 'stale' = DB record with no provider machine */
+  /**
+   * matched  = Fly app exists AND a DB server row references it
+   * orphaned = Fly app exists but no DB row references it (cleanup target)
+   * stale    = DB row references a Fly app name that no longer exists
+   */
   status: 'orphaned' | 'matched' | 'stale';
 };
 
@@ -29,6 +47,7 @@ type DbServer = {
   id: string;
   name: string;
   machineId: string | null;
+  flyAppName: string | null;
   provider: string | null;
   deploymentType: string | null;
   region: string | null;
@@ -37,12 +56,15 @@ type DbServer = {
   ownerName: string | null;
 };
 
+const WORKSPACE_APP_PREFIX = 'ws-';
+
 async function getDbServers(): Promise<DbServer[]> {
   return db
     .select({
       id: servers.id,
       name: servers.name,
       machineId: servers.machineId,
+      flyAppName: servers.flyAppName,
       provider: servers.provider,
       deploymentType: servers.deploymentType,
       region: servers.region,
@@ -55,34 +77,69 @@ async function getDbServers(): Promise<DbServer[]> {
     .orderBy(desc(servers.createdAt));
 }
 
+/**
+ * Collect (app, machines) pairs for every per-tenant workspace Fly app in the
+ * org. Listing machines is per-app (the Machines REST API has no global
+ * endpoint), so we fan out one request per app — bounded by the small number
+ * of workspaces.
+ *
+ * `apiErrors` accumulates per-app failures so a single rotten app doesn't
+ * blank out the whole admin page.
+ */
+async function collectFlyAppsAndMachines(
+  apiErrors: string[],
+): Promise<Array<{ appName: string; appStatus: string; machines: FlyMachine[] }>> {
+  let apps: Array<{ name: string; status: string }>;
+  try {
+    apps = await listAppsInOrg(WORKSPACE_APP_PREFIX);
+  } catch (err) {
+    apiErrors.push(`Fly.io listAppsInOrg: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    return [];
+  }
+
+  const results = await Promise.all(
+    apps.map(async (app) => {
+      try {
+        const machines = await listMachines(app.name);
+        return { appName: app.name, appStatus: app.status, machines };
+      } catch (err) {
+        apiErrors.push(
+          `Fly.io listMachines(${app.name}): ${err instanceof Error ? err.message : 'Unknown error'}`,
+        );
+        return { appName: app.name, appStatus: app.status, machines: [] as FlyMachine[] };
+      }
+    }),
+  );
+  return results;
+}
+
 function buildRows(
-  flyMachines: FlyMachine[],
-  dbServers: DbServer[]
+  flyApps: Array<{ appName: string; appStatus: string; machines: FlyMachine[] }>,
+  dbServers: DbServer[],
 ): InfrastructureRow[] {
   const rows: InfrastructureRow[] = [];
   const matchedDbIds = new Set<string>();
 
-  // Process Fly machines
-  for (const machine of flyMachines) {
-    const dbMatch = dbServers.find(
-      s => s.machineId === machine.id
-    );
-
+  for (const { appName, appStatus, machines } of flyApps) {
+    const dbMatch = dbServers.find((s) => s.flyAppName === appName);
     if (dbMatch) matchedDbIds.add(dbMatch.id);
 
-    const guest = machine.config?.guest;
-    const cpuInfo = guest
-      ? `${guest.cpus || '?'}c / ${guest.memory_mb || '?'}MB`
-      : undefined;
+    // Workspaces are 1 machine per app under per-app isolation. If somehow
+    // multiple exist we surface the first; the destroy path operates at the
+    // app level so all machines get cleaned up regardless.
+    const machine = machines[0];
+    const guest = machine?.config?.guest;
+    const cpuInfo = guest ? `${guest.cpus ?? '?'}c / ${guest.memory_mb ?? '?'}MB` : undefined;
 
     rows.push({
-      key: `fly:${machine.id}`,
+      key: `fly:${appName}`,
       provider: 'fly',
-      machineId: machine.id,
-      machineName: machine.name,
-      machineState: machine.state,
-      region: machine.region,
-      createdAt: machine.created_at,
+      flyAppName: appName,
+      machineId: machine?.id ?? '',
+      machineName: machine?.name ?? appName,
+      machineState: machine?.state ?? appStatus ?? 'unknown',
+      region: machine?.region ?? '',
+      createdAt: machine?.created_at ?? new Date(0).toISOString(),
       cpuInfo,
       dbServerId: dbMatch?.id,
       dbServerName: dbMatch?.name,
@@ -92,20 +149,20 @@ function buildRows(
     });
   }
 
-  // Find stale DB records: remote servers with a machineId that don't match any provider machine
+  // Stale DB rows: remote server points at a Fly app that no longer exists.
   for (const dbServer of dbServers) {
     if (matchedDbIds.has(dbServer.id)) continue;
     if (dbServer.deploymentType !== 'remote') continue;
-    // Only flag as stale if the server has a machine reference
-    if (!dbServer.machineId) continue;
+    if (!dbServer.flyAppName) continue;
 
     rows.push({
       key: `stale:${dbServer.id}`,
       provider: 'fly',
-      machineId: dbServer.machineId || '',
+      flyAppName: dbServer.flyAppName,
+      machineId: dbServer.machineId ?? '',
       machineName: dbServer.name,
       machineState: 'unknown',
-      region: dbServer.region || '',
+      region: dbServer.region ?? '',
       createdAt: dbServer.createdAt.toISOString(),
       dbServerId: dbServer.id,
       dbServerName: dbServer.name,
@@ -121,32 +178,28 @@ function buildRows(
 export default async function ServersAdminPage() {
   const apiErrors: string[] = [];
 
-  // Fetch all data in parallel
-  const [flyResult, dbServers] = await Promise.all([
-    isFlyConfigured()
-      ? listFlyMachines().catch(err => {
-          apiErrors.push(`Fly.io: ${err instanceof Error ? err.message : 'Unknown error'}`);
-          return [] as FlyMachine[];
-        })
-      : (apiErrors.push('Fly.io: FLY_API_TOKEN not configured'), Promise.resolve([] as FlyMachine[])),
-    getDbServers(),
-  ]);
+  const flyDataPromise = isFlyConfigured()
+    ? collectFlyAppsAndMachines(apiErrors)
+    : (apiErrors.push('Fly.io: FLY_API_TOKEN not configured'),
+      Promise.resolve(
+        [] as Array<{ appName: string; appStatus: string; machines: FlyMachine[] }>,
+      ));
 
-  const rows = buildRows(flyResult, dbServers);
+  const [flyApps, dbServers] = await Promise.all([flyDataPromise, getDbServers()]);
 
-  // Compute stats
+  const rows = buildRows(flyApps, dbServers);
+
   const stats = {
     total: rows.length,
-    orphaned: rows.filter(r => r.status === 'orphaned').length,
-    matched: rows.filter(r => r.status === 'matched').length,
-    stale: rows.filter(r => r.status === 'stale').length,
+    orphaned: rows.filter((r) => r.status === 'orphaned').length,
+    matched: rows.filter((r) => r.status === 'matched').length,
+    stale: rows.filter((r) => r.status === 'stale').length,
   };
 
   return (
     <div>
       <h1 className="text-2xl font-bold text-white mb-8">Infrastructure</h1>
 
-      {/* API Error Banners */}
       {apiErrors.length > 0 && (
         <div className="mb-6 space-y-2">
           {apiErrors.map((err, i) => (
@@ -157,7 +210,6 @@ export default async function ServersAdminPage() {
         </div>
       )}
 
-      {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <StatCard label="Total Machines" value={stats.total} />
         <StatCard label="Matched" value={stats.matched} color="green" />
@@ -165,7 +217,6 @@ export default async function ServersAdminPage() {
         <StatCard label="Stale" value={stats.stale} color="yellow" />
       </div>
 
-      {/* Table */}
       <ServersTable rows={rows} />
     </div>
   );
@@ -174,7 +225,7 @@ export default async function ServersAdminPage() {
 function StatCard({
   label,
   value,
-  color = 'slate'
+  color = 'slate',
 }: {
   label: string;
   value: number;

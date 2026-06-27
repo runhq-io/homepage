@@ -3,6 +3,7 @@ import { db, users, emailVerificationTokens } from '@/db';
 import { eq, and, gt, isNull } from 'drizzle-orm';
 import { createHash } from 'crypto';
 import { rateLimit, rateLimitResponse } from '@/lib/rateLimit';
+import { safeRedirectUrl } from '@/lib/redirectAllowlist';
 
 // Rate limiter: 10 attempts per 15 min per IP
 const ipLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
@@ -84,7 +85,9 @@ export async function GET(request: NextRequest) {
 }
 
 function redirectWithMessage(redirect: string | null, status: string, message: string) {
-  const baseUrl = redirect || process.env.APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:5180';
+  // Reject attacker-supplied redirects; fall back to the configured app URL.
+  const safe = safeRedirectUrl(redirect);
+  const baseUrl = safe || process.env.APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:5180';
   const url = new URL('/login', baseUrl);
   url.searchParams.set('verified', status);
   url.searchParams.set('message', message);

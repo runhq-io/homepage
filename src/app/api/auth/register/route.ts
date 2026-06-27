@@ -141,6 +141,8 @@ export async function POST(request: NextRequest) {
       }
       const response = NextResponse.json({ success: true, user: userInfo, needsVerification: true, emailError: 'Verification email failed to send.' }, { status: 201, headers });
       response.cookies.set('auth_token', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: 30 * 24 * 60 * 60 });
+      const isProdR = process.env.NODE_ENV === 'production';
+      response.cookies.set('rw_session', token, { httpOnly: true, secure: isProdR, sameSite: isProdR ? 'none' : 'lax', path: '/api/widget/', maxAge: 7 * 24 * 60 * 60 });
       return response;
     }
   } else {
@@ -170,6 +172,15 @@ export async function POST(request: NextRequest) {
     sameSite: 'lax',
     path: '/',
     maxAge: 30 * 24 * 60 * 60, // 30 days
+  });
+  // Parallel rw_session cookie for widget cross-origin recognition.
+  const isProd = process.env.NODE_ENV === 'production';
+  response.cookies.set('rw_session', token, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/api/widget/',
+    maxAge: 7 * 24 * 60 * 60,
   });
 
   return response;

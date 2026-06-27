@@ -83,6 +83,8 @@ const providerMock = {
   waitForHealthy: vi.fn(),
   startMachine: vi.fn(),
   stopMachine: vi.fn(),
+  suspendMachine: vi.fn(),
+  restartMachine: vi.fn(),
   deleteMachine: vi.fn(),
   getRegions: vi.fn(() => [{ id: 'iad' }, { id: 'ams' }]),
   getTierSpecs: vi.fn(() => [{ tierId: 'perf-2x-8gb', diskGb: 60 }]),
@@ -91,6 +93,17 @@ const providerMock = {
   extendVolume: vi.fn(),
   deleteVolume: vi.fn(),
   createSnapshot: vi.fn(async () => ({ id: 'snap' })),
+  createVolumeFromSnapshot: vi.fn(async () => ({ id: 'vol-restored' })),
+  waitForVolumeReady: vi.fn(),
+  createApp: vi.fn(),
+  deleteApp: vi.fn(),
+  // Phase 6: per-tenant ingress setup. provisionNewMachine calls these
+  // when flyAppName is set, so any test that drives a per-tenant flow
+  // (reprovisionRemoteServer with persisted flyAppName, the post-cutover
+  // migration test) needs them mocked or the call would fail with
+  // "provider.allocateIPs is not a function".
+  allocateIPs: vi.fn(),
+  addCertificate: vi.fn(),
   getRoutingInfo: vi.fn(() => ({ serverUrl: '' })),
   id: 'fly',
 };
@@ -155,7 +168,32 @@ function assertNoDestructiveWipe(payloads: UpdatePayload[]) {
 
 beforeEach(async () => {
   captured.length = 0;
-  vi.clearAllMocks();
+  // resetAllMocks (not clearAllMocks) — clearAllMocks only clears call history,
+  // it does NOT drain queued mockResolvedValueOnce / mockRejectedValueOnce
+  // implementations. Without resetAllMocks, a once-rejection set up in one
+  // test can fire in a later test that didn't expect it.
+  vi.resetAllMocks();
+
+  // Re-establish default provider behavior. Tests override these per-case via
+  // mockResolvedValueOnce / mockRejectedValueOnce; defaults need to be
+  // re-applied here because resetAllMocks just wiped them.
+  providerMock.getVolume.mockImplementation(async () => ({ sizeGb: 60 }));
+  providerMock.forkVolume.mockImplementation(async () => ({ id: 'vol-forked' }));
+  providerMock.createSnapshot.mockImplementation(async () => ({ id: 'snap' }));
+  providerMock.createVolumeFromSnapshot.mockImplementation(async () => ({ id: 'vol-restored' }));
+  providerMock.getRegions.mockImplementation(() => [{ id: 'iad' }, { id: 'ams' }]);
+  providerMock.getTierSpecs.mockImplementation(() => [{ tierId: 'perf-2x-8gb', diskGb: 60 }]);
+  providerMock.getRoutingInfo.mockImplementation(() => ({ serverUrl: '' }));
+
+  // Re-establish dbMock.update's chain. Same reason as above: the original
+  // factory implementation was wiped by resetAllMocks.
+  dbMock.update.mockImplementation(() => ({
+    set: vi.fn((values: UpdatePayload) => {
+      captured.push(values);
+      return { where: vi.fn().mockResolvedValue(undefined) };
+    }),
+  }));
+
   // Fresh import so provider & db mocks are bound to the ServerService closure.
   vi.resetModules();
   ServerService = await import('./ServerService');
@@ -210,6 +248,41 @@ describe('wakeRemoteServerInternal — DB durability on provider errors', () => 
     expect(result.success).toBe(false);
     expect(captured).toHaveLength(0);
     assertNoDestructiveWipe(captured);
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration gate — must refuse to wake mid-migration even when status is
+  // online. Regression scenario: a process inside the workspace machine
+  // (heartbeat / register / agent) raced our stopMachine and called back into
+  // the BE, which legitimately UPSERTs status='online'. The dedicated
+  // `migrationInProgress` boolean column is the durable signal.
+  // -------------------------------------------------------------------------
+
+  it('refuses to wake when migrationInProgress=true even if status=online', async () => {
+    const result = await ServerService.wakeRemoteServerInternal({
+      ...liveServer,
+      status: 'online',
+      migrationInProgress: true,
+    } as any);
+
+    expect(result.success).toBe(false);
+    // Nothing should have been written, and no provider call should have
+    // been issued — the gate fires before tunnel backfill / getMachineState.
+    expect(captured).toHaveLength(0);
+    expect(providerMock.getMachineState).not.toHaveBeenCalled();
+    expect(providerMock.startMachine).not.toHaveBeenCalled();
+  });
+
+  it('refuses to wake when status=provisioning (legacy gate still works)', async () => {
+    const result = await ServerService.wakeRemoteServerInternal({
+      ...liveServer,
+      status: 'provisioning',
+      migrationInProgress: false,
+    } as any);
+
+    expect(result.success).toBe(false);
+    expect(captured).toHaveLength(0);
+    expect(providerMock.getMachineState).not.toHaveBeenCalled();
   });
 });
 
@@ -355,5 +428,372 @@ describe('changeRegion — metadata durability on region-change failure', () => 
       expect(payload).not.toHaveProperty('volumeId');
       expect(payload).not.toHaveProperty('tunnelToken');
     }
+  });
+});
+
+/**
+ * `db.select().from(...).where(...).limit(N)` is the chain used by getServer
+ * and checkServerPermission. The existing tests in this file mock the chain
+ * to return a single fixed value, which works for assertions that only check
+ * for the absence of destructive writes — those tests pass even when the
+ * function under test bails out early with success: false.
+ *
+ * The migration tests below need to actually exercise the migration body, so
+ * each select() call must return the correct row in sequence:
+ *
+ *   reprovisionRemoteServer:   [serverMembers row, server row]
+ *   migrateWorkspaceToOwnApp:  [server row (initial), server row (refresh)]
+ *
+ * Pass the responses in the order the selects happen.
+ */
+function mockSelectSequence(responses: unknown[]) {
+  let i = 0;
+  (dbMock as any).select = vi.fn(() => ({
+    from: vi.fn(() => ({
+      where: vi.fn(() => ({
+        limit: vi.fn(async () => {
+          const r = responses[i++];
+          if (r === undefined) return [];
+          return Array.isArray(r) ? r : [r];
+        }),
+      })),
+    })),
+  }));
+}
+
+// ===========================================================================
+// 5. migrateWorkspaceToOwnApp — failure-path state handling
+//
+// Three regression scenarios from review:
+//
+//   (a) Pre-cutover failure (createSnapshot, createApp, or
+//       createVolumeFromSnapshot throws): row must end up at status='offline'
+//       (NOT stuck in 'provisioning'); old machine + volume references
+//       unchanged; partial new resources cleaned up.
+//
+//   (b) Post-cutover failure (provisionNewMachine writes the row, then a
+//       wait throws): row must stay at status='provisioning' for operator
+//       attention; new app/volume must NOT be deleted (DB references them).
+//
+//   (c) First-provision retry safety: a row inserted with flyAppName already
+//       populated must round-trip through reprovisionRemoteServer to the
+//       per-tenant app, never the legacy shared app.
+// ===========================================================================
+
+describe('migrateWorkspaceToOwnApp — pre-cutover failures must drop the gate', () => {
+  const legacyServer = {
+    id: 'ws_test',
+    deploymentType: 'remote' as const,
+    machineId: 'mach_old',
+    machineName: 'srv-old',
+    serverUrl: 'https://fishtank-workspaces.fly.dev',
+    tunnelId: 'tun_test',
+    volumeId: 'vol_old',
+    region: 'iad',
+    tier: 'perf-2x-8gb',
+    autoSuspendEnabled: true,
+    provider: 'fly',
+    ownerId: 'user_test',
+    status: 'online' as const,
+    flyAppName: null,
+    flyNetworkName: null,
+  };
+
+  it('waits for the restored volume to be `created` before provisioning the new machine', async () => {
+    // After createVolumeFromSnapshot, Fly hydrates the volume in the
+    // background — state goes `restoring` → `created`. If the migrator
+    // skips the wait and immediately calls provisionNewMachine, the
+    // helper getOrCreateVolume sees `state !== 'created'` and creates
+    // a fresh empty volume, silently dropping the restored data.
+    // Reproduced once in staging. This test pins the contract:
+    // waitForVolumeReady MUST be called between createVolumeFromSnapshot
+    // and createMachine, with the same volume ID.
+    mockSelectSequence([legacyServer, legacyServer]);
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createVolumeFromSnapshot.mockResolvedValueOnce({ id: 'vol_new' });
+    providerMock.waitForVolumeReady.mockResolvedValueOnce(undefined);
+    providerMock.createMachine.mockResolvedValueOnce({
+      machineId: 'mach_new',
+      machineName: 'srv-new',
+      serverUrl: 'https://ws-test.fly.dev',
+      region: 'iad',
+      volumeId: 'vol_new',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
+    });
+    providerMock.waitForState.mockResolvedValueOnce(undefined);
+    providerMock.waitForHealthy.mockResolvedValueOnce(undefined);
+
+    await ServerService.migrateWorkspaceToOwnApp('ws_test');
+
+    // Wait was called exactly once, with the restored volume's id, on
+    // the new app — and BEFORE the machine was created.
+    expect(providerMock.waitForVolumeReady).toHaveBeenCalledTimes(1);
+    expect(providerMock.waitForVolumeReady).toHaveBeenCalledWith('vol_new', 'ws-test');
+
+    const waitOrder = providerMock.waitForVolumeReady.mock.invocationCallOrder[0];
+    const createMachineOrder = providerMock.createMachine.mock.invocationCallOrder[0];
+    expect(waitOrder).toBeLessThan(createMachineOrder);
+
+    // Happy-path migration_in_progress arc: flipped true at the start,
+    // explicitly cleared to false after the old-machine/volume cleanup.
+    // Without the trailing clear the workspace would be permanently
+    // gated even though the migration succeeded.
+    const migFlags = captured
+      .filter(p => 'migrationInProgress' in p)
+      .map(p => p.migrationInProgress);
+    expect(migFlags[0]).toBe(true);
+    expect(migFlags[migFlags.length - 1]).toBe(false);
+  });
+
+  it('disables autostart on the old machine before stop (prevents Fly auto-wake during snapshot)', async () => {
+    // Without `disableAutostart: true`, an open browser tab can race-restart
+    // the machine mid-snapshot via Fly's edge auto-wake. The volume never
+    // quiesces, the snapshot stays in `running` state past our poll
+    // timeout, and step 4 fails with "snapshot not found". This test pins
+    // the contract: step 1 MUST pass `disableAutostart: true` on stop.
+    mockSelectSequence([legacyServer, legacyServer]);
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createVolumeFromSnapshot.mockResolvedValueOnce({ id: 'vol_new' });
+    providerMock.createMachine.mockResolvedValueOnce({
+      machineId: 'mach_new',
+      machineName: 'srv-new',
+      serverUrl: 'https://ws-test.fly.dev',
+      region: 'iad',
+      volumeId: 'vol_new',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
+    });
+    providerMock.waitForState.mockResolvedValueOnce(undefined);
+    providerMock.waitForHealthy.mockResolvedValueOnce(undefined);
+
+    await ServerService.migrateWorkspaceToOwnApp('ws_test');
+
+    expect(providerMock.stopMachine).toHaveBeenCalledTimes(1);
+    expect(providerMock.stopMachine).toHaveBeenCalledWith(
+      'mach_old',
+      expect.any(String),
+      expect.objectContaining({ disableAutostart: true }),
+    );
+  });
+
+  it('createSnapshot throws → status=offline, no app/volume cleanup, no deleteApp called', async () => {
+    // Sequence of getServer calls during migrate:
+    //   1. start of migrate — reads the legacy row
+    //   2. inside catch — refresh to detect cutover (still legacy: pre-cutover)
+    mockSelectSequence([legacyServer, legacyServer]);
+
+    providerMock.createSnapshot.mockRejectedValueOnce(new Error('snapshot service down'));
+
+    await expect(ServerService.migrateWorkspaceToOwnApp('ws_test')).rejects.toThrow(/snapshot service down/);
+
+    // Must have flipped status='provisioning' first, then back to 'offline'.
+    const statuses = captured
+      .map(p => p.status)
+      .filter((s): s is string => typeof s === 'string');
+    expect(statuses).toEqual(['provisioning', 'offline']);
+
+    // migration_in_progress must follow the same arc: true on the gate flip,
+    // false in the recovery write. Anything else leaves the workspace
+    // permanently un-wakeable (wake gates would still trip on the residual
+    // flag).
+    const migFlags = captured
+      .filter(p => 'migrationInProgress' in p)
+      .map(p => p.migrationInProgress);
+    expect(migFlags).toEqual([true, false]);
+
+    // No app or volume was created, so neither should have been cleaned up.
+    expect(providerMock.createApp).not.toHaveBeenCalled();
+    expect(providerMock.createVolumeFromSnapshot).not.toHaveBeenCalled();
+    expect(providerMock.deleteApp).not.toHaveBeenCalled();
+    expect(providerMock.deleteVolume).not.toHaveBeenCalled();
+
+    // No destructive wipes of the legacy machine/volume references.
+    assertNoDestructiveWipe(captured);
+  });
+
+  it('createApp throws → status=offline, no volume cleanup, no deleteApp call', async () => {
+    mockSelectSequence([legacyServer, legacyServer]);
+
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockRejectedValueOnce(new Error('Fly org quota exceeded'));
+
+    await expect(ServerService.migrateWorkspaceToOwnApp('ws_test')).rejects.toThrow(/quota/);
+
+    const statuses = captured
+      .map(p => p.status)
+      .filter((s): s is string => typeof s === 'string');
+    expect(statuses).toEqual(['provisioning', 'offline']);
+
+    expect(providerMock.createVolumeFromSnapshot).not.toHaveBeenCalled();
+    expect(providerMock.deleteApp).not.toHaveBeenCalled(); // appCreated never flipped to true
+    expect(providerMock.deleteVolume).not.toHaveBeenCalled();
+
+    assertNoDestructiveWipe(captured);
+  });
+
+  it('createVolumeFromSnapshot throws → status=offline, deleteApp called, no deleteVolume', async () => {
+    mockSelectSequence([legacyServer, legacyServer]);
+
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createVolumeFromSnapshot.mockRejectedValueOnce(new Error('volume restore failed'));
+
+    await expect(ServerService.migrateWorkspaceToOwnApp('ws_test')).rejects.toThrow(/restore/);
+
+    const statuses = captured
+      .map(p => p.status)
+      .filter((s): s is string => typeof s === 'string');
+    expect(statuses).toEqual(['provisioning', 'offline']);
+
+    // App was created but volume restore threw — cleanup must delete the empty app.
+    expect(providerMock.deleteApp).toHaveBeenCalledTimes(1);
+    expect(providerMock.deleteApp).toHaveBeenCalledWith('ws-test');
+
+    // No new volume was created, so no deleteVolume.
+    expect(providerMock.deleteVolume).not.toHaveBeenCalled();
+
+    assertNoDestructiveWipe(captured);
+  });
+});
+
+describe('migrateWorkspaceToOwnApp — post-cutover failures must NOT clean up', () => {
+  const legacyServer = {
+    id: 'ws_test',
+    deploymentType: 'remote' as const,
+    machineId: 'mach_old',
+    machineName: 'srv-old',
+    serverUrl: 'https://fishtank-workspaces.fly.dev',
+    tunnelId: 'tun_test',
+    volumeId: 'vol_old',
+    region: 'iad',
+    tier: 'perf-2x-8gb',
+    autoSuspendEnabled: true,
+    provider: 'fly',
+    ownerId: 'user_test',
+    status: 'online' as const,
+    flyAppName: null,
+    flyNetworkName: null,
+  };
+
+  // Simulated post-cutover row state: provisionNewMachine has already written
+  // the new machineId + flyAppName. Status is still 'provisioning' because
+  // the final 'online' write happens only after the waits we're about to fail.
+  const postCutoverServer = {
+    ...legacyServer,
+    machineId: 'mach_new',
+    flyAppName: 'ws-test',
+    flyNetworkName: 'ws-test-net',
+    status: 'provisioning' as const,
+  };
+
+  it('waitForHealthy throws after DB cutover → status stays provisioning, no new resources deleted', async () => {
+    // 1st select: initial migrate read (legacy). 2nd select: refresh inside
+    // catch (post-cutover — flyAppName already flipped, simulating what
+    // provisionNewMachine wrote before the wait threw).
+    mockSelectSequence([legacyServer, postCutoverServer]);
+
+    providerMock.createSnapshot.mockResolvedValueOnce({ id: 'snap_x' });
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createVolumeFromSnapshot.mockResolvedValueOnce({ id: 'vol_new' });
+    providerMock.createMachine.mockResolvedValueOnce({
+      machineId: 'mach_new',
+      machineName: 'srv-new',
+      serverUrl: 'https://ws-test.fly.dev',
+      region: 'iad',
+      volumeId: 'vol_new',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
+    });
+    providerMock.waitForState.mockResolvedValueOnce(undefined);
+    // Health check fails — this is the post-cutover failure point.
+    providerMock.waitForHealthy.mockRejectedValueOnce(new Error('health check timed out'));
+
+    await expect(ServerService.migrateWorkspaceToOwnApp('ws_test')).rejects.toThrow(/health/);
+
+    // Critical: status was never reset to 'offline'. The only status writes
+    // should be the initial 'provisioning' flip; no 'offline' or 'online'
+    // anywhere in the captured payloads.
+    const statuses = captured
+      .map(p => p.status)
+      .filter((s): s is string => typeof s === 'string');
+    expect(statuses).toContain('provisioning');
+    expect(statuses).not.toContain('offline');
+
+    // migration_in_progress was flipped to true on entry and MUST remain
+    // true — the post-cutover branch deliberately leaves the structural-op
+    // gate set so wake / autoheal don't touch the half-deployed workspace
+    // until an operator clears it.
+    const migFlags = captured
+      .filter(p => 'migrationInProgress' in p)
+      .map(p => p.migrationInProgress);
+    expect(migFlags).toEqual([true]);
+
+    // New resources MUST NOT be deleted — DB row already references them.
+    expect(providerMock.deleteApp).not.toHaveBeenCalled();
+    // The only deleteVolume permitted in this path is on oldVolumeId during
+    // post-cutover step 6/7 cleanup, but we threw before reaching that.
+    expect(providerMock.deleteVolume).not.toHaveBeenCalled();
+  });
+});
+
+describe('reprovisionRemoteServer — first-provision retry stays per-tenant', () => {
+  it('persisted flyAppName routes the retry to the per-tenant app, not the shared app', async () => {
+    // Row state after a failed first-attempt provisioning: flyAppName is
+    // populated (createServer sets it at insert time, even before the machine
+    // exists), but machineId / serverUrl are still null because provisioning
+    // never reached the DB write step.
+    const failedFirstAttempt = {
+      id: 'ws_test',
+      deploymentType: 'remote' as const,
+      machineId: null,
+      machineName: null,
+      serverUrl: null,
+      tunnelId: null,
+      volumeId: null,
+      region: 'iad',
+      tier: 'perf-2x-8gb',
+      autoSuspendEnabled: true,
+      provider: 'fly',
+      ownerId: 'user_test',
+      status: 'error' as const,
+      flyAppName: 'ws-test',
+      flyNetworkName: 'ws-test-net',
+      tokenHash: 'old_hash',
+    };
+    // 1st select: checkServerPermission's serverMembers lookup (owner).
+    // 2nd select: getServer (failedFirstAttempt row).
+    mockSelectSequence([{ role: 'owner' }, failedFirstAttempt]);
+
+    providerMock.createApp.mockResolvedValueOnce(undefined);
+    providerMock.createMachine.mockResolvedValueOnce({
+      machineId: 'mach_new',
+      machineName: 'srv-new',
+      serverUrl: 'https://ws-test.fly.dev',
+      region: 'iad',
+      volumeId: 'vol_new',
+      appName: 'ws-test',
+      networkName: 'ws-test-net',
+    });
+    providerMock.waitForState.mockResolvedValueOnce(undefined);
+    providerMock.waitForHealthy.mockResolvedValueOnce(undefined);
+
+    const result = await ServerService.reprovisionRemoteServer('ws_test', 'user_test');
+
+    expect(result.success).toBe(true);
+
+    // The whole point of this test: createMachine was invoked targeting the
+    // per-tenant app, NOT the legacy shared app (NOT undefined / null).
+    expect(providerMock.createMachine).toHaveBeenCalledTimes(1);
+    const createMachineArgs = providerMock.createMachine.mock.calls[0][0];
+    expect(createMachineArgs.appName).toBe('ws-test');
+    expect(createMachineArgs.networkName).toBe('ws-test-net');
+
+    // And the idempotent createApp inside provisionNewMachine ran once with
+    // the persisted name (so a retry that lost the Fly app side-effect from
+    // the original createServer flight still recovers).
+    expect(providerMock.createApp).toHaveBeenCalledWith('ws-test', 'ws-test-net');
   });
 });

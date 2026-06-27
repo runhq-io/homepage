@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import {
   workspaceTasks,
@@ -10,6 +10,9 @@ import {
   widgetUsers,
   type WorkspaceTask,
 } from '../../db/schema';
+import { emitTaskNotification, type NotificationActor } from '../../notifications/emitTaskNotification';
+import { dispatchNotification } from '../../notifications/dispatch';
+import { publishTicketUpdate } from './WidgetTicketEvents';
 import type {
   ActivityType,
   CanonicalTaskAttachment,
@@ -42,6 +45,7 @@ type CreateWorkspaceTaskInput = {
   createdById?: string | null;
   createdByName?: string | null;
   commentsDisabled?: boolean;
+  useWorktree?: boolean;
   type?: CanonicalTaskType;
   schedule?: string | null;
   scheduledAt?: number | null;
@@ -53,9 +57,23 @@ type CreateWorkspaceTaskInput = {
   moderationStatus?: 'pending' | 'approved' | 'rejected';
   legacyWorkspaceTodoId?: string | null;
   attachments?: CanonicalTaskAttachmentInput[] | null;
+  isPublished?: boolean;
 };
 
-type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput>;
+type UpdateWorkspaceTaskInput = Partial<CreateWorkspaceTaskInput> & {
+  /** When provided, stamps last_interactor_user_id + last_interactor_at on the row. null clears both. */
+  lastInteractorUserId?: string | null;
+  /** Workspace job/session bound to this task right now. Not persisted on the
+   *  task row — the binding lives on the workspace server's execution-state
+   *  table and may move between jobs over time. Snapshot at emit time onto
+   *  the notification so a click can deep-link to the running session. */
+  workspaceJobId?: string | null;
+  /** Human-readable project name resolved on the workspace server. Not
+   *  persisted on the canonical task; snapshotted at emit time onto the
+   *  notification so the bell shows "MiniCal · Mobile" instead of
+   *  "MiniCal · tank_abc123". */
+  workspaceProjectName?: string | null;
+};
 
 const attachmentStorage = new TaskAttachmentStorageService();
 
@@ -136,11 +154,13 @@ function toCanonicalTask(row: WorkspaceTask, attachments?: CanonicalTaskAttachme
     description: row.description,
     status: row.status as CanonicalTaskStatus,
     visibility: row.visibility as CanonicalTaskVisibility,
+    isPublished: row.isPublished,
     sourceType: row.sourceType as CanonicalTaskSourceType,
     createdByType: row.createdByType as CanonicalTask['createdByType'],
     createdById: row.createdById,
     createdByName: row.createdByName,
     commentsDisabled: row.commentsDisabled,
+    useWorktree: row.useWorktree,
     type: row.taskType as CanonicalTaskType,
     schedule: row.schedule,
     scheduledAt: row.scheduledAt ?? null,
@@ -253,6 +273,137 @@ export async function listTasksByServer(
   }));
 }
 
+// ============================================================================
+// Task share-link resolution
+// ============================================================================
+//
+// A task share-link is minted client-side as `app.runhq.io/task/<shortId>`,
+// where `<shortId>` is the first 8 hex chars of the task UUID (git-style short
+// id). Old links use `/?todo=<full-uuid>`. Neither form carries server context,
+// so the web app asks the cloud — which mirrors every task in `workspace_tasks`
+// — to resolve the id to its owning server + channel before routing.
+//
+// The id in a link may be the canonical cloud id (newer tasks) or the original
+// per-workspace todo id (`legacyWorkspaceTodoId`, for tasks migrated from the
+// legacy todos table), so we match on either column.
+
+/** A classified, validated task share-link id. */
+export type TaskShareIdQuery =
+  | { kind: 'exact'; value: string }
+  | { kind: 'prefix'; value: string };
+
+/** A task row that matched a share-link id, before access filtering. */
+export interface TaskCandidate {
+  serverId: string;
+  channelId: string | null;
+  taskId: string;
+  title: string;
+  legacyWorkspaceTodoId: string | null;
+  /** Epoch ms — used only for a deterministic tiebreak on prefix collisions. */
+  createdAt: number;
+}
+
+/** The routing tuple returned to the client once a task is resolved. */
+export interface ResolvedTask {
+  serverId: string;
+  channelId: string | null;
+  taskId: string;
+  title: string;
+}
+
+const FULL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const HEX_PREFIX_RE = /^[0-9a-f]{4,32}$/;
+
+/**
+ * Classify a raw share-link id into a DB query, or null if it isn't a plausible
+ * task id (rejects garbage / path-traversal before it ever reaches SQL). A full
+ * UUID resolves exactly; a 4–32 char hex string is treated as an id prefix.
+ */
+export function parseTaskShareId(input: string): TaskShareIdQuery | null {
+  const v = input.trim().toLowerCase();
+  if (FULL_UUID_RE.test(v)) return { kind: 'exact', value: v };
+  if (HEX_PREFIX_RE.test(v)) return { kind: 'prefix', value: v };
+  return null;
+}
+
+/**
+ * Given the candidate rows that matched a share-link id and the set of servers
+ * the caller can reach, pick the one task to route to.
+ *
+ * - Filters to reachable servers first (a task on a server the user can't see is
+ *   invisible — the endpoint returns 404, never leaking its existence).
+ * - Exactly one reachable match → resolve it.
+ * - Multiple reachable matches (an 8-char prefix collision among the user's own
+ *   tasks — astronomically rare): prefer an exact id/legacy-id match when the
+ *   input was a full id, else the deterministically-oldest task. `ambiguous` is
+ *   surfaced so the caller can log it.
+ */
+export function selectResolvedTask(
+  candidates: TaskCandidate[],
+  accessibleServerIds: Set<string>,
+  query: TaskShareIdQuery,
+): { resolved: ResolvedTask | null; ambiguous: boolean } {
+  const toResolved = (c: TaskCandidate): ResolvedTask => ({
+    serverId: c.serverId,
+    channelId: c.channelId,
+    taskId: c.taskId,
+    title: c.title,
+  });
+
+  const reachable = candidates.filter((c) => accessibleServerIds.has(c.serverId));
+  if (reachable.length === 0) return { resolved: null, ambiguous: false };
+  if (reachable.length === 1) return { resolved: toResolved(reachable[0]), ambiguous: false };
+
+  if (query.kind === 'exact') {
+    const exact = reachable.find(
+      (c) => c.taskId === query.value || c.legacyWorkspaceTodoId === query.value,
+    );
+    if (exact) return { resolved: toResolved(exact), ambiguous: true };
+  }
+
+  const oldest = [...reachable].sort(
+    (a, b) => a.createdAt - b.createdAt || a.taskId.localeCompare(b.taskId),
+  )[0];
+  return { resolved: toResolved(oldest), ambiguous: true };
+}
+
+/**
+ * Fetch the non-deleted task rows matching a share-link id query. No access
+ * control — the caller filters by reachable servers via {@link selectResolvedTask}.
+ * Capped at 16 rows; a real prefix never collides beyond a handful.
+ */
+export async function resolveTaskCandidates(query: TaskShareIdQuery): Promise<TaskCandidate[]> {
+  const match =
+    query.kind === 'exact'
+      ? or(eq(workspaceTasks.id, query.value), eq(workspaceTasks.legacyWorkspaceTodoId, query.value))
+      : or(
+          sql`${workspaceTasks.id}::text LIKE ${query.value + '%'}`,
+          sql`${workspaceTasks.legacyWorkspaceTodoId} LIKE ${query.value + '%'}`,
+        );
+
+  const rows = await db
+    .select({
+      serverId: workspaceTasks.serverId,
+      channelId: workspaceTasks.workspaceChannelId,
+      taskId: workspaceTasks.id,
+      title: workspaceTasks.title,
+      legacyWorkspaceTodoId: workspaceTasks.legacyWorkspaceTodoId,
+      createdAt: workspaceTasks.createdAt,
+    })
+    .from(workspaceTasks)
+    .where(and(match, isNull(workspaceTasks.deletedAt)))
+    .limit(16);
+
+  return rows.map((r) => ({
+    serverId: r.serverId,
+    channelId: r.channelId ?? null,
+    taskId: r.taskId,
+    title: r.title,
+    legacyWorkspaceTodoId: r.legacyWorkspaceTodoId ?? null,
+    createdAt: r.createdAt instanceof Date ? r.createdAt.getTime() : Number(r.createdAt),
+  }));
+}
+
 export async function getTaskById(
   serverId: string,
   taskId: string,
@@ -279,6 +430,19 @@ export async function getTaskById(
   };
 }
 
+export function resolveCreateIsPublished(
+  input: { sourceType?: CanonicalTaskSourceType; isPublished?: boolean },
+): boolean {
+  if (input.isPublished !== undefined) return input.isPublished;
+  // All tasks default to published. Visibility (public/private) is the gate
+  // for who can see them — the published feed always also requires
+  // visibility='public', so a private+published task never leaks. Widget
+  // submissions used to default unpublished, which made tickets vanish once
+  // their status left the pending set (they never entered the "Latest
+  // Updates" feed). Published-by-default keeps them visible through 'done'.
+  return true;
+}
+
 export async function createTask(serverId: string, input: CreateWorkspaceTaskInput): Promise<CanonicalTask> {
   const [row] = await db
     .insert(workspaceTasks)
@@ -290,11 +454,13 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
       description: input.description ?? null,
       status: input.status ?? 'pending',
       visibility: input.visibility ?? 'private',
+      isPublished: resolveCreateIsPublished(input),
       sourceType: input.sourceType ?? 'workspace',
       createdByType: input.createdByType ?? 'member',
       createdById: input.createdById ?? null,
       createdByName: input.createdByName ?? null,
       commentsDisabled: input.commentsDisabled ?? false,
+      useWorktree: input.useWorktree ?? false,
       taskType: input.type ?? 'regular',
       schedule: input.schedule ?? null,
       scheduledAt: input.scheduledAt ?? null,
@@ -315,67 +481,191 @@ export async function createTask(serverId: string, input: CreateWorkspaceTaskInp
   return toCanonicalTask(row, attachmentGroups?.get(row.id)?.task ?? null);
 }
 
+// When isPublished is being set true, the task must be publicly visible.
+// Returns the visibility to write, or undefined to leave visibility untouched.
+// An explicit visibility in the same payload always wins.
+export function resolvePublishVisibility(
+  input: { isPublished?: boolean; visibility?: 'public' | 'private' },
+  existingVisibility: 'public' | 'private',
+): 'public' | 'private' | undefined {
+  if (input.visibility !== undefined) return input.visibility;
+  if (input.isPublished === true && existingVisibility !== 'public') return 'public';
+  return undefined;
+}
+
 export async function updateTask(
   serverId: string,
   taskId: string,
   input: UpdateWorkspaceTaskInput,
-): Promise<CanonicalTask | null> {
-  // Capture the old status before the update so we can detect transitions.
-  // Only read from DB when a status change might be occurring, to avoid unnecessary I/O.
-  let oldStatus: string | null = null;
-  if (input.status !== undefined) {
-    const [existing] = await db
-      .select({ status: workspaceTasks.status })
+  actor: NotificationActor = { type: 'system' },
+): Promise<{ task: CanonicalTask | null; notification: import('../../notifications/serialize').SerializedNotification | null }> {
+  let resultTask: CanonicalTask | null = null;
+  let emittedNotificationId: string | null = null;
+  // Captured inside the task-update transaction, consumed AFTER it commits so
+  // that notification emission can never roll back a status change (and a
+  // missing-table / notification error never blocks the core task update).
+  type PendingEmit = {
+    rowShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
+    prevShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
+    status: 'needs_review' | 'done';
+  };
+  let pendingEmit: PendingEmit | null = null;
+  // Community-points awarding payload, captured in-transaction and fired
+  // post-commit — same discipline as pendingEmit: best-effort, must never roll
+  // back the authoritative task-status update. This is the single canonical
+  // awarding path (every task status change flows through updateTask).
+  type PendingAward = { row: WorkspaceTask; oldStatus: string; newStatus: string };
+  let pendingAward: PendingAward | null = null;
+
+  await db.transaction(async (tx) => {
+    // Fetch the existing row for visibility comparison and status-transition detection.
+    const existingRows = await tx
+      .select()
       .from(workspaceTasks)
       .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
       .limit(1);
-    oldStatus = existing?.status ?? null;
-  }
+    if (existingRows.length === 0) return; // task not found — resultTask stays null
+    const existing = existingRows[0];
+    const existingVisibility = existing.visibility as 'public' | 'private';
 
-  const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (input.workspaceProjectId !== undefined) updates.workspaceProjectId = input.workspaceProjectId;
-  if (input.workspaceChannelId !== undefined) updates.workspaceChannelId = input.workspaceChannelId;
-  if (input.title !== undefined) updates.title = input.title;
-  if (input.description !== undefined) updates.description = input.description;
-  if (input.status !== undefined) updates.status = input.status;
-  if (input.visibility !== undefined) updates.visibility = input.visibility;
-  if (input.sourceType !== undefined) updates.sourceType = input.sourceType;
-  if (input.createdByType !== undefined) updates.createdByType = input.createdByType;
-  if (input.createdById !== undefined) updates.createdById = input.createdById;
-  if (input.createdByName !== undefined) updates.createdByName = input.createdByName;
-  if (input.commentsDisabled !== undefined) updates.commentsDisabled = input.commentsDisabled;
-  if (input.type !== undefined) updates.taskType = input.type;
-  if (input.schedule !== undefined) updates.schedule = input.schedule;
-  if (input.scheduledAt !== undefined) updates.scheduledAt = input.scheduledAt;
-  if (input.timezone !== undefined) updates.timezone = input.timezone;
-  if (input.completedAt !== undefined) updates.completedAt = input.completedAt ? new Date(input.completedAt) : null;
-  if (input.archivedAt !== undefined) updates.archivedAt = input.archivedAt ? new Date(input.archivedAt) : null;
-  if (input.deletedAt !== undefined) updates.deletedAt = input.deletedAt ? new Date(input.deletedAt) : null;
-  if (input.upvoteCount !== undefined) updates.upvoteCount = input.upvoteCount;
-  if (input.moderationStatus !== undefined) updates.moderationStatus = input.moderationStatus;
+    // Detect whether this update will transition the task to a notification-worthy status.
+    const willTransition =
+      (input.status === 'needs_review' || input.status === 'done') &&
+      input.status !== existing.status;
 
-  const [row] = await db
-    .update(workspaceTasks)
-    .set(updates)
-    .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
-    .returning();
-  if (!row) return null;
-  if (input.attachments !== undefined) {
-    await replaceTaskAttachments(serverId, row.id, input.attachments ?? []);
-  }
-  const attachmentGroups = await loadTaskAttachmentGroups([row.id]);
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (input.workspaceProjectId !== undefined) updates.workspaceProjectId = input.workspaceProjectId;
+    if (input.workspaceChannelId !== undefined) updates.workspaceChannelId = input.workspaceChannelId;
+    if (input.title !== undefined) updates.title = input.title;
+    if (input.description !== undefined) updates.description = input.description;
+    if (input.status !== undefined) updates.status = input.status;
+    if (input.visibility !== undefined) updates.visibility = input.visibility;
+    if (input.isPublished !== undefined) updates.isPublished = input.isPublished;
+    const promotedVisibility = resolvePublishVisibility(input, existingVisibility);
+    if (promotedVisibility !== undefined) updates.visibility = promotedVisibility;
+    if (input.sourceType !== undefined) updates.sourceType = input.sourceType;
+    if (input.createdByType !== undefined) updates.createdByType = input.createdByType;
+    if (input.createdById !== undefined) updates.createdById = input.createdById;
+    if (input.createdByName !== undefined) updates.createdByName = input.createdByName;
+    if (input.commentsDisabled !== undefined) updates.commentsDisabled = input.commentsDisabled;
+    if (input.type !== undefined) updates.taskType = input.type;
+    if (input.schedule !== undefined) updates.schedule = input.schedule;
+    if (input.scheduledAt !== undefined) updates.scheduledAt = input.scheduledAt;
+    if (input.timezone !== undefined) updates.timezone = input.timezone;
+    if (input.completedAt !== undefined) updates.completedAt = input.completedAt ? new Date(input.completedAt) : null;
+    if (input.archivedAt !== undefined) updates.archivedAt = input.archivedAt ? new Date(input.archivedAt) : null;
+    if (input.deletedAt !== undefined) updates.deletedAt = input.deletedAt ? new Date(input.deletedAt) : null;
+    if (input.upvoteCount !== undefined) updates.upvoteCount = input.upvoteCount;
+    if (input.moderationStatus !== undefined) updates.moderationStatus = input.moderationStatus;
+    if (input.lastInteractorUserId !== undefined) {
+      updates.lastInteractorUserId = input.lastInteractorUserId;
+      updates.lastInteractorAt = input.lastInteractorUserId !== null ? new Date() : null;
+    }
 
-  // Fire community awarding after the DB write — best-effort, never blocks the status update.
-  const newStatus = row.status;
-  if (oldStatus !== null && oldStatus !== newStatus) {
+    const [row] = await tx
+      .update(workspaceTasks)
+      .set(updates)
+      .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
+      .returning();
+    if (!row) return;
+
+    // Capture a community-awarding payload on any real status transition.
+    // Eligibility (widget source, terminal-success, no double-award) is decided
+    // later by the awarding policy; here we only need the before/after statuses.
+    if (input.status !== undefined && existing.status !== row.status) {
+      pendingAward = { row, oldStatus: existing.status, newStatus: row.status };
+    }
+
+    // Capture the data needed to emit a notification. We do NOT emit inside
+    // this transaction: notification delivery is best-effort and must never
+    // roll back the authoritative task-status update (e.g. if the notification
+    // tables are missing mid-migration, or any emit error occurs).
+    if (willTransition) {
+      pendingEmit = {
+        prevShape: {
+          id: existing.id,
+          serverId: existing.serverId,
+          workspaceProjectId: existing.workspaceProjectId,
+          workspaceChannelId: existing.workspaceChannelId,
+          workspaceJobId: input.workspaceJobId ?? null,
+          workspaceProjectName: input.workspaceProjectName ?? null,
+          title: existing.title,
+          createdById: existing.createdById,
+          lastInteractorUserId: existing.lastInteractorUserId,
+        },
+        rowShape: {
+          id: row.id,
+          serverId: row.serverId,
+          workspaceProjectId: row.workspaceProjectId,
+          workspaceChannelId: row.workspaceChannelId,
+          workspaceJobId: input.workspaceJobId ?? null,
+          workspaceProjectName: input.workspaceProjectName ?? null,
+          title: row.title,
+          createdById: row.createdById,
+          lastInteractorUserId: row.lastInteractorUserId,
+        },
+        status: input.status as 'needs_review' | 'done',
+      };
+    }
+
+    if (input.attachments !== undefined) {
+      await replaceTaskAttachments(serverId, row.id, input.attachments ?? []);
+    }
+    const attachmentGroups = await loadTaskAttachmentGroups([row.id]);
+    resultTask = toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
+  });
+
+  // Emit + dispatch the notification AFTER the task-update transaction has
+  // committed, in its own transaction, fully wrapped in try/catch. A failure
+  // here (missing table, DB blip, etc.) is logged and swallowed — the task
+  // update has already succeeded and must not be undone.
+  if (pendingEmit) {
+    const emit: PendingEmit = pendingEmit;
     try {
-      await triggerCommunityAwarding(row, oldStatus, newStatus);
+      await db.transaction(async (tx) => {
+        const notificationId = await emitTaskNotification(tx, emit.rowShape, emit.prevShape, emit.status, actor);
+        if (notificationId) emittedNotificationId = notificationId;
+      });
+      if (emittedNotificationId) {
+        void dispatchNotification(emittedNotificationId).catch((err) =>
+          console.warn('[WorkspaceTaskService] post-commit dispatch failed', err),
+        );
+      }
     } catch (err) {
-      console.error('[WorkspaceTaskService] community awarding failed', { taskId: row.id, err });
+      console.error('[WorkspaceTaskService] notification emit failed (task update preserved)', err);
+    }
+  }
+  // Fire community awarding AFTER the task-update transaction commits —
+  // best-effort, never blocks or rolls back the status update.
+  if (pendingAward) {
+    const award: PendingAward = pendingAward;
+    try {
+      await triggerCommunityAwarding(award.row, award.oldStatus, award.newStatus);
+    } catch (err) {
+      console.error('[WorkspaceTaskService] community awarding failed', { taskId, err });
     }
   }
 
-  return toCanonicalTask(row, attachmentGroups.get(row.id)?.task ?? null);
+  // If a notification was emitted, fetch the full row so the caller can ship
+  // it down to clients (via the existing per-server WS) for sub-second push
+  // without a separate browser-to-BE WebSocket connection.
+  let emittedNotification: import('../../notifications/serialize').SerializedNotification | null = null;
+  if (emittedNotificationId) {
+    const { serializeNotification } = await import('../../notifications/serialize');
+    const { notifications } = await import('../../db/schema');
+    const found = await db.query.notifications.findFirst({ where: eq(notifications.id, emittedNotificationId) });
+    if (found) emittedNotification = serializeNotification(found);
+  }
+
+  // Push the change to any live widget ticket-status SSE subscribers. The task
+  // write is already committed; this is best-effort and must never throw.
+  if (resultTask) {
+    try { publishTicketUpdate(taskId); } catch (err) {
+      console.warn('[WorkspaceTaskService] publishTicketUpdate failed', err);
+    }
+  }
+
+  return { task: resultTask, notification: emittedNotification };
 }
 
 /**
@@ -535,11 +825,23 @@ export async function updateComment(
   return toCanonicalComment(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 
+export type DeleteCommentResult = 'deleted' | 'not_found' | 'forbidden';
+
+/**
+ * Delete a comment. The actor must be the original author (member-typed) of
+ * the comment. Pass `{ override: true }` for trusted internal callers (e.g. an
+ * admin/moderator pathway) that have already authorized the deletion.
+ */
 export async function deleteComment(
   serverId: string,
   taskId: string,
   commentId: string,
-): Promise<boolean> {
+  authorization: {
+    actorId: string;
+    actorType: 'member' | 'external' | 'system' | 'agent';
+    override?: boolean;
+  },
+): Promise<DeleteCommentResult> {
   const [comment] = await db
     .select()
     .from(workspaceTaskComments)
@@ -551,7 +853,14 @@ export async function deleteComment(
     ))
     .limit(1);
 
-  if (!comment) return false;
+  if (!comment) return 'not_found';
+
+  if (!authorization.override) {
+    const isAuthor =
+      comment.createdByType === authorization.actorType &&
+      comment.createdById === authorization.actorId;
+    if (!isAuthor) return 'forbidden';
+  }
 
   const attachments = await db
     .select()
@@ -591,7 +900,7 @@ export async function deleteComment(
     }
   }
 
-  return true;
+  return 'deleted';
 }
 
 async function recountTaskUpvotes(taskId: string): Promise<number> {
@@ -712,7 +1021,27 @@ export async function addActivity(
     await insertOwnerAttachments(serverId, taskId, 'activity', row.id, input.attachments);
   }
   const attachmentGroups = await loadTaskAttachmentGroups([taskId]);
+  // Activity rows (status_change, agent_assigned, pr_linked, comments) move the
+  // partner-facing milestone stepper — push to live SSE subscribers. Best-effort.
+  try { publishTicketUpdate(taskId); } catch (err) {
+    console.warn('[WorkspaceTaskService] publishTicketUpdate failed', err);
+  }
   return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
+}
+
+/**
+ * Replace the metadata of an existing activity row.
+ * The caller is responsible for merging/building the full metadata object;
+ * this function performs a straightforward SET replacement.
+ */
+export async function updateActivityMetadata(
+  activityId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  await db
+    .update(workspaceTaskActivity)
+    .set({ metadata })
+    .where(eq(workspaceTaskActivity.id, activityId));
 }
 
 export async function updateAttachmentStorage(

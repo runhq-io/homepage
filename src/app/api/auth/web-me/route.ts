@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { extractUserIdFromToken } from '@/api/auth/jwt';
 import { isAdmin } from '@/lib/adminPolicy';
 import { computeMfaEnforcement } from '@/lib/workspaceMfaEnforcement';
+import { isSignupInviteRequired } from '@/lib/signupGating';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -55,6 +56,7 @@ export async function GET(request: Request) {
         mfaEnabled: user.mfaEnabled ?? false,
       },
       mfaEnforcement,
+      signupInviteRequired: isSignupInviteRequired(),
     }, { headers: corsHeaders });
   } catch (err) {
     console.error('[web-me] Token validation error:', err);

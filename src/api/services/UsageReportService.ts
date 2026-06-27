@@ -7,6 +7,13 @@ export interface UsageFilter {
   userIds?: string[];
   serverIds?: string[];
   excludePreCutover?: boolean;
+  // Restrict to events whose server is currently owned by this user. This is
+  // how the per-user billing report enforces the invariant "you only ever see
+  // servers you own". Under owner-pays (live 2026-05-27) usageEvents.userId is
+  // already the server owner, so for post-cutover data this is a no-op; its
+  // purpose is to drop legacy *pre*-cutover events that were actor-billed onto
+  // a server the actor does not own (and events with no resolvable server).
+  ownedBy?: string;
 }
 
 export interface SummaryStats {
@@ -78,6 +85,15 @@ export interface JobRow {
   totalCostCents: number;
 }
 
+export interface DayRow {
+  // Calendar day, 'YYYY-MM-DD' (truncated in the DB's timezone).
+  day: string;
+  requestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalCostCents: number;
+}
+
 function buildWhere(f: UsageFilter) {
   const parts: ReturnType<typeof gte>[] = [
     gte(usageEvents.ts, f.start),
@@ -86,6 +102,18 @@ function buildWhere(f: UsageFilter) {
   if (f.excludePreCutover) parts.push(ne(usageEvents.model, 'pre-cutover-rollup'));
   if (f.userIds && f.userIds.length > 0) parts.push(inArray(usageEvents.userId, f.userIds));
   if (f.serverIds && f.serverIds.length > 0) parts.push(inArray(usageEvents.serverId, f.serverIds));
+  if (f.ownedBy) {
+    // server_id IN (SELECT id FROM servers WHERE owner_id = :ownedBy).
+    // A NULL/unresolvable server_id is not IN the set, so legacy events that
+    // never captured a server are excluded too — correct, since they cannot be
+    // attributed to a server the viewer owns.
+    parts.push(
+      inArray(
+        usageEvents.serverId,
+        db.select({ id: servers.id }).from(servers).where(eq(servers.ownerId, f.ownedBy)),
+      ),
+    );
+  }
   return and(...parts);
 }
 
@@ -231,6 +259,27 @@ export async function getBreakdownByJob(f: UsageFilter): Promise<JobRow[]> {
     .where(buildWhere(f))
     .groupBy(usageEvents.jobId)
     .orderBy(desc(sql`COALESCE(SUM(${usageEvents.costCents}), 0)`));
+}
+
+/**
+ * Per-calendar-day usage, including token counts. Unlike getDailyTotals (which
+ * zero-fills every bucket in the range to drive a continuous chart), this only
+ * returns days that actually had activity and adds input/output token sums —
+ * the right shape for a tabular per-day usage list. Ordered newest-first.
+ */
+export async function getBreakdownByDay(f: UsageFilter): Promise<DayRow[]> {
+  return db
+    .select({
+      day:            sql<string>`to_char(date_trunc('day', ${usageEvents.ts}), 'YYYY-MM-DD')`,
+      requestCount:   sql<number>`COUNT(*)::int`,
+      inputTokens:    sql<number>`COALESCE(SUM(${usageEvents.inputTokens}), 0)::int`,
+      outputTokens:   sql<number>`COALESCE(SUM(${usageEvents.outputTokens}), 0)::int`,
+      totalCostCents: sql<number>`COALESCE(SUM(${usageEvents.costCents}), 0)::double precision`,
+    })
+    .from(usageEvents)
+    .where(buildWhere(f))
+    .groupBy(sql`date_trunc('day', ${usageEvents.ts})`)
+    .orderBy(desc(sql`date_trunc('day', ${usageEvents.ts})`));
 }
 
 export interface UsageEventCsvRow {

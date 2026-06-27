@@ -9,7 +9,7 @@
 // Provider identity
 // ---------------------------------------------------------------------------
 
-export type ProviderId = 'fly';
+export type ProviderId = 'fly' | 'docker';
 
 // ---------------------------------------------------------------------------
 // Machine states (normalized across providers)
@@ -67,6 +67,12 @@ export interface CreateMachineOptions {
   tier: TierId;
   existingVolumeId?: string | null;
   autoSuspendEnabled?: boolean;
+  // Per-tenant isolation context. When set, the provider creates the machine
+  // (and its volume) inside this app instead of the legacy shared app. The
+  // app is expected to already exist (caller invokes provider.createApp first).
+  // See docs/per-app-isolation-migration.md.
+  appName?: string | null;
+  networkName?: string | null;
 }
 
 export interface ProvisionResult {
@@ -75,6 +81,10 @@ export interface ProvisionResult {
   serverUrl: string;
   region: string;
   volumeId: string;
+  // Echo back the app + network the machine was provisioned into, so the
+  // caller can persist them on the server row for later lookups.
+  appName?: string | null;
+  networkName?: string | null;
   providerMetadata?: Record<string, unknown>;
 }
 
