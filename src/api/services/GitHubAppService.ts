@@ -109,6 +109,8 @@ export class GitHubAppService {
       baseRef: p.base?.ref ?? '',
       url: p.html_url,
       nodeId: p.node_id as string,
+      mergedAt: p.merged_at ?? null,
+      closedAt: p.closed_at ?? null,
     }));
   }
 
