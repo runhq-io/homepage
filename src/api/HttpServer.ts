@@ -43,8 +43,8 @@ import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimit
 import * as WidgetChatService from './services/WidgetChatService';
 import { subscribeToTicket } from './services/WidgetTicketEvents';
 import { streamSSE } from 'hono/streaming';
-import { setCookie } from 'hono/cookie';
-import { RW_SESSION_COOKIE, rwSessionCookieOptions } from './services/WidgetCookieAuth';
+import { getCookie, setCookie } from 'hono/cookie';
+import { RW_SESSION_COOKIE, rwSessionCookieOptions, rwSessionMatchesUser } from './services/WidgetCookieAuth';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -7039,8 +7039,19 @@ export function createHttpApp() {
     // (mobile), which verifyRwSession can't validate. The /api/widget/ CORS
     // envelope already echoes the allowlisted origin + Allow-Credentials, so
     // the browser stores and later sends this cookie cross-subdomain.
-    const sessionToken = await createToken(userId);
-    setCookie(c, RW_SESSION_COOKIE, sessionToken, rwSessionCookieOptions());
+    //
+    // Crucially, only mint when the caller has NO valid rw_session for this
+    // user. The console hits this endpoint on every load and on every auth-token
+    // rotation, but the widget's `init()` is idempotent and captures its
+    // per-session CSRF token (bound to the session `iat`) exactly once. Blindly
+    // re-minting here would assign a new `iat` and silently invalidate that
+    // captured CSRF token, making every later widget write (assign agent, open
+    // Live session, …) fail the cookie-path CSRF check with a 401. Reusing the
+    // existing session keeps `iat` — and the CSRF token — stable.
+    if (!(await rwSessionMatchesUser(getCookie(c, RW_SESSION_COOKIE), userId))) {
+      const sessionToken = await createToken(userId);
+      setCookie(c, RW_SESSION_COOKIE, sessionToken, rwSessionCookieOptions());
+    }
 
     return c.json({ success: true, data: result });
   });

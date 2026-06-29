@@ -104,6 +104,27 @@ export async function verifyRwSession(
 }
 
 /**
+ * True when `cookieValue` is a currently-valid rw_session for `userId`.
+ *
+ * Used by the console's `/api/widget/user-token` bootstrap to decide whether to
+ * REUSE the caller's existing session cookie rather than minting a fresh one.
+ * Re-minting assigns a new JWT `iat`, and the widget's per-session CSRF token is
+ * bound to that `iat` (see {@link csrfTokenFor}). Because the embedded widget
+ * captures its CSRF token only once (its `init()` is idempotent), a re-mint
+ * after capture silently invalidates every subsequent widget write. Reusing a
+ * still-valid session keeps `iat` — and the CSRF token — stable for the
+ * session's lifetime.
+ */
+export async function rwSessionMatchesUser(
+  cookieValue: string | undefined | null,
+  userId: string,
+): Promise<boolean> {
+  if (!cookieValue) return false;
+  const verified = await verifyRwSession(cookieValue);
+  return !!verified && verified.userId === userId;
+}
+
+/**
  * The CSRF secret used to derive per-session tokens. Falls back to the
  * JWT_SECRET-derived value if WIDGET_CSRF_SECRET is unset, so the system
  * boots without an extra env var (documented behavior). In production the
