@@ -790,6 +790,7 @@
     image:     function (s) { return icon([{ tag: "rect", x: 3, y: 4, width: 18, height: 16, rx: 2 }, { tag: "circle", cx: 9, cy: 10, r: 1.5 }, { d: "M21 16l-5-5-8 8" }], s); },
     globe:     function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 10 }, { d: "M2 12h20" }, { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" }], s); },
     chevRight: function (s) { return icon([{ d: "M9 6l6 6-6 6" }], s, 2); },
+    chevLeft:  function (s) { return icon([{ d: "M15 6l-6 6 6 6" }], s, 2); },
     home:      function (s) { return icon([{ d: "M3 11l9-8 9 8" }, { d: "M5 9.5V21h14V9.5" }], s, 2); },
   };
 
@@ -2842,6 +2843,21 @@
       '}',
       '.rw-chip-attach > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
       '.rw-modal-mount[data-theme="light"] .rw-chip-attach { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-thumb {',
+      '  position: relative; display: inline-block; flex: 0 0 auto;',
+      '  width: 56px; height: 56px; border-radius: 8px; overflow: hidden;',
+      '  border: 1px solid var(--rw-line-2); background: rgba(255,255,255,0.06);',
+      '}',
+      '.rw-modal-mount[data-theme="light"] .rw-chip-thumb { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-thumb-img {',
+      '  width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in;',
+      '}',
+      '.rw-chip-thumb .rw-chip-x {',
+      '  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;',
+      '  background: rgba(4,6,11,0.62); color: #fff; border-radius: 999px;',
+      '  font-size: 13px; line-height: 1;',
+      '}',
+      '.rw-chip-thumb .rw-chip-x:hover { background: rgba(4,6,11,0.85); color: #fff; }',
       '.rw-chip-attach.rw-uploading { opacity: 0.75; }',
       '.rw-chip-attach.rw-failed { border-color: rgba(220,38,38,0.55); color: #fca5a5; }',
       '.rw-chip-mini-spinner {',
@@ -3066,6 +3082,18 @@
       '  transition: background .15s ease, border-color .15s ease;',
       '}',
       '.rw-lightbox-close:hover { background: rgba(0,0,0,0.7); border-color: rgba(255,255,255,0.28); }',
+      '.rw-lightbox-nav {',
+      '  position: absolute; top: 50%; transform: translateY(-50%);',
+      '  width: 44px; height: 44px;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  border-radius: 999px; border: 1px solid rgba(255,255,255,0.14);',
+      '  background: rgba(0,0,0,0.4); color: rgba(255,255,255,0.92);',
+      '  cursor: pointer; padding: 0;',
+      '  transition: background .15s ease, border-color .15s ease;',
+      '}',
+      '.rw-lightbox-nav:hover { background: rgba(0,0,0,0.7); border-color: rgba(255,255,255,0.28); }',
+      '.rw-lightbox-prev { left: 16px; }',
+      '.rw-lightbox-next { right: 16px; }',
 
       /* composer */
       '.rw-td-composer { border-top: 1px solid var(--rw-line); padding: 10px 12px; background: rgba(255,255,255,0.015); flex: 0 0 auto; }',
@@ -3696,8 +3724,17 @@
     return h("div", { className: "rw-notice rw-notice-" + type }, msg);
   }
 
-  function openImageLightbox(url, name) {
-    var img = h("img", { className: "rw-lightbox-img", src: url, alt: name || "" });
+  // Full-screen image lightbox with optional gallery navigation. Accepts
+  // either a single image — openImageLightbox(url, name) — or a gallery:
+  // openImageLightbox([{ url, name }, …], startIndex). When more than one image
+  // is present, prev/next arrows appear only on the side(s) where another image
+  // exists, and ←/→ navigate between them.
+  function openImageLightbox(items, start) {
+    if (typeof items === "string") items = [{ url: items, name: start }];
+    if (!items || !items.length) return;
+    var i = Math.max(0, Math.min(items.length - 1, start | 0));
+
+    var img = h("img", { className: "rw-lightbox-img" });
     img.addEventListener("mousedown", function (e) { e.stopPropagation(); });
 
     var closeBtn = h("button", {
@@ -3706,12 +3743,41 @@
       "aria-label": "Close image",
     }, Icons.close(18));
 
+    var prevBtn = h("button", {
+      className: "rw-lightbox-nav rw-lightbox-prev",
+      type: "button",
+      "aria-label": "Previous image",
+    }, Icons.chevLeft(26));
+    var nextBtn = h("button", {
+      className: "rw-lightbox-nav rw-lightbox-next",
+      type: "button",
+      "aria-label": "Next image",
+    }, Icons.chevRight(26));
+
     var scrim = h("div", {
       className: "rw-lightbox-scrim",
       role: "dialog",
       "aria-modal": "true",
-      "aria-label": name || "Image preview",
-    }, [img, closeBtn]);
+    }, [img, prevBtn, nextBtn, closeBtn]);
+
+    function render() {
+      var it = items[i];
+      img.setAttribute("src", it.url);
+      img.setAttribute("alt", it.name || "");
+      scrim.setAttribute("aria-label", it.name || "Image preview");
+      // Arrows show only when an adjacent image exists on that side.
+      prevBtn.style.display = i > 0 ? "inline-flex" : "none";
+      nextBtn.style.display = i < items.length - 1 ? "inline-flex" : "none";
+    }
+    function go(delta, e) {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      var ni = i + delta;
+      if (ni < 0 || ni > items.length - 1) return;
+      i = ni;
+      render();
+    }
+    prevBtn.addEventListener("click", function (e) { go(-1, e); });
+    nextBtn.addEventListener("click", function (e) { go(1, e); });
 
     function close() {
       document.removeEventListener("keydown", onKey, true);
@@ -3722,6 +3788,12 @@
         e.stopImmediatePropagation();
         e.preventDefault();
         close();
+      } else if (e.key === "ArrowLeft") {
+        e.stopImmediatePropagation();
+        go(-1, e);
+      } else if (e.key === "ArrowRight") {
+        e.stopImmediatePropagation();
+        go(1, e);
       }
     };
 
@@ -3730,22 +3802,106 @@
       if (e.target === scrim) close();
     });
 
+    render();
     document.addEventListener("keydown", onKey, true);
     modalMountEl.appendChild(scrim);
   }
 
-  function renderShotThumb(att) {
+  // ---------------------------------------------------------------------------
+  // Staged-attachment previews (composer chips)
+  //
+  // A file the user has chosen but not yet uploaded is held as { file }. To
+  // show the actual image — not just its name — we mint an object URL over the
+  // chosen bytes and embed it as a thumbnail. The URL is cached on the entry so
+  // repeated chip re-renders reuse one allocation, and released the moment the
+  // entry is removed or cleared so we never leak object URLs.
+  // ---------------------------------------------------------------------------
+  function attachPreviewUrl(entry) {
+    if (!entry || !entry.file) return null;
+    var type = entry.file.type || "";
+    if (type.indexOf("image/") !== 0) return null;
+    if (!entry.previewUrl) {
+      try { entry.previewUrl = URL.createObjectURL(entry.file); }
+      catch (e) { return null; }
+    }
+    return entry.previewUrl;
+  }
+  function releaseAttachPreview(entry) {
+    if (entry && entry.previewUrl) {
+      try { URL.revokeObjectURL(entry.previewUrl); } catch (e) { /* noop */ }
+      entry.previewUrl = null;
+    }
+  }
+  function releaseAllAttachPreviews(entries) {
+    if (entries && entries.length) entries.forEach(releaseAttachPreview);
+  }
+
+  // A staged-attachment chip rendered in a composer before upload. Image files
+  // render as a standalone thumbnail tile — no filename — that expands to a
+  // full-screen lightbox on click (the same one posted attachments use); the
+  // corner × removes it. Non-images (rare: composers only accept image/*) fall
+  // back to a compact icon chip. onRemove(entry) fires when × is clicked.
+  // getGallery (optional) returns the ordered [{ url, name }] of all staged
+  // images so the lightbox can page between them with prev/next arrows.
+  function renderAttachChip(entry, onRemove, getGallery) {
+    var name = entry.file.name || t("composer.pastedImage");
+    var removeBtn = h("button", {
+      className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+    }, "×");
+    removeBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      onRemove(entry);
+    });
+    var previewUrl = attachPreviewUrl(entry);
+    if (previewUrl) {
+      var img = h("img", {
+        className: "rw-chip-thumb-img", src: previewUrl, alt: name,
+        title: name, role: "button", tabindex: "0", "aria-label": name,
+      });
+      function expand(e) {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        var items = (getGallery && getGallery()) || [{ url: previewUrl, name: name }];
+        var idx = 0;
+        for (var k = 0; k < items.length; k++) { if (items[k].url === previewUrl) { idx = k; break; } }
+        openImageLightbox(items, idx);
+      }
+      img.addEventListener("click", expand);
+      img.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") expand(e);
+      });
+      return h("span", { className: "rw-chip-thumb", title: name }, [img, removeBtn]);
+    }
+    return h("span", { className: "rw-chip-attach", title: name }, [Icons.image(13), removeBtn]);
+  }
+
+  // Ordered [{ url, name }] of every staged image in a composer's entry list —
+  // the gallery a thumbnail's lightbox pages through.
+  function stagedGallery(entries) {
+    var items = [];
+    entries.forEach(function (e) {
+      var url = attachPreviewUrl(e);
+      if (url) items.push({ url: url, name: e.file.name || t("composer.pastedImage") });
+    });
+    return items;
+  }
+
+  function shotIsImage(att) {
+    return (att.mimeType || att.mime || "").indexOf("image/") === 0;
+  }
+  function shotName(att) {
+    return att.originalName || att.filename || "image";
+  }
+  function renderShotThumb(att, gallery) {
     // Attachment shape from be/: { id, filename, originalName, mimeType, url, ... }
     var aspect = att.width && att.height ? (att.width + " / " + att.height) : "16 / 10";
-    var name = att.originalName || att.filename || "image";
-    var isImage = (att.mimeType || att.mime || "").indexOf("image/") === 0;
+    var name = shotName(att);
     var img = h("img", {
       className: "rw-shot-img",
       src: att.url,
       alt: name, loading: "lazy",
       style: { aspectRatio: aspect, objectFit: "cover" },
     });
-    if (!isImage) {
+    if (!shotIsImage(att)) {
       // Non-image — render a tile with filename only
       return h("a", {
         className: "rw-shot",
@@ -3759,13 +3915,23 @@
       type: "button",
       title: name,
     }, [img, h("span", { className: "rw-shot-name" }, name)]);
-    thumb.addEventListener("click", function () { openImageLightbox(att.url, name); });
+    thumb.addEventListener("click", function () {
+      var items = gallery || [{ url: att.url, name: name }];
+      var idx = 0;
+      for (var k = 0; k < items.length; k++) { if (items[k].url === att.url) { idx = k; break; } }
+      openImageLightbox(items, idx);
+    });
     return thumb;
   }
   function renderShotGrid(attachments, tight) {
     if (!attachments || attachments.length === 0) return null;
     var grid = h("div", { className: "rw-shots" + (tight ? " rw-shots--tight" : "") });
-    attachments.forEach(function (a) { grid.appendChild(renderShotThumb(a)); });
+    // Gallery = the image attachments, in grid order, so the lightbox can page
+    // between them with prev/next arrows.
+    var gallery = attachments.filter(shotIsImage).map(function (a) {
+      return { url: a.url, name: shotName(a) };
+    });
+    attachments.forEach(function (a) { grid.appendChild(renderShotThumb(a, gallery)); });
     return grid;
   }
 
@@ -4047,18 +4213,11 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach") }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
+        chipsEl.appendChild(renderAttachChip(entry, function (target) {
+          var i = entries.indexOf(target);
+          if (i >= 0) { releaseAttachPreview(entries[i]); entries.splice(i, 1); }
           renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || t("composer.pastedImage")),
-          removeBtn,
-        ]));
+        }, function () { return stagedGallery(entries); }));
       });
     }
     function addFiles(files) {
@@ -4239,6 +4398,7 @@
       request.then(function (data) {
         createdTicket = (data && data.ticket) || null;
         ta.value = "";
+        releaseAllAttachPreviews(entries);
         entries.length = 0;
         renderChips();
         isPrivate = false;
@@ -6815,18 +6975,11 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.remove") }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
+        chipsEl.appendChild(renderAttachChip(entry, function (target) {
+          var i = entries.indexOf(target);
+          if (i >= 0) { releaseAttachPreview(entries[i]); entries.splice(i, 1); }
           renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || t("composer.pastedImage")),
-          removeBtn,
-        ]));
+        }, function () { return stagedGallery(entries); }));
       });
     }
     function addFiles(files) {
@@ -6915,6 +7068,7 @@
       }).then(function (newComment) {
         ta.value = "";
         ta.style.height = "auto";
+        releaseAllAttachPreviews(entries);
         entries.length = 0;
         renderChips();
         submitBtn.firstChild.textContent = t("reply.submit");
@@ -7476,6 +7630,9 @@
   // ---------------------------------------------------------------------------
   if (window._rwTestHooks && typeof window._rwTestHooks === "object") {
     window._rwTestHooks.renderDetailInto = renderDetailInto;
+    window._rwTestHooks.renderAttachChip = renderAttachChip;
+    window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
+    window._rwTestHooks.stagedGallery = stagedGallery;
   }
 
 })();
