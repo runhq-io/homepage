@@ -7625,6 +7625,10 @@ export function createHttpApp() {
           await WorkspaceTaskService.updateTask(serverId, taskId, input);
         },
         updateActivityMetadata: WorkspaceTaskService.updateActivityMetadata,
+        getTask: async (serverId, taskId) => {
+          const task = await WorkspaceTaskService.getTaskById(serverId, taskId);
+          return task ? { status: task.status } : null;
+        },
       },
       pushHandling: {
         findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,

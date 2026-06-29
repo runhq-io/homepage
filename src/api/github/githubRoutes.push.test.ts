@@ -225,7 +225,7 @@ describe('openPullRequestForReadyTask', () => {
       type: 'pr_linked',
       metadata: expect.objectContaining({ number: 7, repoBranch: 'session/job_x/ticket-abcd1234' }),
     }));
-    expect(deps.updateTask).toHaveBeenCalledWith('ws_1', 'task_1', { status: 'needs_review' });
+    expect(deps.updateTask).toHaveBeenCalledWith('ws_1', 'task_1', { status: 'done' });
   });
 
   it('links an existing open PR instead of creating another one', async () => {
