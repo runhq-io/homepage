@@ -522,8 +522,15 @@ function noSubscriptionResult(): CreditCheckResult {
  */
 export async function checkCreditBalanceForServer(userToken: string, serverId: string | null): Promise<CreditCheckResult> {
   const actorUserId = extractUserIdFromToken(userToken);
-  if (!actorUserId) return noSubscriptionResult();
-  const billedUserId = await resolveBilledUserId(serverId, actorUserId);
+  // Resolve the SERVER OWNER first — they're who pays under owner-pays, and many
+  // legitimate callers authenticate with a raw server token that carries NO user
+  // (e.g. the status-update screening gate, which runs without a user session and
+  // sends the workspace SERVER_TOKEN). Requiring `actorUserId` up front would
+  // wrongly report "no subscription" for those calls even though the server's
+  // owner is funded — so only fall back to the actor, and bail, when the owner
+  // can't be resolved from `serverId`.
+  const billedUserId = (await getServerOwnerId(serverId)) ?? actorUserId;
+  if (!billedUserId) return noSubscriptionResult();
   return checkCreditBalanceByUserId(billedUserId);
 }
 
