@@ -168,25 +168,33 @@ function hasClass(n: FakeNode, cls: string): boolean {
   return String(n.attrs['class'] || '').split(' ').includes(cls);
 }
 function findThumb(chip: FakeNode): FakeNode | null {
-  return chip._find((n) => n.tagName === 'IMG' && hasClass(n, 'rw-chip-thumb'));
+  return chip._find((n) => n.tagName === 'IMG' && hasClass(n, 'rw-chip-thumb-img'));
+}
+function anyTextContains(n: FakeNode, s: string): boolean {
+  if (typeof n.textContent === 'string' && n.textContent.includes(s)) return true;
+  return n.children.some((c) => anyTextContains(c, s));
 }
 
 describe('widget.js — staged attachment preview chip', () => {
-  it('renders an inline image thumbnail for an image attachment', () => {
+  it('renders a standalone image thumbnail (no filename) for an image attachment', () => {
     const { hooks, created, objectUrlFactory } = loadWidget();
     expect(hooks.renderAttachChip).toBeDefined();
 
     const entry: ChipEntry = { file: { name: 'shot.png', type: 'image/png' } };
     const chip = hooks.renderAttachChip!(entry, () => {});
 
-    // The chip is tagged as an image chip and embeds a real <img> thumbnail.
-    expect(hasClass(chip, 'rw-chip-attach--img')).toBe(true);
+    // The chip is a thumbnail tile embedding a real <img> preview.
+    expect(hasClass(chip, 'rw-chip-thumb')).toBe(true);
     const thumb = findThumb(chip);
     expect(thumb).not.toBeNull();
     // Its src is the object URL minted over the chosen file bytes.
     expect(objectUrlFactory.createObjectURL).toHaveBeenCalledWith(entry.file);
     expect(thumb!.getAttribute('src')).toBe(created[0]);
     expect(entry.previewUrl).toBe(created[0]);
+    // The thumbnail is an interactive control (click → full-screen lightbox).
+    expect(thumb!.getAttribute('role')).toBe('button');
+    // The filename is NOT rendered as visible text anywhere in the chip.
+    expect(anyTextContains(chip, 'shot.png')).toBe(false);
   });
 
   it('falls back to an icon (no thumbnail) for a non-image attachment', () => {
@@ -194,7 +202,7 @@ describe('widget.js — staged attachment preview chip', () => {
     const entry: ChipEntry = { file: { name: 'notes.pdf', type: 'application/pdf' } };
     const chip = hooks.renderAttachChip!(entry, () => {});
 
-    expect(hasClass(chip, 'rw-chip-attach--img')).toBe(false);
+    expect(hasClass(chip, 'rw-chip-thumb')).toBe(false);
     expect(findThumb(chip)).toBeNull();
     expect(objectUrlFactory.createObjectURL).not.toHaveBeenCalled();
     expect(entry.previewUrl).toBeUndefined();

@@ -2828,12 +2828,21 @@
       '}',
       '.rw-chip-attach > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
       '.rw-modal-mount[data-theme="light"] .rw-chip-attach { background: rgba(15,20,35,0.04); }',
-      '.rw-chip-attach--img { padding-left: 3px; }',
       '.rw-chip-thumb {',
-      '  width: 30px; height: 30px; flex: 0 0 auto;',
-      '  border-radius: 4px; object-fit: cover; display: block;',
-      '  background: rgba(255,255,255,0.06);',
+      '  position: relative; display: inline-block; flex: 0 0 auto;',
+      '  width: 56px; height: 56px; border-radius: 8px; overflow: hidden;',
+      '  border: 1px solid var(--rw-line-2); background: rgba(255,255,255,0.06);',
       '}',
+      '.rw-modal-mount[data-theme="light"] .rw-chip-thumb { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-thumb-img {',
+      '  width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in;',
+      '}',
+      '.rw-chip-thumb .rw-chip-x {',
+      '  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;',
+      '  background: rgba(4,6,11,0.62); color: #fff; border-radius: 999px;',
+      '  font-size: 13px; line-height: 1;',
+      '}',
+      '.rw-chip-thumb .rw-chip-x:hover { background: rgba(4,6,11,0.85); color: #fff; }',
       '.rw-chip-attach.rw-uploading { opacity: 0.75; }',
       '.rw-chip-attach.rw-failed { border-color: rgba(220,38,38,0.55); color: #fca5a5; }',
       '.rw-chip-mini-spinner {',
@@ -3756,9 +3765,10 @@
   }
 
   // A staged-attachment chip rendered in a composer before upload. Image files
-  // get an inline thumbnail preview (so the user sees what they attached);
-  // anything else falls back to the generic image icon. onRemove(entry) is
-  // invoked when the chip's × control is clicked.
+  // render as a standalone thumbnail tile — no filename — that expands to a
+  // full-screen lightbox on click (the same one posted attachments use); the
+  // corner × removes it. Non-images (rare: composers only accept image/*) fall
+  // back to a compact icon chip. onRemove(entry) fires when × is clicked.
   function renderAttachChip(entry, onRemove) {
     var name = entry.file.name || t("composer.pastedImage");
     var removeBtn = h("button", {
@@ -3769,13 +3779,22 @@
       onRemove(entry);
     });
     var previewUrl = attachPreviewUrl(entry);
-    var lead = previewUrl
-      ? h("img", { className: "rw-chip-thumb", src: previewUrl, alt: name })
-      : Icons.image(11);
-    return h("span", {
-      className: "rw-chip-attach" + (previewUrl ? " rw-chip-attach--img" : ""),
-      title: name,
-    }, [lead, h("span", null, name), removeBtn]);
+    if (previewUrl) {
+      var img = h("img", {
+        className: "rw-chip-thumb-img", src: previewUrl, alt: name,
+        title: name, role: "button", tabindex: "0", "aria-label": name,
+      });
+      function expand(e) {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        openImageLightbox(previewUrl, name);
+      }
+      img.addEventListener("click", expand);
+      img.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") expand(e);
+      });
+      return h("span", { className: "rw-chip-thumb", title: name }, [img, removeBtn]);
+    }
+    return h("span", { className: "rw-chip-attach", title: name }, [Icons.image(13), removeBtn]);
   }
 
   function renderShotThumb(att) {
