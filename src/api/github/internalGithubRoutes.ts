@@ -49,6 +49,20 @@ export interface InternalGithubDeps {
   } | null>;
 }
 
+/**
+ * Octokit throws a RequestError (with `.status` + GitHub's `.message`) when the
+ * GitHub API refuses a call — e.g. PUT .../merge returns 405 "Pull Request is
+ * not mergeable" for a conflicting PR. Pull the real status + message out so the
+ * route can forward them, instead of letting the throw become an opaque 500
+ * (which reaches the workspace as the useless "Cloud GitHub call failed: 500").
+ */
+function githubErrorResponse(err: unknown): { status: number; message: string } {
+  const e = err as { status?: number; message?: string; response?: { data?: { message?: string } } };
+  const status = typeof e?.status === 'number' && e.status >= 400 && e.status < 600 ? e.status : 502;
+  const message = e?.response?.data?.message || e?.message || 'GitHub request failed';
+  return { status, message };
+}
+
 export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps): void {
   const authServer = async (c: any): Promise<{ id: string } | Response> => {
     const token = c.req.header('X-Server-Token');
@@ -209,8 +223,15 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     const installationId = await associatedInstall(c, server);
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json().catch(() => ({}));
-    const result = await deps.mergePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')), (body.method as any) || 'merge');
-    return c.json(result);
+    try {
+      const result = await deps.mergePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')), (body.method as any) || 'merge');
+      return c.json(result);
+    } catch (err) {
+      // Forward GitHub's real status + message (e.g. 405 "not mergeable") so the
+      // workspace can humanize it, rather than 500-ing with no detail.
+      const { status, message } = githubErrorResponse(err);
+      return c.json({ error: message }, status as any);
+    }
   });
 
   app.post('/api/internal/servers/:serverId/github/installations/:installationId/pulls/:number/close', async (c) => {
@@ -219,8 +240,13 @@ export function registerInternalGithubRoutes(app: Hono, deps: InternalGithubDeps
     const installationId = await associatedInstall(c, server);
     if (installationId === null) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json().catch(() => ({}));
-    const result = await deps.closePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')));
-    return c.json(result);
+    try {
+      const result = await deps.closePullRequest(installationId, body.owner ?? '', body.repo ?? '', Number(c.req.param('number')));
+      return c.json(result);
+    } catch (err) {
+      const { status, message } = githubErrorResponse(err);
+      return c.json({ error: message }, status as any);
+    }
   });
 
   // Sync a project's repo link into the central mirror. The installation must be
