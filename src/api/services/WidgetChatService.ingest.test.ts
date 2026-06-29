@@ -135,6 +135,32 @@ describe('ingestTurnEvents', () => {
     const rows = await messages();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ role: 'team', content: 'Pushed a fix — can you re-test?', turnId: TURN_ID });
+    // No author supplied → null payload, so the widget falls back to "Team".
+    expect(rows[0]!.payload).toBeNull();
+  });
+
+  it('attributes a team_message to its author (multiple staff in a live session)', async () => {
+    // The live-chat → live-session mirror carries the workspace member's display
+    // name so a session with several staff shows each sender's name, not "Team".
+    const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'team_message', text: 'On it — deploying now.', authorName: '  Suha  ' }],
+    });
+    expect(result).toEqual({ inserted: 1, turnDone: false });
+    const rows = await messages();
+    expect(rows).toHaveLength(1);
+    // Same {authorName} shape sendTeamReply uses; trimmed before persisting.
+    expect(rows[0]).toMatchObject({ role: 'team', content: 'On it — deploying now.', payload: { authorName: 'Suha' } });
+  });
+
+  it('falls back to a null payload when team_message authorName is blank', async () => {
+    const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'team_message', text: 'Whitespace author', authorName: '   ' }],
+    });
+    expect(result).toEqual({ inserted: 1, turnDone: false });
+    const rows = await messages();
+    expect(rows[0]!.payload).toBeNull();
   });
 
   it('per-message turn ids: same seq + different turn ids both persist; same turn id dedups (mirror convergence contract)', async () => {

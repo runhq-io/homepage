@@ -994,6 +994,7 @@
         agentDefault: "Support",
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
+        liveSessionIntro: "{name} is on it — working away in the background. You'll see progress here as it happens, and a note once it's done. Send a message anytime to ask a question or steer the work.",
         agentlessIntro: "Our support agent is currently offline. You can still submit a ticket directly — describe your issue or request with as much detail as possible (what happened, steps to reproduce, what you expected), then tap Submit Ticket below.",
         collectPrompt: "Anything more you'd like to add? When you're ready, tap Submit Ticket below — the more detail, the faster we can help.",
         submitTicket: "Submit Ticket",
@@ -1210,6 +1211,7 @@
         agentDefault: "지원 담당",
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
+        liveSessionIntro: "{name}이(가) 백그라운드에서 작업하고 있어요. 진행 상황이 여기에 표시되고, 완료되면 알려드릴게요. 궁금한 점이나 방향을 알려주실 게 있으면 언제든 메시지를 보내 주세요.",
         agentlessIntro: "지금은 상담원이 오프라인 상태예요. 그래도 바로 티켓을 제출하실 수 있어요 — 무슨 일이 있었는지, 재현 방법, 기대했던 동작 등 가능한 한 자세히 알려주신 뒤 아래 '티켓 제출'을 눌러주세요.",
         collectPrompt: "더 추가하실 내용이 있나요? 준비되셨으면 아래 '티켓 제출'을 눌러주세요 — 자세할수록 빠르게 도와드릴 수 있어요.",
         submitTicket: "티켓 제출",
@@ -3428,6 +3430,8 @@
       '  display: flex; flex-direction: column; gap: 10px;',
       '}',
       '.rw-chat-empty { font-size: 13px; color: var(--rw-muted); text-align: center; padding: 24px 12px; }',
+      '.rw-chat-intro { padding: 28px 18px; }',
+      '.rw-chat-intro-title { font-size: 14px; font-weight: 600; color: var(--rw-fg); margin-bottom: 6px; }',
       '.rw-chat-msg { display: flex; gap: 8px; }',
       '.rw-chat-msg-user { justify-content: flex-end; }',
       '.rw-chat-msg-agent { justify-content: flex-start; align-items: flex-start; }',
@@ -5610,24 +5614,50 @@
   // Full rebuild of the message list from chatMessages. Cheap at the ≤50-
   // message history scale this view operates at; guarded by chatUi so a
   // stale async callback after navigation is a no-op.
+  // Opening acknowledgement for a Live session that has no messages yet. This
+  // is NOT a fabricated chat message — it is a UI affordance (styled like the
+  // intake empty state) that names the ticket and sets expectations: the
+  // assigned agent is already working in the background and progress/updates
+  // will appear here. Without it a freshly-opened Live session reads as a blank
+  // screen with nothing going on, even though a coder job is running.
+  function renderLiveSessionIntro() {
+    var children = [];
+    var title = liveSessionTicket && liveSessionTicket.title;
+    if (title) {
+      children.push(h("div", { className: "rw-chat-intro-title" }, title));
+    }
+    children.push(h("div", null, t("chat.liveSessionIntro", { name: chatIdentityName() })));
+    return h("div", { className: "rw-chat-empty rw-chat-intro" }, children);
+  }
+
   function renderChatMessageList() {
     if (!chatUi) return;
     var listEl = chatUi.listEl;
     clearChildren(listEl);
 
-    // Agentless threads open with a scripted offline notice that doubles as
-    // submission guidance ("provide as much detail as possible, then Submit
-    // Ticket"). Rendered as a bot bubble pinned to the top of the thread —
-    // including before the first message — so the user always knows who is
-    // (not) on the other end. Threads an agent has joined skip it; the
-    // agent speaks for itself.
-    if (!chatAgentMode() && !chatThreadHasAgent()) {
-      listEl.appendChild(renderChatAgentRow({ content: t("chat.agentlessIntro") }));
-    }
+    if (chatIsLiveSession) {
+      // Live session against a running coder job: replace the generic intake
+      // empty state with an acknowledgement of the ticket + reassurance that
+      // work is happening in the background. The footer input stays live, so
+      // the user can ask a question or steer the work at any time.
+      if (chatMessages.length === 0) {
+        listEl.appendChild(renderLiveSessionIntro());
+      }
+    } else {
+      // Agentless threads open with a scripted offline notice that doubles as
+      // submission guidance ("provide as much detail as possible, then Submit
+      // Ticket"). Rendered as a bot bubble pinned to the top of the thread —
+      // including before the first message — so the user always knows who is
+      // (not) on the other end. Threads an agent has joined skip it; the
+      // agent speaks for itself.
+      if (!chatAgentMode() && !chatThreadHasAgent()) {
+        listEl.appendChild(renderChatAgentRow({ content: t("chat.agentlessIntro") }));
+      }
 
-    if (chatMessages.length === 0 && chatAgentMode()) {
-      listEl.appendChild(h("div", { className: "rw-chat-empty" },
-        t("chat.empty", { name: chatAgentName() })));
+      if (chatMessages.length === 0 && chatAgentMode()) {
+        listEl.appendChild(h("div", { className: "rw-chat-empty" },
+          t("chat.empty", { name: chatAgentName() })));
+      }
     }
 
     var activeProposal = chatFindActiveProposal();
@@ -7633,6 +7663,14 @@
     window._rwTestHooks.renderAttachChip = renderAttachChip;
     window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
     window._rwTestHooks.stagedGallery = stagedGallery;
+    window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
+    window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
+    // Seed the closure state the live-session intro reads (ticket + chat config),
+    // so a vm test can render it without bootstrapping the whole widget.
+    window._rwTestHooks._setLiveSessionState = function (ticket, chatConfig) {
+      liveSessionTicket = ticket;
+      if (chatConfig) config.chat = chatConfig;
+    };
   }
 
 })();

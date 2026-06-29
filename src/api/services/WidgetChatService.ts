@@ -25,6 +25,7 @@ import {
   widgetUsers,
   workspaceTasks,
   type WidgetChatEventPayload,
+  type WidgetChatMessagePayload,
 } from '../../db/schema';
 import * as ServerService from './ServerService';
 import * as WidgetService from './WidgetService';
@@ -73,7 +74,7 @@ export type { WidgetChatEventPayload };
 /** Events the workspace reports back for a turn. seq orders them; turn_done completes the turn. */
 export type TurnEventInput =
   | { seq: number; kind: 'agent_message'; text?: unknown }
-  | { seq: number; kind: 'team_message'; text?: unknown }
+  | { seq: number; kind: 'team_message'; text?: unknown; authorName?: unknown }
   | { seq: number; kind: 'proposal'; title?: unknown; description?: unknown; toolUseId?: unknown }
   | { seq: number; kind: 'ticket_link'; ticketId?: unknown }
   | { seq: number; kind: 'search_performed'; query?: unknown; resultText?: unknown }
@@ -1249,7 +1250,7 @@ export async function ingestTurnEvents(
       continue;
     }
 
-    let row: { role: 'agent' | 'team' | 'event'; content: string; payload: WidgetChatEventPayload | null } | null = null;
+    let row: { role: 'agent' | 'team' | 'event'; content: string; payload: WidgetChatMessagePayload | null } | null = null;
     switch (ev.kind) {
       case 'agent_message': {
         if (typeof ev.text === 'string' && ev.text.length > 0) {
@@ -1262,8 +1263,18 @@ export async function ingestTurnEvents(
         // session. Persisted as a `team` row so the external viewer sees what the
         // team said (the live session mirrors the workspace live chat). Not part
         // of the agent's turn transcript (buildTranscript excludes role='team').
+        //
+        // authorName attributes the reply to the human who sent it, so a live
+        // session with MULTIPLE staff shows each sender's name rather than a
+        // generic "Team" (the widget renders payload.authorName, falling back to
+        // "Team" when absent). Same {authorName} payload shape as sendTeamReply.
         if (typeof ev.text === 'string' && ev.text.length > 0) {
-          row = { role: 'team', content: ev.text, payload: null };
+          const authorName = typeof ev.authorName === 'string' ? ev.authorName.trim() : '';
+          row = {
+            role: 'team',
+            content: ev.text,
+            payload: authorName ? { authorName } : null,
+          };
         }
         break;
       }
