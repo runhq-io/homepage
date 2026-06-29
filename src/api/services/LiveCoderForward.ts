@@ -1,21 +1,23 @@
 /**
- * LiveCoderForward.ts — Pure screen-and-forward logic for staff live-coder messages.
+ * LiveCoderForward.ts — Pure forward logic for staff live-coder messages.
  *
  * A staff member with the `live_coder` widget permission sends a message into
  * an active widget-chat conversation. This module:
- *   1. Guards against injection attacks via the `screen` dependency.
- *   2. Forwards safe messages to the workspace Runtime Operator via
+ *   1. Forwards the message to the workspace Runtime Operator via
  *      `sendToWorkspace`.
- *   3. Short-circuits early when there is no assigned job channel yet.
+ *   2. Short-circuits early when there is no assigned job channel yet.
  *
- * The deps pattern (injected screen + sendToWorkspace) keeps the pure logic
- * fully unit-testable without touching the DB, InjectionGuardService, or
- * ServerService.
+ * Inbound live-session messages are NOT AI-screened: the endpoint is already
+ * RBAC-gated to holders of the `live_coder` permission, so these are trusted
+ * staff instructions to their own coder and are forwarded verbatim. (The
+ * injection guard still protects the untrusted intake path — ticket creation
+ * and auto-assign — via InjectionGuardService elsewhere.)
+ *
+ * The deps pattern (injected sendToWorkspace) keeps the pure logic fully
+ * unit-testable without touching the DB or ServerService.
  */
 
 export interface LiveCoderForwardDeps {
-  /** Screen the text for injection attacks. Returns `{ safe, reasons }`. */
-  screen: (text: string) => Promise<{ safe: boolean; reasons: string[]; unavailable?: boolean }>;
   /**
    * Forward the message to the workspace Runtime Operator via the HMAC-signed
    * internal route. Returns `{ ok: true }` on success.
@@ -30,11 +32,10 @@ export interface LiveCoderForwardDeps {
 
 export type LiveCoderForwardResult =
   | { status: 'forwarded' }
-  | { status: 'flagged' }
   | { status: 'no-job' };
 
 /**
- * Screen a staff live-coder message and, if safe, forward it to the workspace.
+ * Forward a staff live-coder message to the workspace.
  *
  * @param input.conversationId  The widget chat conversation id (for tracing).
  * @param input.projectId       The widget project id (for tracing).
@@ -56,9 +57,6 @@ export async function forwardLiveMessage(
   deps: LiveCoderForwardDeps,
 ): Promise<LiveCoderForwardResult> {
   if (!input.jobChannelId) return { status: 'no-job' };
-
-  const verdict = await deps.screen(input.text);
-  if (!verdict.safe) return { status: 'flagged' };
 
   await deps.sendToWorkspace({
     jobChannelId: input.jobChannelId,

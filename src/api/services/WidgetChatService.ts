@@ -1210,26 +1210,6 @@ export async function sendLiveCoderMessage(
 }
 
 /**
- * Append a rejection event row into the conversation transcript (e.g. when
- * forwardLiveMessage returns 'flagged'). The event is surfaced to the widget
- * SSE stream so the live-coder UI can show an inline error.
- */
-export async function appendLiveCoderRejectionEvent(
-  conversationId: string,
-  reason: string,
-): Promise<void> {
-  const [row] = await db
-    .insert(widgetChatMessages)
-    .values({
-      conversationId,
-      role: 'event',
-      payload: { kind: 'live_coder_rejected', reason },
-    })
-    .returning();
-  if (row) publish(row);
-}
-
-/**
  * Idempotently persist a batch of turn events. Rows upsert on the partial
  * unique index (turn_id, seq) via onConflictDoNothing — retries cannot
  * duplicate, reordering cannot corrupt (rows are processed in seq order and
