@@ -72,7 +72,7 @@ import { wsServer as getWsServer } from '../notifications/wsRegistry';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
-import { calculateCost, type TokenCounts } from './services/pricing';
+import { calculateCost, resolveModel, type TokenCounts } from './services/pricing';
 import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
@@ -7708,16 +7708,8 @@ export function createHttpApp() {
 // Helper Functions
 // ============================================================================
 
-// Upgrade legacy model IDs to their latest equivalents
-const MODEL_UPGRADES: Record<string, string> = {
-  'claude-sonnet-4-20250514': 'claude-sonnet-4-6',
-  'claude-opus-4-20250514': 'claude-opus-4-6',
-  'claude-haiku-4-5-20251001': 'claude-haiku-4-5',
-};
-
-function resolveModel(model: string): string {
-  return MODEL_UPGRADES[model] || model;
-}
+// Model id normalisation (retired/dated → current tier model) lives next to the
+// pricing registry in services/pricing.ts and is imported as `resolveModel`.
 
 
 // ============================================================================
