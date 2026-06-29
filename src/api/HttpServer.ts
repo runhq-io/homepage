@@ -4662,9 +4662,59 @@ export function createHttpApp() {
           });
           return c.json({ error: 'Server is provisioning. Please try again shortly.', serverName: server.name }, 503);
         } else {
-          // Machine exists, wake it if needed (using internal version to skip redundant access/fetch)
+          // Machine exists, wake it if needed (using internal version to skip redundant access/fetch).
+          //
+          // Cold starts of a suspended/stopped machine can take far longer than
+          // the edge gateway — and the client's own ~60s fetch abort — will
+          // wait: a heavy workspace boot + health can run 90s+. Blocking the
+          // whole session request on that is exactly what surfaced to users as a
+          // raw 504 "server won't load". The BE was still faithfully waiting,
+          // but the gateway gave up first and returned a 504 the client can't
+          // recover from.
+          //
+          // So bound how long we block. `wakeRemoteServerInternal` keeps running
+          // in the background regardless — `startMachine` has already been
+          // issued to Fly, and the promise flips status→online once health
+          // passes (and the workspace's own register call does the same on
+          // boot). If the machine isn't ready within the budget we return a
+          // fast, structured `503 { starting }` — comfortably under any gateway
+          // timeout — and the client polls the session endpoint until the
+          // fast-path (online + fresh heartbeat) succeeds.
           console.log(`[HttpServer] Waking machine for server ${serverId} before session...`);
-          const wakeResult = await ServerService.wakeRemoteServerInternal(server);
+          const wakePromise = ServerService.wakeRemoteServerInternal(server);
+          // A background rejection (the wake failing after we've already replied
+          // 503-starting) must not bubble up as an unhandledRejection.
+          wakePromise.catch((err) => {
+            console.error(`[HttpServer] Background wake failed for server ${serverId}:`, err);
+          });
+
+          const SESSION_WAKE_BUDGET_MS = 20_000;
+          let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+          const timedOut = Symbol('wake-timeout');
+          const raced = await Promise.race([
+            wakePromise,
+            new Promise<typeof timedOut>((resolve) => {
+              wakeTimer = setTimeout(() => resolve(timedOut), SESSION_WAKE_BUDGET_MS);
+            }),
+          ]);
+          if (wakeTimer) clearTimeout(wakeTimer);
+
+          if (raced === timedOut) {
+            // Still booting. The wake continues in the background; tell the
+            // client to poll. `starting:true` is the explicit signal the client
+            // routes into its auto-reconnect loop — kept distinct from
+            // `provisioning`, which would collide with the migration guard in
+            // wakeRemoteServerInternal.
+            console.log(
+              `[HttpServer] Machine for server ${serverId} still starting after ${SESSION_WAKE_BUDGET_MS}ms; returning 503 starting`,
+            );
+            return c.json(
+              { error: 'Server is starting. Please try again shortly.', starting: true, serverName: server.name },
+              503,
+            );
+          }
+
+          const wakeResult = raced;
           if (!wakeResult.success) {
             // Never auto-reprovision based on a wake error string. String
             // matching on "destroyed" / "not found" is how transient Fly API
