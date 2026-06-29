@@ -13,23 +13,26 @@
  * conversation_not_found, never an existence signal.
  */
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import {
   servers,
   widgetChatConversations,
+  widgetChatImages,
   widgetChatMessages,
   widgetClarifications,
   widgetExposedAgents,
   widgetProjects,
   widgetUsers,
   workspaceTasks,
+  type ChatImageRow,
   type WidgetChatEventPayload,
   type WidgetChatMessagePayload,
 } from '../../db/schema';
 import * as ServerService from './ServerService';
 import * as WidgetService from './WidgetService';
 import { autoAssignTicket as autoAssignTicketDefault } from './WidgetAutoAssign';
+import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
 /**
  * Fire-and-forget auto-assign hook, invoked after a widget ticket is created
@@ -398,28 +401,100 @@ export async function listMessages(
 // Pure transcript helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Attachment storage seam (injectable for tests)
+// ---------------------------------------------------------------------------
+
+interface AttachmentStorage {
+  isConfigured(): boolean;
+  getObjectBuffer(input: { storageProvider: 'r2' | 's3'; storageKey: string }): Promise<Buffer>;
+  createDownloadUrl(input: { storageProvider: 'r2' | 's3'; storageKey: string; originalName?: string | null }, options?: { ttlSeconds?: number }): Promise<string | null>;
+}
+
+let attachmentStorageImpl: AttachmentStorage = new TaskAttachmentStorageService();
+
+/** Test seam: override the attachment storage service. Returns a restore function. */
+export function __setAttachmentStorageForTests(svc: AttachmentStorage): () => void {
+  const prev = attachmentStorageImpl;
+  attachmentStorageImpl = svc;
+  return () => {
+    attachmentStorageImpl = prev;
+  };
+}
+
 export type TranscriptEntry =
-  | { role: 'user' | 'agent'; content: string }
+  | { role: 'user' | 'agent'; content: string; images?: { mime: string; dataBase64: string }[] }
   | { role: 'event'; payload: WidgetChatEventPayload };
 
 /**
- * Map persisted rows onto the turn-dispatch transcript shape. Defensive:
- * payload-less event rows and empty user/agent rows are dropped. role='team'
- * rows are EXCLUDED — the workspace turn contract only knows
- * user/agent/event entries, and team replies are a human side-channel the
- * agent does not consume (widening the workspace ingest is a separate,
- * cross-repo contract change).
+ * Map persisted rows onto the turn-dispatch transcript shape. Async: when
+ * `conversationId` is provided and object storage is configured, user rows that
+ * have linked `widget_chat_images` are enriched with the base64-encoded model
+ * derivative (≤1024px JPEG). The `images` field is OMITTED (not `[]`) when a
+ * user row has no linked images, keeping the shape additive and backward-compatible.
+ *
+ * Non-user rows (agent, event) never carry images. role='team' rows are EXCLUDED —
+ * the workspace turn contract only knows user/agent/event entries.
+ *
+ * When `conversationId` is omitted the function behaves identically to the
+ * previous pure-sync version (no DB or storage access).
  */
-export function buildTranscript(
-  rows: Pick<ChatMessageRow, 'role' | 'content' | 'payload'>[],
-): TranscriptEntry[] {
+export async function buildTranscript(
+  rows: Array<Pick<ChatMessageRow, 'role' | 'content' | 'payload'> & { id?: string }>,
+  conversationId?: string,
+): Promise<TranscriptEntry[]> {
+  // Collect IDs of all user rows — including image-only (empty-content) rows.
+  const userRowIds: string[] = [];
+  for (const row of rows) {
+    if (row.role === 'user' && row.id) {
+      userRowIds.push(row.id);
+    }
+  }
+
+  // Batch-load images when all conditions are met: we have user rows, a
+  // conversationId to scope the query, and configured storage to fetch bytes.
+  const byMessageId = new Map<string, Array<{ modelStorageProvider: 'r2' | 's3'; modelStorageKey: string }>>();
+  if (userRowIds.length > 0 && conversationId && attachmentStorageImpl.isConfigured()) {
+    const imageRows = await db
+      .select({
+        messageId: widgetChatImages.messageId,
+        modelStorageProvider: widgetChatImages.modelStorageProvider,
+        modelStorageKey: widgetChatImages.modelStorageKey,
+      })
+      .from(widgetChatImages)
+      .where(inArray(widgetChatImages.messageId, userRowIds));
+    for (const img of imageRows) {
+      if (!img.messageId) continue;
+      const list = byMessageId.get(img.messageId);
+      if (list) {
+        list.push({ modelStorageProvider: img.modelStorageProvider, modelStorageKey: img.modelStorageKey });
+      } else {
+        byMessageId.set(img.messageId, [{ modelStorageProvider: img.modelStorageProvider, modelStorageKey: img.modelStorageKey }]);
+      }
+    }
+  }
+
   const out: TranscriptEntry[] = [];
   for (const row of rows) {
     if (row.role === 'event') {
       // 'kind' in — narrows away the role='team' attribution payload shape.
       if (row.payload && 'kind' in row.payload) out.push({ role: 'event', payload: row.payload });
-    } else if (row.role !== 'team' && row.content) {
-      out.push({ role: row.role, content: row.content });
+    } else if (row.role !== 'team' && (row.content || (row.role === 'user' && row.id && byMessageId.has(row.id)))) {
+      if (row.role === 'user' && row.id && byMessageId.has(row.id)) {
+        // User row with linked images: fetch each model derivative and base64-encode.
+        const imgList = byMessageId.get(row.id)!;
+        const images: { mime: string; dataBase64: string }[] = [];
+        for (const img of imgList) {
+          const buffer = await attachmentStorageImpl.getObjectBuffer({
+            storageProvider: img.modelStorageProvider,
+            storageKey: img.modelStorageKey,
+          });
+          images.push({ mime: 'image/jpeg', dataBase64: buffer.toString('base64') });
+        }
+        out.push({ role: 'user', content: row.content, images });
+      } else {
+        out.push({ role: row.role as 'user' | 'agent', content: row.content });
+      }
     }
   }
   return out;
@@ -587,7 +662,7 @@ async function dispatchTurn(
         agentEntityId: project.widgetChatAgentEntityId,
         chatInstructions: null,
         forceProposal: opts.forceProposal === true,
-        transcript: buildTranscript(rows),
+        transcript: await buildTranscript(rows, conversation.id),
         pendingProposal: pending
           ? { toolUseId: pending.toolUseId, resolution: pending.resolution }
           : null,
@@ -633,17 +708,26 @@ async function ensureCollectPrompt(conversationId: string): Promise<void> {
  * on the very next message. Caps: 4000 chars per message, 30 user turns per
  * conversation (abuse backstop — each turn is paid model time). The HTTP
  * layer additionally rate-limits via the chat_message bucket.
+ *
+ * Optional imageIds: previously-uploaded chat images to attach to this message.
+ * Validated BEFORE the message row is inserted (invalid refs produce no row).
+ * After insert, the image rows are updated to set their message_id.
  */
 export async function sendUserMessage(
   conversationId: string,
   projectId: string,
   widgetUserId: string,
   content: string,
+  imageIds?: string[],
 ): Promise<ChatMessageRow> {
   const text = content.trim();
-  if (!text) throw new WidgetService.WidgetError('message_required', 400);
   if (text.length > MAX_MESSAGE_LENGTH) {
     throw new WidgetService.WidgetError('message_too_long', 400);
+  }
+
+  // Count cap: fast path, no DB query needed.
+  if (imageIds && imageIds.length > WidgetService.MAX_CHAT_IMAGES_PER_MESSAGE) {
+    throw new WidgetService.WidgetError('attachment_count_exceeded', 400);
   }
 
   const conversation = await requireWritableConversation(conversationId, projectId, widgetUserId);
@@ -653,11 +737,35 @@ export async function sendUserMessage(
   const project = await getChatProject(projectId);
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
+  // Image ref validation: BEFORE the message insert — invalid refs must not
+  // produce a message row. The query enforces ownership (conversationId +
+  // widgetUserId) and confirms no prior link (messageId IS NULL).
+  let validatedImageIds: string[] = [];
+  if (imageIds && imageIds.length > 0) {
+    const validRows = await db
+      .select({ id: widgetChatImages.id })
+      .from(widgetChatImages)
+      .where(and(
+        inArray(widgetChatImages.id, imageIds),
+        eq(widgetChatImages.conversationId, conversationId),
+        eq(widgetChatImages.widgetUserId, widgetUserId),
+        isNull(widgetChatImages.messageId),
+      ));
+    if (validRows.length !== imageIds.length) {
+      throw new WidgetService.WidgetError('invalid_image_ref', 400);
+    }
+    validatedImageIds = validRows.map((r) => r.id);
+  }
+
+  // Require either non-empty text or at least one validated image.
+  if (!text && validatedImageIds.length === 0) {
+    throw new WidgetService.WidgetError('message_required', 400);
+  }
+
   const [message] = await db
     .insert(widgetChatMessages)
     .values({ conversationId, role: 'user', content: text })
     .returning();
-  publish(message!);
 
   await db
     .update(widgetChatConversations)
@@ -666,6 +774,16 @@ export async function sendUserMessage(
       updatedAt: new Date(),
     })
     .where(eq(widgetChatConversations.id, conversationId));
+
+  // Link images to the new message after the row exists; publish AFTER so SSE
+  // subscribers see the FK already written.
+  if (validatedImageIds.length > 0) {
+    await db
+      .update(widgetChatImages)
+      .set({ messageId: message!.id })
+      .where(inArray(widgetChatImages.id, validatedImageIds));
+  }
+  publish(message!);
 
   if (project.widgetChatAgentEntityId) {
     await dispatchTurn(conversation);
@@ -704,6 +822,54 @@ export async function forceProposal(
 
 const MAX_DRAFT_TITLE_LENGTH = 300;
 const MAX_DRAFT_DESCRIPTION_LENGTH = 10_000;
+
+/**
+ * Shared helper: carry all `widget_chat_images` for a conversation onto a
+ * newly-created task as `workspaceTaskAttachments`. References the ORIGINAL
+ * storage object directly — no copy needed or possible. Best-effort: a
+ * failing insert for one image logs a warning and moves on; the other images
+ * and the ticket itself are unaffected.
+ */
+async function carryConversationImagesToTask(
+  conversationId: string,
+  serverId: string,
+  taskId: string,
+): Promise<void> {
+  let imgs: (typeof widgetChatImages.$inferSelect)[];
+  try {
+    imgs = await db
+      .select()
+      .from(widgetChatImages)
+      .where(
+        and(
+          eq(widgetChatImages.conversationId, conversationId),
+          isNotNull(widgetChatImages.messageId),
+        ),
+      );
+  } catch (err) {
+    console.warn('[WidgetChatService] failed to load chat images for carry-over', { conversationId, taskId, err });
+    return;
+  }
+  for (const img of imgs) {
+    try {
+      await WidgetService.linkExistingTaskAttachment({
+        serverId,
+        taskId,
+        storageProvider: img.originalStorageProvider,
+        storageKey: img.originalStorageKey,
+        mimeType: img.mimeType,
+        originalName: img.originalName,
+      });
+    } catch (err) {
+      console.warn('[WidgetChatService] failed to carry chat image onto ticket', {
+        conversationId,
+        taskId,
+        imageId: img.id,
+        err,
+      });
+    }
+  }
+}
 
 /** The latest proposal, iff still unresolved. Throws no_pending_proposal otherwise. */
 async function requirePendingProposal(conversationId: string): Promise<PendingProposal> {
@@ -748,6 +914,10 @@ export async function createTicketFromChat(
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
   const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+
+  // Carry all images from the conversation onto the new ticket as task attachments.
+  // Best-effort: a failing insert must not abort the already-created ticket.
+  await carryConversationImagesToTask(conversationId, project.serverId, task.id);
 
   // Clarifier suppression: 'skipped' is the codebase's native "no clarifying
   // state" marker (getTicketClarification orders 'skipped' rows last; the
@@ -859,6 +1029,10 @@ export async function submitTicketFromConversation(
 
   const { title, description } = deriveTicketDraft(userMessages);
   const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+
+  // Carry all images from the conversation onto the new ticket as task attachments.
+  // Best-effort: a failing insert must not abort the already-created ticket.
+  await carryConversationImagesToTask(conversationId, project.serverId, task.id);
 
   // Born ready: same clarifier-suppression marker createTicketFromChat writes.
   await db.insert(widgetClarifications).values({
@@ -1416,4 +1590,150 @@ export async function ingestTurnEvents(
   }
 
   return { inserted, turnDone };
+}
+
+// ============================================================================
+// Chat image upload
+// ============================================================================
+
+/** Publicly safe image descriptor — never includes storage keys. */
+export interface PublicChatImage {
+  id: string;
+  mimeType: string;
+  originalName: string | null;
+  width: number;
+  height: number;
+}
+
+/**
+ * Map a full ChatImageRow to the public-safe descriptor.
+ * MUST NOT include storageProvider, storageKey, or any derivative storage fields.
+ */
+export function toPublicChatImage(row: Pick<ChatImageRow, 'id' | 'mimeType' | 'originalName' | 'width' | 'height'>): PublicChatImage {
+  return {
+    id: row.id,
+    mimeType: row.mimeType,
+    originalName: row.originalName ?? null,
+    width: row.width,
+    height: row.height,
+  };
+}
+
+/**
+ * Batch-load all widget_chat_images linked to a set of message ids.
+ * Returns a Map<messageId, PublicChatImage[]> for O(1) lookup per message.
+ * Empty input returns an empty Map without querying the DB.
+ */
+export async function loadChatImagesForMessages(
+  messageIds: string[],
+): Promise<Map<string, PublicChatImage[]>> {
+  if (messageIds.length === 0) return new Map();
+  const rows = await db
+    .select({
+      id: widgetChatImages.id,
+      mimeType: widgetChatImages.mimeType,
+      originalName: widgetChatImages.originalName,
+      width: widgetChatImages.width,
+      height: widgetChatImages.height,
+      messageId: widgetChatImages.messageId,
+    })
+    .from(widgetChatImages)
+    .where(inArray(widgetChatImages.messageId, messageIds));
+  const map = new Map<string, PublicChatImage[]>();
+  for (const row of rows) {
+    if (!row.messageId) continue;
+    const existing = map.get(row.messageId);
+    if (existing) {
+      existing.push(toPublicChatImage(row));
+    } else {
+      map.set(row.messageId, [toPublicChatImage(row)]);
+    }
+  }
+  return map;
+}
+
+/**
+ * Gate an image upload behind conversation writability + per-conversation cap,
+ * then delegate storage to WidgetService.storeWidgetChatImage. Returns only
+ * the public-safe fields — storage keys are never exposed to callers.
+ *
+ * Error codes thrown:
+ *   conversation_not_found (404) — not the owner or doesn't exist
+ *   conversation_closed (409)    — conversation is no longer active
+ *   attachment_count_exceeded (400) — per-conversation cap reached
+ *   + any errors from storeWidgetChatImage (type, size, guard, storage)
+ */
+export async function attachConversationImage(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetService.WidgetPermission>,
+  file: WidgetService.WidgetUploadFile,
+): Promise<PublicChatImage> {
+  // 1. Verify conversation ownership + active status
+  await requireWritableConversation(conversationId, projectId, widgetUserId);
+
+  // 2. Fail fast before any storage: check per-conversation cap
+  const [countRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(widgetChatImages)
+    .where(eq(widgetChatImages.conversationId, conversationId));
+  if (Number(countRow?.count ?? 0) >= WidgetService.MAX_CHAT_IMAGES_PER_CONVERSATION) {
+    throw new WidgetService.WidgetError('attachment_count_exceeded', 400);
+  }
+
+  // 3. Delegate type/size/guard/storage to WidgetService
+  const row = await WidgetService.storeWidgetChatImage(projectId, conversationId, widgetUserId, permissions, file);
+
+  // 4. Strip storage keys before returning
+  return toPublicChatImage(row);
+}
+
+/**
+ * Load a widget_chat_images row owned by the caller and return a presigned
+ * download URL for the ORIGINAL rendition. Used by the GET serve endpoint.
+ *
+ * Throws:
+ *   conversation_not_found (404) — unknown conversationId, wrong user, or wrong project.
+ *   image_not_found (404)        — unknown imageId, wrong conversation, or wrong user.
+ */
+export async function resolveConversationImageForServe(
+  conversationId: string,
+  imageId: string,
+  projectId: string,
+  widgetUserId: string,
+): Promise<string> {
+  // 1. Verify conversation ownership (also asserts projectId)
+  await getConversationOwned(conversationId, projectId, widgetUserId);
+
+  // 2. Load the image row, asserting conversation + user ownership
+  const [row] = await db
+    .select({
+      originalStorageProvider: widgetChatImages.originalStorageProvider,
+      originalStorageKey: widgetChatImages.originalStorageKey,
+      originalName: widgetChatImages.originalName,
+    })
+    .from(widgetChatImages)
+    .where(
+      and(
+        eq(widgetChatImages.id, imageId),
+        eq(widgetChatImages.conversationId, conversationId),
+        eq(widgetChatImages.widgetUserId, widgetUserId),
+      ),
+    )
+    .limit(1);
+
+  if (!row) throw new WidgetService.WidgetError('image_not_found', 404);
+
+  // 3. Generate presigned URL for the original rendition — short-lived (5 min)
+  // because chat images are private and the URL is served directly to the user.
+  const url = await attachmentStorageImpl.createDownloadUrl({
+    storageProvider: row.originalStorageProvider,
+    storageKey: row.originalStorageKey,
+    originalName: row.originalName,
+  }, { ttlSeconds: 300 });
+
+  if (!url) throw new WidgetService.WidgetError('image_not_found', 404);
+
+  return url;
 }

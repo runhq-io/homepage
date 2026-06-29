@@ -24,7 +24,10 @@ import {
   users,
   widgetExposedAgents,
   widgetChatConversations,
+  widgetChatImages,
+  type ChatImageRow,
 } from '../../db/schema';
+import { resizeForModel } from './widgetChatImage';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment, TodoStatus } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
@@ -2140,6 +2143,40 @@ async function storeTaskAttachment(input: {
   };
 }
 
+/**
+ * Links an EXISTING stored object to a task as a workspaceTaskAttachments row.
+ * Unlike storeTaskAttachment, this does NOT upload anything — the object must
+ * already exist in storage (e.g. a widget_chat_images original). Used when
+ * chat images are carried over to the ticket created from a conversation.
+ */
+export async function linkExistingTaskAttachment(input: {
+  serverId: string;
+  taskId: string;
+  storageProvider: 'r2' | 's3';
+  storageKey: string;
+  mimeType: string;
+  originalName?: string | null;
+}): Promise<{ id: string; mimeType: string; originalName: string | null }> {
+  const [attachment] = await db
+    .insert(workspaceTaskAttachments)
+    .values({
+      serverId: input.serverId,
+      taskId: input.taskId,
+      ownerType: 'task',
+      ownerId: input.taskId,
+      storageProvider: input.storageProvider,
+      storageKey: input.storageKey,
+      mimeType: input.mimeType,
+      originalName: input.originalName ?? null,
+    })
+    .returning();
+  return {
+    id: attachment!.id,
+    mimeType: attachment!.mimeType,
+    originalName: attachment!.originalName ?? null,
+  };
+}
+
 export async function createTicketWithAttachments(
   projectId: string,
   widgetUserId: string,
@@ -2412,6 +2449,172 @@ export async function deleteTicketAttachment(
     .delete(workspaceTaskAttachments)
     .where(eq(workspaceTaskAttachments.id, attachmentId));
 }
+
+// ============================================================================
+// Widget chat image upload
+// ============================================================================
+
+/** Maximum images a visitor may attach to a single chat message. */
+export const MAX_CHAT_IMAGES_PER_MESSAGE = 3;
+
+/** Maximum total images across an entire conversation (abuse cap). */
+export const MAX_CHAT_IMAGES_PER_CONVERSATION = 5;
+
+const MAX_CHAT_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+
+// SVG intentionally excluded — XML payload can carry inline <script>.
+const ALLOWED_CHAT_IMAGE_MIME_SET = new Set<string>([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+/**
+ * Returns true when the permission set grants image-attachment capability.
+ * Used by the upload endpoint (defense-in-depth: checked again inside
+ * storeWidgetChatImage to ensure no caller can bypass the gate).
+ */
+export function canAttachImages(_projectId: string, permissions: ReadonlySet<WidgetPermission>): boolean {
+  return permissions.has('attach_image');
+}
+
+/**
+ * Screen a single chat image through the injection guard.
+ * Uses an empty ticket context (no subject/description) because chat images
+ * are uploaded independently of any ticket. The guard evaluates image content.
+ */
+async function requireSafeChatImage(image: InjectionGuardImage): Promise<void> {
+  const verdict = await InjectionGuardService.checkTicket(
+    { title: '', description: null },
+    { images: [image] },
+  );
+  if (verdict.safe) return;
+  throw new WidgetError(
+    verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
+    verdict.unavailable ? 503 : 400,
+    verdict.reasons,
+  );
+}
+
+/**
+ * Screen, store, and register a widget-chat image upload.
+ *
+ * Flow:
+ *   1. Enforce attach_image RBAC permission (defense-in-depth).
+ *   2. Validate mime-type and size.
+ *   3. Look up project to resolve the serverId storage namespace.
+ *   4. Enforce per-conversation count cap.
+ *   5. Run the injection guard (before ANY storage write).
+ *   6. Store the original upload via attachmentStorage.
+ *   7. Produce a model-sized JPEG derivative via resizeForModel.
+ *   8. Store the derivative.  On failure → delete the original and re-throw.
+ *   9. Insert the widget_chat_images row and return it.
+ *
+ * The row is inserted with messageId null; a later task binds it to a message.
+ */
+export async function storeWidgetChatImage(
+  projectId: string,
+  conversationId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetPermission>,
+  file: WidgetUploadFile,
+): Promise<ChatImageRow> {
+  // 0. Kill-switch checks (same guards as the ticket attachment upload paths).
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+  if (!attachmentStorage.isConfigured()) throw new WidgetError('attachment_storage_unconfigured', 500);
+
+  // 1. RBAC check (defense-in-depth)
+  if (!canAttachImages(projectId, permissions)) {
+    throw new WidgetError('attach_image_permission_required', 403);
+  }
+
+  // 2. Type check
+  if (!ALLOWED_CHAT_IMAGE_MIME_SET.has(file.mimeType)) {
+    throw new WidgetError('attachment_unsupported_type', 400);
+  }
+
+  // 3. Size check
+  if (file.buffer.length > MAX_CHAT_IMAGE_SIZE) {
+    throw new WidgetError('attachment_too_large', 413);
+  }
+
+  // 4. Look up project → serverId
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
+  // 5. Per-conversation count cap
+  const [convCountRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(widgetChatImages)
+    .where(eq(widgetChatImages.conversationId, conversationId));
+  if (Number(convCountRow?.count ?? 0) >= MAX_CHAT_IMAGES_PER_CONVERSATION) {
+    throw new WidgetError('attachment_count_exceeded', 400);
+  }
+
+  // 6. Injection guard — MUST run before any storeUpload call
+  await requireSafeChatImage({
+    mimeType: file.mimeType as InjectionGuardImageMime,
+    dataBase64: file.buffer.toString('base64'),
+    filename: file.originalName ?? file.filename,
+  });
+
+  // 7. Store original upload
+  const original = await attachmentStorage.storeUpload({
+    serverId: project.serverId,
+    body: file.buffer,
+    mimeType: file.mimeType,
+    filename: file.filename,
+    originalName: file.originalName,
+    ownerType: 'widget_chat_message',
+  });
+
+  // 8. Generate model-sized derivative
+  const derivative = await resizeForModel(file.buffer, file.mimeType);
+
+  // 9. Store derivative — on failure, clean up the original to avoid orphaned objects
+  const modelFilename = file.filename.replace(/\.[^.]+$/, '') + '-model.jpg';
+  let modelStored: { storageProvider: 'r2' | 's3'; storageKey: string };
+  try {
+    modelStored = await attachmentStorage.storeUpload({
+      serverId: project.serverId,
+      body: derivative.buffer,
+      mimeType: derivative.mime,
+      filename: modelFilename,
+      ownerType: 'widget_chat_message',
+    });
+  } catch (err) {
+    await attachmentStorage
+      .deleteStoredObject({ storageProvider: original.storageProvider, storageKey: original.storageKey })
+      .catch((cleanupErr) => {
+        console.warn('[WidgetService] cleanup of original failed after model image store error:', cleanupErr);
+      });
+    throw err;
+  }
+
+  // 10. Insert the row and return it
+  const [row] = await db
+    .insert(widgetChatImages)
+    .values({
+      conversationId,
+      widgetUserId,
+      messageId: null,
+      serverId: project.serverId,
+      mimeType: file.mimeType,
+      originalName: file.originalName ?? null,
+      originalStorageProvider: original.storageProvider,
+      originalStorageKey: original.storageKey,
+      modelStorageProvider: modelStored.storageProvider,
+      modelStorageKey: modelStored.storageKey,
+      width: derivative.width,
+      height: derivative.height,
+    })
+    .returning();
+
+  return row!;
+}
+
+export type { ChatImageRow };
 
 export async function listMyTickets(
   projectId: string,
@@ -3551,6 +3754,7 @@ export const WIDGET_ERROR_CODES = [
   'voting_period_ended',
   'ticket_rejected',
   'ticket_review_unavailable',
+  'attach_image_permission_required',
   'attachment_unsupported_type',
   'attachment_too_large',
   'attachment_count_exceeded',
@@ -3569,6 +3773,9 @@ export const WIDGET_ERROR_CODES = [
   'invalid_cursor',
   'no_pending_proposal',
   'invalid_proposal_draft',
+  // Chat image attachments
+  'invalid_image_ref',
+  'image_not_found',
   // Agentless [Submit Ticket]
   'ticket_already_created',
   'agent_turns_present',

@@ -24,6 +24,7 @@ vi.mock('./services/WidgetChatService', () => ({
   getOrCreateActiveConversation: vi.fn(),
   getActiveConversation: vi.fn(),
   getConversationOwned: vi.fn(),
+  getConversationForViewer: vi.fn(),
   listMessages: vi.fn(),
   sendUserMessage: vi.fn(),
   forceProposal: vi.fn(),
@@ -32,6 +33,8 @@ vi.mock('./services/WidgetChatService', () => ({
   dismissProposal: vi.fn(),
   ingestTurnEvents: vi.fn(),
   subscribeToConversation: vi.fn(() => () => {}),
+  loadChatImagesForMessages: vi.fn().mockResolvedValue(new Map()),
+  attachConversationImage: vi.fn(),
 }));
 vi.mock('./services/WidgetService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./services/WidgetService')>();
@@ -86,7 +89,10 @@ const MSG = {
 };
 
 describe('POST /api/widget/chat/conversations', () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(WidgetChatService.loadChatImagesForMessages).mockResolvedValue(new Map());
+  });
 
   it('401 when authenticateWidget returns null', async () => {
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(null as any);
@@ -137,7 +143,11 @@ describe('GET /api/widget/chat/conversations/active', () => {
 });
 
 describe('POST /api/widget/chat/conversations/:id/messages', () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => {
+    vi.resetAllMocks();
+    // loadChatImagesForMessages is called after every successful sendUserMessage
+    vi.mocked(WidgetChatService.loadChatImagesForMessages).mockResolvedValue(new Map());
+  });
 
   it('400 when content is missing', async () => {
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
@@ -147,15 +157,102 @@ describe('POST /api/widget/chat/conversations/:id/messages', () => {
     expect(res.status).toBe(400);
   });
 
-  it('passes content through and returns the appended message', async () => {
+  it('passes content (no imageIds) through and returns the appended message with images:[]', async () => {
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
     vi.mocked(WidgetChatService.sendUserMessage).mockResolvedValue(MSG as any);
     const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'hi' }),
     });
     expect(res.status).toBe(200);
-    expect(WidgetChatService.sendUserMessage).toHaveBeenCalledWith(CONV.id, 'proj-1', 'wu-1', 'hi');
-    expect((await res.json()).message.content).toBe('hi');
+    // 5th arg is undefined when no imageIds in body
+    expect(WidgetChatService.sendUserMessage).toHaveBeenCalledWith(CONV.id, 'proj-1', 'wu-1', 'hi', undefined);
+    const body = await res.json();
+    expect(body.message.content).toBe('hi');
+    expect(body.message.images).toEqual([]);
+  });
+
+  it('passes imageIds to sendUserMessage when provided', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.sendUserMessage).mockResolvedValue(MSG as any);
+    const imgId = 'dddddddd-dddd-4ddd-dddd-dddddddddddd';
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', imageIds: [imgId] }),
+    });
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.sendUserMessage).toHaveBeenCalledWith(CONV.id, 'proj-1', 'wu-1', 'hi', [imgId]);
+  });
+
+  it('surfaces images from loadChatImagesForMessages in the response DTO', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.sendUserMessage).mockResolvedValue(MSG as any);
+    const stubImage = { id: 'img-1', mimeType: 'image/jpeg', originalName: 'photo.jpg', width: 800, height: 600 };
+    vi.mocked(WidgetChatService.loadChatImagesForMessages).mockResolvedValue(
+      new Map([[MSG.id, [stubImage]]]),
+    );
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', imageIds: ['img-1'] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.message.images).toEqual([stubImage]);
+  });
+
+  it('400 when imageIds is present but not an array', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', imageIds: 'not-an-array' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('400 when imageIds is an array but contains non-strings', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', imageIds: [123, 'valid-string'] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('maps attachment_count_exceeded → 400', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.sendUserMessage).mockRejectedValue(
+      new WidgetService.WidgetError('attachment_count_exceeded', 400),
+    );
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', imageIds: ['a', 'b', 'c', 'd'] }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('attachment_count_exceeded');
+  });
+
+  it('maps invalid_image_ref → 400', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.sendUserMessage).mockRejectedValue(
+      new WidgetService.WidgetError('invalid_image_ref', 400),
+    );
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'hi', imageIds: ['bad-id'] }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid_image_ref');
+  });
+
+  it('response DTO always includes images field (empty array when no images)', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.sendUserMessage).mockResolvedValue(MSG as any);
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'hi' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.message).toHaveProperty('images');
+    expect(Array.isArray(body.message.images)).toBe(true);
   });
 
   it('maps turn_limit_reached → 409', async () => {

@@ -108,11 +108,17 @@
   var CHAT_CLOSED_WATCH_MS = 5000;
   var CHAT_INPUT_MAX = 4000;
   var CHAT_ESCAPE_HATCH_MIN_TURNS = 4;
+  var CHAT_IMAGE_MAX = 3; // max images per message
   // True when the chat view is a Live session (staff → running job), rather
   // than the ordinary user → agent intake conversation. Set by openLiveSession;
   // cleared when the chat view exits. Controls: send route (liveCoderSend vs
   // chatSendMessage), topbar label, back destination, and hatch-slot visibility.
   var chatIsLiveSession = false;
+  // Pending image uploads for the chat composer. Each entry:
+  //   { id: null|string, dataUrl: string, name: string, mimeType: string, uploading: bool, failed: bool }
+  // id is null while the upload is in flight; set to the server-returned opaque
+  // id on success. Cleared when the chat shell is rebuilt and on successful send.
+  var pendingChatImages = [];
   // When chatIsLiveSession is true: the ticket the live session was opened from
   // (used to restore the detail view on back-navigation).
   var liveSessionTicket = null;
@@ -310,10 +316,28 @@
     var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages" + qs);
   }
-  function chatSendMessage(conversationId, content) {
+  function chatSendMessage(conversationId, content, imageIds) {
+    var body = { content: content };
+    if (imageIds && imageIds.length) body.imageIds = imageIds;
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages", {
-      method: "POST", body: { content: content },
+      method: "POST", body: body,
     });
+  }
+
+  function chatUploadImage(conversationId, file) {
+    var fd = new FormData();
+    fd.append("file", file, file.name || "upload");
+    var init = {
+      method: "POST",
+      headers: authHeaders({}, { method: "POST" }),
+      body: fd,
+    };
+    if (wantsCookieAuth()) init.credentials = "include";
+    return fetch(RUNHQ_API + "/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/images", init).then(readJsonOrThrow);
+  }
+
+  function chatGetImageUrl(conversationId, imageId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/images/" + encodeURIComponent(imageId));
   }
   // Staff-only: send a message into the running job via the front-door agent.
   // Requires the `live_coder` permission (enforced server-side; 403 otherwise).
@@ -1010,6 +1034,7 @@
         signInPrompt: "Sign in to chat with our support agent.",
         sendFailed: "Could not send: {msg}",
         rateLimited: "You're sending messages too quickly — please wait a moment and try again.",
+        uploadFailed: "That image couldn't be uploaded. Please try again.",
         turnCap: "This conversation has reached its message limit. Create a ticket from it or start a new conversation.",
         unavailable: "The agent is unavailable right now — try Open Discussion instead.",
         proposalTitle: "Ready to create this ticket?",
@@ -1227,6 +1252,7 @@
         signInPrompt: "상담을 시작하려면 로그인하세요.",
         sendFailed: "전송 실패: {msg}",
         rateLimited: "메시지를 너무 빠르게 보내고 있습니다 — 잠시 후 다시 시도해 주세요.",
+        uploadFailed: "이미지를 업로드하지 못했습니다. 다시 시도해 주세요.",
         turnCap: "이 대화는 메시지 한도에 도달했습니다. 대화 내용으로 티켓을 만들거나 새 대화를 시작하세요.",
         unavailable: "지금은 에이전트를 이용할 수 없습니다 — 공개 토론을 이용해 보세요.",
         proposalTitle: "이 티켓을 생성할까요?",
@@ -3506,6 +3532,42 @@
       '}',
       '.rw-chat-newconv-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
 
+      /* Chat image attach affordance: thumbnail chips above input + attach btn */
+      '.rw-chat-img-chips { display: flex; gap: 6px; padding: 0 2px 4px; flex-wrap: wrap; }',
+      '.rw-chat-img-chip {',
+      '  position: relative; width: 56px; height: 56px; border-radius: 8px;',
+      '  overflow: hidden; flex-shrink: 0;',
+      '  border: 1px solid var(--rw-line-2); background: var(--rw-bg);',
+      '}',
+      '.rw-chat-img-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }',
+      '.rw-chat-img-chip-x {',
+      '  position: absolute; top: 2px; right: 2px;',
+      '  width: 16px; height: 16px; border-radius: 50%;',
+      '  background: rgba(0,0,0,0.65); border: none; color: #fff;',
+      '  cursor: pointer; font-size: 13px; line-height: 1;',
+      '  display: flex; align-items: center; justify-content: center; padding: 0;',
+      '}',
+      '.rw-chat-img-chip.rw-uploading::after {',
+      '  content: ""; position: absolute; inset: 0; background: rgba(0,0,0,0.35);',
+      '}',
+      '.rw-chat-img-chip.rw-failed { border-color: rgba(220,38,38,0.55); }',
+      '.rw-chat-attach-btn {',
+      '  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;',
+      '  width: 30px; height: 30px; border-radius: 50%;',
+      '  border: 1px solid var(--rw-line); background: transparent;',
+      '  color: var(--rw-muted); cursor: pointer;',
+      '}',
+      '.rw-chat-attach-btn:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-line-2); }',
+      '.rw-chat-attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }',
+
+      /* Chat bubble: images sent by the user */
+      '.rw-chat-bubble-imgs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }',
+      '.rw-chat-bubble-img {',
+      '  width: 72px; height: 72px; border-radius: 8px; object-fit: cover;',
+      '  cursor: pointer; display: block;',
+      '  border: 1px solid rgba(255,255,255,0.12);',
+      '}',
+
       /* Chat ticket cards: compact reference cards rendered inline in the
          conversation (existing-ticket deflection links and the created-
          ticket confirmation). Idiom matches rw-pr-card. */
@@ -4972,6 +5034,23 @@
       var m = chatMessages[i];
       if (String(m.id).indexOf("local-") !== 0) continue;
       if (row.role === "user" && m.role === "user" && m.content === row.content) {
+        // Carry local _dataUrl previews forward to the authoritative server row
+        // so images remain visible while the data URL is still in memory.
+        // The serve endpoint (chatGetImageUrl) fetches a presigned URL for
+        // authoritative rows that have no local preview.
+        var localImgs = m.images || [];
+        var serverImgs = row.images || [];
+        if (localImgs.length > 0) {
+          if (serverImgs.length === 0) {
+            row.images = localImgs;
+          } else {
+            for (var j = 0; j < Math.min(localImgs.length, serverImgs.length); j++) {
+              if (localImgs[j]._dataUrl && !serverImgs[j]._dataUrl) {
+                serverImgs[j]._dataUrl = localImgs[j]._dataUrl;
+              }
+            }
+          }
+        }
         chatMessages[i] = row;
         return true;
       }
@@ -5140,8 +5219,62 @@
   }
 
   function renderChatUserRow(row) {
+    var bubbleChildren = [];
+    if (row.content) bubbleChildren.push(renderMarkdownText(row.content));
+    var images = row.images || [];
+    if (images.length > 0) {
+      var imgRow = h("div", { className: "rw-chat-bubble-imgs" });
+      images.forEach(function (img) {
+        var url = img._dataUrl || null;
+        var name = img.originalName || "image";
+        if (url) {
+          // Local data URL captured at send time (and carried forward by
+          // chatReplaceLocalEcho). Authoritative rows use the serve endpoint
+          // below to fetch a presigned URL when no local preview is available.
+          var imgEl = h("img", { className: "rw-chat-bubble-img", src: url, alt: name });
+          imgEl.addEventListener("click", function () { openImageLightbox(url, name); });
+          imgRow.appendChild(imgEl);
+        } else {
+          // No local preview. Fetch the presigned URL from the serve endpoint
+          // (authenticated), then update the img src. The conversation id comes
+          // from the module-level chatConversation state.
+          var convId = chatConversation && chatConversation.id;
+          if (convId && img.id) {
+            var imgEl = h("img", { className: "rw-chat-bubble-img", src: "", alt: name });
+            imgEl.style.minWidth = "60px";
+            imgEl.style.minHeight = "60px";
+            imgEl.style.background = "rgba(255,255,255,0.07)";
+            imgRow.appendChild(imgEl);
+            (function (el, cId, iId, iName) {
+              chatGetImageUrl(cId, iId).then(function (data) {
+                if (data && data.url) {
+                  el.src = data.url;
+                  el.addEventListener("click", function () { openImageLightbox(data.url, iName); });
+                }
+              }).catch(function () {
+                // Fetch failed — replace with filename chip as fallback
+                if (el.parentNode) {
+                  var chip = h("span", { className: "rw-chip-attach" }, [
+                    Icons.image(11),
+                    h("span", null, iName),
+                  ]);
+                  el.parentNode.replaceChild(chip, el);
+                }
+              });
+            }(imgEl, convId, img.id, name));
+          } else {
+            // No conversation context (shouldn't happen in normal flow)
+            imgRow.appendChild(h("span", { className: "rw-chip-attach" }, [
+              Icons.image(11),
+              h("span", null, name),
+            ]));
+          }
+        }
+      });
+      bubbleChildren.push(imgRow);
+    }
     return h("div", { className: "rw-chat-msg rw-chat-msg-user" },
-      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, renderMarkdownText(row.content || "")));
+      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, bubbleChildren));
   }
 
   function renderChatAgentRow(row) {
@@ -5721,6 +5854,38 @@
 
     var noticeSlot = h("div", { className: "rw-chat-notice-slot" });
 
+    // Image attach affordance: gated on the attach_image permission; disabled
+    // in live sessions (staff → coder) because that path doesn't support images.
+    var canAttachImages = !chatIsLiveSession
+      && currentUser.permissions
+      && currentUser.permissions.indexOf("attach_image") !== -1;
+
+    // Thumbnail strip rendered above the input row while images are pending.
+    var pendingChipsRow = canAttachImages ? h("div", { className: "rw-chat-img-chips" }) : null;
+
+    function renderPendingChips() {
+      if (!pendingChipsRow) return;
+      clearChildren(pendingChipsRow);
+      pendingChipsRow.style.display = pendingChatImages.length > 0 ? "flex" : "none";
+      pendingChatImages.forEach(function (entry, idx) {
+        var chip = h("div", {
+          className: "rw-chat-img-chip" + (entry.uploading ? " rw-uploading" : "") + (entry.failed ? " rw-failed" : ""),
+        });
+        var img = h("img", { src: entry.dataUrl, alt: entry.name || "image" });
+        chip.appendChild(img);
+        var xBtn = h("button", {
+          className: "rw-chat-img-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+        }, "×");
+        xBtn.addEventListener("click", function () {
+          pendingChatImages.splice(idx, 1);
+          renderPendingChips();
+          updateSendState();
+        });
+        chip.appendChild(xBtn);
+        pendingChipsRow.appendChild(chip);
+      });
+    }
+
     var ta = h("textarea", {
       className: "rw-chat-input",
       placeholder: t("chat.inputPlaceholder"),
@@ -5732,6 +5897,82 @@
       className: "rw-chat-send-btn", type: "button", "aria-label": t("chat.send"),
     }, Icons.send(14));
 
+    var attachBtn = canAttachImages ? h("button", {
+      className: "rw-chat-attach-btn", type: "button", "aria-label": t("composer.attach"),
+      title: t("composer.attach"),
+    }, Icons.image(14)) : null;
+    var fileInput = canAttachImages ? h("input", {
+      type: "file", accept: "image/*", style: { display: "none" },
+    }) : null;
+
+    // Whether any upload is still in flight — blocks send until settled.
+    function anyUploading() {
+      for (var k = 0; k < pendingChatImages.length; k++) {
+        if (pendingChatImages[k].uploading) return true;
+      }
+      return false;
+    }
+
+    function updateSendState() {
+      if (!canAttachImages) return;
+      var busy = anyUploading();
+      sendBtn.disabled = busy;
+      attachBtn.disabled = busy || pendingChatImages.length >= CHAT_IMAGE_MAX;
+    }
+
+    function queueImageFile(file) {
+      if (!file || !file.type || file.type.indexOf("image/") !== 0) return;
+      if (pendingChatImages.length >= CHAT_IMAGE_MAX) return;
+      var convId = chatConversation && chatConversation.id;
+      if (!convId) return;
+      // Read as data URL for immediate preview, then upload.
+      var reader = new FileReader();
+      var entry = { id: null, dataUrl: "", name: file.name || "image", mimeType: file.type, uploading: true, failed: false };
+      pendingChatImages.push(entry);
+      renderPendingChips();
+      updateSendState();
+      reader.onload = function () {
+        entry.dataUrl = String(reader.result || "");
+        renderPendingChips();
+      };
+      reader.readAsDataURL(file);
+      chatUploadImage(convId, file).then(function (data) {
+        var img = data && data.image;
+        if (!img) throw new Error("upload_empty_response");
+        entry.id = img.id;
+        entry.mimeType = img.mimeType || entry.mimeType;
+        entry.uploading = false;
+        renderPendingChips();
+        updateSendState();
+      }).catch(function () {
+        entry.uploading = false;
+        entry.failed = true;
+        renderPendingChips();
+        updateSendState();
+        showChatNotice(t("chat.uploadFailed"));
+      });
+    }
+
+    if (canAttachImages) {
+      attachBtn.addEventListener("click", function () { fileInput.click(); });
+      fileInput.addEventListener("change", function () {
+        Array.prototype.forEach.call(fileInput.files, queueImageFile);
+        fileInput.value = "";
+      });
+      ta.addEventListener("paste", function (e) {
+        var items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        var found = false;
+        for (var k = 0; k < items.length; k++) {
+          if (items[k].type && items[k].type.indexOf("image/") === 0) {
+            var pf = items[k].getAsFile();
+            if (pf) { found = true; queueImageFile(pf); }
+          }
+        }
+        if (found) e.preventDefault();
+      });
+    }
+
     function showChatNotice(msg) {
       clearChildren(noticeSlot);
       noticeSlot.appendChild(h("div", { className: "rw-chat-inline-notice" }, msg));
@@ -5740,16 +5981,32 @@
     function doSend() {
       if (!chatConversation || chatConversation.status !== "active") return;
       var content = ta.value.trim();
-      if (!content || sendBtn.disabled) return;
+      // Collect successfully-uploaded image ids (skip failed).
+      var imageIds = canAttachImages
+        ? pendingChatImages.filter(function (p) { return p.id && !p.failed; }).map(function (p) { return p.id; })
+        : [];
+      // Require either text or at least one image; block while upload in flight.
+      if ((!content && imageIds.length === 0) || sendBtn.disabled) return;
+      if (anyUploading()) return;
       if (content.length > CHAT_INPUT_MAX) content = content.slice(0, CHAT_INPUT_MAX);
       sendBtn.disabled = true;
       ta.disabled = true;
+      if (canAttachImages) attachBtn.disabled = true;
       clearChildren(noticeSlot);
+      // Capture local previews so the optimistic echo can show images before
+      // the authoritative row (which has no fetch URL) arrives from the server.
+      // Only include successfully-uploaded images (mirrors the imageIds filter).
+      var localImagePreviews = pendingChatImages
+        .filter(function (p) { return p.id && !p.failed; })
+        .map(function (p) { return { id: p.id, mimeType: p.mimeType, originalName: p.name, _dataUrl: p.dataUrl }; });
       // Live session: route through the staff-only live-message endpoint.
       // Regular chat: route through the user-message endpoint.
       var sendFn = chatIsLiveSession ? liveCoderSend : chatSendMessage;
-      sendFn(chatConversation.id, content).then(function (data) {
+      sendFn(chatConversation.id, content, imageIds.length ? imageIds : undefined).then(function (data) {
         ta.value = "";
+        // Clear pending images and chips on success.
+        pendingChatImages = [];
+        renderPendingChips();
         // Use the server's row when returned; otherwise an optimistic echo
         // that chatReplaceLocalEcho swaps for the authoritative row later.
         var row = (data && data.message) || {
@@ -5759,6 +6016,18 @@
           payload: null,
           createdAt: new Date().toISOString(),
         };
+        // Attach local previews to the echo so the bubble renders images.
+        if (localImagePreviews.length > 0) {
+          if (row.images && row.images.length > 0) {
+            // Server returned an authoritative row with image ids — enrich with dataUrl.
+            for (var j = 0; j < Math.min(localImagePreviews.length, row.images.length); j++) {
+              if (!row.images[j]._dataUrl) row.images[j]._dataUrl = localImagePreviews[j]._dataUrl;
+            }
+          } else {
+            // Optimistic echo (no images field from server yet): set directly.
+            row.images = localImagePreviews;
+          }
+        }
         // Merge through chatApplyMessages — SSE may have already delivered
         // this row (and even the turn's reply) before the POST resolved, so
         // a raw push would duplicate it. Pending state is recomputed from
@@ -5775,7 +6044,9 @@
       }).then(function () {
         sendBtn.disabled = false;
         ta.disabled = false;
+        if (canAttachImages) attachBtn.disabled = false;
         ta.focus();
+        updateSendState();
       });
     }
 
@@ -5788,8 +6059,17 @@
     });
 
     footerEl.appendChild(noticeSlot);
-    footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [ta, sendBtn]));
+    if (canAttachImages && pendingChipsRow) footerEl.appendChild(pendingChipsRow);
+    footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [
+      canAttachImages ? attachBtn : null,
+      ta,
+      sendBtn,
+    ]));
+    if (canAttachImages) footerEl.appendChild(fileInput);
     chatUi.inputEl = ta;
+    // Render chips from any images still pending (e.g. footer rebuilt while
+    // uploads were in flight).
+    if (canAttachImages) { renderPendingChips(); updateSendState(); }
     // The slot was just (re)created empty — populate it now so a resumed
     // agentless conversation shows [Submit Ticket] immediately instead of
     // waiting for the next message-driven list render.
@@ -5800,6 +6080,8 @@
   // the active conversation or creates one — this is the "resume on reopen"
   // behavior). Called from renderPanelBody when view === "chat".
   function renderChatViewShell() {
+    // Discard any images queued in the previous session.
+    pendingChatImages = [];
     var root = h("div", { className: "rw-chat-full" });
 
     // Live session: back returns to the ticket detail. Regular chat: back goes home.

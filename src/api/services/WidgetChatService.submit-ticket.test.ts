@@ -20,8 +20,10 @@ import {
   widgetUsers,
   widgetClarifications,
   workspaceTasks,
+  workspaceTaskAttachments,
   widgetChatConversations,
   widgetChatMessages,
+  widgetChatImages,
 } from '../../db/schema';
 import * as WidgetChatService from './WidgetChatService';
 import * as ServerService from './ServerService';
@@ -58,6 +60,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db.delete(widgetClarifications).where(eq(widgetClarifications.serverId, SERVER_ID));
+  await db.delete(workspaceTaskAttachments).where(eq(workspaceTaskAttachments.serverId, SERVER_ID));
   await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_ID));
   await db.delete(servers).where(eq(servers.id, SERVER_ID));
@@ -80,6 +83,23 @@ async function seedUserMessage(content: string) {
     conversationId: CONV_ID, role: 'user', content,
   }).returning();
   return row!;
+}
+
+async function seedChatImage(overrides: { storageKey?: string; originalName?: string } = {}) {
+  const [img] = await db.insert(widgetChatImages).values({
+    conversationId: CONV_ID,
+    widgetUserId: WIDGET_USER_ID,
+    serverId: SERVER_ID,
+    mimeType: 'image/png',
+    originalName: overrides.originalName ?? 'submit-screenshot.png',
+    originalStorageProvider: 'r2',
+    originalStorageKey: overrides.storageKey ?? `uploads/st/${RUN_HEX}/${randomBytes(4).toString('hex')}.png`,
+    modelStorageProvider: 'r2',
+    modelStorageKey: `model/st/${RUN_HEX}/${randomBytes(4).toString('hex')}.jpg`,
+    width: 1024,
+    height: 768,
+  }).returning();
+  return img!;
 }
 
 describe('deriveTicketDraft', () => {
@@ -204,5 +224,38 @@ describe('submitTicketFromConversation', () => {
     }).returning({ id: widgetUsers.id });
     await expect(WidgetChatService.submitTicketFromConversation(CONV_ID, PROJECT_ID, stranger!.id))
       .rejects.toMatchObject({ code: 'conversation_not_found', status: 404 });
+  });
+
+  it('carries conversation images onto the created ticket as task attachments', async () => {
+    await seedUserMessage('Bug report with screenshot');
+    const img1 = await seedChatImage({ storageKey: `uploads/st/${RUN_HEX}/submit-a.png`, originalName: 'bug-a.png' });
+    const img2 = await seedChatImage({ storageKey: `uploads/st/${RUN_HEX}/submit-b.png`, originalName: 'bug-b.png' });
+
+    const { ticketId } = await WidgetChatService.submitTicketFromConversation(CONV_ID, PROJECT_ID, WIDGET_USER_ID);
+
+    const attachments = await db
+      .select()
+      .from(workspaceTaskAttachments)
+      .where(eq(workspaceTaskAttachments.taskId, ticketId));
+
+    expect(attachments).toHaveLength(2);
+    const keys = attachments.map((a) => a.storageKey).sort();
+    expect(keys).toEqual([img1.originalStorageKey, img2.originalStorageKey].sort());
+
+    for (const att of attachments) {
+      expect(att.ownerType).toBe('task');
+      expect(att.ownerId).toBe(ticketId);
+      expect(att.serverId).toBe(SERVER_ID);
+      expect(att.storageProvider).toBe('r2');
+      expect(att.mimeType).toBe('image/png');
+    }
+
+    // Original names are preserved
+    const names = attachments.map((a) => a.originalName).sort();
+    expect(names).toEqual(['bug-a.png', 'bug-b.png'].sort());
+
+    // Ticket itself still created correctly
+    const [task] = await db.select().from(workspaceTasks).where(eq(workspaceTasks.id, ticketId));
+    expect(task!.title).toBe('Bug report with screenshot');
   });
 });

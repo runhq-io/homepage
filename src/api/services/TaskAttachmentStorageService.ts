@@ -72,13 +72,14 @@ export class TaskAttachmentStorageService {
     return this.client;
   }
 
-  async createDownloadUrl(attachment: DownloadableAttachment): Promise<string | null> {
+  async createDownloadUrl(attachment: DownloadableAttachment, options?: { ttlSeconds?: number }): Promise<string | null> {
     if (attachment.storageProvider === 'workspace-local') return null;
     if (!this.isConfigured()) return null;
 
     const bucket = process.env.TASK_ATTACHMENT_STORAGE_BUCKET!;
-    const requestedTtl = Number(process.env.TASK_ATTACHMENT_STORAGE_PRESIGN_TTL_SECONDS || '604800');
-    const expiresIn = Math.max(60, Math.min(Number.isFinite(requestedTtl) ? requestedTtl : 604800, 604800));
+    const defaultTtl = Number(process.env.TASK_ATTACHMENT_STORAGE_PRESIGN_TTL_SECONDS || '604800');
+    const rawTtl = options?.ttlSeconds ?? (Number.isFinite(defaultTtl) ? defaultTtl : 604800);
+    const expiresIn = Math.max(60, Math.min(rawTtl, 604800));
     const disposition = attachment.originalName
       ? contentDispositionForFilename(attachment.originalName)
       : undefined;
@@ -101,7 +102,7 @@ export class TaskAttachmentStorageService {
     filename: string;
     originalName?: string | null;
     mode?: 'upload' | 'migration';
-    ownerType?: 'task' | 'comment' | 'activity';
+    ownerType?: 'task' | 'comment' | 'activity' | 'widget_chat_message';
     ownerLegacyId?: string | null;
   }): Promise<{
     storageProvider: 'r2' | 's3';
@@ -172,5 +173,31 @@ export class TaskAttachmentStorageService {
       Bucket: process.env.TASK_ATTACHMENT_STORAGE_BUCKET!,
       Key: input.storageKey,
     }));
+  }
+
+  /**
+   * Fetch the raw bytes of a stored object. Uses the same configured S3 client
+   * and bucket as `storeUpload` / `createDownloadUrl` — there is one storage
+   * provider per deployment (r2 OR s3, never both simultaneously).
+   *
+   * Throws if storage is not configured or the object body is absent.
+   */
+  async getObjectBuffer(input: {
+    storageProvider: 'r2' | 's3';
+    storageKey: string;
+  }): Promise<Buffer> {
+    if (!this.isConfigured()) {
+      throw new Error('Task attachment object storage is not configured');
+    }
+    const response = await this.getClient().send(new GetObjectCommand({
+      Bucket: process.env.TASK_ATTACHMENT_STORAGE_BUCKET!,
+      Key: input.storageKey,
+    }));
+    if (!response.Body) {
+      throw new Error(`getObjectBuffer: no response body for key: ${input.storageKey}`);
+    }
+    // AWS SDK v3 attaches transformToByteArray() to the Body stream in Node.js.
+    const bytes = await (response.Body as { transformToByteArray(): Promise<Uint8Array> }).transformToByteArray();
+    return Buffer.from(bytes);
   }
 }

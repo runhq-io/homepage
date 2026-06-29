@@ -1655,6 +1655,39 @@ export type NewWidgetChatConversation = typeof widgetChatConversations.$inferIns
 export type WidgetChatMessage = typeof widgetChatMessages.$inferSelect;
 export type NewWidgetChatMessage = typeof widgetChatMessages.$inferInsert;
 
+// Server-owned image references for widget chat. The client only ever sees the
+// opaque `id`; all storage keys are kept server-side.
+// Both the original upload and the model-sized JPEG derivative are stored so the
+// derivative can be regenerated or audited independently.
+export const widgetChatImages = pgTable('widget_chat_images', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id').notNull().references(() => widgetChatConversations.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  /** Null while the message row doesn't exist yet; updated in a later task. */
+  messageId: uuid('message_id').references(() => widgetChatMessages.id, { onDelete: 'cascade' }),
+  /** Server that owns the storage keys. */
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  /** MIME type of the original upload (model image is always image/jpeg). */
+  mimeType: text('mime_type').notNull(),
+  /** Original filename as supplied by the uploader. */
+  originalName: text('original_name'),
+  /** Original upload as received from the client. */
+  originalStorageProvider: text('original_storage_provider').notNull().$type<'r2' | 's3'>(),
+  originalStorageKey: text('original_storage_key').notNull(),
+  /** Model-ready derivative (JPEG ≤ 1024px long edge). */
+  modelStorageProvider: text('model_storage_provider').notNull().$type<'r2' | 's3'>(),
+  modelStorageKey: text('model_storage_key').notNull(),
+  width: integer('width').notNull(),
+  height: integer('height').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_chat_images_conversation_idx').on(t.conversationId),
+  index('widget_chat_images_message_idx').on(t.messageId),
+]);
+
+export type ChatImageRow = typeof widgetChatImages.$inferSelect;
+export type NewChatImage = typeof widgetChatImages.$inferInsert;
+
 // Per-channel naming: the widget is now anchored to a single todo channel,
 // so the row type is named `WidgetChannel` (the underlying table keeps the
 // `widget_projects` name to avoid Drizzle / SQL churn).

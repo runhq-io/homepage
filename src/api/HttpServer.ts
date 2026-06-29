@@ -5913,7 +5913,10 @@ export function createHttpApp() {
   // gets 403 (the widget shows its login-prompt path).
   // ---------------------------------------------------------------------------
 
-  function chatMessageDto(m: WidgetChatService.ChatMessageRow) {
+  function chatMessageDto(
+    m: WidgetChatService.ChatMessageRow,
+    images?: WidgetChatService.PublicChatImage[],
+  ) {
     return {
       id: m.id,
       role: m.role,
@@ -5922,7 +5925,21 @@ export function createHttpApp() {
       turnId: m.turnId ?? null,
       seq: m.seq ?? null,
       createdAt: m.createdAt.toISOString(),
+      images: images ?? [],
     };
+  }
+
+  /**
+   * Batch-map a page of messages to DTOs. Loads all linked images in one query
+   * (no N+1) and attaches them per message. Use this for all multi-message
+   * list responses.
+   */
+  async function chatMessageDtos(
+    messages: WidgetChatService.ChatMessageRow[],
+  ): Promise<ReturnType<typeof chatMessageDto>[]> {
+    if (messages.length === 0) return [];
+    const imagesMap = await WidgetChatService.loadChatImagesForMessages(messages.map((m) => m.id));
+    return messages.map((m) => chatMessageDto(m, imagesMap.get(m.id)));
   }
 
   function chatConversationDto(conv: {
@@ -5969,7 +5986,7 @@ export function createHttpApp() {
       );
       return c.json({
         conversation: chatConversationDto(conversation, hasAgentTurns),
-        messages: messages.map(chatMessageDto),
+        messages: await chatMessageDtos(messages),
       });
     } catch (err) {
       return widgetErrorResponse(c, err);
@@ -5985,7 +6002,7 @@ export function createHttpApp() {
       if (!bundle) return c.json({ error: 'not_found' }, 404);
       return c.json({
         conversation: chatConversationDto(bundle.conversation, bundle.hasAgentTurns),
-        messages: bundle.messages.map(chatMessageDto),
+        messages: await chatMessageDtos(bundle.messages),
       });
     } catch (err) {
       return widgetErrorResponse(c, err);
@@ -6001,7 +6018,7 @@ export function createHttpApp() {
       const messages = await WidgetChatService.listMessages(
         c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, c.req.query('after') || undefined,
       );
-      return c.json({ messages: messages.map(chatMessageDto) });
+      return c.json({ messages: await chatMessageDtos(messages) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6014,13 +6031,23 @@ export function createHttpApp() {
     const { auth } = gate;
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'chat_message');
     if (limited) return limited;
-    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    const body = await c.req.json().catch(() => null) as { content?: unknown; imageIds?: unknown } | null;
     if (!body || typeof body.content !== 'string') return c.json({ error: 'content required' }, 400);
+    // imageIds: optional array of strings; 400 if present but wrong shape.
+    let imageIds: string[] | undefined;
+    if (body.imageIds !== undefined) {
+      if (!Array.isArray(body.imageIds) || !body.imageIds.every((id) => typeof id === 'string')) {
+        return c.json({ error: 'imageIds must be an array of strings' }, 400);
+      }
+      imageIds = body.imageIds as string[];
+    }
     try {
       const message = await WidgetChatService.sendUserMessage(
-        c.req.param('id'), auth.projectId, auth.widgetUserId, body.content,
+        c.req.param('id'), auth.projectId, auth.widgetUserId, body.content, imageIds,
       );
-      return c.json({ message: chatMessageDto(message) });
+      // Load linked images for the response (single-element batch — no N+1).
+      const imagesMap = await WidgetChatService.loadChatImagesForMessages([message.id]);
+      return c.json({ message: chatMessageDto(message, imagesMap.get(message.id)) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6092,6 +6119,74 @@ export function createHttpApp() {
     try {
       await WidgetChatService.dismissProposal(c.req.param('id'), auth.projectId, auth.widgetUserId);
       return c.json({ ok: true });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/chat/conversations/:id/images
+  //
+  // Upload an image to a chat conversation. The image is stored and returned
+  // as a PublicChatImage (id, mimeType, originalName, width, height) — storage
+  // keys are NEVER included in the response.
+  //
+  // Auth: identified widget user (widgetUserId required; 403 for anon).
+  // RBAC: requires attach_image permission.
+  // Rate limit: shared with ticket attachment_upload bucket.
+  // Multipart: field name "file", mirrors POST /api/widget/tickets/:id/attachments.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/chat/conversations/:id/images', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
+    if (!auth.permissions.has('attach_image')) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
+    try {
+      const formData = await c.req.raw.formData();
+      const file = formData.get('file');
+      if (!file || typeof (file as any).arrayBuffer !== 'function') {
+        return c.json({ error: 'file_required' }, 400);
+      }
+      const inputFile = file as globalThis.File;
+      const buffer = Buffer.from(await inputFile.arrayBuffer());
+      const mimeType = inputFile.type || 'application/octet-stream';
+      const filename = inputFile.name || 'image';
+      const image = await WidgetChatService.attachConversationImage(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions,
+        { buffer, mimeType, filename, originalName: inputFile.name },
+      );
+      return c.json({ image }, 201);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/widget/chat/conversations/:id/images/:imageId
+  //
+  // Return a short-lived presigned download URL for a chat image owned by
+  // the caller. Storage keys are never included in the response.
+  //
+  // Auth: identified widget user (widgetUserId required; 403 for anon).
+  // Ownership: conversationId + widgetUserId + projectId all asserted.
+  // Not-found / foreign: 404 (no leakage).
+  // ---------------------------------------------------------------------------
+  app.get('/api/widget/chat/conversations/:id/images/:imageId', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const url = await WidgetChatService.resolveConversationImageForServe(
+        c.req.param('id'),
+        c.req.param('imageId'),
+        auth.projectId,
+        auth.widgetUserId,
+      );
+      return c.json({ url });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6231,7 +6326,10 @@ export function createHttpApp() {
     return streamSSE(c, async (stream) => {
       let open = true;
       const unsubscribe = WidgetChatService.subscribeToConversation(conversationId, (row) => {
-        void stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row)) });
+        void (async () => {
+          const imagesByMessage = await WidgetChatService.loadChatImagesForMessages([row.id]);
+          await stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row, imagesByMessage.get(row.id))) });
+        })();
       });
       stream.onAbort(() => {
         open = false;
@@ -6240,8 +6338,9 @@ export function createHttpApp() {
       if (after) {
         try {
           const missed = await WidgetChatService.listMessages(conversationId, projectId, widgetUserId, permissions, after);
-          for (const m of missed) {
-            await stream.writeSSE({ event: 'message', id: m.id, data: JSON.stringify(chatMessageDto(m)) });
+          const missedDtos = await chatMessageDtos(missed);
+          for (const dto of missedDtos) {
+            await stream.writeSSE({ event: 'message', id: dto.id, data: JSON.stringify(dto) });
           }
         } catch {
           // invalid cursor → client falls back to a full refetch via the messages endpoint
@@ -7243,7 +7342,7 @@ export function createHttpApp() {
       const detail = await WidgetChatService.getTeamConversation(serverId, conversationId);
       return c.json({
         conversation: detail.conversation,
-        messages: detail.messages.map(chatMessageDto),
+        messages: await chatMessageDtos(detail.messages),
       });
     } catch (err) {
       return widgetErrorResponse(c, err);
