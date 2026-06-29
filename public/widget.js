@@ -902,6 +902,7 @@
       visibility: {
         private: "Private",
         public: "Public",
+        privateHint: "Only you can see this.",
         privateTooltip: "Only you can see this. Click to make it public.",
         publicTooltip: "Anyone can see this. Click to make it private.",
         failed: "Couldn't update visibility — try again.",
@@ -1117,6 +1118,7 @@
       visibility: {
         private: "비공개",
         public: "공개",
+        privateHint: "본인만 볼 수 있습니다.",
         privateTooltip: "본인만 볼 수 있습니다. 클릭하면 공개로 전환됩니다.",
         publicTooltip: "누구나 볼 수 있습니다. 클릭하면 비공개로 전환됩니다.",
         failed: "공개 설정을 변경하지 못했습니다. 다시 시도해 주세요.",
@@ -2369,6 +2371,18 @@
       '.rw-dash-row-meta {',
       '  display: flex; align-items: center; gap: 6px;',
       '  font-size: 11px; color: var(--rw-muted); flex-wrap: wrap;',
+      '}',
+      /* "Private" badge on a card's meta row — a non-interactive marker (the
+         clickable toggle lives in the detail head). Mirrors .rw-vis-chip's
+         resting look so the two read as the same concept. */
+      '.rw-meta-private {',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  padding: 1px 7px 1px 6px;',
+      '  border-radius: 999px;',
+      '  background: var(--rw-panel-2);',
+      '  border: 1px solid var(--rw-line);',
+      '  color: var(--rw-fg-2);',
+      '  font-size: 10.5px; font-weight: 500; line-height: 1.6; white-space: nowrap;',
       '}',
 
       /* vote pill (right side of row) — replaces the old vertical .rw-vote */
@@ -3815,9 +3829,23 @@
     });
 
     var authorName = displayNameFromTicket(ticket);
+    var metaChildren = [];
+    // Private marker leads the meta row so the viewer can tell at a glance
+    // which of their submissions are visible only to them. Private tickets
+    // surface only to their owner (My Submissions), so this never leaks.
+    if (ticket.isPrivate) {
+      metaChildren.push(h("span", {
+        className: "rw-meta-private",
+        title: t("visibility.privateHint"),
+        "aria-label": t("visibility.private"),
+      }, [Icons.lock(11), h("span", null, t("visibility.private"))]));
+    }
     // Status chip is suppressed on the Latest Updates tab — every ticket there
     // is already shipped (done/deployed), so the chip carries no information.
-    var metaChildren = hideStatus ? [] : [renderStatusChip(ticket.status)];
+    if (!hideStatus) {
+      if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      metaChildren.push(renderStatusChip(ticket.status));
+    }
     if (authorName) {
       if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
       metaChildren.push(h("span", { className: "rw-meta-author" }, authorName));
