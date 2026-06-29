@@ -77,7 +77,6 @@ import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
-import * as InjectionGuardService from './services/InjectionGuardService';
 import { forwardLiveMessage } from './services/LiveCoderForward';
 
 type BuildInfo = {
@@ -6110,9 +6109,12 @@ export function createHttpApp() {
   //
   // Flow:
   //   1. Persist the staff message (role='user') via sendLiveCoderMessage.
-  //   2. Screen + forward via forwardLiveMessage.
-  //   3. On 'flagged': append a rejection event row.
-  //   4. Return { status } to the client.
+  //   2. Forward via forwardLiveMessage.
+  //   3. Return { status } to the client.
+  //
+  // Inbound live-session messages are NOT AI-screened — this endpoint is
+  // RBAC-gated to the `live_coder` permission, so they are trusted staff
+  // instructions to their own coder and are forwarded verbatim.
   // ---------------------------------------------------------------------------
   app.post('/api/widget/chat/conversations/:id/live-message', async (c) => {
     const gate = await requireChatUser(c);
@@ -6147,10 +6149,7 @@ export function createHttpApp() {
 
       const server = wp ? await ServerService.getServer(wp.serverId) : null;
 
-      // Build the default screen + sendToWorkspace deps.
-      const screenDep = async (t: string) =>
-        InjectionGuardService.checkTicket({ title: t, description: null });
-
+      // Build the sendToWorkspace dep.
       const sendToWorkspaceDep = async (p: {
         jobChannelId: string;
         text: string;
@@ -6184,15 +6183,8 @@ export function createHttpApp() {
           text,
           actor,
         },
-        { screen: screenDep, sendToWorkspace: sendToWorkspaceDep },
+        { sendToWorkspace: sendToWorkspaceDep },
       );
-
-      if (result.status === 'flagged') {
-        await WidgetChatService.appendLiveCoderRejectionEvent(
-          conversationId,
-          'injection_guard',
-        );
-      }
 
       // Return the authoritative message row (same shape the SSE stream emits)
       // so the widget client merges by server id instead of falling back to an
