@@ -109,8 +109,13 @@ function makeDomMock() {
 
 interface ChipEntry { file: { name?: string; type?: string }; previewUrl?: string | null }
 interface TestHooks {
-  renderAttachChip?: (entry: ChipEntry, onRemove: (e: ChipEntry) => void) => FakeNode;
+  renderAttachChip?: (
+    entry: ChipEntry,
+    onRemove: (e: ChipEntry) => void,
+    getGallery?: () => Array<{ url: string; name: string }>,
+  ) => FakeNode;
   releaseAttachPreview?: (entry: ChipEntry) => void;
+  stagedGallery?: (entries: ChipEntry[]) => Array<{ url: string; name: string }>;
 }
 
 function loadWidget() {
@@ -241,5 +246,41 @@ describe('widget.js — staged attachment preview chip', () => {
     hooks.releaseAttachPreview!(entry);
     expect(revoked).toContain(created[0]);
     expect(entry.previewUrl).toBeNull();
+  });
+});
+
+describe('widget.js — staged gallery (lightbox paging source)', () => {
+  it('builds an ordered {url,name} list of only the image entries', () => {
+    const { hooks, created } = loadWidget();
+    const entries: ChipEntry[] = [
+      { file: { name: 'a.png', type: 'image/png' } },
+      { file: { name: 'notes.pdf', type: 'application/pdf' } }, // skipped (non-image)
+      { file: { name: 'b.jpg', type: 'image/jpeg' } },
+    ];
+
+    const gallery = hooks.stagedGallery!(entries);
+
+    // Non-image dropped; images kept in order, each with its cached object URL.
+    expect(gallery).toEqual([
+      { url: created[0], name: 'a.png' },
+      { url: created[1], name: 'b.jpg' },
+    ]);
+    // The URLs match what the chips render, so paging targets the same bytes.
+    expect(entries[0].previewUrl).toBe(created[0]);
+    expect(entries[2].previewUrl).toBe(created[1]);
+  });
+
+  it('passes its own previewUrl as the gallery index the chip opens at', () => {
+    const { hooks } = loadWidget();
+    const entries: ChipEntry[] = [
+      { file: { name: 'a.png', type: 'image/png' } },
+      { file: { name: 'b.png', type: 'image/png' } },
+    ];
+    // Render the chips so each entry gets a cached preview URL.
+    entries.forEach((e) => hooks.renderAttachChip!(e, () => {}, () => hooks.stagedGallery!(entries)));
+
+    const gallery = hooks.stagedGallery!(entries);
+    // The second chip's URL is at gallery index 1 — the lightbox would open there.
+    expect(gallery.findIndex((g) => g.url === entries[1].previewUrl)).toBe(1);
   });
 });
