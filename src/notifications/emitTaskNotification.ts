@@ -133,8 +133,9 @@ export async function insertNotificationWithDeliveries(
  * Returns the new notification ID, or null if no notification was emitted.
  *
  * Rules:
- *  - Only fires for `needs_review` or `done` transitions (caller's responsibility
- *    to call only when `newStatus !== prev.status`).
+ *  - Only fires for `done` / `reviewed` / `merged` transitions (caller's
+ *    responsibility to call only when `newStatus !== prev.status`). `merged`
+ *    maps to the `completed` event type; `done`/`reviewed` map to `need_help`.
  *  - Recipient = row.lastInteractorUserId ?? row.createdById. Skips if null.
  *  - Self-suppression: skips if actor is a user and actor.userId === recipient.
  *  - workspaceProjectId is required; skips if null.
@@ -150,7 +151,7 @@ export async function emitTaskNotification(
   tx: any,
   row: TaskRowForNotification,
   _prev: TaskRowForNotification,
-  newStatus: 'needs_review' | 'done',
+  newStatus: 'done' | 'reviewed' | 'merged',
   actor: NotificationActor,
 ): Promise<string | null> {
   // --- Recipient resolution ---
@@ -192,6 +193,9 @@ export async function emitTaskNotification(
     taskTitle: row.title,
     channelId: row.workspaceChannelId,
     jobId: row.workspaceJobId,
-    eventType: newStatus === 'done' ? 'completed' : 'need_help',
+    // `merged` (and beyond) is the "completed/landed in base" signal; `done`
+    // (PR up, awaiting review) and `reviewed` (approved, awaiting merge) are
+    // "needs your attention" milestones.
+    eventType: newStatus === 'merged' ? 'completed' : 'need_help',
   })
 }

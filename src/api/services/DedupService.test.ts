@@ -164,26 +164,50 @@ describe('DedupService.findLikelyDuplicate', () => {
     expect(result).toEqual({ duplicateOf: null });
   });
 
-  it('excludes done/deployed/cancelled tickets from the candidate set', async () => {
-    // Insert a closed ticket; stub returns its id — the model should never be
-    // called with it as a valid id, so parseDedupVerdict will throw → fail-open null.
-    const [closed] = await db.insert(workspaceTasks).values({
-      serverId: SERVER_ID,
-      title: 'Closed SSO issue',
-      description: 'Resolved last week',
-      status: 'done',
-      visibility: 'public',
-    }).returning({ id: workspaceTasks.id });
+  it('excludes terminal (cancelled / deployed / deployed:<env>) tickets from the candidate set', async () => {
+    // Insert terminal tickets; the stub returns each one's id — since a terminal
+    // ticket is never in the valid candidate set, parseDedupVerdict throws and
+    // findLikelyDuplicate fails open to null.
+    for (const status of ['cancelled', 'deployed', 'deployed:11111111-2222-3333-4444-555555555555']) {
+      const [closed] = await db.insert(workspaceTasks).values({
+        serverId: SERVER_ID,
+        title: `Terminal ${status}`,
+        description: 'Already shipped or abandoned',
+        status: status as any,
+        visibility: 'public',
+      }).returning({ id: workspaceTasks.id });
 
-    // Stub that tries to return the closed ticket id — should fail-open
-    const result = await findLikelyDuplicate(
-      { serverId: SERVER_ID, ticketId: CANDIDATE_ID, candidate: { title: 'SSO issue' } },
-      { callModel: stubModel(closed!.id) },
-    );
-    // The closed ticket is not in the valid set, so parseDedupVerdict throws → null
-    expect(result).toEqual({ duplicateOf: null });
+      const result = await findLikelyDuplicate(
+        { serverId: SERVER_ID, ticketId: CANDIDATE_ID, candidate: { title: 'SSO issue' } },
+        { callModel: stubModel(closed!.id) },
+      );
+      expect(result).toEqual({ duplicateOf: null });
 
-    await db.delete(workspaceTasks).where(eq(workspaceTasks.id, closed!.id));
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, closed!.id));
+    }
+  });
+
+  it('INCLUDES mid-pipeline (done / reviewed / merged) tickets in the candidate set', async () => {
+    // In the PR lifecycle these are open, not terminal — they must still be
+    // deduped against. The stub returns each one's id; since it IS a valid
+    // candidate, the verdict resolves to that id.
+    for (const status of ['done', 'reviewed', 'merged']) {
+      const [open] = await db.insert(workspaceTasks).values({
+        serverId: SERVER_ID,
+        title: `Open ${status} SSO issue`,
+        description: 'PR in flight',
+        status: status as any,
+        visibility: 'public',
+      }).returning({ id: workspaceTasks.id });
+
+      const result = await findLikelyDuplicate(
+        { serverId: SERVER_ID, ticketId: CANDIDATE_ID, candidate: { title: 'SSO issue' } },
+        { callModel: stubModel(open!.id) },
+      );
+      expect(result).toEqual({ duplicateOf: open!.id });
+
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, open!.id));
+    }
   });
 
   it('excludes the candidate ticket itself from comparison', async () => {

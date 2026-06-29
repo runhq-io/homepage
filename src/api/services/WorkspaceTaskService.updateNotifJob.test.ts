@@ -65,13 +65,13 @@ afterAll(async () => {
 
 describe('updateTask → notification snapshot', () => {
   it('snapshots workspaceChannelId AND workspaceJobId onto the notification when a status transition fires', async () => {
-    // Agent (not the creator) flips it to needs_review and supplies the job id.
+    // Agent (not the creator) flips it to done and supplies the job id.
     // This mirrors what the workspace server's CanonicalTaskApiClient does on
     // every PATCH after the resolver is wired.
     const { task, notification } = await updateTask(
       SERVER_ID,
       TASK_ID,
-      { status: 'needs_review', workspaceJobId: JOB_ID },
+      { status: 'done', workspaceJobId: JOB_ID },
       { type: 'agent' },
     );
 
@@ -95,7 +95,7 @@ describe('updateTask → notification snapshot', () => {
     const { notification } = await updateTask(
       SERVER_ID,
       TASK_ID,
-      { status: 'needs_review', workspaceJobId: JOB_ID, workspaceProjectName: 'Mobile' },
+      { status: 'done', workspaceJobId: JOB_ID, workspaceProjectName: 'Mobile' },
       { type: 'agent' },
     );
 
@@ -112,7 +112,7 @@ describe('updateTask → notification snapshot', () => {
     const { notification } = await updateTask(
       SERVER_ID,
       TASK_ID,
-      { status: 'needs_review', workspaceJobId: JOB_ID },
+      { status: 'done', workspaceJobId: JOB_ID },
       { type: 'agent' },
     );
 

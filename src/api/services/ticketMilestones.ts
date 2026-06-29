@@ -10,14 +10,18 @@
  * ordered list of milestones.
  */
 
+import { isDeployedStatus } from '@runhq/server-protocol';
+
 export type TicketStatus =
   | 'pending'
   | 'planned'
   | 'in_progress'
-  | 'needs_review'
   | 'done'
+  | 'reviewed'
+  | 'merged'
+  | 'cancelled'
   | 'deployed'
-  | 'cancelled';
+  | `deployed:${string}`;
 
 export type ClarificationStatus = 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
 
@@ -66,18 +70,21 @@ const LABELS: Record<string, string> = {
  */
 function reachedIndex(input: MilestoneInput): number {
   let statusReached: number = TRACK.received;
-  switch (input.status) {
-    case 'in_progress':
-      statusReached = TRACK.in_progress;
-      break;
-    case 'needs_review':
-    case 'done':
-      statusReached = TRACK.in_review;
-      break;
-    case 'deployed':
-      statusReached = TRACK.shipped;
-      break;
-    // pending / planned → received
+  if (isDeployedStatus(input.status)) {
+    // Any deploy status (legacy bare `deployed` or env-qualified `deployed:<env>`).
+    statusReached = TRACK.shipped;
+  } else {
+    switch (input.status) {
+      case 'in_progress':
+        statusReached = TRACK.in_progress;
+        break;
+      case 'done':       // PR up, awaiting review
+      case 'reviewed':   // approved
+      case 'merged':     // landed in base, pre-ship
+        statusReached = TRACK.in_review;
+        break;
+      // pending / planned → received
+    }
   }
 
   let clarReached: number = TRACK.received;
@@ -113,7 +120,7 @@ export function deriveTicketMilestones(input: MilestoneInput): Milestone[] {
   }
 
   const reached = reachedIndex(input);
-  const complete = input.status === 'deployed';
+  const complete = isDeployedStatus(input.status);
 
   const milestones: Milestone[] = [step('received', reached, complete)];
   // The clarifying step appears only when a clarification session exists.

@@ -62,8 +62,17 @@ describe('deriveTicketMilestones', () => {
     ]);
   });
 
-  it('needs_review status advances to in_review', () => {
-    expect(keysWithState({ status: 'needs_review' })).toEqual([
+  it('reviewed status advances to in_review (approved, awaiting merge)', () => {
+    expect(keysWithState({ status: 'reviewed' })).toEqual([
+      'received:done',
+      'in_progress:done',
+      'in_review:current',
+      'shipped:upcoming',
+    ]);
+  });
+
+  it('merged status advances to in_review (landed in base, pre-ship)', () => {
+    expect(keysWithState({ status: 'merged' })).toEqual([
       'received:done',
       'in_progress:done',
       'in_review:current',
@@ -89,8 +98,17 @@ describe('deriveTicketMilestones', () => {
     ]);
   });
 
-  it('deployed: every step done including shipped (terminal complete)', () => {
+  it('deployed (legacy bare): every step done including shipped (terminal complete)', () => {
     expect(keysWithState({ status: 'deployed' })).toEqual([
+      'received:done',
+      'in_progress:done',
+      'in_review:done',
+      'shipped:done',
+    ]);
+  });
+
+  it('deployed:<env> (env-qualified): every step done including shipped (terminal complete)', () => {
+    expect(keysWithState({ status: 'deployed:11111111-2222-3333-4444-555555555555' })).toEqual([
       'received:done',
       'in_progress:done',
       'in_review:done',
@@ -114,7 +132,8 @@ describe('deriveTicketMilestones', () => {
 
   it('is total: never throws for any status value', () => {
     const statuses: MilestoneInput['status'][] = [
-      'pending', 'planned', 'in_progress', 'needs_review', 'done', 'deployed', 'cancelled',
+      'pending', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
+      'deployed', 'deployed:prod-env-id',
     ];
     for (const status of statuses) {
       expect(() => deriveTicketMilestones({ status })).not.toThrow();

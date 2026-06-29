@@ -502,7 +502,7 @@ export async function updateTask(
   type PendingEmit = {
     rowShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
     prevShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
-    status: 'needs_review' | 'done';
+    status: 'done' | 'reviewed' | 'merged';
   };
   let pendingEmit: PendingEmit | null = null;
 
@@ -517,9 +517,12 @@ export async function updateTask(
     const existing = existingRows[0];
     const existingVisibility = existing.visibility as 'public' | 'private';
 
-    // Detect whether this update will transition the task to a notification-worthy status.
+    // Detect whether this update will transition the task to a notification-worthy
+    // status. In the PR lifecycle the recipient cares about the review/merge
+    // milestones: `done` (PR up, awaiting review), `reviewed` (approved), and
+    // `merged` (landed in base). `needs_review` was folded into `done`.
     const willTransition =
-      (input.status === 'needs_review' || input.status === 'done') &&
+      (input.status === 'done' || input.status === 'reviewed' || input.status === 'merged') &&
       input.status !== existing.status;
 
     const updates: Record<string, unknown> = { updatedAt: new Date() };
@@ -586,7 +589,7 @@ export async function updateTask(
           createdById: row.createdById,
           lastInteractorUserId: row.lastInteractorUserId,
         },
-        status: input.status as 'needs_review' | 'done',
+        status: input.status as 'done' | 'reviewed' | 'merged',
       };
     }
 

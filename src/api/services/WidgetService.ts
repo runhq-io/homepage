@@ -26,7 +26,7 @@ import {
   widgetChatConversations,
 } from '../../db/schema';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
-import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
+import type { CanonicalTaskActorType, CanonicalTaskComment, TodoStatus } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
@@ -187,7 +187,7 @@ type WidgetTicketResponse = {
   id: string;
   title: string;
   description: string | null;
-  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled';
+  status: TodoStatus;
   moderationStatus: 'pending' | 'approved' | 'rejected';
   isPrivate: boolean;
   source: string;
@@ -1433,8 +1433,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   // while the system is already handling assignment — an open clarification card
   // (questions pending / duplicate notice) or auto-assign still reviewing — so
   // the manual control doesn't clutter or compete with that flow.
+  // Open work that hasn't shipped yet. `needs_review` was folded into `done`
+  // ("PR up, awaiting review") — still assignable (e.g. reassign for fixes).
+  // `reviewed`/`merged` are intentionally excluded: by then the work is past the
+  // point a manual agent assignment makes sense.
   const ASSIGNABLE_STATUSES: ReadonlySet<typeof task.status> = new Set([
-    'pending', 'planned', 'in_progress', 'needs_review',
+    'pending', 'planned', 'in_progress', 'done',
   ]);
   const clarificationActive = clar?.status === 'asking' || clar?.status === 'duplicate';
   const canAssign =
@@ -2486,15 +2490,20 @@ export async function getTicketStats(projectId: string) {
 
   const [result] = await db
     .select({
-      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'deployed', 'cancelled'))`,
-      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} in ('done', 'deployed'))`,
+      // Open = not terminal. Terminal = cancelled OR any deployed status
+      // (legacy bare `deployed` OR env-qualified `deployed:<env>`). In the PR
+      // lifecycle done/reviewed/merged are mid-pipeline and count as open.
+      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} <> 'cancelled' and ${workspaceTasks.status} <> 'deployed' and ${workspaceTasks.status} not like 'deployed:%')`,
+      // "Shipped"/completed = deployed only now (NOT done) — a task is finished
+      // when it reaches a deploy environment.
+      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} = 'deployed' or ${workspaceTasks.status} like 'deployed:%')`,
     })
     .from(workspaceTasks)
     .where(and(...conditions));
 
   const totalDone = Number(result?.totalDone ?? 0);
 
-  // Calculate average resolution time for done tasks
+  // Calculate average resolution time for shipped (deployed) tasks
   let avgResolutionMs: number | null = null;
   if (totalDone > 0) {
     const [avgResult] = await db
@@ -2504,7 +2513,7 @@ export async function getTicketStats(projectId: string) {
       .from(workspaceTasks)
       .where(and(
         ...conditions,
-        sql`${workspaceTasks.status} in ('done', 'deployed')`,
+        sql`(${workspaceTasks.status} = 'deployed' or ${workspaceTasks.status} like 'deployed:%')`,
         sql`${workspaceTasks.completedAt} is not null`,
       ));
     avgResolutionMs = avgResult?.avg ? Math.round(Number(avgResult.avg)) : null;

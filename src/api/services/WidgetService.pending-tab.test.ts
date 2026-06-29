@@ -32,8 +32,9 @@ beforeAll(async () => {
     { serverId: SERVER_ID, title: 'Pending ticket',     status: 'pending',     visibility: 'public' },
     { serverId: SERVER_ID, title: 'Planned ticket',     status: 'planned',     visibility: 'public' },
     { serverId: SERVER_ID, title: 'In progress ticket', status: 'in_progress', visibility: 'public' },
-    { serverId: SERVER_ID, title: 'Needs review ticket', status: 'needs_review', visibility: 'public' },
-    { serverId: SERVER_ID, title: 'Shipped ticket',     status: 'done',        visibility: 'public', completedAt: new Date(now - 1000) },
+    { serverId: SERVER_ID, title: 'Reviewed ticket',    status: 'reviewed',    visibility: 'public' },
+    { serverId: SERVER_ID, title: 'Merged ticket',      status: 'merged',      visibility: 'public' },
+    { serverId: SERVER_ID, title: 'Done ticket',        status: 'done',        visibility: 'public' },
     { serverId: SERVER_ID, title: 'Deployed ticket',    status: 'deployed',    visibility: 'public', completedAt: new Date(now - 500) },
     { serverId: SERVER_ID, title: 'Cancelled ticket',   status: 'cancelled',   visibility: 'public' },
   ]);
@@ -55,8 +56,9 @@ describe('listTickets (Hot tab)', () => {
     expect(titles).toContain('Planned ticket');
     expect(titles).toContain('In progress ticket');
 
-    expect(titles).not.toContain('Needs review ticket');
-    expect(titles).not.toContain('Shipped ticket');
+    expect(titles).not.toContain('Reviewed ticket');
+    expect(titles).not.toContain('Merged ticket');
+    expect(titles).not.toContain('Done ticket');
     expect(titles).not.toContain('Deployed ticket');
     expect(titles).not.toContain('Cancelled ticket');
   });
