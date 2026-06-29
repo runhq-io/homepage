@@ -2828,6 +2828,12 @@
       '}',
       '.rw-chip-attach > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
       '.rw-modal-mount[data-theme="light"] .rw-chip-attach { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-attach--img { padding-left: 3px; }',
+      '.rw-chip-thumb {',
+      '  width: 30px; height: 30px; flex: 0 0 auto;',
+      '  border-radius: 4px; object-fit: cover; display: block;',
+      '  background: rgba(255,255,255,0.06);',
+      '}',
       '.rw-chip-attach.rw-uploading { opacity: 0.75; }',
       '.rw-chip-attach.rw-failed { border-color: rgba(220,38,38,0.55); color: #fca5a5; }',
       '.rw-chip-mini-spinner {',
@@ -3720,6 +3726,58 @@
     modalMountEl.appendChild(scrim);
   }
 
+  // ---------------------------------------------------------------------------
+  // Staged-attachment previews (composer chips)
+  //
+  // A file the user has chosen but not yet uploaded is held as { file }. To
+  // show the actual image — not just its name — we mint an object URL over the
+  // chosen bytes and embed it as a thumbnail. The URL is cached on the entry so
+  // repeated chip re-renders reuse one allocation, and released the moment the
+  // entry is removed or cleared so we never leak object URLs.
+  // ---------------------------------------------------------------------------
+  function attachPreviewUrl(entry) {
+    if (!entry || !entry.file) return null;
+    var type = entry.file.type || "";
+    if (type.indexOf("image/") !== 0) return null;
+    if (!entry.previewUrl) {
+      try { entry.previewUrl = URL.createObjectURL(entry.file); }
+      catch (e) { return null; }
+    }
+    return entry.previewUrl;
+  }
+  function releaseAttachPreview(entry) {
+    if (entry && entry.previewUrl) {
+      try { URL.revokeObjectURL(entry.previewUrl); } catch (e) { /* noop */ }
+      entry.previewUrl = null;
+    }
+  }
+  function releaseAllAttachPreviews(entries) {
+    if (entries && entries.length) entries.forEach(releaseAttachPreview);
+  }
+
+  // A staged-attachment chip rendered in a composer before upload. Image files
+  // get an inline thumbnail preview (so the user sees what they attached);
+  // anything else falls back to the generic image icon. onRemove(entry) is
+  // invoked when the chip's × control is clicked.
+  function renderAttachChip(entry, onRemove) {
+    var name = entry.file.name || t("composer.pastedImage");
+    var removeBtn = h("button", {
+      className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+    }, "×");
+    removeBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      onRemove(entry);
+    });
+    var previewUrl = attachPreviewUrl(entry);
+    var lead = previewUrl
+      ? h("img", { className: "rw-chip-thumb", src: previewUrl, alt: name })
+      : Icons.image(11);
+    return h("span", {
+      className: "rw-chip-attach" + (previewUrl ? " rw-chip-attach--img" : ""),
+      title: name,
+    }, [lead, h("span", null, name), removeBtn]);
+  }
+
   function renderShotThumb(att) {
     // Attachment shape from be/: { id, filename, originalName, mimeType, url, ... }
     var aspect = att.width && att.height ? (att.width + " / " + att.height) : "16 / 10";
@@ -4019,18 +4077,11 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach") }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
+        chipsEl.appendChild(renderAttachChip(entry, function (target) {
+          var i = entries.indexOf(target);
+          if (i >= 0) { releaseAttachPreview(entries[i]); entries.splice(i, 1); }
           renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || t("composer.pastedImage")),
-          removeBtn,
-        ]));
+        }));
       });
     }
     function addFiles(files) {
@@ -4211,6 +4262,7 @@
       request.then(function (data) {
         createdTicket = (data && data.ticket) || null;
         ta.value = "";
+        releaseAllAttachPreviews(entries);
         entries.length = 0;
         renderChips();
         isPrivate = false;
@@ -6787,18 +6839,11 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.remove") }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
+        chipsEl.appendChild(renderAttachChip(entry, function (target) {
+          var i = entries.indexOf(target);
+          if (i >= 0) { releaseAttachPreview(entries[i]); entries.splice(i, 1); }
           renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || t("composer.pastedImage")),
-          removeBtn,
-        ]));
+        }));
       });
     }
     function addFiles(files) {
@@ -6887,6 +6932,7 @@
       }).then(function (newComment) {
         ta.value = "";
         ta.style.height = "auto";
+        releaseAllAttachPreviews(entries);
         entries.length = 0;
         renderChips();
         submitBtn.firstChild.textContent = t("reply.submit");
@@ -7448,6 +7494,8 @@
   // ---------------------------------------------------------------------------
   if (window._rwTestHooks && typeof window._rwTestHooks === "object") {
     window._rwTestHooks.renderDetailInto = renderDetailInto;
+    window._rwTestHooks.renderAttachChip = renderAttachChip;
+    window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
   }
 
 })();
