@@ -1897,17 +1897,19 @@ async function requireSafeForAutoAssignment(
   prepared: PreparedWidgetTicketCreate,
 ): Promise<void> {
   // Human-reviewed projects do not need AI availability at ticket creation.
-  // Auto-assigned projects do: an unreviewed ticket must not reach an agent.
   if (!prepared.project.agentAssignmentEnabled) return;
 
   const verdict = await InjectionGuardService.checkTicket(prepared.reviewTicket);
   if (verdict.safe) return;
 
-  throw new WidgetError(
-    verdict.unavailable ? 'ticket_review_unavailable' : 'ticket_rejected',
-    verdict.unavailable ? 503 : 400,
-    verdict.reasons,
-  );
+  // Guard UNAVAILABLE (screening model down / out of credits): do NOT block the
+  // reporter from filing the ticket. The ticket is created for human review and
+  // the auto-assign orchestrator independently skips assignment when the model
+  // is unavailable, so an unscreened ticket never reaches a coding agent. Only a
+  // concrete "unsafe" verdict (a real injection attempt) blocks creation.
+  if (verdict.unavailable) return;
+
+  throw new WidgetError('ticket_rejected', 400, verdict.reasons);
 }
 
 export async function createTicket(
@@ -2072,19 +2074,18 @@ function toGuardImages(files: Array<WidgetUploadFile & { mimeType: InjectionGuar
 async function requireSafeTicketAndImages(
   ticket: { title: string; description: string | null },
   files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>,
-  opts: { agentAssignmentEnabled: boolean },
+  _opts: { agentAssignmentEnabled: boolean },
 ): Promise<void> {
   const verdict = await InjectionGuardService.checkTicket(ticket, { images: toGuardImages(files) });
   if (verdict.safe) return;
-  // If no agent can be auto-assigned, a guard outage should not block the
-  // reporter from creating a ticket that a human will review.
-  if (verdict.unavailable && !opts.agentAssignmentEnabled) return;
+  // Guard UNAVAILABLE (screening model down / out of credits): do NOT block the
+  // reporter from filing the ticket + image. The ticket is created for human
+  // review; the auto-assign orchestrator independently skips assignment when the
+  // model is unavailable, so an unscreened ticket never reaches a coding agent.
+  // Only a concrete "unsafe" verdict (a real injection attempt) blocks creation.
+  if (verdict.unavailable) return;
 
-  throw new WidgetError(
-    verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
-    verdict.unavailable ? 503 : 400,
-    verdict.reasons,
-  );
+  throw new WidgetError('attachment_rejected', 400, verdict.reasons);
 }
 
 async function storeTaskAttachment(input: {
