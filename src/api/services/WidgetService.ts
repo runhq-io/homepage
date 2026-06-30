@@ -184,6 +184,7 @@ interface WidgetProjectContext {
   serverId: string;
   channelId: string | null;
   widgetChatAgentEntityId: string | null;
+  deployEnvironments: Array<{ id: string; name: string }> | null;
 }
 
 type WidgetTicketResponse = {
@@ -328,6 +329,12 @@ export type PublicTicketDetail = {
    * outcome is recorded (questions, assignment, or a skip).
    */
   processing: boolean;
+  /**
+   * Deploy-environment id→name map for this project, so the widget resolves
+   * `deployed:<envId>` statuses to a human label ("Deployed → Production").
+   * Empty until the workspace heartbeat has synced its deploy config.
+   */
+  environments: Array<{ id: string; name: string }>;
 };
 
 type PublicAttachmentLike = {
@@ -460,6 +467,7 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      deployEnvironments: widgetProjects.deployEnvironments,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
@@ -491,6 +499,7 @@ async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContex
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      deployEnvironments: widgetProjects.deployEnvironments,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.slug, slug), eq(widgetProjects.enabled, true)))
@@ -1207,6 +1216,9 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     // get redirected, and non-public projects must not leak owner config.
     loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     chat: await getChatBootstrapInfo(project),
+    // Deploy-environment id→name map so the widget resolves `deployed:<envId>`
+    // ticket statuses to a human label ("Deployed → Production").
+    environments: project?.deployEnvironments ?? [],
     // Drives whether the client shows image-attach affordances. The upload
     // routes still return explicit errors, but bootstrap hides controls when
     // storage is absent or the kill switch is off.
@@ -1483,6 +1495,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     canPreview: !!permissions?.has('preview') && !!internalPr,
     canAssign,
     processing,
+    environments: project.deployEnvironments ?? [],
   };
 }
 
@@ -2923,6 +2936,32 @@ export async function regenerateSecret(serverId: string, lookup?: WidgetLookup) 
 
   if (!project) throw new Error('Widget project not found');
   return { apiSecret: newSecret };
+}
+
+/**
+ * Store the workspace's per-project deploy-environment id→name map (synced on
+ * the server heartbeat). Lets the widget resolve `deployed:<envId>` ticket
+ * statuses to a human name. Keyed by workspaceProjectId; only this server's rows
+ * are touched. Best-effort — malformed entries are skipped, never thrown.
+ */
+export async function syncDeployEnvironments(
+  serverId: string,
+  byWorkspaceProjectId: Record<string, unknown>,
+): Promise<void> {
+  for (const [workspaceProjectId, envs] of Object.entries(byWorkspaceProjectId)) {
+    if (!workspaceProjectId || !Array.isArray(envs)) continue;
+    const clean = envs
+      .filter((e): e is { id: string; name: string } =>
+        !!e && typeof (e as { id?: unknown }).id === 'string' && typeof (e as { name?: unknown }).name === 'string')
+      .map((e) => ({ id: e.id, name: e.name }));
+    await db
+      .update(widgetProjects)
+      .set({ deployEnvironments: clean })
+      .where(and(
+        eq(widgetProjects.serverId, serverId),
+        eq(widgetProjects.workspaceProjectId, workspaceProjectId),
+      ));
+  }
 }
 
 /**

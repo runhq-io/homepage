@@ -259,7 +259,13 @@
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
-  function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
+  function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
+    // Capture the project's deploy-env map from any detail load so status chips
+    // resolve "deployed:<envId>" → "Deployed → <name>" even on the public page
+    // (which may open a detail without going through the panel bootstrap).
+    if (data && data.environments) setDeployEnvironments(data.environments);
+    return data;
+  }); }
   function assignTicketAgent(id)  { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/assign", { method: "POST" }); }
   function ensureTicketLiveSession(id) { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/live-session", { method: "POST" }); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
@@ -1318,6 +1324,31 @@
     var c = (typeof window !== "undefined" && window.__RW_CONSTANTS__) || null;
     return (c && c.status) || null;
   }
+  // Deploy-environment id→name map for this project, captured from the bootstrap
+  // (GET /api/widget/tickets) and ticket-detail responses. Lets us resolve a
+  // `deployed:<envId>` status to a human label ("Deployed → Production") instead
+  // of leaking the raw env id. Empty until a response carries it.
+  var deployEnvironments = [];
+  function setDeployEnvironments(list) {
+    if (Array.isArray(list)) deployEnvironments = list;
+  }
+  function isDeployedStatus(s) {
+    return s === "deployed" || (typeof s === "string" && s.indexOf("deployed:") === 0);
+  }
+  // Resolve a `deployed:<envId>` status to its environment name, or null when
+  // it's the bare `deployed`, has no env id, or the id isn't in the synced map.
+  function deployedEnvName(s) {
+    if (typeof s !== "string") return null;
+    var i = s.indexOf(":");
+    var envId = i >= 0 ? s.slice(i + 1) : "";
+    if (!envId) return null;
+    for (var k = 0; k < deployEnvironments.length; k++) {
+      if (deployEnvironments[k] && deployEnvironments[k].id === envId) {
+        return deployEnvironments[k].name || null;
+      }
+    }
+    return null;
+  }
   // Last-resort visual when the registry is unavailable (cached pre-injection
   // bundle, mounted via an unexpected path, etc.). Surfaces the raw status
   // value so divergence is visible rather than silently mislabeled.
@@ -1327,6 +1358,15 @@
   // LOCALES.{lang}.status. We use the locale label when it exists for the
   // active language, otherwise fall back to the registry's English label.
   function localizedStatusLabel(s) {
+    // Compound deploy statuses (`deployed:<envId>`) aren't registry keys; label
+    // them off the base `deployed` vocabulary + the resolved environment name.
+    // Guarded to the compound form (has ':') so the bare `deployed` recurses
+    // into the normal registry/locale path below instead of looping.
+    if (typeof s === "string" && s.indexOf("deployed:") === 0) {
+      var base = localizedStatusLabel("deployed") || "Deployed";
+      var envName = deployedEnvName(s);
+      return envName ? base + " → " + envName : base;
+    }
     var path = "status." + s;
     var localized = t(path);
     if (localized && localized !== path) return localized;
@@ -1335,7 +1375,9 @@
   }
   function statusMeta(s) {
     var R = getStatusRegistry();
-    var entry = R && R[s];
+    // A `deployed:<envId>` status carries the base `deployed` colors; only its
+    // label changes (resolved to "Deployed → <env name>").
+    var entry = R && (isDeployedStatus(s) ? R["deployed"] : R[s]);
     var localized = localizedStatusLabel(s);
     if (entry) {
       return { label: localized || entry.label, dot: entry.dot, bg: entry.bg, fg: entry.fg };
@@ -3516,6 +3558,7 @@
       '.rw-chat-typing-dot:nth-child(3) { animation-delay: 0.3s; }',
       '@keyframes rw-chat-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }',
       '.rw-chat-event-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
+      '.rw-chat-event-chips { display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; }',
       '.rw-chat-footer {',
       '  flex: 0 0 auto; border-top: 1px solid var(--rw-line);',
       '  padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px;',
@@ -4831,6 +4874,9 @@
       // Re-read chat config on every panel open so enabling/disabling the
       // support agent in settings picks up without an embed reload.
       config.chat = data.chat || null;
+      // Deploy-environment id→name map, for resolving `deployed:<envId>` status
+      // labels to "Deployed → <name>" across the list/detail/live-session.
+      setDeployEnvironments(data.environments);
       // Image-attach affordances are gated server-side (currently off). Absent
       // ⇒ false ⇒ hidden, which is the safe default against an older server.
       config.attachmentsEnabled = !!data.attachmentsEnabled;
@@ -5382,8 +5428,20 @@
     }
     if (kind === "activity") {
       // A ticket status change / milestone / PR event mirrored from the public
-      // activity feed. Reuse describeEvent() so the wording is identical to the
-      // feed; render as an inline event line in the thread's timeline.
+      // activity feed, rendered as an inline line in the thread's timeline.
+      var aMeta = payload.metadata || {};
+      // Status changes render as from→to chips — exactly like the public activity
+      // page (renderEventNode). describeEvent's text form collapses to a vague
+      // "changed status" whenever a label can't be resolved (e.g. a deployed:<env>
+      // status), losing the transition; the chips keep it clear.
+      if (payload.activityType === "status_change" && (aMeta.from || aMeta.to)) {
+        var chips = [];
+        if (aMeta.from) chips.push(renderStatusChip(aMeta.from));
+        if (aMeta.from && aMeta.to) chips.push(h("span", { className: "rw-event-arrow" }, " → "));
+        if (aMeta.to) chips.push(renderStatusChip(aMeta.to));
+        return h("div", { className: "rw-chat-event-line rw-chat-event-chips" }, chips);
+      }
+      // Everything else (milestones, PR, assignment, …) keeps the feed's wording.
       var text = describeEvent({
         type: payload.activityType,
         content: payload.content,
@@ -7995,6 +8053,9 @@
     window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
     window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
     window._rwTestHooks.renderChatEventRow = renderChatEventRow;
+    window._rwTestHooks.statusMeta = statusMeta;
+    window._rwTestHooks.renderStatusChip = renderStatusChip;
+    window._rwTestHooks.setDeployEnvironments = setDeployEnvironments;
     // Seed the closure state the live-session intro reads (ticket + chat config),
     // so a vm test can render it without bootstrapping the whole widget.
     window._rwTestHooks._setLiveSessionState = function (ticket, chatConfig) {
