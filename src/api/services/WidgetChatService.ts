@@ -24,6 +24,7 @@ import {
   widgetExposedAgents,
   widgetProjects,
   widgetUsers,
+  workspaceTaskActivity,
   workspaceTasks,
   type ChatImageRow,
   type WidgetChatEventPayload,
@@ -1390,7 +1391,67 @@ export async function sendLiveCoderMessage(
 // excluded — agent assignment already reaches the chat thread as its own
 // `assigned` event (ingestTurnEvents), so mirroring them here would double up.
 // Comments/edits/archive/etc. are activity-feed-only and would be noise in chat.
-const LIVE_SESSION_MIRRORED_ACTIVITY = new Set(['status_change', 'agent_update', 'pr_linked']);
+const LIVE_SESSION_MIRRORED_ACTIVITY = new Set([
+  'status_change',
+  'agent_update',   // `runhq milestone`
+  'pr_linked',
+  'agent_assigned',
+  'agent_unassigned',
+  'assigned',
+  'unassigned',
+]);
+// Assignment activity types. When a ticket is assigned THROUGH the widget chat,
+// the workspace already emits a dedicated `assigned` chat event (ingestTurnEvents)
+// — so mirroring the agent_assigned/assigned ACTIVITY too would double the line.
+// For these types we skip the mirror when the thread already shows an `assigned`
+// event. (Auto-PR / triage assignment has no such chat event, so it still shows.)
+const ASSIGNMENT_ACTIVITY = new Set(['agent_assigned', 'agent_unassigned', 'assigned', 'unassigned']);
+
+// How far back to look when backfilling a freshly-opened live session.
+const ACTIVITY_BACKFILL_LIMIT = 100;
+
+// True when the conversation already carries the chat-native `assigned` event,
+// so an assignment ACTIVITY row would be a duplicate line.
+async function conversationHasAssignedEvent(conversationId: string): Promise<boolean> {
+  const [hit] = await db
+    .select({ id: widgetChatMessages.id })
+    .from(widgetChatMessages)
+    .where(and(
+      eq(widgetChatMessages.conversationId, conversationId),
+      eq(widgetChatMessages.role, 'event'),
+      sql`${widgetChatMessages.payload}->>'kind' = 'assigned'`,
+    ))
+    .limit(1);
+  return !!hit;
+}
+
+// Insert one activity event into a conversation, idempotently. The turn id is
+// `act:<conversationId>:<activityId>` so the live forward-mirror and the
+// open-time backfill of the SAME activity collide on the (turn_id, seq) unique
+// index (onConflictDoNothing) — neither can produce a duplicate — while the same
+// activity can still land in a sibling conversation of a multi-conversation
+// ticket (different conversationId → different turn id). Returns true on insert.
+async function insertActivityEvent(
+  conversationId: string,
+  activity: { id: string; type: string; content: string | null; metadata: Record<string, unknown> | null },
+): Promise<boolean> {
+  if (ASSIGNMENT_ACTIVITY.has(activity.type) && await conversationHasAssignedEvent(conversationId)) {
+    return false;
+  }
+  const payload: WidgetChatMessagePayload = {
+    kind: 'activity',
+    activityType: activity.type,
+    content: activity.content,
+    metadata: activity.metadata,
+  };
+  const [row] = await db
+    .insert(widgetChatMessages)
+    .values({ conversationId, role: 'event', content: '', payload, turnId: `act:${conversationId}:${activity.id}`, seq: 0 })
+    .onConflictDoNothing()
+    .returning();
+  if (row) { publish(row); return true; }
+  return false;
+}
 
 /**
  * Mirror a ticket activity row into its live-session chat thread (if one
@@ -1408,7 +1469,7 @@ const LIVE_SESSION_MIRRORED_ACTIVITY = new Set(['status_change', 'agent_update',
  */
 export async function mirrorActivityToLiveSession(
   taskId: string,
-  activity: { type: string; content?: string | null; metadata?: Record<string, unknown> | null },
+  activity: { id: string; type: string; content?: string | null; metadata?: Record<string, unknown> | null },
 ): Promise<void> {
   if (!LIVE_SESSION_MIRRORED_ACTIVITY.has(activity.type)) return;
 
@@ -1419,21 +1480,56 @@ export async function mirrorActivityToLiveSession(
     .select({ id: widgetChatConversations.id })
     .from(widgetChatConversations)
     .where(eq(widgetChatConversations.createdTaskId, taskId));
-  if (convs.length === 0) return;
-
-  const payload: WidgetChatMessagePayload = {
-    kind: 'activity',
-    activityType: activity.type,
-    content: activity.content ?? null,
-    metadata: activity.metadata ?? null,
-  };
 
   for (const conv of convs) {
-    const [row] = await db
-      .insert(widgetChatMessages)
-      .values({ conversationId: conv.id, role: 'event', content: '', payload })
-      .returning();
-    if (row) publish(row);
+    await insertActivityEvent(conv.id, {
+      id: activity.id,
+      type: activity.type,
+      content: activity.content ?? null,
+      metadata: activity.metadata ?? null,
+    });
+  }
+}
+
+/**
+ * Backfill a live session's progress timeline when it is opened. A directly-
+ * assigned (auto-PR / triage) ticket has no conversation until staff open the
+ * Live session, so everything that already happened — assignment, status
+ * changes, milestones, PR events — predates the thread and the forward mirror
+ * never saw it. This replays the ticket's recent allowlisted activity into the
+ * conversation. Idempotent: each row reuses the `act:<activityId>` turn id, so
+ * re-opening the session, or an event that was also live-mirrored, never
+ * duplicates. Comments live in a separate table and never reach this path.
+ * Best-effort; never throws.
+ */
+export async function backfillLiveSessionActivity(conversationId: string, taskId: string): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        id: workspaceTaskActivity.id,
+        type: workspaceTaskActivity.type,
+        content: workspaceTaskActivity.content,
+        metadata: workspaceTaskActivity.metadata,
+      })
+      .from(workspaceTaskActivity)
+      .where(and(
+        eq(workspaceTaskActivity.taskId, taskId),
+        inArray(workspaceTaskActivity.type, [...LIVE_SESSION_MIRRORED_ACTIVITY]),
+      ))
+      .orderBy(desc(workspaceTaskActivity.createdAt))
+      .limit(ACTIVITY_BACKFILL_LIMIT);
+
+    // Insert oldest-first so created_at order matches the original timeline.
+    for (const row of rows.reverse()) {
+      await insertActivityEvent(conversationId, {
+        id: row.id,
+        type: row.type,
+        content: row.content ?? null,
+        metadata: (row.metadata as Record<string, unknown> | null) ?? null,
+      });
+    }
+  } catch (err) {
+    console.warn('[WidgetChatService] live-session activity backfill failed', err);
   }
 }
 

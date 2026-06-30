@@ -3992,6 +3992,9 @@ export function createHttpApp() {
       }
       const result = await WidgetService.ensureLiveConversationForServerTask(server.id, body.canonicalTaskId);
       if (!result) return c.json({ error: 'not_found' }, 404);
+      // Backfill the progress timeline (status/milestone/PR/assignment) so the
+      // session opens showing what already happened, not a blank thread.
+      await WidgetChatService.backfillLiveSessionActivity(result.conversationId, body.canonicalTaskId);
       return c.json({ conversationId: result.conversationId });
     } catch (err) {
       console.error('[HttpServer] resolve-conversation error:', err);
@@ -6775,6 +6778,9 @@ export function createHttpApp() {
         auth.projectId, c.req.param('id'), auth.widgetUserId,
       );
       if (!result) return c.json({ error: 'ticket_not_found' }, 404);
+      // Backfill the progress timeline (status/milestone/PR/assignment) so the
+      // session opens showing what already happened, not a blank thread.
+      await WidgetChatService.backfillLiveSessionActivity(result.conversationId, c.req.param('id'));
       return c.json({ conversationId: result.conversationId });
     } catch (err) {
       return widgetErrorResponse(c, err);

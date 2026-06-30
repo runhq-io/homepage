@@ -915,7 +915,7 @@ export async function addActivity(
   // (WidgetChatService → WidgetService → WorkspaceTaskService).
   try {
     const { mirrorActivityToLiveSession } = await import('./WidgetChatService');
-    await mirrorActivityToLiveSession(taskId, { type: row.type, content: row.content, metadata: row.metadata });
+    await mirrorActivityToLiveSession(taskId, { id: row.id, type: row.type, content: row.content, metadata: row.metadata });
   } catch (err) {
     console.warn('[WorkspaceTaskService] live-session activity mirror failed', err);
   }

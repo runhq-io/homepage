@@ -16,6 +16,7 @@ import {
   widgetProjects,
   widgetUsers,
   workspaceTasks,
+  workspaceTaskActivity,
   widgetChatConversations,
   widgetChatMessages,
 } from '../../db/schema';
@@ -59,6 +60,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await db.delete(widgetChatMessages).where(eq(widgetChatMessages.conversationId, CONV_ID));
   await db.delete(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
+  await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, TASK_ID));
   await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.id, WIDGET_USER_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_ID));
@@ -73,13 +75,22 @@ async function eventRows() {
     .where(eq(widgetChatMessages.conversationId, CONV_ID));
 }
 
+// Stamp a fresh activity id per insert so the `act:<id>` turn id is unique.
+let actSeq = 0;
+function actId(): string { return `${RUN_HEX}-act-${actSeq++}`; }
+
+async function clearEvents() {
+  await db.delete(widgetChatMessages).where(eq(widgetChatMessages.conversationId, CONV_ID));
+}
+
 describe('mirrorActivityToLiveSession', () => {
   it('mirrors a status change into the live session as an activity event row + publishes it', async () => {
+    await clearEvents();
     const seen: Array<{ role: string; payload: unknown }> = [];
     const unsub = WidgetChatService.subscribeToConversation(CONV_ID, (row) =>
       seen.push({ role: row.role, payload: row.payload }));
     await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, {
-      type: 'status_change', content: null, metadata: { from: 'in_progress', to: 'needs_review' },
+      id: actId(), type: 'status_change', content: null, metadata: { from: 'in_progress', to: 'needs_review' },
     });
     unsub();
     const rows = await eventRows();
@@ -88,42 +99,92 @@ describe('mirrorActivityToLiveSession', () => {
     expect(rows[0]!.payload).toMatchObject({
       kind: 'activity', activityType: 'status_change', metadata: { from: 'in_progress', to: 'needs_review' },
     });
-    // Delivered live over SSE too.
     expect(seen).toHaveLength(1);
     expect(seen[0]!.role).toBe('event');
   });
 
-  it('mirrors milestones (agent_update) and PR lifecycle (pr_linked)', async () => {
-    await db.delete(widgetChatMessages).where(eq(widgetChatMessages.conversationId, CONV_ID));
-    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, {
-      type: 'agent_update', content: 'Deploying now.', metadata: null,
-    });
-    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, {
-      type: 'pr_linked', content: null, metadata: { state: 'merged' },
-    });
+  it('mirrors milestones (agent_update), PR lifecycle (pr_linked), and assignment', async () => {
+    await clearEvents();
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: actId(), type: 'agent_update', content: 'Deploying now.', metadata: null });
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: actId(), type: 'pr_linked', content: null, metadata: { state: 'merged' } });
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: actId(), type: 'agent_assigned', content: null, metadata: { agentName: 'Codey' } });
     const kinds = (await eventRows())
       .map((r) => (r.payload as { activityType?: string } | null)?.activityType)
       .sort();
-    expect(kinds).toEqual(['agent_update', 'pr_linked']);
+    expect(kinds).toEqual(['agent_assigned', 'agent_update', 'pr_linked']);
   });
 
-  it('does NOT mirror non-progress activity (comments, edits, assignment)', async () => {
-    await db.delete(widgetChatMessages).where(eq(widgetChatMessages.conversationId, CONV_ID));
-    for (const type of ['comment_added', 'ticket_edited', 'agent_assigned', 'task_archived']) {
-      await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { type, content: 'x', metadata: null });
+  it('does NOT mirror comments/edits/archive (kept off the live session)', async () => {
+    await clearEvents();
+    for (const type of ['comment_added', 'comment', 'ticket_edited', 'task_archived', 'attachment_added']) {
+      await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: actId(), type, content: 'x', metadata: null });
     }
     expect(await eventRows()).toHaveLength(0);
   });
 
+  it('skips assignment activity when the thread already has the chat `assigned` event (dedup)', async () => {
+    await clearEvents();
+    // The chat-native assignment representation already in the thread.
+    await db.insert(widgetChatMessages).values({
+      conversationId: CONV_ID, role: 'event', content: '',
+      payload: { kind: 'assigned', ticketId: TASK_ID, agentEntityId: 'ae_x', agentName: 'Codey' },
+    });
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: actId(), type: 'agent_assigned', content: null, metadata: { agentName: 'Codey' } });
+    // Only the original `assigned` event — no duplicate activity line.
+    const kinds = (await eventRows()).map((r) => (r.payload as { kind?: string } | null)?.kind);
+    expect(kinds).toEqual(['assigned']);
+    // A status change still mirrors (dedup is assignment-only).
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: actId(), type: 'status_change', content: null, metadata: { to: 'done' } });
+    expect(await eventRows()).toHaveLength(2);
+  });
+
+  it('is idempotent: the same activity id never produces a duplicate line', async () => {
+    await clearEvents();
+    const id = actId();
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id, type: 'status_change', content: null, metadata: { to: 'done' } });
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id, type: 'status_change', content: null, metadata: { to: 'done' } });
+    expect(await eventRows()).toHaveLength(1);
+  });
+
   it('is a no-op when no conversation is linked to the task', async () => {
+    await clearEvents();
     const [orphan] = await db.insert(workspaceTasks).values({
       serverId: SERVER_ID, title: 'No session', sourceType: 'widget', createdByType: 'external', visibility: 'public',
     }).returning({ id: workspaceTasks.id });
-    // Must not throw, and must not touch the existing conversation.
-    await db.delete(widgetChatMessages).where(eq(widgetChatMessages.conversationId, CONV_ID));
-    await WidgetChatService.mirrorActivityToLiveSession(orphan!.id, {
-      type: 'status_change', content: null, metadata: { to: 'done' },
-    });
+    await WidgetChatService.mirrorActivityToLiveSession(orphan!.id, { id: actId(), type: 'status_change', content: null, metadata: { to: 'done' } });
     expect(await eventRows()).toHaveLength(0);
+  });
+});
+
+describe('backfillLiveSessionActivity', () => {
+  it('replays the ticket\'s allowlisted activity into a freshly-opened session, skipping comments', async () => {
+    await clearEvents();
+    await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, TASK_ID));
+    // Seed a realistic pre-session timeline (what the screenshot showed + noise).
+    await db.insert(workspaceTaskActivity).values([
+      { serverId: SERVER_ID, taskId: TASK_ID, type: 'agent_assigned', content: null, metadata: { agentName: 'Codey' }, createdByType: 'external', createdByName: 'p2' },
+      { serverId: SERVER_ID, taskId: TASK_ID, type: 'comment', content: 'Coder session started', createdByType: 'agent' },
+      { serverId: SERVER_ID, taskId: TASK_ID, type: 'status_change', content: null, metadata: { from: 'pending', to: 'in_progress' }, createdByType: 'agent' },
+      { serverId: SERVER_ID, taskId: TASK_ID, type: 'comment_added', content: 'a public comment', createdByType: 'external' },
+    ]);
+    await WidgetChatService.backfillLiveSessionActivity(CONV_ID, TASK_ID);
+    const kinds = (await eventRows())
+      .map((r) => (r.payload as { activityType?: string } | null)?.activityType)
+      .sort();
+    // assignment + status backfilled; the comment/coder-session markers are NOT.
+    expect(kinds).toEqual(['agent_assigned', 'status_change']);
+  });
+
+  it('is idempotent with the forward mirror and across re-opens (shared act:<id> turn id)', async () => {
+    await clearEvents();
+    await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, TASK_ID));
+    const [act] = await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID, taskId: TASK_ID, type: 'status_change', content: null, metadata: { to: 'done' }, createdByType: 'agent',
+    }).returning({ id: workspaceTaskActivity.id });
+    // Forward-mirror it live, then backfill the same activity twice on re-open.
+    await WidgetChatService.mirrorActivityToLiveSession(TASK_ID, { id: act!.id, type: 'status_change', content: null, metadata: { to: 'done' } });
+    await WidgetChatService.backfillLiveSessionActivity(CONV_ID, TASK_ID);
+    await WidgetChatService.backfillLiveSessionActivity(CONV_ID, TASK_ID);
+    expect(await eventRows()).toHaveLength(1);
   });
 });
