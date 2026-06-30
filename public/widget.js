@@ -3682,16 +3682,23 @@
       '}',
       '.rw-chat-attach-btn:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-line-2); }',
       '.rw-chat-attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }',
-      /* New-conversation control — composer action (left of the input),
-         styled like the attach button so the bottom toolbar reads as one set. */
-      '.rw-chat-newconv-icon {',
-      '  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;',
-      '  width: 30px; height: 30px; border-radius: 50%;',
-      '  border: 1px solid var(--rw-line); background: transparent;',
-      '  color: var(--rw-muted); cursor: pointer;',
+      /* New-conversation strip — right-aligned, directly below the header.
+         Its own row so it reads as a distinct chat action, clear of both the
+         global icon cluster and the composer. */
+      '.rw-chat-actionbar {',
+      '  flex: 0 0 auto; display: flex; justify-content: flex-end;',
+      '  padding: 8px 18px 0;',
       '}',
-      '.rw-chat-newconv-icon:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-line-2); }',
-      '.rw-chat-newconv-icon:disabled { opacity: 0.4; cursor: not-allowed; }',
+      '.rw-chat-newconv-pill {',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  height: 26px; padding: 0 10px;',
+      '  background: transparent; border: 1px solid var(--rw-line-2);',
+      '  border-radius: 999px; color: var(--rw-muted);',
+      '  font: inherit; font-size: 11.5px; font-weight: 500; cursor: pointer;',
+      '  transition: color .15s ease, border-color .15s ease;',
+      '}',
+      '.rw-chat-newconv-pill:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-muted); }',
+      '.rw-chat-newconv-pill:disabled { opacity: 0.45; cursor: not-allowed; }',
 
       /* Chat bubble: images sent by the user */
       '.rw-chat-bubble-imgs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }',
@@ -6021,6 +6028,15 @@
     return false;
   }
 
+  // Show the below-header "New conversation" strip only for an active intake
+  // conversation (never in a Live session; hidden once closed, where the footer
+  // already offers "Start new conversation").
+  function updateChatActionBar() {
+    if (!chatUi || !chatUi.actionBar) return;
+    var show = !chatIsLiveSession && chatConversation && chatConversation.status === "active";
+    chatUi.actionBar.style.display = show ? "" : "none";
+  }
+
   // Clear the current intake conversation and open a fresh one. A non-empty
   // conversation prompts for confirmation first (a half-typed chat is easy to
   // discard by accident); an empty one starts fresh silently.
@@ -6098,6 +6114,9 @@
   // in-progress draft in the textarea survives incoming messages.
   function renderChatFooter() {
     if (!chatUi) return;
+    // Keep the below-header new-conversation strip in sync with the
+    // conversation lifecycle (footer rebuilds on every lifecycle change).
+    updateChatActionBar();
     var footerEl = chatUi.footerEl;
     clearChildren(footerEl);
     if (!chatConversation) return;
@@ -6183,20 +6202,6 @@
       title: t("composer.attach"),
     }, Icons.image(14)) : null;
 
-    // New-conversation control — grouped with the composer actions (a chat
-    // action, not a global shell control like the bell/theme/close), so it
-    // reads as "start over" rather than blending into the header icon cluster.
-    // Intake only; a Live session is a staff↔job channel, never discardable.
-    var newConvBtn = chatIsLiveSession ? null : h("button", {
-      className: "rw-chat-newconv-icon", type: "button",
-      "aria-label": t("chat.clearAria"), title: t("chat.clearTitle"),
-    }, Icons.compose(15));
-    if (newConvBtn) {
-      newConvBtn.addEventListener("click", function () {
-        if (newConvBtn.disabled) return;
-        requestFreshConversation();
-      });
-    }
     var fileInput = canAttachImages ? h("input", {
       type: "file", accept: "image/*", style: { display: "none" },
     }) : null;
@@ -6357,7 +6362,6 @@
     footerEl.appendChild(noticeSlot);
     if (canAttachImages && pendingChipsRow) footerEl.appendChild(pendingChipsRow);
     footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [
-      newConvBtn,
       canAttachImages ? attachBtn : null,
       ta,
       sendBtn,
@@ -6422,11 +6426,29 @@
       ]),
     ]));
 
+    // New-conversation control — its own right-aligned strip directly below the
+    // header (intake chats only; a Live session is a staff↔job channel, never
+    // discardable). Kept out of both the global icon cluster and the composer.
+    // Visibility is synced to the conversation lifecycle by updateChatActionBar.
+    var actionBar = null;
+    if (!isLive) {
+      var newConvBtn = h("button", {
+        className: "rw-chat-newconv-pill", type: "button",
+        "aria-label": t("chat.clearAria"), title: t("chat.clearTitle"),
+      }, [Icons.compose(13), h("span", null, t("chat.clearTitle"))]);
+      newConvBtn.addEventListener("click", function () {
+        if (newConvBtn.disabled) return;
+        requestFreshConversation();
+      });
+      actionBar = h("div", { className: "rw-chat-actionbar", style: { display: "none" } }, [newConvBtn]);
+      root.appendChild(actionBar);
+    }
+
     var listEl = h("div", { className: "rw-chat-scroll" });
     var footerEl = h("div", { className: "rw-chat-footer" });
     root.appendChild(listEl);
     root.appendChild(footerEl);
-    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, actionBar: actionBar };
 
     listEl.appendChild(renderLoading());
 
