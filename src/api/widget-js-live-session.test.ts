@@ -107,6 +107,9 @@ interface TestHooks {
     row: { id?: string; payload?: Record<string, unknown> | null },
     activeProposal?: unknown,
   ) => FakeNode | null;
+  statusMeta?: (s: string) => { label: string; dot: string; bg: string; fg: string };
+  renderStatusChip?: (s: string) => FakeNode;
+  setDeployEnvironments?: (list: Array<{ id: string; name: string }>) => void;
   _setLiveSessionState?: (
     ticket: { id?: string; title?: string } | null,
     chatConfig?: { enabled?: boolean; agentName?: string } | null,
@@ -123,6 +126,16 @@ function loadWidget() {
     open: vi.fn(),
     EventSource: undefined,
     _rwTestHooks: hooks,
+    // The status registry the widget normally gets injected at page load.
+    __RW_CONSTANTS__: {
+      status: {
+        pending: { label: 'Pending', dot: '#8a857d', bg: '#eee', fg: '#555' },
+        in_progress: { label: 'In progress', dot: '#c79a2e', bg: '#fef', fg: '#8a6d1f' },
+        needs_review: { label: 'In review', dot: '#6366f1', bg: '#eef', fg: '#3a3a8a' },
+        done: { label: 'Done', dot: '#4a7558', bg: '#efe', fg: '#3a5a44' },
+        deployed: { label: 'Deployed', dot: '#4a7558', bg: '#dfe', fg: '#3a5a44' },
+      },
+    },
   };
   const context: Record<string, unknown> = {
     window: windowMock,
@@ -252,14 +265,64 @@ describe('widget.js — status/milestone activity mirrored into the live session
     expect(text).not.toContain('123');
   });
 
-  it('renders a status_change as an inline event line (not the raw type)', () => {
+  it('renders a status_change as from→to chips (matching the public activity page)', () => {
     const { hooks } = loadWidget();
     const node = hooks.renderChatEventRow!({
       id: 'e3',
       payload: { kind: 'activity', activityType: 'status_change', content: null, metadata: { from: 'in_progress', to: 'needs_review' } },
     });
     expect(node).not.toBeNull();
-    expect(hasClass(node!, 'rw-chat-event-line')).toBe(true);
+    expect(hasClass(node!, 'rw-chat-event-chips')).toBe(true);
+    // Two status chips (from + to) — the clear transition, not vague text.
+    const chips = node!._findAll((n) => hasClass(n, 'rw-chip'));
+    expect(chips.length).toBe(2);
     expect(allText(node!)).not.toContain('status_change');
+  });
+
+  it('renders a single chip when a status_change has only a target', () => {
+    const { hooks } = loadWidget();
+    const node = hooks.renderChatEventRow!({
+      id: 'e4',
+      payload: { kind: 'activity', activityType: 'status_change', content: null, metadata: { to: 'done' } },
+    });
+    expect(node!._findAll((n) => hasClass(n, 'rw-chip')).length).toBe(1);
+  });
+});
+
+describe('widget.js — deployed:<envId> status resolves to an env name', () => {
+  it('labels a deployed status "Deployed → <env name>" using the synced env map', () => {
+    const { hooks } = loadWidget();
+    hooks.setDeployEnvironments!([{ id: 'denv_ec106c0a7c6b4644', name: 'Production' }]);
+    expect(hooks.statusMeta!('deployed:denv_ec106c0a7c6b4644').label).toBe('Deployed → Production');
+    // Carries the base `deployed` colors (not the gray fallback).
+    expect(hooks.statusMeta!('deployed:denv_ec106c0a7c6b4644').dot).toBe('#4a7558');
+  });
+
+  it('falls back to "Deployed" for an unknown env id or the bare status (never the raw id)', () => {
+    const { hooks } = loadWidget();
+    hooks.setDeployEnvironments!([{ id: 'denv_known', name: 'Production' }]);
+    expect(hooks.statusMeta!('deployed:denv_unknown').label).toBe('Deployed');
+    expect(hooks.statusMeta!('deployed').label).toBe('Deployed');
+    // Crucially, the raw env id never surfaces as the label.
+    expect(hooks.statusMeta!('deployed:denv_unknown').label).not.toContain('denv_');
+  });
+
+  it('renders the resolved name in a status chip (the public-page + live-session path)', () => {
+    const { hooks } = loadWidget();
+    hooks.setDeployEnvironments!([{ id: 'denv_x', name: 'Staging' }]);
+    const chip = hooks.renderStatusChip!('deployed:denv_x');
+    expect(allText(chip)).toContain('Staging');
+    expect(allText(chip)).not.toContain('denv_x');
+  });
+
+  it('resolves the env name inside a live-session status_change chip (A + B together)', () => {
+    const { hooks } = loadWidget();
+    hooks.setDeployEnvironments!([{ id: 'denv_x', name: 'Production' }]);
+    const node = hooks.renderChatEventRow!({
+      id: 'e5',
+      payload: { kind: 'activity', activityType: 'status_change', content: null, metadata: { from: 'done', to: 'deployed:denv_x' } },
+    });
+    expect(allText(node!)).toContain('Production');
+    expect(allText(node!)).not.toContain('denv_x');
   });
 });

@@ -1399,6 +1399,10 @@ export const widgetProjects = pgTable('widget_projects', {
   // authenticated user); values are arrays of WidgetPermission strings.
   // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder","preview"] }
   widgetRolePermissions: jsonb('widget_role_permissions').$type<Record<string, string[]>>().notNull().default({}),
+  // Deploy-environment id→name map for this project, synced from the workspace
+  // on the server heartbeat. Lets the widget resolve `deployed:<envId>` ticket
+  // statuses to a human label ("Deployed → Production"). Null until first sync.
+  deployEnvironments: jsonb('deploy_environments').$type<Array<{ id: string; name: string }>>(),
   // Feature flag enabling the live-coder UI for this widget project.
   widgetLiveCoderEnabled: boolean('widget_live_coder_enabled').notNull().default(false),
   // Origins (e.g. https://acme.com) where the widget is allowed to use

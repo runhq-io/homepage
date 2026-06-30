@@ -21,6 +21,7 @@ import {
   widgetChatMessages,
 } from '../../db/schema';
 import * as WidgetChatService from './WidgetChatService';
+import * as WidgetService from './WidgetService';
 
 const RUN_HEX = randomBytes(6).toString('hex');
 const SERVER_ID = `ws_actmirror_${RUN_HEX}`;
@@ -206,5 +207,41 @@ describe('backfillLiveSessionActivity', () => {
     await WidgetChatService.backfillLiveSessionActivity(CONV_ID, TASK_ID);
     await WidgetChatService.backfillLiveSessionActivity(CONV_ID, TASK_ID);
     expect(await eventRows()).toHaveLength(1);
+  });
+});
+
+describe('deploy-environment sync (env id→name for deployed:<envId> labels)', () => {
+  const WSP = `wsp_actmirror_${RUN_HEX}`;
+
+  it('stores the env map on the widget project and surfaces it in the bootstrap', async () => {
+    await WidgetService.syncDeployEnvironments(SERVER_ID, {
+      [WSP]: [{ id: 'denv_ec106c0a7c6b4644', name: 'Production' }, { id: 'denv_stg', name: 'Staging' }],
+    });
+    const [row] = await db
+      .select({ envs: widgetProjects.deployEnvironments })
+      .from(widgetProjects)
+      .where(eq(widgetProjects.id, PROJECT_ID));
+    expect(row!.envs).toEqual([
+      { id: 'denv_ec106c0a7c6b4644', name: 'Production' },
+      { id: 'denv_stg', name: 'Staging' },
+    ]);
+    // The widget bootstrap carries it so the client can resolve labels.
+    const bootstrap = await WidgetService.listTickets(PROJECT_ID);
+    expect(bootstrap.environments).toEqual([
+      { id: 'denv_ec106c0a7c6b4644', name: 'Production' },
+      { id: 'denv_stg', name: 'Staging' },
+    ]);
+  });
+
+  it('skips malformed entries and never throws on bad shapes', async () => {
+    await WidgetService.syncDeployEnvironments(SERVER_ID, {
+      [WSP]: [{ id: 'denv_ok', name: 'Prod' }, { id: 123 }, null, { name: 'no-id' }] as unknown[],
+      '': [{ id: 'x', name: 'y' }], // empty project id ignored
+    } as Record<string, unknown>);
+    const [row] = await db
+      .select({ envs: widgetProjects.deployEnvironments })
+      .from(widgetProjects)
+      .where(eq(widgetProjects.id, PROJECT_ID));
+    expect(row!.envs).toEqual([{ id: 'denv_ok', name: 'Prod' }]);
   });
 });

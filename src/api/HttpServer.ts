@@ -3807,6 +3807,19 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid server token' }, 401);
       }
 
+      // Sync the workspace's per-project deploy-environment id→name map so the
+      // widget can resolve `deployed:<envId>` statuses to a human name. Stored
+      // server-side here so public widget reads never have to reach the (possibly
+      // suspended) workspace. Best-effort — never fail the heartbeat over it.
+      if (body.deployEnvironments && typeof body.deployEnvironments === 'object' && !Array.isArray(body.deployEnvironments)) {
+        try {
+          const server = await ServerService.getServerByToken(serverToken);
+          if (server) await WidgetService.syncDeployEnvironments(server.id, body.deployEnvironments);
+        } catch (err) {
+          console.warn('[HttpServer] deploy-environment sync failed', err);
+        }
+      }
+
       return c.json({ success: true });
     } catch (error) {
       console.error('[HttpServer] Server heartbeat error:', error);
