@@ -41,6 +41,7 @@
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
   var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
+  var assignedTicketsCache = null; // /api/widget/tickets/assigned — live sessions the viewer assigned
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
   // Current authenticated user info, populated after auth via /api/widget/me.
@@ -262,6 +263,7 @@
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
+  function loadAssignedTickets()  { return api("/api/widget/tickets/assigned"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
     // Capture the project's deploy-env map from any detail load so status chips
     // resolve "deployed:<envId>" → "Deployed → <name>" even on the public page
@@ -603,6 +605,11 @@
       currentUser.permissions = (me && me.permissions) || [];
       currentUser.matchedRoles = (me && me.matchedRoles) || [];
       currentUser.isTriager = !!(me && me.isTriager);
+      if (config.isIdentified && viewerCanLiveCoder()) {
+        loadAssignedTickets()
+          .then(function (d) { assignedTicketsCache = d.tickets || []; refreshTabLabel(); })
+          .catch(function () {});
+      }
       // Re-render so the badge appears/disappears in the eyebrow row.
       if (scrollEl) renderPanelBody();
     }).catch(function () {
@@ -1509,15 +1516,36 @@
     return updated > base;
   }
 
+  // Only viewers who can OPEN a live session (live_coder / assign_agent) get the
+  // assigned-session unread signal — they are the only ones who can clear it.
+  function viewerCanLiveCoder() {
+    var p = currentUser.permissions || [];
+    return p.indexOf("live_coder") !== -1 || p.indexOf("assign_agent") !== -1;
+  }
+
+  // Deduped union of the viewer's reported tickets and the live sessions they
+  // assigned. Both carry lastActivityAt, so the existing unread predicate works.
+  function unreadCandidateTickets() {
+    var byId = {};
+    var out = [];
+    var push = function (tk) {
+      if (!tk || !tk.id || byId[tk.id]) return;
+      byId[tk.id] = true; out.push(tk);
+    };
+    (myTicketsCache || []).forEach(push);
+    (assignedTicketsCache || []).forEach(push);
+    return out;
+  }
+
   // Launcher badge = how many of the viewer's OWN submitted tickets have unseen
   // activity. Deliberately NOT unioned with the community "Updates" feed — that
   // count lives on the "View Latest Updates" home card (newUpdatesCount).
   function launcherBadgeCount() {
     if (!config.isIdentified) return 0;
-    var mine = myTicketsCache || [];
+    var items = unreadCandidateTickets();
     var n = 0;
-    for (var j = 0; j < mine.length; j++) {
-      if (ticketHasUnseenActivity(mine[j])) n++;
+    for (var j = 0; j < items.length; j++) {
+      if (ticketHasUnseenActivity(items[j])) n++;
     }
     return n;
   }
@@ -1796,7 +1824,7 @@
 
   function renderNotifDropdown() {
     if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
-    var items = (myTicketsCache || []).filter(ticketHasUnseenActivity);
+    var items = unreadCandidateTickets().filter(ticketHasUnseenActivity);
     var listEl = h("div", { className: "rw-notif-list" });
     if (items.length === 0) {
       listEl.appendChild(h("div", { className: "rw-notif-empty" }, t("filters.noUnread")));
@@ -4615,7 +4643,7 @@
         refreshPrivateBtn();
         privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
-        topTicketsCache = null; updatesCache = null; myTicketsCache = null;
+        topTicketsCache = null; updatesCache = null; myTicketsCache = null; assignedTicketsCache = null;
         composeReturnView = "home";
         activeTab = "mine";
 
@@ -4968,8 +4996,11 @@
     var mineP = config.isIdentified
       ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
       : Promise.resolve().then(function () { myTicketsCache = []; });
+    var assignedP = (config.isIdentified && viewerCanLiveCoder())
+      ? loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () { assignedTicketsCache = []; })
+      : Promise.resolve().then(function () { assignedTicketsCache = []; });
 
-    return Promise.all([topP, updP, mineP]).then(function () {
+    return Promise.all([topP, updP, mineP, assignedP]).then(function () {
       renderPanelBody();
       refreshTabLabel();
     }).catch(function (err) {
@@ -8217,6 +8248,7 @@
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
         } else {
           myTicketsCache = [];
+          assignedTicketsCache = [];
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () { updatesCache = []; });
         }
 
