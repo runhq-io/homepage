@@ -183,6 +183,9 @@ function setupStoreMocks(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Screening is opt-in (default OFF). These suites exercise the guard, so
+  // enable it; the dedicated "screening disabled" test clears it.
+  process.env.WIDGET_CHAT_IMAGE_SCREENING_ENABLED = 'true';
   // Reset checkTicket to the safe default
   mockCheckTicket.mockResolvedValue({ safe: true, reasons: [] });
   mockDeleteStoredObject.mockResolvedValue(undefined);
@@ -190,6 +193,10 @@ beforeEach(() => {
   setupSelectMocks();
   setupInsertMock();
   setupStoreMocks();
+});
+
+afterEach(() => {
+  delete process.env.WIDGET_CHAT_IMAGE_SCREENING_ENABLED;
 });
 
 const BASE_PARAMS = {
@@ -369,6 +376,26 @@ describe('storeWidgetChatImage — injection guard rejections', () => {
       storeWidgetChatImage(BASE_PARAMS.projectId, BASE_PARAMS.conversationId, BASE_PARAMS.widgetUserId, BASE_PARAMS.permissions, makeFile()),
     ).rejects.toMatchObject({ code: 'attachment_review_unavailable', status: 503 });
     expect(mockStoreUpload).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: screening opt-in flag (WIDGET_CHAT_IMAGE_SCREENING_ENABLED)
+// ---------------------------------------------------------------------------
+
+describe('storeWidgetChatImage — screening disabled (default)', () => {
+  it('skips the injection guard and stores the image when screening is off', async () => {
+    delete process.env.WIDGET_CHAT_IMAGE_SCREENING_ENABLED; // default OFF
+    // Even an "unsafe" verdict must be irrelevant — the guard must not run.
+    mockCheckTicket.mockResolvedValue({ safe: false, reasons: ['would-block-if-run'] });
+
+    const row = await storeWidgetChatImage(
+      BASE_PARAMS.projectId, BASE_PARAMS.conversationId, BASE_PARAMS.widgetUserId, BASE_PARAMS.permissions, makeFile(),
+    );
+
+    expect(mockCheckTicket).not.toHaveBeenCalled();   // guard not invoked
+    expect(mockStoreUpload).toHaveBeenCalled();        // upload proceeded
+    expect(row).toBeDefined();
   });
 });
 

@@ -2498,6 +2498,19 @@ async function requireSafeChatImage(image: InjectionGuardImage): Promise<void> {
 }
 
 /**
+ * Whether widget-chat image uploads are screened by the injection guard.
+ *
+ * OFF by default: the guard's screening model can be unfunded/unavailable
+ * (fails closed → blocks every upload) and has produced false positives on
+ * ordinary bug screenshots. The screening code (`requireSafeChatImage`) is
+ * fully retained — set `WIDGET_CHAT_IMAGE_SCREENING_ENABLED=true` to re-enable
+ * it once the screening model is reliable.
+ */
+export function chatImageScreeningEnabled(): boolean {
+  return process.env.WIDGET_CHAT_IMAGE_SCREENING_ENABLED === 'true';
+}
+
+/**
  * Screen, store, and register a widget-chat image upload.
  *
  * Flow:
@@ -2552,12 +2565,16 @@ export async function storeWidgetChatImage(
     throw new WidgetError('attachment_count_exceeded', 400);
   }
 
-  // 6. Injection guard — MUST run before any storeUpload call
-  await requireSafeChatImage({
-    mimeType: file.mimeType as InjectionGuardImageMime,
-    dataBase64: file.buffer.toString('base64'),
-    filename: file.originalName ?? file.filename,
-  });
+  // 6. Injection guard — opt-in via WIDGET_CHAT_IMAGE_SCREENING_ENABLED.
+  //    When enabled it MUST run before any storeUpload call. Disabled by
+  //    default for now (see chatImageScreeningEnabled); the guard code is kept.
+  if (chatImageScreeningEnabled()) {
+    await requireSafeChatImage({
+      mimeType: file.mimeType as InjectionGuardImageMime,
+      dataBase64: file.buffer.toString('base64'),
+      filename: file.originalName ?? file.filename,
+    });
+  }
 
   // 7. Store original upload
   const original = await attachmentStorage.storeUpload({
