@@ -78,31 +78,35 @@ describe('listTicketsAssignedByMe', () => {
     }
   });
 
-  it('lastActivityAt advances on a coder reply but not on the assigner\'s own message', async () => {
+  it('liveSessionLastMessageAt tracks coder/teammate replies, NOT the assigner\'s own message; lastActivityAt is untouched by chat', async () => {
     const { taskId, convId } = await makeAssignedTask('Activity', ASSIGNER_EXT);
+    const get = async () =>
+      (await listTicketsAssignedByMe(PROJECT_ID, ASSIGNER_WUID)).find((r) => r.id === taskId)!;
     try {
-      const base = new Date(
-        (await listTicketsAssignedByMe(PROJECT_ID, ASSIGNER_WUID)).find((r) => r.id === taskId)!.lastActivityAt!,
-      ).getTime();
+      const before = await get();
+      const lastActivityBase = new Date(before.lastActivityAt!).getTime();
+      // No replies yet → no live-session signal.
+      expect(before.liveSessionLastMessageAt ?? null).toBeNull();
 
-      // assigner's own live message → role='user' → must NOT bump
+      // The assigner's own live message → role='user' → must NOT set the signal.
       await new Promise((r) => setTimeout(r, 10));
       await WidgetChatService.sendLiveCoderMessage(convId, PROJECT_ID, 'Any update?');
-      const afterOwn = new Date(
-        (await listTicketsAssignedByMe(PROJECT_ID, ASSIGNER_WUID)).find((r) => r.id === taskId)!.lastActivityAt!,
-      ).getTime();
-      expect(afterOwn).toBe(base);
+      const afterOwn = await get();
+      expect(afterOwn.liveSessionLastMessageAt ?? null).toBeNull();
 
-      // coder reply → role='agent' → must bump
+      // A coder reply → role='agent' → SETS liveSessionLastMessageAt, but leaves
+      // lastActivityAt (the general-activity axis) unchanged.
       await new Promise((r) => setTimeout(r, 10));
       await WidgetChatService.ingestTurnEvents(SERVER_ID, {
         conversationId: convId, turnId: `turn-${RUN_HEX}`,
         events: [{ kind: 'agent_message', seq: 0, text: 'Pushed a fix.' }],
       });
-      const afterReply = new Date(
-        (await listTicketsAssignedByMe(PROJECT_ID, ASSIGNER_WUID)).find((r) => r.id === taskId)!.lastActivityAt!,
-      ).getTime();
-      expect(afterReply).toBeGreaterThan(base);
+      const afterReply = await get();
+      expect(afterReply.liveSessionLastMessageAt).toBeTruthy();
+      expect(new Date(afterReply.liveSessionLastMessageAt!).getTime())
+        .toBeGreaterThan(new Date(afterReply.createdAt!).getTime());
+      // Chat does NOT bleed into lastActivityAt anymore.
+      expect(new Date(afterReply.lastActivityAt!).getTime()).toBe(lastActivityBase);
     } finally {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, taskId));
     }

@@ -116,6 +116,8 @@ interface TestHooks {
   ) => void;
   launcherBadgeCount?: () => number;
   markTicketSeen?: (id: string, whenMs: number) => void;
+  markLiveSessionSeen?: (id: string, whenMs: number) => void;
+  hasUnreadLiveSession?: (ticket: unknown) => boolean;
   _setCaches?: (mine: unknown[], assigned: unknown[]) => void;
   _setConfig?: (updates: Record<string, unknown>) => void;
   _setCurrentUser?: (updates: Record<string, unknown>) => void;
@@ -345,7 +347,7 @@ describe('widget.js — deployed:<envId> status resolves to an env name', () => 
 });
 
 describe('live-session unread badge (assigner)', () => {
-  it('counts an assigned session with unseen activity and clears on read', () => {
+  it('counts an assigned session with an unread reply; only opening the session clears it (NOT viewing the detail)', () => {
     const { hooks } = loadWidget();
     // Simulate a logged-in staff viewer with live_coder permission.
     hooks._setConfig!({ isIdentified: true });
@@ -356,17 +358,27 @@ describe('live-session unread badge (assigner)', () => {
       id: 'task-1',
       title: 'Assigned',
       createdAt: new Date(now - 10000).toISOString(),
-      lastActivityAt: new Date(now).toISOString(),
+      // An unread coder reply landed AT now; the general-activity axis is even
+      // newer (a later status sync), to reproduce the prod bug where the detail
+      // mark would otherwise mask the older reply.
+      lastActivityAt: new Date(now + 5000).toISOString(),
+      liveSessionLastMessageAt: new Date(now).toISOString(),
     };
 
     // Seed the assigned-ticket cache (simulates what loadAssignedTickets sets).
     hooks._setCaches!([], [ticket]);
 
-    // The ticket has unseen activity (lastActivityAt > createdAt, no seen record).
+    // The assigned session has an unread reply (no live-session-seen record).
     expect(hooks.launcherBadgeCount!()).toBe(1);
 
-    // Reading the live session up to the latest message clears the unread signal.
-    hooks.markTicketSeen!('task-1', now);
+    // Merely viewing the ticket DETAIL marks the ticket seen up to its general
+    // activity (later than the reply) — this must NOT clear the live-session
+    // signal (the prod bug). Badge stays lit.
+    hooks.markTicketSeen!('task-1', now + 5000);
+    expect(hooks.launcherBadgeCount!()).toBe(1);
+
+    // Opening the live session advances the dedicated mark → cleared.
+    hooks.markLiveSessionSeen!('task-1', now);
     expect(hooks.launcherBadgeCount!()).toBe(0);
   });
 
