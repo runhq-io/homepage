@@ -92,6 +92,9 @@
   // button disabled across the full list re-renders that incoming SSE rows
   // trigger (the slot is rebuilt on every render).
   var chatSubmitInFlight = false;
+  // Guards the discard-and-start-fresh flow against a double-trigger while the
+  // POST is outstanding.
+  var chatFreshInFlight = false;
   // Element refs for the mounted chat view ({listEl, footerEl, hatchSlot,
   // inputEl}); null whenever view !== "chat".
   var chatUi = null;
@@ -817,6 +820,9 @@
     arrowUp:   function (s) { return icon([{ d: "M12 19V5M5 12l7-7 7 7" }], s, 2); },
     arrowLeft: function (s) { return icon([{ d: "M19 12H5M12 19l-7-7 7-7" }], s, 2); },
     paperclip: function (s) { return icon([{ d: "M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8" }], s); },
+    // Compose / "new conversation" glyph (document + pencil) — the conventional
+    // new-message affordance, kept distinct from the paperclip attach icon.
+    compose:   function (s) { return icon([{ d: "M12 20h9" }, { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" }], s); },
     lock:      function (s) { return icon([{ tag: "rect", x: 4, y: 11, width: 16, height: 10, rx: 2 }, { d: "M8 11V7a4 4 0 0 1 8 0v4" }], s); },
     send:      function (s) { return icon([{ d: "M22 2L11 13" }, { d: "M22 2l-7 20-4-9-9-4 20-7z" }], s); },
     sun:       function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 4 }, { d: "M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" }], s); },
@@ -3515,10 +3521,7 @@
       '.rw-chat-full { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }',
       '.rw-chat-topbar {',
       '  flex: 0 0 auto; display: flex; align-items: center; gap: 12px;',
-      /* Right padding clears the absolute-positioned shell actions (bell +
-         theme + close), matching the list/detail/compose topbars — so the
-         clear/new-conversation control sits just left of them, never under. */
-      '  padding: 12px 116px 10px 18px; border-bottom: 1px solid var(--rw-line);',
+      '  padding: 12px 18px 10px; border-bottom: 1px solid var(--rw-line);',
       '}',
       '.rw-chat-topbar-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }',
       '.rw-chat-topbar-name {',
@@ -3526,9 +3529,6 @@
       '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
       '}',
       '.rw-chat-agent-img { border-radius: 50%; object-fit: cover; flex: 0 0 auto; }',
-      /* Clear / new-conversation control — pinned to the far right of the chat
-         topbar, sized to match the other icon buttons in the shell. */
-      '.rw-chat-clear-btn { margin-left: auto; flex: 0 0 auto; }',
       '.rw-chat-scroll {',
       '  flex: 1 1 auto; overflow-y: auto; padding: 14px 18px;',
       '  display: flex; flex-direction: column; gap: 10px;',
@@ -3682,6 +3682,16 @@
       '}',
       '.rw-chat-attach-btn:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-line-2); }',
       '.rw-chat-attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }',
+      /* New-conversation control — composer action (left of the input),
+         styled like the attach button so the bottom toolbar reads as one set. */
+      '.rw-chat-newconv-icon {',
+      '  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;',
+      '  width: 30px; height: 30px; border-radius: 50%;',
+      '  border: 1px solid var(--rw-line); background: transparent;',
+      '  color: var(--rw-muted); cursor: pointer;',
+      '}',
+      '.rw-chat-newconv-icon:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-line-2); }',
+      '.rw-chat-newconv-icon:disabled { opacity: 0.4; cursor: not-allowed; }',
 
       /* Chat bubble: images sent by the user */
       '.rw-chat-bubble-imgs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }',
@@ -6001,15 +6011,6 @@
     listEl.scrollTop = listEl.scrollHeight;
   }
 
-  // Show the topbar clear/new-conversation control only for an active intake
-  // conversation (never in a Live session, never on a closed/empty shell where
-  // the footer already offers "Start new conversation").
-  function updateChatClearBtn() {
-    if (!chatUi || !chatUi.clearBtn) return;
-    var show = !chatIsLiveSession && chatConversation && chatConversation.status === "active";
-    chatUi.clearBtn.style.display = show ? "" : "none";
-  }
-
   // Whether the current intake conversation has anything worth confirming
   // before discarding — at least one thing the user said or the agent replied.
   function chatHasDiscardableContent() {
@@ -6024,6 +6025,7 @@
   // conversation prompts for confirmation first (a half-typed chat is easy to
   // discard by accident); an empty one starts fresh silently.
   function requestFreshConversation() {
+    if (chatFreshInFlight) return;
     if (chatHasDiscardableContent()) {
       confirmClearConversation(beginFreshConversation);
     } else {
@@ -6033,28 +6035,26 @@
 
   // Abandon the active conversation server-side and swap in the new one. The
   // current transcript stays visible until the fresh conversation loads, so a
-  // failed request leaves the user exactly where they were.
+  // failed request leaves the user exactly where they were. chatFreshInFlight
+  // guards against a double-trigger while the request is outstanding.
   function beginFreshConversation() {
-    var clearBtn = chatUi && chatUi.clearBtn;
-    if (clearBtn) clearBtn.disabled = true;
+    if (chatFreshInFlight) return;
+    chatFreshInFlight = true;
     stopChatTransport();
     chatStartFreshConversation().then(function (data) {
+      chatFreshInFlight = false;
       if (view !== "chat" || !chatUi) return;
       chatConversation = (data && data.conversation) || null;
       chatMessages = ((data && data.messages) || []).slice();
       chatTurnPending = false;
       chatSubmitInFlight = false;
       pendingChatImages = [];
-      if (clearBtn) clearBtn.disabled = false;
       renderChatMessageList();
       renderChatFooter();
       startChatTransport();
     }).catch(function (err) {
-      if (view !== "chat" || !chatUi) {
-        if (clearBtn) clearBtn.disabled = false;
-        return;
-      }
-      if (clearBtn) clearBtn.disabled = false;
+      chatFreshInFlight = false;
+      if (view !== "chat" || !chatUi) return;
       // Restore real-time delivery for the conversation we left intact, then
       // surface the failure inline.
       if (chatConversation && chatConversation.status === "active") startChatTransport();
@@ -6098,9 +6098,6 @@
   // in-progress draft in the textarea survives incoming messages.
   function renderChatFooter() {
     if (!chatUi) return;
-    // Keep the topbar clear/new-conversation control in sync with the
-    // conversation lifecycle (footer rebuilds on every lifecycle change).
-    updateChatClearBtn();
     var footerEl = chatUi.footerEl;
     clearChildren(footerEl);
     if (!chatConversation) return;
@@ -6185,6 +6182,21 @@
       className: "rw-chat-attach-btn", type: "button", "aria-label": t("composer.attach"),
       title: t("composer.attach"),
     }, Icons.image(14)) : null;
+
+    // New-conversation control — grouped with the composer actions (a chat
+    // action, not a global shell control like the bell/theme/close), so it
+    // reads as "start over" rather than blending into the header icon cluster.
+    // Intake only; a Live session is a staff↔job channel, never discardable.
+    var newConvBtn = chatIsLiveSession ? null : h("button", {
+      className: "rw-chat-newconv-icon", type: "button",
+      "aria-label": t("chat.clearAria"), title: t("chat.clearTitle"),
+    }, Icons.compose(15));
+    if (newConvBtn) {
+      newConvBtn.addEventListener("click", function () {
+        if (newConvBtn.disabled) return;
+        requestFreshConversation();
+      });
+    }
     var fileInput = canAttachImages ? h("input", {
       type: "file", accept: "image/*", style: { display: "none" },
     }) : null;
@@ -6345,6 +6357,7 @@
     footerEl.appendChild(noticeSlot);
     if (canAttachImages && pendingChipsRow) footerEl.appendChild(pendingChipsRow);
     footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [
+      newConvBtn,
       canAttachImages ? attachBtn : null,
       ta,
       sendBtn,
@@ -6401,37 +6414,19 @@
       chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()
     );
 
-    // Clear / new-conversation control — intake chats only (a Live session is a
-    // staff↔job channel, not a discardable intake). Lets the user abandon a
-    // half-typed conversation and start fresh without first creating a ticket.
-    // Hidden until an active conversation has loaded (see updateChatClearBtn).
-    var clearBtn = null;
-    if (!isLive) {
-      clearBtn = h("button", {
-        className: "rw-icon-btn rw-chat-clear-btn", type: "button",
-        "aria-label": t("chat.clearAria"), title: t("chat.clearTitle"),
-        style: { display: "none" },
-      }, Icons.plus(16));
-      clearBtn.addEventListener("click", function () {
-        if (clearBtn.disabled) return;
-        requestFreshConversation();
-      });
-    }
-
     root.appendChild(h("div", { className: "rw-chat-topbar" }, [
       backBtn,
       h("div", { className: "rw-chat-topbar-identity" }, [
         renderChatAgentAvatar(22),
         h("span", { className: "rw-chat-topbar-name" }, topbarLabel),
       ]),
-      clearBtn,
     ]));
 
     var listEl = h("div", { className: "rw-chat-scroll" });
     var footerEl = h("div", { className: "rw-chat-footer" });
     root.appendChild(listEl);
     root.appendChild(footerEl);
-    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, clearBtn: clearBtn };
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
 
     listEl.appendChild(renderLoading());
 
