@@ -22,6 +22,7 @@ vi.mock('./services/TaskAttachmentStorageService', () => ({
 }));
 vi.mock('./services/WidgetChatService', () => ({
   getOrCreateActiveConversation: vi.fn(),
+  startFreshConversation: vi.fn(),
   getActiveConversation: vi.fn(),
   getConversationOwned: vi.fn(),
   getConversationForViewer: vi.fn(),
@@ -128,6 +129,34 @@ describe('POST /api/widget/chat/conversations', () => {
     const res = await makeApp().request('/api/widget/chat/conversations', { method: 'POST' });
     expect(res.status).toBe(404);
     expect((await res.json()).error).toBe('chat_not_enabled');
+  });
+
+  it('{ fresh: true } routes to startFreshConversation (discard + new)', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.startFreshConversation).mockResolvedValue({
+      conversation: CONV, messages: [],
+    } as any);
+    const res = await makeApp().request('/api/widget/chat/conversations', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fresh: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.startFreshConversation).toHaveBeenCalledWith('proj-1', 'wu-1');
+    expect(WidgetChatService.getOrCreateActiveConversation).not.toHaveBeenCalled();
+  });
+
+  it('without fresh resumes-or-creates (not a discard)', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.getOrCreateActiveConversation).mockResolvedValue({
+      conversation: CONV, messages: [],
+    } as any);
+    const res = await makeApp().request('/api/widget/chat/conversations', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fresh: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.getOrCreateActiveConversation).toHaveBeenCalledWith('proj-1', 'wu-1');
+    expect(WidgetChatService.startFreshConversation).not.toHaveBeenCalled();
   });
 });
 
@@ -271,7 +300,7 @@ describe('POST /api/widget/chat/conversations/:id/messages', () => {
 describe('POST /api/widget/chat/conversations/:id/create-ticket', () => {
   beforeEach(() => vi.resetAllMocks());
 
-  it('forwards the edited draft and returns the ticketId', async () => {
+  it('forwards the edited draft (public by default) and returns the ticketId', async () => {
     vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
     vi.mocked(WidgetChatService.createTicketFromChat).mockResolvedValue({ ticketId: 'tk-9' });
     const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/create-ticket`, {
@@ -280,9 +309,32 @@ describe('POST /api/widget/chat/conversations/:id/create-ticket', () => {
     });
     expect(res.status).toBe(200);
     expect(WidgetChatService.createTicketFromChat).toHaveBeenCalledWith(
-      CONV.id, 'proj-1', 'wu-1', { title: 'T', description: 'D' }, false,
+      CONV.id, 'proj-1', 'wu-1', { title: 'T', description: 'D', isPrivate: false }, false,
     );
     expect((await res.json()).ticketId).toBe('tk-9');
+  });
+
+  it('forwards isPrivate: true so the ticket is filed privately', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    vi.mocked(WidgetChatService.createTicketFromChat).mockResolvedValue({ ticketId: 'tk-10' });
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/create-ticket`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', description: 'D', isPrivate: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.createTicketFromChat).toHaveBeenCalledWith(
+      CONV.id, 'proj-1', 'wu-1', { title: 'T', description: 'D', isPrivate: true }, false,
+    );
+  });
+
+  it('400 when isPrivate is the wrong type', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED as any);
+    const res = await makeApp().request(`/api/widget/chat/conversations/${CONV.id}/create-ticket`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', description: 'D', isPrivate: 'yes' }),
+    });
+    expect(res.status).toBe(400);
+    expect(WidgetChatService.createTicketFromChat).not.toHaveBeenCalled();
   });
 });
 

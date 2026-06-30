@@ -344,6 +344,34 @@ export async function getOrCreateActiveConversation(
   return { conversation: conversation!, messages: [], hasAgentTurns: false };
 }
 
+/**
+ * Discard the user's current intake conversation and open a brand-new one.
+ * Closes any active intake conversation (so it stops being resumed as the
+ * active "Chat with Agent" thread — its transcript is preserved, just no
+ * longer surfaced) and returns a fresh, empty bundle. Ticket-linked / Live
+ * conversations are untouched: findActiveConversation already excludes rows
+ * with a createdTaskId, so only true intake threads are ever closed here.
+ */
+export async function startFreshConversation(
+  projectId: string,
+  widgetUserId: string,
+): Promise<ConversationBundle> {
+  const project = await getChatProject(projectId);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
+  const existing = await findActiveConversation(projectId, widgetUserId);
+  if (existing) {
+    await db
+      .update(widgetChatConversations)
+      .set({ status: 'closed', updatedAt: new Date() })
+      .where(eq(widgetChatConversations.id, existing.id));
+  }
+  const [conversation] = await db
+    .insert(widgetChatConversations)
+    .values({ widgetProjectId: projectId, widgetUserId })
+    .returning();
+  return { conversation: conversation!, messages: [], hasAgentTurns: false };
+}
+
 export async function getActiveConversation(
   projectId: string,
   widgetUserId: string,
@@ -898,7 +926,7 @@ export async function createTicketFromChat(
   conversationId: string,
   projectId: string,
   widgetUserId: string,
-  draft: { title?: string; description?: string },
+  draft: { title?: string; description?: string; isPrivate?: boolean },
   /** Whether the reporter holds `assign_agent`; gates automatic assignment. */
   creatorCanAssign = true,
 ): Promise<{ ticketId: string }> {
@@ -914,7 +942,9 @@ export async function createTicketFromChat(
   const project = await getChatProject(projectId);
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
-  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+  const task = await WidgetService.createTicket(projectId, widgetUserId, {
+    title, description, isPrivate: draft.isPrivate === true,
+  });
 
   // Carry all images from the conversation onto the new ticket as task attachments.
   // Best-effort: a failing insert must not abort the already-created ticket.

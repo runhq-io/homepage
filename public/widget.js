@@ -309,6 +309,12 @@
   function chatOpenConversation() {
     return api("/api/widget/chat/conversations", { method: "POST", body: {} });
   }
+  // Clear the current intake conversation and open a fresh one in a single
+  // round trip (the BE closes any active intake conversation, then creates a
+  // new one). Returns the same shape as chatOpenConversation.
+  function chatStartFreshConversation() {
+    return api("/api/widget/chat/conversations", { method: "POST", body: { fresh: true } });
+  }
   function chatLoadActive() {
     return api("/api/widget/chat/conversations/active");
   }
@@ -352,9 +358,9 @@
       method: "POST", body: {},
     });
   }
-  function chatCreateTicket(conversationId, title, description) {
+  function chatCreateTicket(conversationId, title, description, isPrivate) {
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/create-ticket", {
-      method: "POST", body: { title: title, description: description },
+      method: "POST", body: { title: title, description: description, isPrivate: !!isPrivate },
     });
   }
   function chatDismissProposal(conversationId) {
@@ -1042,6 +1048,10 @@
         proposalTitleLabel: "Title",
         proposalDescLabel: "Description",
         proposalIncomplete: "Title and description are both required.",
+        proposalPrivate: "Private",
+        proposalPublic: "Public",
+        proposalPrivateOn: "Only you will see this.",
+        proposalPrivateOff: "Others can see and upvote this.",
         createTicket: "Create Ticket",
         creating: "Creating…",
         createFailed: "Could not create the ticket: {msg}",
@@ -1056,6 +1066,13 @@
         forceRequested: "Preparing a ticket draft from this conversation…",
         closed: "This conversation has ended.",
         startNew: "Start new conversation",
+        clearAria: "Start a new conversation",
+        clearTitle: "New conversation",
+        clearConfirmTitle: "Start a new conversation?",
+        clearConfirmBody: "This clears the current chat and starts fresh. Your messages here won't be sent as a ticket.",
+        clearConfirm: "Start new",
+        clearCancel: "Keep editing",
+        clearFailed: "Could not start a new conversation: {msg}",
         transcriptTitle: "Created from a conversation",
         transcriptShow: "Show transcript",
         transcriptHide: "Hide transcript",
@@ -1261,6 +1278,10 @@
         proposalTitleLabel: "제목",
         proposalDescLabel: "설명",
         proposalIncomplete: "제목과 설명을 모두 입력해 주세요.",
+        proposalPrivate: "비공개",
+        proposalPublic: "공개",
+        proposalPrivateOn: "본인에게만 표시됩니다.",
+        proposalPrivateOff: "다른 사용자가 보고 추천할 수 있습니다.",
         createTicket: "티켓 생성",
         creating: "생성 중…",
         createFailed: "티켓을 생성하지 못했습니다: {msg}",
@@ -1275,6 +1296,13 @@
         forceRequested: "대화 내용으로 티켓 초안을 준비하고 있습니다…",
         closed: "대화가 종료되었습니다.",
         startNew: "새 대화 시작",
+        clearAria: "새 대화 시작",
+        clearTitle: "새 대화",
+        clearConfirmTitle: "새 대화를 시작할까요?",
+        clearConfirmBody: "현재 대화를 지우고 새로 시작합니다. 여기에 입력한 메시지는 티켓으로 전송되지 않습니다.",
+        clearConfirm: "새로 시작",
+        clearCancel: "계속 작성",
+        clearFailed: "새 대화를 시작하지 못했습니다: {msg}",
         transcriptTitle: "대화에서 생성됨",
         transcriptShow: "대화 내용 보기",
         transcriptHide: "대화 내용 숨기기",
@@ -3445,7 +3473,10 @@
       '.rw-chat-full { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }',
       '.rw-chat-topbar {',
       '  flex: 0 0 auto; display: flex; align-items: center; gap: 12px;',
-      '  padding: 12px 18px 10px; border-bottom: 1px solid var(--rw-line);',
+      /* Right padding clears the absolute-positioned shell actions (bell +
+         theme + close), matching the list/detail/compose topbars — so the
+         clear/new-conversation control sits just left of them, never under. */
+      '  padding: 12px 116px 10px 18px; border-bottom: 1px solid var(--rw-line);',
       '}',
       '.rw-chat-topbar-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }',
       '.rw-chat-topbar-name {',
@@ -3453,6 +3484,9 @@
       '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
       '}',
       '.rw-chat-agent-img { border-radius: 50%; object-fit: cover; flex: 0 0 auto; }',
+      /* Clear / new-conversation control — pinned to the far right of the chat
+         topbar, sized to match the other icon buttons in the shell. */
+      '.rw-chat-clear-btn { margin-left: auto; flex: 0 0 auto; }',
       '.rw-chat-scroll {',
       '  flex: 1 1 auto; overflow-y: auto; padding: 14px 18px;',
       '  display: flex; flex-direction: column; gap: 10px;',
@@ -3556,6 +3590,28 @@
       '}',
       '.rw-chat-newconv-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
 
+      /* Discard-conversation confirmation dialog (rendered via mountModal). */
+      '.rw-confirm-modal {',
+      '  width: min(360px, 100%); box-sizing: border-box;',
+      '  background: var(--rw-bg); border: 1px solid var(--rw-line-2);',
+      '  border-radius: 14px; padding: 20px;',
+      '  box-shadow: 0 18px 48px -16px rgba(0,0,0,0.55);',
+      '  display: flex; flex-direction: column; gap: 8px; color: var(--rw-fg);',
+      '  animation: rw-modal-in .2s cubic-bezier(0.16, 1, 0.3, 1);',
+      '}',
+      '.rw-confirm-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--rw-fg); }',
+      '.rw-confirm-body { margin: 0; font-size: 13px; line-height: 1.5; color: var(--rw-muted); }',
+      '.rw-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }',
+      '.rw-confirm-btn {',
+      '  height: 30px; padding: 0 14px; border-radius: 999px;',
+      '  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;',
+      '  border: 1px solid transparent; transition: all .15s ease;',
+      '}',
+      '.rw-confirm-cancel { background: transparent; border-color: var(--rw-line-2); color: var(--rw-fg-2); }',
+      '.rw-confirm-cancel:hover { color: var(--rw-fg); border-color: var(--rw-muted); }',
+      '.rw-confirm-go { background: var(--rw-accent); border-color: var(--rw-accent); color: var(--rw-accent-ink); }',
+      '.rw-confirm-go:hover { filter: brightness(1.06); }',
+
       /* Chat image attach affordance: thumbnail chips above input + attach btn */
       '.rw-chat-img-chips { display: flex; gap: 6px; padding: 0 2px 4px; flex-wrap: wrap; }',
       '.rw-chat-img-chip {',
@@ -3641,6 +3697,10 @@
       '  font-size: 11px; font-weight: 600; color: var(--rw-muted); margin: 2px 0 0;',
       '}',
       '.rw-chat-proposal-desc { resize: vertical; min-height: 84px; font-family: inherit; }',
+      /* Visibility row in the proposal card — Public/Private pill + hint,
+         mirroring the standalone composer's privacy control. */
+      '.rw-chat-proposal-visibility { display: flex; align-items: center; flex-wrap: wrap; margin: 2px 0 0; }',
+      '.rw-chat-proposal-visibility .rw-priv-hint { margin-left: 8px; }',
       '.rw-chat-dismiss-link {',
       '  background: none; border: none; padding: 0; font: inherit;',
       '  font-size: 12px; color: var(--rw-muted); cursor: pointer;',
@@ -5453,6 +5513,29 @@
     var createBtn = h("button", { className: "rw-clarif-send-btn", type: "button" }, t("chat.createTicket"));
     var dismissBtn = h("button", { className: "rw-chat-dismiss-link", type: "button" }, t("chat.dismiss"));
 
+    // Visibility toggle: mirrors the composer's Public/Private pill (label +
+    // icon flip rather than a single pill lighting up). The chosen state is
+    // threaded into chatCreateTicket so the born-ready ticket is filed with
+    // the right visibility — matching the standalone new-ticket composer.
+    var isPrivate = false;
+    var privateBtn = h("button", { className: "rw-pill-btn rw-priv-toggle", type: "button", "data-rw-private": "false" }, [
+      Icons.globe(12),
+      h("span", null, t("chat.proposalPublic")),
+    ]);
+    var privHint = h("span", { className: "rw-priv-hint" }, t("chat.proposalPrivateOff"));
+    function refreshPrivateBtn() {
+      clearChildren(privateBtn);
+      privateBtn.appendChild(isPrivate ? Icons.lock(12) : Icons.globe(12));
+      privateBtn.appendChild(h("span", null, isPrivate ? t("chat.proposalPrivate") : t("chat.proposalPublic")));
+      privateBtn.setAttribute("data-rw-private", isPrivate ? "true" : "false");
+      privHint.textContent = isPrivate ? t("chat.proposalPrivateOn") : t("chat.proposalPrivateOff");
+    }
+    privateBtn.addEventListener("click", function () {
+      if (createBtn.disabled) return;
+      isPrivate = !isPrivate;
+      refreshPrivateBtn();
+    });
+
     function resolveLocally(created, ticketId) {
       // SSE may have delivered the BE's authoritative proposal_resolved (and
       // even the wrap-up turn's rows) before this POST resolved — only echo
@@ -5489,7 +5572,7 @@
       createBtn.disabled = true;
       dismissBtn.disabled = true;
       createBtn.textContent = t("chat.creating");
-      chatCreateTicket(chatConversation.id, title, description).then(function (data) {
+      chatCreateTicket(chatConversation.id, title, description, isPrivate).then(function (data) {
         var ticketId = (data && (data.ticketId || (data.ticket && data.ticket.id))) || null;
         if (ticketId) {
           chatRememberTicketConversation(ticketId, chatConversation.id);
@@ -5525,6 +5608,7 @@
       titleInput,
       h("label", { className: "rw-chat-proposal-label" }, t("chat.proposalDescLabel")),
       descTa,
+      h("div", { className: "rw-chat-proposal-visibility" }, [privateBtn, privHint]),
       h("div", { className: "rw-clarif-actions" }, [createBtn, dismissBtn, errorEl]),
     ]);
   }
@@ -5859,11 +5943,106 @@
     listEl.scrollTop = listEl.scrollHeight;
   }
 
+  // Show the topbar clear/new-conversation control only for an active intake
+  // conversation (never in a Live session, never on a closed/empty shell where
+  // the footer already offers "Start new conversation").
+  function updateChatClearBtn() {
+    if (!chatUi || !chatUi.clearBtn) return;
+    var show = !chatIsLiveSession && chatConversation && chatConversation.status === "active";
+    chatUi.clearBtn.style.display = show ? "" : "none";
+  }
+
+  // Whether the current intake conversation has anything worth confirming
+  // before discarding — at least one thing the user said or the agent replied.
+  function chatHasDiscardableContent() {
+    for (var i = 0; i < chatMessages.length; i++) {
+      var role = chatMessages[i].role;
+      if (role === "user" || role === "agent" || role === "team") return true;
+    }
+    return false;
+  }
+
+  // Clear the current intake conversation and open a fresh one. A non-empty
+  // conversation prompts for confirmation first (a half-typed chat is easy to
+  // discard by accident); an empty one starts fresh silently.
+  function requestFreshConversation() {
+    if (chatHasDiscardableContent()) {
+      confirmClearConversation(beginFreshConversation);
+    } else {
+      beginFreshConversation();
+    }
+  }
+
+  // Abandon the active conversation server-side and swap in the new one. The
+  // current transcript stays visible until the fresh conversation loads, so a
+  // failed request leaves the user exactly where they were.
+  function beginFreshConversation() {
+    var clearBtn = chatUi && chatUi.clearBtn;
+    if (clearBtn) clearBtn.disabled = true;
+    stopChatTransport();
+    chatStartFreshConversation().then(function (data) {
+      if (view !== "chat" || !chatUi) return;
+      chatConversation = (data && data.conversation) || null;
+      chatMessages = ((data && data.messages) || []).slice();
+      chatTurnPending = false;
+      chatSubmitInFlight = false;
+      pendingChatImages = [];
+      if (clearBtn) clearBtn.disabled = false;
+      renderChatMessageList();
+      renderChatFooter();
+      startChatTransport();
+    }).catch(function (err) {
+      if (view !== "chat" || !chatUi) {
+        if (clearBtn) clearBtn.disabled = false;
+        return;
+      }
+      if (clearBtn) clearBtn.disabled = false;
+      // Restore real-time delivery for the conversation we left intact, then
+      // surface the failure inline.
+      if (chatConversation && chatConversation.status === "active") startChatTransport();
+      renderChatMessageList();
+      renderChatFooter();
+      chatSystemNotice(t("chat.clearFailed", { msg: (err && err.message) || "" }));
+    });
+  }
+
+  // Push an inline system-notice event into the thread (same shape the
+  // agentless [Submit Ticket] flow uses for its local errors).
+  function chatSystemNotice(text) {
+    chatApplyMessages([{
+      id: "local-notice-" + Date.now(),
+      role: "event",
+      content: null,
+      payload: { kind: "system_notice", text: text },
+      createdAt: new Date().toISOString(),
+    }]);
+    renderChatMessageList();
+  }
+
+  // Small themed confirmation dialog for discarding the conversation. Uses the
+  // shared modal infra (scrim + Escape/outside-click to cancel).
+  function confirmClearConversation(onConfirm) {
+    var cancelBtn = h("button", { className: "rw-confirm-btn rw-confirm-cancel", type: "button" }, t("chat.clearCancel"));
+    var confirmBtn = h("button", { className: "rw-confirm-btn rw-confirm-go", type: "button" }, t("chat.clearConfirm"));
+    cancelBtn.addEventListener("click", function () { closeActiveModal(); });
+    confirmBtn.addEventListener("click", function () { closeActiveModal(); onConfirm(); });
+    var modal = h("div", { className: "rw-confirm-modal" }, [
+      h("h3", { className: "rw-confirm-title" }, t("chat.clearConfirmTitle")),
+      h("p", { className: "rw-confirm-body" }, t("chat.clearConfirmBody")),
+      h("div", { className: "rw-confirm-actions" }, [cancelBtn, confirmBtn]),
+    ]);
+    mountModal(modal);
+    confirmBtn.focus();
+  }
+
   // Footer: closed bar OR (hatch slot + notice slot + input row). Rebuilt
   // only on conversation lifecycle changes — NOT per message — so an
   // in-progress draft in the textarea survives incoming messages.
   function renderChatFooter() {
     if (!chatUi) return;
+    // Keep the topbar clear/new-conversation control in sync with the
+    // conversation lifecycle (footer rebuilds on every lifecycle change).
+    updateChatClearBtn();
     var footerEl = chatUi.footerEl;
     clearChildren(footerEl);
     if (!chatConversation) return;
@@ -6164,19 +6343,37 @@
       chatAgentMode() ? t("chat.title", { name: chatAgentName() }) : chatIdentityName()
     );
 
+    // Clear / new-conversation control — intake chats only (a Live session is a
+    // staff↔job channel, not a discardable intake). Lets the user abandon a
+    // half-typed conversation and start fresh without first creating a ticket.
+    // Hidden until an active conversation has loaded (see updateChatClearBtn).
+    var clearBtn = null;
+    if (!isLive) {
+      clearBtn = h("button", {
+        className: "rw-icon-btn rw-chat-clear-btn", type: "button",
+        "aria-label": t("chat.clearAria"), title: t("chat.clearTitle"),
+        style: { display: "none" },
+      }, Icons.plus(16));
+      clearBtn.addEventListener("click", function () {
+        if (clearBtn.disabled) return;
+        requestFreshConversation();
+      });
+    }
+
     root.appendChild(h("div", { className: "rw-chat-topbar" }, [
       backBtn,
       h("div", { className: "rw-chat-topbar-identity" }, [
         renderChatAgentAvatar(22),
         h("span", { className: "rw-chat-topbar-name" }, topbarLabel),
       ]),
+      clearBtn,
     ]));
 
     var listEl = h("div", { className: "rw-chat-scroll" });
     var footerEl = h("div", { className: "rw-chat-footer" });
     root.appendChild(listEl);
     root.appendChild(footerEl);
-    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, clearBtn: clearBtn };
 
     listEl.appendChild(renderLoading());
 
@@ -7995,11 +8192,17 @@
     window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
     window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
     window._rwTestHooks.renderChatEventRow = renderChatEventRow;
+    window._rwTestHooks.renderChatProposalCard = renderChatProposalCard;
     // Seed the closure state the live-session intro reads (ticket + chat config),
     // so a vm test can render it without bootstrapping the whole widget.
     window._rwTestHooks._setLiveSessionState = function (ticket, chatConfig) {
       liveSessionTicket = ticket;
       if (chatConfig) config.chat = chatConfig;
+    };
+    // Seed the active conversation so a vm test can drive the proposal card's
+    // Create action (which posts to chatCreateTicket against the conversation).
+    window._rwTestHooks._setChatConversation = function (conv) {
+      chatConversation = conv;
     };
   }
 

@@ -138,6 +138,54 @@ describe('getOrCreateActiveConversation', () => {
   });
 });
 
+describe('startFreshConversation', () => {
+  it('creates a new active conversation when none exists', async () => {
+    const { conversation, messages } = await WidgetChatService.startFreshConversation(PROJECT_ID, OWNER_ID);
+    expect(conversation).toMatchObject({
+      widgetProjectId: PROJECT_ID, widgetUserId: OWNER_ID, status: 'active',
+    });
+    expect(messages).toEqual([]);
+  });
+
+  it('closes the current active intake conversation and returns a fresh empty one', async () => {
+    const old = await seedConversation();
+    await seedMessage(old.id, 'half-typed');
+    const { conversation, messages } = await WidgetChatService.startFreshConversation(PROJECT_ID, OWNER_ID);
+    // A brand-new conversation, not the old one.
+    expect(conversation.id).not.toBe(old.id);
+    expect(conversation.status).toBe('active');
+    expect(messages).toEqual([]);
+    // The old conversation is closed (its transcript preserved) so it no
+    // longer resumes as the active intake.
+    const [reloaded] = await db
+      .select()
+      .from(widgetChatConversations)
+      .where(eq(widgetChatConversations.id, old.id));
+    expect(reloaded!.status).toBe('closed');
+    // The next resume picks up the fresh conversation, never the closed one.
+    const resumed = await WidgetChatService.getActiveConversation(PROJECT_ID, OWNER_ID);
+    expect(resumed!.conversation.id).toBe(conversation.id);
+  });
+
+  it('leaves a ticket-linked Live-session conversation untouched', async () => {
+    const [linked] = await db.insert(widgetChatConversations).values({
+      widgetProjectId: PROJECT_ID, widgetUserId: OWNER_ID, createdTaskId: randomUUID(),
+    }).returning();
+    try {
+      const { conversation } = await WidgetChatService.startFreshConversation(PROJECT_ID, OWNER_ID);
+      expect(conversation.id).not.toBe(linked!.id);
+      const [reloaded] = await db
+        .select()
+        .from(widgetChatConversations)
+        .where(eq(widgetChatConversations.id, linked!.id));
+      // Still active — the Live relay container is never closed by an intake reset.
+      expect(reloaded!.status).toBe('active');
+    } finally {
+      await db.delete(widgetChatConversations).where(eq(widgetChatConversations.id, linked!.id));
+    }
+  });
+});
+
 describe('getActiveConversation', () => {
   it('returns null when none, the bundle when active, and null again once closed', async () => {
     expect(await WidgetChatService.getActiveConversation(PROJECT_ID, OWNER_ID)).toBeNull();

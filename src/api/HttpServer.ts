@@ -6030,10 +6030,15 @@ export function createHttpApp() {
     const gate = await requireChatUser(c);
     if ('response' in gate) return gate.response;
     const { auth } = gate;
+    // `{ fresh: true }` discards the current intake conversation and opens a
+    // new one (the widget's "new conversation" control); otherwise this
+    // resumes-or-creates the active conversation.
+    const body = await c.req.json().catch(() => null) as { fresh?: unknown } | null;
+    const fresh = !!(body && body.fresh === true);
     try {
-      const { conversation, messages, hasAgentTurns } = await WidgetChatService.getOrCreateActiveConversation(
-        auth.projectId, auth.widgetUserId,
-      );
+      const { conversation, messages, hasAgentTurns } = fresh
+        ? await WidgetChatService.startFreshConversation(auth.projectId, auth.widgetUserId)
+        : await WidgetChatService.getOrCreateActiveConversation(auth.projectId, auth.widgetUserId);
       return c.json({
         conversation: chatConversationDto(conversation, hasAgentTurns),
         messages: await chatMessageDtos(messages),
@@ -6134,14 +6139,18 @@ export function createHttpApp() {
     const { auth } = gate;
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
     if (limited) return limited;
-    const body = await c.req.json().catch(() => null) as { title?: unknown; description?: unknown } | null;
+    const body = await c.req.json().catch(() => null) as { title?: unknown; description?: unknown; isPrivate?: unknown } | null;
     if (!body || typeof body.title !== 'string' || typeof body.description !== 'string') {
       return c.json({ error: 'title and description required' }, 400);
+    }
+    // isPrivate is optional; only an explicit `true` files the ticket privately.
+    if (body.isPrivate !== undefined && typeof body.isPrivate !== 'boolean') {
+      return c.json({ error: 'isPrivate must be a boolean' }, 400);
     }
     try {
       const result = await WidgetChatService.createTicketFromChat(
         c.req.param('id'), auth.projectId, auth.widgetUserId,
-        { title: body.title, description: body.description },
+        { title: body.title, description: body.description, isPrivate: body.isPrivate === true },
         auth.permissions.has('assign_agent'),
       );
       return c.json({ ticketId: result.ticketId });

@@ -140,6 +140,24 @@ describe('createTicketFromChat', () => {
     expect(closed!.status).toBe('closed');
   });
 
+  it('files the ticket publicly by default', async () => {
+    await seedProposal('tu_public');
+    const { ticketId } = await WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
+      title: 'Public ticket', description: 'Visible to everyone',
+    });
+    const [task] = await db.select().from(workspaceTasks).where(eq(workspaceTasks.id, ticketId));
+    expect(task!.visibility).toBe('public');
+  });
+
+  it('files the ticket privately when isPrivate is set', async () => {
+    await seedProposal('tu_private');
+    const { ticketId } = await WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
+      title: 'Private ticket', description: 'Only the reporter sees this', isPrivate: true,
+    });
+    const [task] = await db.select().from(workspaceTasks).where(eq(workspaceTasks.id, ticketId));
+    expect(task!.visibility).toBe('private');
+  });
+
   it('validates the edited draft', async () => {
     await seedProposal();
     await expect(WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
