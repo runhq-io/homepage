@@ -119,6 +119,7 @@ interface TestHooks {
   _setCaches?: (mine: unknown[], assigned: unknown[]) => void;
   _setConfig?: (updates: Record<string, unknown>) => void;
   _setCurrentUser?: (updates: Record<string, unknown>) => void;
+  viewerCanLiveCoder?: () => boolean;
 }
 
 function makeLocalStorageMock() {
@@ -367,5 +368,17 @@ describe('live-session unread badge (assigner)', () => {
     // Reading the live session up to the latest message clears the unread signal.
     hooks.markTicketSeen!('task-1', now);
     expect(hooks.launcherBadgeCount!()).toBe(0);
+  });
+
+  it('viewerCanLiveCoder gates on live_coder only (assign_agent alone is false)', () => {
+    const { hooks } = loadWidget();
+
+    // assign_agent without live_coder — cannot open the session, badge must stay dark.
+    hooks._setCurrentUser!({ permissions: ['assign_agent'] });
+    expect(hooks.viewerCanLiveCoder!()).toBe(false);
+
+    // live_coder — can open the session, badge should light.
+    hooks._setCurrentUser!({ permissions: ['live_coder'] });
+    expect(hooks.viewerCanLiveCoder!()).toBe(true);
   });
 });

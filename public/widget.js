@@ -1516,11 +1516,14 @@
     return updated > base;
   }
 
-  // Only viewers who can OPEN a live session (live_coder / assign_agent) get the
-  // assigned-session unread signal — they are the only ones who can clear it.
+  // Gate the assigned-session unread signal on live_coder ONLY — the same
+  // permission that gates the "Live session" button (the only surface that
+  // clears live-session unread). An assign_agent-only viewer can assign a coder
+  // but cannot open the session, so giving them the badge would strand it
+  // unclearable. Lighting it only for live_coder holders keeps it clearable.
   function viewerCanLiveCoder() {
     var p = currentUser.permissions || [];
-    return p.indexOf("live_coder") !== -1 || p.indexOf("assign_agent") !== -1;
+    return p.indexOf("live_coder") !== -1;
   }
 
   // Deduped union of the viewer's reported tickets and the live sessions they
@@ -1537,9 +1540,10 @@
     return out;
   }
 
-  // Launcher badge = how many of the viewer's OWN submitted tickets have unseen
-  // activity. Deliberately NOT unioned with the community "Updates" feed — that
-  // count lives on the "View Latest Updates" home card (newUpdatesCount).
+  // Launcher badge = how many of the viewer's submitted OR live-session-assigned
+  // tickets have unseen activity (the unreadCandidateTickets union). Deliberately
+  // NOT unioned with the community "Updates" feed — that count lives on the
+  // "View Latest Updates" home card (newUpdatesCount).
   function launcherBadgeCount() {
     if (!config.isIdentified) return 0;
     var items = unreadCandidateTickets();
@@ -6013,16 +6017,16 @@
       if (chatMessages.length === 0) {
         listEl.appendChild(renderLiveSessionIntro());
       }
-      // Reading the live session marks its ticket seen up to the freshest
-      // message, so the launcher/bell/dot clear and only re-light on the next
-      // reply. createdTaskId links the conversation to the ticket.
+      // Reading the live session marks its ticket seen up to the newest CHAT
+      // message, so the launcher/bell/dot clear and re-light on the next reply.
+      // (A later status/activity row, if any, is cleared via the detail view.)
       var liveTaskId = chatConversation && chatConversation.createdTaskId;
       if (liveTaskId && chatMessages.length > 0) {
         var seenMs = 0;
         for (var si = 0; si < chatMessages.length; si++) {
           seenMs = Math.max(seenMs, new Date(chatMessages[si].createdAt || 0).getTime() || 0);
         }
-        if (seenMs > 0) { markTicketSeen(liveTaskId, seenMs); refreshNotifBell(); }
+        if (seenMs > 0) { markTicketSeen(liveTaskId, seenMs); refreshTabLabel(); }
       }
     } else {
       // Agentless threads open with a scripted offline notice that doubles as
@@ -8333,6 +8337,7 @@
     // without bootstrapping the full network layer.
     window._rwTestHooks.launcherBadgeCount = launcherBadgeCount;
     window._rwTestHooks.markTicketSeen = markTicketSeen;
+    window._rwTestHooks.viewerCanLiveCoder = viewerCanLiveCoder;
     window._rwTestHooks._setCaches = function (mine, assigned) {
       myTicketsCache = mine || [];
       assignedTicketsCache = assigned || [];
