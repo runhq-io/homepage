@@ -114,6 +114,21 @@ interface TestHooks {
     ticket: { id?: string; title?: string } | null,
     chatConfig?: { enabled?: boolean; agentName?: string } | null,
   ) => void;
+  launcherBadgeCount?: () => number;
+  markTicketSeen?: (id: string, whenMs: number) => void;
+  _setCaches?: (mine: unknown[], assigned: unknown[]) => void;
+  _setConfig?: (updates: Record<string, unknown>) => void;
+  _setCurrentUser?: (updates: Record<string, unknown>) => void;
+  viewerCanLiveCoder?: () => boolean;
+}
+
+function makeLocalStorageMock() {
+  const store: Record<string, string> = {};
+  return {
+    getItem: (k: string) => (k in store ? store[k] : null),
+    setItem: (k: string, v: string) => { store[k] = v; },
+    removeItem: (k: string) => { delete store[k]; },
+  };
 }
 
 function loadWidget() {
@@ -149,7 +164,9 @@ function loadWidget() {
     requestAnimationFrame: (fn: () => void) => setTimeout(fn, 0),
     cancelAnimationFrame: clearTimeout,
     parseFloat, parseInt, isNaN, encodeURIComponent, decodeURIComponent,
-    localStorage: { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() },
+    // Functional localStorage so markTicketSeen/getTicketSeen round-trips work
+    // in vm tests (unlike a stub that always returns null).
+    localStorage: makeLocalStorageMock(),
     atob: (s: string) => Buffer.from(s, 'base64').toString('utf8'),
     btoa: (s: string) => Buffer.from(s, 'utf8').toString('base64'),
   };
@@ -324,5 +341,44 @@ describe('widget.js — deployed:<envId> status resolves to an env name', () => 
     });
     expect(allText(node!)).toContain('Production');
     expect(allText(node!)).not.toContain('denv_x');
+  });
+});
+
+describe('live-session unread badge (assigner)', () => {
+  it('counts an assigned session with unseen activity and clears on read', () => {
+    const { hooks } = loadWidget();
+    // Simulate a logged-in staff viewer with live_coder permission.
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setCurrentUser!({ permissions: ['live_coder'] });
+
+    const now = Date.now();
+    const ticket = {
+      id: 'task-1',
+      title: 'Assigned',
+      createdAt: new Date(now - 10000).toISOString(),
+      lastActivityAt: new Date(now).toISOString(),
+    };
+
+    // Seed the assigned-ticket cache (simulates what loadAssignedTickets sets).
+    hooks._setCaches!([], [ticket]);
+
+    // The ticket has unseen activity (lastActivityAt > createdAt, no seen record).
+    expect(hooks.launcherBadgeCount!()).toBe(1);
+
+    // Reading the live session up to the latest message clears the unread signal.
+    hooks.markTicketSeen!('task-1', now);
+    expect(hooks.launcherBadgeCount!()).toBe(0);
+  });
+
+  it('viewerCanLiveCoder gates on live_coder only (assign_agent alone is false)', () => {
+    const { hooks } = loadWidget();
+
+    // assign_agent without live_coder — cannot open the session, badge must stay dark.
+    hooks._setCurrentUser!({ permissions: ['assign_agent'] });
+    expect(hooks.viewerCanLiveCoder!()).toBe(false);
+
+    // live_coder — can open the session, badge should light.
+    hooks._setCurrentUser!({ permissions: ['live_coder'] });
+    expect(hooks.viewerCanLiveCoder!()).toBe(true);
   });
 });

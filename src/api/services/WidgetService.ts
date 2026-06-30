@@ -24,6 +24,7 @@ import {
   users,
   widgetExposedAgents,
   widgetChatConversations,
+  widgetChatMessages,
   widgetChatImages,
   type ChatImageRow,
 } from '../../db/schema';
@@ -2647,6 +2648,62 @@ export async function storeWidgetChatImage(
 
 export type { ChatImageRow };
 
+/**
+ * Max "activity" timestamp (ms) per task across comments and activity rows, and
+ * — when includeLiveSession is set — non-`user` live-session chat messages
+ * (a coder's agent_message / a teammate's team_message on the conversation
+ * linked via createdTaskId). The task's own updatedAt is folded in by callers.
+ * Comments, activity, and chat messages do NOT bump workspaceTasks.updatedAt,
+ * so this is what lets a reply light an unread badge. `user` chat rows are
+ * excluded: the viewer's own message is not unread activity for them.
+ */
+async function deriveLastActivity(
+  taskIds: string[],
+  opts: { includeLiveSession: boolean },
+): Promise<Map<string, number>> {
+  const latest = new Map<string, number>();
+  if (taskIds.length === 0) return latest;
+  const bump = (taskId: string | null, raw: string | null) => {
+    if (!taskId || !raw) return;
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) return;
+    if (!(latest.has(taskId) && latest.get(taskId)! >= ms)) latest.set(taskId, ms);
+  };
+
+  const queries: Promise<{ taskId: string | null; max: string | null }[]>[] = [
+    db
+      .select({ taskId: workspaceTaskComments.taskId, max: sql<string>`max(${workspaceTaskComments.createdAt})` })
+      .from(workspaceTaskComments)
+      .where(and(inArray(workspaceTaskComments.taskId, taskIds), isNull(workspaceTaskComments.deletedAt)))
+      .groupBy(workspaceTaskComments.taskId),
+    db
+      .select({ taskId: workspaceTaskActivity.taskId, max: sql<string>`max(${workspaceTaskActivity.createdAt})` })
+      .from(workspaceTaskActivity)
+      .where(inArray(workspaceTaskActivity.taskId, taskIds))
+      .groupBy(workspaceTaskActivity.taskId),
+  ];
+  if (opts.includeLiveSession) {
+    queries.push(
+      db
+        .select({
+          taskId: widgetChatConversations.createdTaskId,
+          max: sql<string>`max(${widgetChatMessages.createdAt})`,
+        })
+        .from(widgetChatMessages)
+        .innerJoin(widgetChatConversations, eq(widgetChatMessages.conversationId, widgetChatConversations.id))
+        .where(and(
+          inArray(widgetChatConversations.createdTaskId, taskIds),
+          ne(widgetChatMessages.role, 'user'),
+        ))
+        .groupBy(widgetChatConversations.createdTaskId),
+    );
+  }
+
+  const results = await Promise.all(queries);
+  for (const rows of results) for (const r of rows) bump(r.taskId, r.max);
+  return latest;
+}
+
 export async function listMyTickets(
   projectId: string,
   widgetUserId: string
@@ -2671,33 +2728,85 @@ export async function listMyTickets(
 
   if (rows.length === 0) return [];
 
-  // Derive lastActivityAt = max(task.updatedAt, latest comment, latest activity)
-  // per ticket. Comments and activity rows do NOT bump workspaceTasks.updatedAt,
-  // so without this a team reply would never light the launcher badge.
+  // Comments and activity do NOT bump workspaceTasks.updatedAt, so derive
+  // lastActivityAt here. Live-session chat messages are intentionally NOT
+  // included for the reporter: a public reporter cannot re-open a live session,
+  // so its unread could never clear. The assigner gets that signal via
+  // listTicketsAssignedByMe.
   const ids = rows.map((r) => r.id);
-  const [commentMax, activityMax] = await Promise.all([
-    db
-      .select({ taskId: workspaceTaskComments.taskId, max: sql<string>`max(${workspaceTaskComments.createdAt})` })
-      .from(workspaceTaskComments)
-      .where(and(inArray(workspaceTaskComments.taskId, ids), isNull(workspaceTaskComments.deletedAt)))
-      .groupBy(workspaceTaskComments.taskId),
-    db
-      .select({ taskId: workspaceTaskActivity.taskId, max: sql<string>`max(${workspaceTaskActivity.createdAt})` })
-      .from(workspaceTaskActivity)
-      .where(inArray(workspaceTaskActivity.taskId, ids))
-      .groupBy(workspaceTaskActivity.taskId),
-  ]);
+  const latest = await deriveLastActivity(ids, { includeLiveSession: false });
 
-  const latest = new Map<string, number>();
-  const bump = (taskId: string, raw: string | null) => {
-    if (!raw) return;
-    const ms = new Date(raw).getTime();
-    if (Number.isNaN(ms)) return;
-    if (!(latest.has(taskId) && latest.get(taskId)! >= ms)) latest.set(taskId, ms);
-  };
-  for (const r of commentMax) bump(r.taskId, r.max);
-  for (const r of activityMax) bump(r.taskId, r.max);
+  return rows.map((t) => {
+    const dto = mapTaskToWidgetResponse(t);
+    const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
+    const activityMs = latest.get(t.id) ?? 0;
+    dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    return dto;
+  });
+}
 
+/**
+ * Tickets the given widget user ASSIGNED a coder agent to (the latest
+ * agent_assigned activity's createdById equals their externalUserId), excluding
+ * terminal tickets. lastActivityAt includes non-`user` live-session chat
+ * messages so a coder/teammate reply lights the assigner's widget unread. This
+ * is the assigner-scoped counterpart to listMyTickets (which is reporter-scoped
+ * and deliberately omits live-session messages).
+ */
+export async function listTicketsAssignedByMe(
+  projectId: string,
+  widgetUserId: string,
+): Promise<WidgetTicketResponse[]> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return [];
+  const audit = await getWidgetUserAuditInfo(widgetUserId);
+  if (!audit) return [];
+  const externalUserId = audit.externalUserId;
+
+  // Latest agent_assigned activity per task on this server, with its author.
+  const assignRows = await db
+    .select({
+      taskId: workspaceTaskActivity.taskId,
+      createdById: workspaceTaskActivity.createdById,
+      createdAt: workspaceTaskActivity.createdAt,
+    })
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.serverId, project.serverId),
+      eq(workspaceTaskActivity.type, 'agent_assigned'),
+    ))
+    .orderBy(desc(workspaceTaskActivity.createdAt));
+
+  // Keep only the most-recent assignment per task (assignRows is newest-first),
+  // then keep tasks whose latest assigner is this viewer.
+  const latestAssigner = new Map<string, string | null>();
+  for (const r of assignRows) {
+    if (!latestAssigner.has(r.taskId)) latestAssigner.set(r.taskId, r.createdById);
+  }
+  const mineTaskIds = [...latestAssigner.entries()]
+    .filter(([, by]) => by === externalUserId)
+    .map(([taskId]) => taskId);
+  if (mineTaskIds.length === 0) return [];
+
+  // Load the (non-terminal, non-deleted) tasks themselves.
+  const rows = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.serverId, project.serverId),
+      inArray(workspaceTasks.id, mineTaskIds),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+      isNull(workspaceTasks.deletedAt),
+      ne(workspaceTasks.status, 'cancelled'),
+      ne(workspaceTasks.status, 'deployed'),
+      sql`${workspaceTasks.status} not like 'deployed:%'`,
+    ))
+    .orderBy(desc(workspaceTasks.createdAt))
+    .limit(50);
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((r) => r.id);
+  const latest = await deriveLastActivity(ids, { includeLiveSession: true });
   return rows.map((t) => {
     const dto = mapTaskToWidgetResponse(t);
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
