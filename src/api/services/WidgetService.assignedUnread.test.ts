@@ -117,4 +117,24 @@ describe('listTicketsAssignedByMe', () => {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, taskId));
     }
   });
+
+  it('excludes tickets on another project channel (cross-project isolation)', async () => {
+    const OTHER_CHANNEL = `chan-other-${RUN_HEX}`;
+    const [task] = await db.insert(workspaceTasks).values({
+      serverId: SERVER_ID, workspaceChannelId: OTHER_CHANNEL, title: 'OtherChannel',
+      visibility: 'public', status: 'in_progress',
+      sourceType: 'widget', createdByType: 'external', createdById: ASSIGNER_WUID,
+    }).returning({ id: workspaceTasks.id });
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID, taskId: task!.id, type: 'agent_assigned',
+      metadata: { agentName: 'Coder' },
+      createdByType: 'external', createdById: ASSIGNER_EXT, createdByName: 'Assigner',
+    });
+    try {
+      const ids = (await listTicketsAssignedByMe(PROJECT_ID, ASSIGNER_WUID)).map((r) => r.id);
+      expect(ids).not.toContain(task!.id);
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, task!.id));
+    }
+  });
 });

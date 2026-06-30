@@ -2795,6 +2795,7 @@ export async function listTicketsAssignedByMe(
     .where(and(
       eq(workspaceTasks.serverId, project.serverId),
       inArray(workspaceTasks.id, mineTaskIds),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
       isNull(workspaceTasks.deletedAt),
       ne(workspaceTasks.status, 'cancelled'),
       ne(workspaceTasks.status, 'deployed'),
