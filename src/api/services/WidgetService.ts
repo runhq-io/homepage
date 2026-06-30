@@ -2745,6 +2745,76 @@ export async function listMyTickets(
   });
 }
 
+/**
+ * Tickets the given widget user ASSIGNED a coder agent to (the latest
+ * agent_assigned activity's createdById equals their externalUserId), excluding
+ * terminal tickets. lastActivityAt includes non-`user` live-session chat
+ * messages so a coder/teammate reply lights the assigner's widget unread. This
+ * is the assigner-scoped counterpart to listMyTickets (which is reporter-scoped
+ * and deliberately omits live-session messages).
+ */
+export async function listTicketsAssignedByMe(
+  projectId: string,
+  widgetUserId: string,
+): Promise<WidgetTicketResponse[]> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return [];
+  const audit = await getWidgetUserAuditInfo(widgetUserId);
+  if (!audit) return [];
+  const externalUserId = audit.externalUserId;
+
+  // Latest agent_assigned activity per task on this server, with its author.
+  const assignRows = await db
+    .select({
+      taskId: workspaceTaskActivity.taskId,
+      createdById: workspaceTaskActivity.createdById,
+      createdAt: workspaceTaskActivity.createdAt,
+    })
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.serverId, project.serverId),
+      eq(workspaceTaskActivity.type, 'agent_assigned'),
+    ))
+    .orderBy(desc(workspaceTaskActivity.createdAt));
+
+  // Keep only the most-recent assignment per task (assignRows is newest-first),
+  // then keep tasks whose latest assigner is this viewer.
+  const latestAssigner = new Map<string, string | null>();
+  for (const r of assignRows) {
+    if (!latestAssigner.has(r.taskId)) latestAssigner.set(r.taskId, r.createdById);
+  }
+  const mineTaskIds = [...latestAssigner.entries()]
+    .filter(([, by]) => by === externalUserId)
+    .map(([taskId]) => taskId);
+  if (mineTaskIds.length === 0) return [];
+
+  // Load the (non-terminal, non-deleted) tasks themselves.
+  const rows = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.serverId, project.serverId),
+      inArray(workspaceTasks.id, mineTaskIds),
+      isNull(workspaceTasks.deletedAt),
+      ne(workspaceTasks.status, 'cancelled'),
+      ne(workspaceTasks.status, 'deployed'),
+      sql`${workspaceTasks.status} not like 'deployed:%'`,
+    ))
+    .orderBy(desc(workspaceTasks.createdAt))
+    .limit(50);
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((r) => r.id);
+  const latest = await deriveLastActivity(ids, { includeLiveSession: true });
+  return rows.map((t) => {
+    const dto = mapTaskToWidgetResponse(t);
+    const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
+    const activityMs = latest.get(t.id) ?? 0;
+    dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    return dto;
+  });
+}
+
 export async function getTicketStats(projectId: string) {
   const project = await getWidgetProjectContext(projectId);
   if (!project) return { totalOpen: 0, totalDone: 0, totalResolved: 0, avgResolutionMs: null };
