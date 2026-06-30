@@ -508,6 +508,26 @@ function hasOpenLinkedPr(
 }
 
 /**
+ * Whether the task already has a MERGED pull request (optionally scoped to one
+ * branch). A task whose previous PR landed is past its draft phase — so a PR
+ * opened for newly-pushed follow-up work should start ready for review, not as a
+ * draft the user would have to manually un-draft on every iteration after the
+ * first merge.
+ */
+function hasMergedLinkedPr(
+  activity: Array<{ type: ActivityType; metadata?: Record<string, any> | null }>,
+  branch?: string,
+): boolean {
+  return activity.some(
+    (a) =>
+      a.type === 'pr_linked' &&
+      typeof a.metadata?.number === 'number' &&
+      a.metadata?.state === 'merged' &&
+      (branch === undefined || a.metadata?.repoBranch === branch),
+  );
+}
+
+/**
  * Outcome of {@link openPullRequestForReadyTask}. `reason` (skipped) and
  * `message` (error) carry a human-readable explanation so callers can surface
  * *why* nothing opened instead of failing silently.
@@ -561,22 +581,41 @@ export async function openPullRequestForReadyTask(
 
     // ── DRAFT mode (push webhook): ensure a draft PR exists, no status change ──
     if (mode === 'draft') {
+      const afterMerge = hasMergedLinkedPr(activity, branch);
       if (existing) {
+        // Follow-up work pushed after a previous PR merged: an open PR left as a
+        // draft would block the merge button, so promote it to ready.
+        if (existing.isDraft && afterMerge) {
+          await deps.markPullRequestReady(installationId, existing.nodeId);
+          console.info('[github/draft] promoted existing draft PR to ready (a previous PR already merged)', { owner, repo, branch, taskId, pr: existing.number });
+          return { status: 'marked_ready', prNumber: existing.number, url: existing.url };
+        }
         return { status: 'linked_existing', prNumber: existing.number, url: existing.url };
       }
       if (hasOpenLinkedPr(activity, branch)) {
         return { status: 'skipped', reason: 'A pull request is already open for this branch.' };
       }
+      // A task whose previous PR already merged is past its draft phase — open
+      // the follow-up PR ready for review, not as a draft. Otherwise every
+      // post-merge iteration on the same branch would re-open as a draft the
+      // user has to manually un-draft before merging.
       const pr = await deps.createPullRequest(installationId, owner, repo, {
         title,
         head: branch,
         base,
-        draft: true,
-        body: `Automated draft pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ when the ticket branch was pushed. It is marked ready for review when the agent signals completion.`,
+        draft: !afterMerge,
+        body: afterMerge
+          ? `Automated pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ for new commits pushed after this ticket's previous pull request was merged.`
+          : `Automated draft pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ when the ticket branch was pushed. It is marked ready for review when the agent signals completion.`,
       });
       await writePrLinked(serverId, taskId, branch, pr.number, pr.url, deps);
       await notify(deps, serverId, branch, pr.number, pr.url);
-      console.info('[github/draft] opened draft PR for ticket branch', { owner, repo, branch, taskId, pr: pr.number });
+      console.info(
+        afterMerge
+          ? '[github/draft] opened READY follow-up PR (a previous PR already merged)'
+          : '[github/draft] opened draft PR for ticket branch',
+        { owner, repo, branch, taskId, pr: pr.number },
+      );
       return { status: 'opened', prNumber: pr.number, url: pr.url };
     }
 

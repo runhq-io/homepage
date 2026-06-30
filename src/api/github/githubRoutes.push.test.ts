@@ -329,6 +329,59 @@ describe('openPullRequestForReadyTask modes', () => {
     expect(deps.updateTask).not.toHaveBeenCalled();
   });
 
+  it("mode='draft' opens a READY (non-draft) PR when the task's previous PR already merged", async () => {
+    // Same branch, post-merge follow-up commits: the merged pr_linked means the
+    // task is past its draft phase, so the new PR must NOT be a draft.
+    const deps = makeReadyDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        { id: 'a', type: 'branch_pushed', metadata: { owner: 'acme', repo: 'app', branch: 'session/job_x/ticket-abcd1234', base: 'main', installationId: 42, title: 'Add dark mode', shortId: 'abcd1234' } },
+        { id: 'b', type: 'pr_linked', metadata: { number: 5, state: 'merged', repoBranch: 'session/job_x/ticket-abcd1234' } },
+      ]),
+    });
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps, { mode: 'draft' });
+    expect(result.status).toBe('opened');
+    expect(deps.createPullRequest).toHaveBeenCalledWith(42, 'acme', 'app', expect.objectContaining({ draft: false }));
+    // Still a draft-mode open: it links the PR but doesn't force a task status change.
+    expect(deps.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("mode='draft' promotes an EXISTING open draft PR to ready when a previous PR merged", async () => {
+    const deps = makeReadyDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        { id: 'a', type: 'branch_pushed', metadata: { owner: 'acme', repo: 'app', branch: 'session/job_x/ticket-abcd1234', base: 'main', installationId: 42, title: 'Add dark mode', shortId: 'abcd1234' } },
+        { id: 'b', type: 'pr_linked', metadata: { number: 5, state: 'merged', repoBranch: 'session/job_x/ticket-abcd1234' } },
+        { id: 'c', type: 'pr_linked', metadata: { number: 6, state: 'open', repoBranch: 'session/job_x/ticket-abcd1234' } },
+      ]),
+      findOpenPullRequestByHead: vi.fn().mockResolvedValue({ number: 6, url: 'https://github.com/acme/app/pull/6', nodeId: 'PR_6_node', isDraft: true }),
+    });
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps, { mode: 'draft' });
+    expect(result).toEqual({ status: 'marked_ready', prNumber: 6, url: 'https://github.com/acme/app/pull/6' });
+    expect(deps.markPullRequestReady).toHaveBeenCalledWith(42, 'PR_6_node');
+    expect(deps.createPullRequest).not.toHaveBeenCalled();
+    expect(deps.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("mode='draft' leaves an existing draft alone when NO previous PR merged", async () => {
+    const deps = makeReadyDeps({
+      findOpenPullRequestByHead: vi.fn().mockResolvedValue({ number: 6, url: 'u', nodeId: 'PR_6_node', isDraft: true }),
+    });
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps, { mode: 'draft' });
+    expect(result.status).toBe('linked_existing');
+    expect(deps.markPullRequestReady).not.toHaveBeenCalled();
+  });
+
+  it("mode='draft' keeps the PR a draft when a merged PR is on a DIFFERENT branch", async () => {
+    const deps = makeReadyDeps({
+      listActivity: vi.fn().mockResolvedValue([
+        { id: 'a', type: 'branch_pushed', metadata: { owner: 'acme', repo: 'app', branch: 'session/job_x/ticket-abcd1234', base: 'main', installationId: 42, title: 'Add dark mode', shortId: 'abcd1234' } },
+        { id: 'b', type: 'pr_linked', metadata: { number: 5, state: 'merged', repoBranch: 'some/other-branch' } },
+      ]),
+    });
+    const result = await openPullRequestForReadyTask('ws_1', 'task_1', deps, { mode: 'draft' });
+    expect(result.status).toBe('opened');
+    expect(deps.createPullRequest).toHaveBeenCalledWith(42, 'acme', 'app', expect.objectContaining({ draft: true }));
+  });
+
   it("mode='ready' un-drafts an existing draft PR and sets needs_review", async () => {
     const deps = makeReadyDeps({
       listActivity: vi.fn().mockResolvedValue([
