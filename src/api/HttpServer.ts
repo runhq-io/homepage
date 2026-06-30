@@ -6449,6 +6449,16 @@ export function createHttpApp() {
     return c.json({ tickets });
   });
 
+  // Tickets the viewer assigned a coder to, with live-session activity folded
+  // into lastActivityAt — drives the widget's live-session unread indicators.
+  app.get('/api/widget/tickets/assigned', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    const tickets = await WidgetService.listTicketsAssignedByMe(auth.projectId, auth.widgetUserId);
+    return c.json({ tickets });
+  });
+
   app.get('/api/widget/tickets/stats', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
