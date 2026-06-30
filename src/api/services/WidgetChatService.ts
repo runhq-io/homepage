@@ -1502,6 +1502,19 @@ export async function mirrorActivityToLiveSession(
  * duplicates. Comments live in a separate table and never reach this path.
  * Best-effort; never throws.
  */
+export async function backfillLiveSessionForConversation(conversationId: string): Promise<void> {
+  if (!UUID_RE.test(conversationId)) return;
+  const [conv] = await db
+    .select({ createdTaskId: widgetChatConversations.createdTaskId })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  // Only ticket-linked (live-session) conversations have a timeline to backfill;
+  // a plain intake conversation has no createdTaskId and is a no-op.
+  if (!conv?.createdTaskId) return;
+  await backfillLiveSessionActivity(conversationId, conv.createdTaskId);
+}
+
 export async function backfillLiveSessionActivity(conversationId: string, taskId: string): Promise<void> {
   try {
     const rows = await db

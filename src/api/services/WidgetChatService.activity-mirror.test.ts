@@ -175,6 +175,26 @@ describe('backfillLiveSessionActivity', () => {
     expect(kinds).toEqual(['agent_assigned', 'status_change']);
   });
 
+  it('resolves the task from the conversation (backfillLiveSessionForConversation)', async () => {
+    await clearEvents();
+    await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, TASK_ID));
+    await db.insert(workspaceTaskActivity).values({
+      serverId: SERVER_ID, taskId: TASK_ID, type: 'pr_linked', content: null, metadata: { state: 'merged' }, createdByType: 'agent',
+    });
+    await WidgetChatService.backfillLiveSessionForConversation(CONV_ID);
+    expect(await eventRows()).toHaveLength(1);
+  });
+
+  it('is a no-op for an intake conversation with no linked ticket', async () => {
+    const [intake] = await db.insert(widgetChatConversations).values({
+      widgetProjectId: PROJECT_ID, widgetUserId: WIDGET_USER_ID,
+    }).returning({ id: widgetChatConversations.id });
+    await WidgetChatService.backfillLiveSessionForConversation(intake!.id);
+    const rows = await db.select().from(widgetChatMessages).where(eq(widgetChatMessages.conversationId, intake!.id));
+    expect(rows).toHaveLength(0);
+    await db.delete(widgetChatConversations).where(eq(widgetChatConversations.id, intake!.id));
+  });
+
   it('is idempotent with the forward mirror and across re-opens (shared act:<id> turn id)', async () => {
     await clearEvents();
     await db.delete(workspaceTaskActivity).where(eq(workspaceTaskActivity.taskId, TASK_ID));

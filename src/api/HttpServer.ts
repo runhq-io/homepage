@@ -3992,9 +3992,6 @@ export function createHttpApp() {
       }
       const result = await WidgetService.ensureLiveConversationForServerTask(server.id, body.canonicalTaskId);
       if (!result) return c.json({ error: 'not_found' }, 404);
-      // Backfill the progress timeline (status/milestone/PR/assignment) so the
-      // session opens showing what already happened, not a blank thread.
-      await WidgetChatService.backfillLiveSessionActivity(result.conversationId, body.canonicalTaskId);
       return c.json({ conversationId: result.conversationId });
     } catch (err) {
       console.error('[HttpServer] resolve-conversation error:', err);
@@ -6068,8 +6065,17 @@ export function createHttpApp() {
     if ('response' in gate) return gate.response;
     const { auth } = gate;
     try {
+      const after = c.req.query('after') || undefined;
+      // On an initial (non-cursor) load, backfill the live-session progress
+      // timeline so a session opened from a directly-assigned ticket — or one
+      // created before this existed — shows the assignment/status/PR history,
+      // not a blank thread. Idempotent + a no-op for non-live-session threads;
+      // skipped on incremental polls (which carry ?after=).
+      if (!after) {
+        await WidgetChatService.backfillLiveSessionForConversation(c.req.param('id'));
+      }
       const messages = await WidgetChatService.listMessages(
-        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, c.req.query('after') || undefined,
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, after,
       );
       return c.json({ messages: await chatMessageDtos(messages) });
     } catch (err) {
@@ -6778,9 +6784,6 @@ export function createHttpApp() {
         auth.projectId, c.req.param('id'), auth.widgetUserId,
       );
       if (!result) return c.json({ error: 'ticket_not_found' }, 404);
-      // Backfill the progress timeline (status/milestone/PR/assignment) so the
-      // session opens showing what already happened, not a blank thread.
-      await WidgetChatService.backfillLiveSessionActivity(result.conversationId, c.req.param('id'));
       return c.json({ conversationId: result.conversationId });
     } catch (err) {
       return widgetErrorResponse(c, err);
