@@ -2530,6 +2530,10 @@
          inline so the title keeps its 2-line clamp. */
       '.rw-dash-row--unseen .rw-dash-row-title { font-weight: 650; }',
       '.rw-unseen-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); margin-right: 7px; vertical-align: middle; flex: 0 0 auto; }',
+      // On the accent-filled "Live session" button the default accent dot blends
+      // into the button background — give it an alert red + white ring so it
+      // reads as an unread indicator regardless of theme.
+      '.rw-staff-btn--primary .rw-unseen-dot { background: #ef4444; box-shadow: 0 0 0 1.5px rgba(255,255,255,0.85); }',
       /* "Unread only" filter toggle (My Submissions) */
       '.rw-unread-filter-row { display: flex; padding: 2px 10px 10px; }',
       '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
