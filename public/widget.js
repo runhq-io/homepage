@@ -1018,7 +1018,8 @@
         agentDefault: "Support",
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
-        liveSessionIntro: "{name} is on it — working away in the background. You'll see progress here as it happens, and a note once it's done. Send a message anytime to ask a question or steer the work.",
+        liveSessionStatus: "{name} is working in the background",
+        liveSessionIntro: "Updates show up here as they happen — message anytime to ask a question or steer the work.",
         agentlessIntro: "Our support agent is currently offline. You can still submit a ticket directly — describe your issue or request with as much detail as possible (what happened, steps to reproduce, what you expected), then tap Submit Ticket below.",
         collectPrompt: "Anything more you'd like to add? When you're ready, tap Submit Ticket below — the more detail, the faster we can help.",
         submitTicket: "Submit Ticket",
@@ -1236,7 +1237,8 @@
         agentDefault: "지원 담당",
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
-        liveSessionIntro: "{name}이(가) 백그라운드에서 작업하고 있어요. 진행 상황이 여기에 표시되고, 완료되면 알려드릴게요. 궁금한 점이나 방향을 알려주실 게 있으면 언제든 메시지를 보내 주세요.",
+        liveSessionStatus: "{name}이(가) 백그라운드에서 작업 중이에요",
+        liveSessionIntro: "진행 상황이 여기에 표시돼요 — 궁금한 점이나 방향이 있으면 언제든 메시지를 보내 주세요.",
         agentlessIntro: "지금은 상담원이 오프라인 상태예요. 그래도 바로 티켓을 제출하실 수 있어요 — 무슨 일이 있었는지, 재현 방법, 기대했던 동작 등 가능한 한 자세히 알려주신 뒤 아래 '티켓 제출'을 눌러주세요.",
         collectPrompt: "더 추가하실 내용이 있나요? 준비되셨으면 아래 '티켓 제출'을 눌러주세요 — 자세할수록 빠르게 도와드릴 수 있어요.",
         submitTicket: "티켓 제출",
@@ -3456,8 +3458,30 @@
       '  display: flex; flex-direction: column; gap: 10px;',
       '}',
       '.rw-chat-empty { font-size: 13px; color: var(--rw-muted); text-align: center; padding: 24px 12px; }',
-      '.rw-chat-intro { padding: 28px 18px; }',
-      '.rw-chat-intro-title { font-size: 14px; font-weight: 600; color: var(--rw-fg); margin-bottom: 6px; }',
+      '.rw-chat-intro { padding: 36px 22px; display: flex; flex-direction: column; align-items: center; gap: 12px; }',
+      '.rw-intro-status {',
+      '  display: inline-flex; align-items: center; gap: 7px;',
+      '  font-size: 12px; font-weight: 600; color: var(--rw-fg-2);',
+      '  background: var(--rw-panel-2); border: 1px solid var(--rw-panel-3);',
+      '  padding: 5px 11px 5px 9px; border-radius: 999px;',
+      '}',
+      '.rw-intro-pulse {',
+      '  width: 8px; height: 8px; border-radius: 50%; flex: none;',
+      '  background: #16a34a; box-shadow: 0 0 0 0 rgba(22,163,74,0.5);',
+      '  animation: rw-intro-pulse 2s ease-out infinite;',
+      '}',
+      '@keyframes rw-intro-pulse {',
+      '  0% { box-shadow: 0 0 0 0 rgba(22,163,74,0.45); }',
+      '  70% { box-shadow: 0 0 0 6px rgba(22,163,74,0); }',
+      '  100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }',
+      '}',
+      '@media (prefers-reduced-motion: reduce) { .rw-intro-pulse { animation: none; } }',
+      '.rw-chat-intro-title {',
+      '  font-size: 15px; font-weight: 700; color: var(--rw-fg);',
+      '  line-height: 1.35; max-width: 34ch; margin: 0;',
+      '  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;',
+      '}',
+      '.rw-intro-body { font-size: 13px; color: var(--rw-muted); line-height: 1.5; max-width: 32ch; }',
       '.rw-chat-msg { display: flex; gap: 8px; }',
       '.rw-chat-msg-user { justify-content: flex-end; }',
       '.rw-chat-msg-agent { justify-content: flex-start; align-items: flex-start; }',
@@ -5356,6 +5380,18 @@
     if (kind === "force_proposal_requested") {
       return h("div", { className: "rw-chat-event-line" }, t("chat.forceRequested"));
     }
+    if (kind === "activity") {
+      // A ticket status change / milestone / PR event mirrored from the public
+      // activity feed. Reuse describeEvent() so the wording is identical to the
+      // feed; render as an inline event line in the thread's timeline.
+      var text = describeEvent({
+        type: payload.activityType,
+        content: payload.content,
+        metadata: payload.metadata,
+      });
+      if (!text) return null;
+      return h("div", { className: "rw-chat-event-line" }, renderInlineMarkdown(text));
+    }
     return null;
   }
 
@@ -5755,11 +5791,22 @@
   // screen with nothing going on, even though a coder job is running.
   function renderLiveSessionIntro() {
     var children = [];
+    // Signature element: a live "working" pill whose pulsing dot signals that
+    // work is actively happening in the background — the direct answer to the
+    // blank-screen "is anything going on?" feeling. The dot is decorative
+    // (aria-hidden); the text carries the meaning.
+    children.push(h("div", { className: "rw-intro-status" }, [
+      h("span", { className: "rw-intro-pulse", "aria-hidden": "true" }),
+      h("span", null, t("chat.liveSessionStatus", { name: chatIdentityName() })),
+    ]));
+    // The ticket the session is about, clamped to two lines with an ellipsis
+    // (full text on hover via title=) so a long subject can't blow out the
+    // layout. Reads as "working on → this".
     var title = liveSessionTicket && liveSessionTicket.title;
     if (title) {
-      children.push(h("div", { className: "rw-chat-intro-title" }, title));
+      children.push(h("div", { className: "rw-chat-intro-title", title: title }, title));
     }
-    children.push(h("div", null, t("chat.liveSessionIntro", { name: chatIdentityName() })));
+    children.push(h("div", { className: "rw-intro-body" }, t("chat.liveSessionIntro")));
     return h("div", { className: "rw-chat-empty rw-chat-intro" }, children);
   }
 
@@ -7947,6 +7994,7 @@
     window._rwTestHooks.stagedGallery = stagedGallery;
     window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
     window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
+    window._rwTestHooks.renderChatEventRow = renderChatEventRow;
     // Seed the closure state the live-session intro reads (ticket + chat config),
     // so a vm test can render it without bootstrapping the whole widget.
     window._rwTestHooks._setLiveSessionState = function (ticket, chatConfig) {

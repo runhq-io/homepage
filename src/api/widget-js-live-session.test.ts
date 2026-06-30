@@ -103,6 +103,10 @@ function makeDomMock() {
 interface TestHooks {
   renderLiveSessionIntro?: () => FakeNode;
   renderChatTeamRow?: (row: { payload?: { authorName?: string } | null; content?: string }) => FakeNode;
+  renderChatEventRow?: (
+    row: { id?: string; payload?: Record<string, unknown> | null },
+    activeProposal?: unknown,
+  ) => FakeNode | null;
   _setLiveSessionState?: (
     ticket: { id?: string; title?: string } | null,
     chatConfig?: { enabled?: boolean; agentName?: string } | null,
@@ -163,22 +167,41 @@ describe('widget.js — Live session opening acknowledgement', () => {
     // Styled like the intake empty state, not a fabricated chat bubble.
     expect(hasClass(intro, 'rw-chat-empty')).toBe(true);
     expect(hasClass(intro, 'rw-chat-intro')).toBe(true);
-    // The ticket title is surfaced as the heading.
+    // Signature: a live "working" pill (with a decorative pulse dot) that names
+    // the agent and signals background activity.
+    const status = intro._find((n) => hasClass(n, 'rw-intro-status'));
+    expect(status).not.toBeNull();
+    expect(status!._find((n) => hasClass(n, 'rw-intro-pulse'))).not.toBeNull();
+    expect(allText(status!)).toContain('Suha (Support)');
+    expect(allText(status!).toLowerCase()).toContain('background');
+    // The ticket title is surfaced as the focal subject, with the full text on
+    // hover (title=) so the CSS line-clamp can truncate long subjects safely.
     const heading = intro._find((n) => hasClass(n, 'rw-chat-intro-title'));
     expect(heading).not.toBeNull();
     expect(heading!.textContent).toBe('Deploy to production');
-    // The body names the agent and promises updates here + a done note.
-    const text = allText(intro);
-    expect(text).toContain('Suha (Support)');
-    expect(text.toLowerCase()).toContain('background');
-    expect(text.toLowerCase()).toContain('done');
+    expect(heading!.getAttribute('title')).toBe('Deploy to production');
+    // The body sets expectations and invites a reply.
+    const body = intro._find((n) => hasClass(n, 'rw-intro-body'));
+    expect(body!.textContent.toLowerCase()).toContain('updates');
+    expect(body!.textContent.toLowerCase()).toContain('message anytime');
   });
 
-  it('still renders a useful body when the ticket has no title', () => {
+  it('preserves the full title on hover even when long (CSS clamps the display)', () => {
+    const { hooks } = loadWidget();
+    const long = 'can you add a search button here for PR/branches/worktree so for example when a user opens it';
+    hooks._setLiveSessionState!({ id: 't3', title: long }, { enabled: true, agentName: 'Suha (Support)' });
+    const heading = hooks.renderLiveSessionIntro!()._find((n) => hasClass(n, 'rw-chat-intro-title'));
+    // Full text is retained (not pre-truncated in JS); the ellipsis is purely CSS.
+    expect(heading!.textContent).toBe(long);
+    expect(heading!.getAttribute('title')).toBe(long);
+  });
+
+  it('still renders the status pill when the ticket has no title', () => {
     const { hooks } = loadWidget();
     hooks._setLiveSessionState!({ id: 't2' }, { enabled: true, agentName: 'Suha (Support)' });
     const intro = hooks.renderLiveSessionIntro!();
     expect(intro._find((n) => hasClass(n, 'rw-chat-intro-title'))).toBeNull();
+    expect(intro._find((n) => hasClass(n, 'rw-intro-status'))).not.toBeNull();
     expect(allText(intro)).toContain('Suha (Support)');
   });
 });
@@ -198,5 +221,45 @@ describe('widget.js — Live session team-message attribution', () => {
     const row = hooks.renderChatTeamRow!({ payload: null, content: 'Pushed a fix.' });
     const name = row._find((n) => hasClass(n, 'rw-chat-agent-name'));
     expect(name!.textContent).toBe('Team');
+  });
+});
+
+describe('widget.js — status/milestone activity mirrored into the live session', () => {
+  it('renders a milestone (agent_update) as an inline event line with its text', () => {
+    const { hooks } = loadWidget();
+    expect(hooks.renderChatEventRow).toBeDefined();
+    const node = hooks.renderChatEventRow!({
+      id: 'e1',
+      payload: { kind: 'activity', activityType: 'agent_update', content: 'Deploying to production now.', metadata: null },
+    });
+    expect(node).not.toBeNull();
+    expect(hasClass(node!, 'rw-chat-event-line')).toBe(true);
+    // agent_update renders its (already-screened) content verbatim via describeEvent.
+    expect(allText(node!)).toContain('Deploying to production now.');
+  });
+
+  it('renders a PR-merged activity as a code-safe inline line (never the PR number)', () => {
+    const { hooks } = loadWidget();
+    const node = hooks.renderChatEventRow!({
+      id: 'e2',
+      payload: { kind: 'activity', activityType: 'pr_linked', content: null, metadata: { state: 'merged', prNumber: 123 } },
+    });
+    expect(node).not.toBeNull();
+    const text = allText(node!);
+    expect(text.length).toBeGreaterThan(0);
+    // Never leaks the raw activity type or the PR number into the thread.
+    expect(text).not.toContain('pr_linked');
+    expect(text).not.toContain('123');
+  });
+
+  it('renders a status_change as an inline event line (not the raw type)', () => {
+    const { hooks } = loadWidget();
+    const node = hooks.renderChatEventRow!({
+      id: 'e3',
+      payload: { kind: 'activity', activityType: 'status_change', content: null, metadata: { from: 'in_progress', to: 'needs_review' } },
+    });
+    expect(node).not.toBeNull();
+    expect(hasClass(node!, 'rw-chat-event-line')).toBe(true);
+    expect(allText(node!)).not.toContain('status_change');
   });
 });

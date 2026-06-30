@@ -909,6 +909,16 @@ export async function addActivity(
   try { publishTicketUpdate(taskId); } catch (err) {
     console.warn('[WorkspaceTaskService] publishTicketUpdate failed', err);
   }
+  // Also mirror progress-bearing activity (status change / milestone / PR) into
+  // the ticket's live-session chat thread so the session shows the same timeline
+  // as the public screen. Best-effort; the dynamic import avoids a module cycle
+  // (WidgetChatService → WidgetService → WorkspaceTaskService).
+  try {
+    const { mirrorActivityToLiveSession } = await import('./WidgetChatService');
+    await mirrorActivityToLiveSession(taskId, { type: row.type, content: row.content, metadata: row.metadata });
+  } catch (err) {
+    console.warn('[WorkspaceTaskService] live-session activity mirror failed', err);
+  }
   return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }
 

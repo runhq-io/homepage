@@ -1591,7 +1591,13 @@ export type WidgetChatEventPayload =
   // Live-coder forward rejected by injection guard. The reason string carries
   // a machine-readable code ('injection_guard') so the widget can show a
   // localized error without parsing human text.
-  | { kind: 'live_coder_rejected'; reason: string };
+  | { kind: 'live_coder_rejected'; reason: string }
+  // A ticket activity (status change / milestone / PR lifecycle) mirrored INTO
+  // the live session so the chat thread shows the same progress timeline as the
+  // public ticket screen. Carries the source activity row's shape so the widget
+  // renders it with its existing describeEvent() formatter (identical wording to
+  // the activity feed). See WidgetChatService.mirrorActivityToLiveSession.
+  | { kind: 'activity'; activityType: string; content: string | null; metadata: Record<string, unknown> | null };
 
 /**
  * Attribution payload on role='team' rows (workspace-member replies from the

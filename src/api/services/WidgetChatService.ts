@@ -1384,6 +1384,59 @@ export async function sendLiveCoderMessage(
   return { message: message!, jobChannelId, canonicalTaskId: conv.createdTaskId ?? null };
 }
 
+// Ticket activity types worth showing INSIDE the live session as a progress
+// timeline: status transitions, agent milestones (`runhq milestone` →
+// agent_update), and PR lifecycle. `assigned`/`agent_assigned` are deliberately
+// excluded — agent assignment already reaches the chat thread as its own
+// `assigned` event (ingestTurnEvents), so mirroring them here would double up.
+// Comments/edits/archive/etc. are activity-feed-only and would be noise in chat.
+const LIVE_SESSION_MIRRORED_ACTIVITY = new Set(['status_change', 'agent_update', 'pr_linked']);
+
+/**
+ * Mirror a ticket activity row into its live-session chat thread (if one
+ * exists), so the live session shows the same progress timeline as the public
+ * ticket screen. Persisted as a role='event' row with the source activity's
+ * shape; the widget renders it through its existing describeEvent() formatter,
+ * giving identical wording to the activity feed with zero duplicated copy.
+ *
+ * Best-effort and idempotent-by-construction: addActivity inserts exactly one
+ * activity row per call, so this fires once per activity (no turnId dedup
+ * needed). Only mirrors into a conversation that ALREADY exists — it never
+ * creates one, so a status change on a ticket nobody opened a session on is a
+ * no-op. Never throws (the caller wraps it; a mirror failure must not break the
+ * activity write).
+ */
+export async function mirrorActivityToLiveSession(
+  taskId: string,
+  activity: { type: string; content?: string | null; metadata?: Record<string, unknown> | null },
+): Promise<void> {
+  if (!LIVE_SESSION_MIRRORED_ACTIVITY.has(activity.type)) return;
+
+  // A ticket can be backed by more than one conversation (the intake thread that
+  // created it AND a lazily-created live-session thread for a directly-assigned
+  // ticket), so mirror into every conversation linked to the task.
+  const convs = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, taskId));
+  if (convs.length === 0) return;
+
+  const payload: WidgetChatMessagePayload = {
+    kind: 'activity',
+    activityType: activity.type,
+    content: activity.content ?? null,
+    metadata: activity.metadata ?? null,
+  };
+
+  for (const conv of convs) {
+    const [row] = await db
+      .insert(widgetChatMessages)
+      .values({ conversationId: conv.id, role: 'event', content: '', payload })
+      .returning();
+    if (row) publish(row);
+  }
+}
+
 /**
  * Idempotently persist a batch of turn events. Rows upsert on the partial
  * unique index (turn_id, seq) via onConflictDoNothing — retries cannot
