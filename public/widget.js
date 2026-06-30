@@ -1495,6 +1495,45 @@
     } catch (_) {}
   }
 
+  // Live-session unread is tracked on its OWN axis, separate from ticketSeen
+  // above. The detail view marks a ticket seen up to its general activity
+  // (updatedAt/comments/activity), which can be NEWER than an unread coder
+  // reply — so sharing one mark would let merely opening the detail silently
+  // clear a live-session reply the assigner never read. This per-ticket mark is
+  // advanced ONLY when the live session itself is opened (renderChatMessageList).
+  function liveSessionSeenKey() {
+    return "rw-livesession-seen:" + (config.projectId || config.project || "default");
+  }
+  function getLiveSessionSeen() {
+    try { return JSON.parse(localStorage.getItem(liveSessionSeenKey()) || "{}") || {}; }
+    catch (_) { return {}; }
+  }
+  function markLiveSessionSeen(id, whenMs) {
+    if (!id) return;
+    try {
+      var m = getLiveSessionSeen();
+      var v = whenMs && !isNaN(whenMs) ? whenMs : Date.now();
+      if (!(m[id] >= v)) {
+        m[id] = v;
+        localStorage.setItem(liveSessionSeenKey(), JSON.stringify(m));
+      }
+    } catch (_) {}
+  }
+
+  // True when a ticket's linked live session has a coder/teammate reply
+  // (liveSessionLastMessageAt, populated only on assigned-ticket DTOs) that the
+  // assigner hasn't read. Baseline = when they last OPENED the session, or — if
+  // never opened — the ticket's creation time. Independent of ticketSeen, so
+  // viewing the ticket detail does not clear it; only opening the session does.
+  function hasUnreadLiveSession(ticket) {
+    if (!config.isIdentified || !ticket || !ticket.liveSessionLastMessageAt) return false;
+    var msg = new Date(ticket.liveSessionLastMessageAt).getTime();
+    if (isNaN(msg)) return false;
+    var seen = getLiveSessionSeen();
+    var base = seen[ticket.id] != null ? seen[ticket.id] : new Date(ticket.createdAt || 0).getTime();
+    return msg > base;
+  }
+
   // True when one of the viewer's OWN tickets has activity/comments they
   // haven't viewed yet (a team reply or status change). The single source of
   // truth for both the launcher count and the per-row "needs attention" dot.
@@ -1526,32 +1565,33 @@
     return p.indexOf("live_coder") !== -1;
   }
 
-  // Deduped union of the viewer's reported tickets and the live sessions they
-  // assigned. Both carry lastActivityAt, so the existing unread predicate works.
-  function unreadCandidateTickets() {
+  // Deduped list of the viewer's tickets that warrant attention, by TWO distinct
+  // signals kept on their own axes:
+  //   - reported tickets (myTicketsCache) → general activity unread
+  //     (ticketHasUnseenActivity: a team reply / status change since last view)
+  //   - assigned live sessions (assignedTicketsCache) → an unread coder/teammate
+  //     REPLY (hasUnreadLiveSession), cleared only by opening the session
+  // A ticket the viewer both reported AND assigned is counted once (either
+  // signal qualifies it). Deliberately NOT unioned with the community "Updates"
+  // feed — that count lives on the "View Latest Updates" home card.
+  function unreadTickets() {
+    if (!config.isIdentified) return [];
     var byId = {};
     var out = [];
-    var push = function (tk) {
+    var consider = function (tk, isUnread) {
       if (!tk || !tk.id || byId[tk.id]) return;
+      if (!isUnread(tk)) return;
       byId[tk.id] = true; out.push(tk);
     };
-    (myTicketsCache || []).forEach(push);
-    (assignedTicketsCache || []).forEach(push);
+    (myTicketsCache || []).forEach(function (tk) { consider(tk, ticketHasUnseenActivity); });
+    (assignedTicketsCache || []).forEach(function (tk) { consider(tk, hasUnreadLiveSession); });
     return out;
   }
 
-  // Launcher badge = how many of the viewer's submitted OR live-session-assigned
-  // tickets have unseen activity (the unreadCandidateTickets union). Deliberately
-  // NOT unioned with the community "Updates" feed — that count lives on the
-  // "View Latest Updates" home card (newUpdatesCount).
+  // Launcher badge = how many of the viewer's submitted-or-assigned tickets need
+  // attention (see unreadTickets).
   function launcherBadgeCount() {
-    if (!config.isIdentified) return 0;
-    var items = unreadCandidateTickets();
-    var n = 0;
-    for (var j = 0; j < items.length; j++) {
-      if (ticketHasUnseenActivity(items[j])) n++;
-    }
-    return n;
+    return unreadTickets().length;
   }
 
   // Community "Updates" newer than the last panel-open (bounded to a week) —
@@ -1828,7 +1868,7 @@
 
   function renderNotifDropdown() {
     if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
-    var items = unreadCandidateTickets().filter(ticketHasUnseenActivity);
+    var items = unreadTickets();
     var listEl = h("div", { className: "rw-notif-list" });
     if (items.length === 0) {
       listEl.appendChild(h("div", { className: "rw-notif-empty" }, t("filters.noUnread")));
@@ -6017,16 +6057,18 @@
       if (chatMessages.length === 0) {
         listEl.appendChild(renderLiveSessionIntro());
       }
-      // Reading the live session marks its ticket seen up to the newest CHAT
-      // message, so the launcher/bell/dot clear and re-light on the next reply.
-      // (A later status/activity row, if any, is cleared via the detail view.)
+      // Reading the live session advances the DEDICATED live-session-seen mark
+      // up to the newest message shown, so the launcher/bell/dot clear and
+      // re-light only on the next coder/teammate reply. This is separate from
+      // ticketSeen (the detail view), so merely viewing the ticket detail never
+      // clears an unread live-session reply.
       var liveTaskId = chatConversation && chatConversation.createdTaskId;
       if (liveTaskId && chatMessages.length > 0) {
         var seenMs = 0;
         for (var si = 0; si < chatMessages.length; si++) {
           seenMs = Math.max(seenMs, new Date(chatMessages[si].createdAt || 0).getTime() || 0);
         }
-        if (seenMs > 0) { markTicketSeen(liveTaskId, seenMs); refreshTabLabel(); }
+        if (seenMs > 0) { markLiveSessionSeen(liveTaskId, seenMs); refreshTabLabel(); }
       }
     } else {
       // Agentless threads open with a scripted offline notice that doubles as
@@ -7196,7 +7238,11 @@
         h("span", { className: "rw-staff-btn-ic" }, "⚡"),
         "Live session",
       ]);
-      if (ticketHasUnseenActivity(ticket)) {
+      // Unread dot = an unread coder/teammate reply in THIS ticket's live
+      // session. The detail ticket may not carry liveSessionLastMessageAt, so
+      // resolve it from the assigned cache (which does).
+      var assignedMatch = (assignedTicketsCache || []).find(function (a) { return a && a.id === ticket.id; });
+      if (assignedMatch && hasUnreadLiveSession(assignedMatch)) {
         liveBtn.insertBefore(h("span", { className: "rw-unseen-dot" }), liveBtn.firstChild);
       }
       var liveOpening = false;
@@ -8337,6 +8383,8 @@
     // without bootstrapping the full network layer.
     window._rwTestHooks.launcherBadgeCount = launcherBadgeCount;
     window._rwTestHooks.markTicketSeen = markTicketSeen;
+    window._rwTestHooks.markLiveSessionSeen = markLiveSessionSeen;
+    window._rwTestHooks.hasUnreadLiveSession = hasUnreadLiveSession;
     window._rwTestHooks.viewerCanLiveCoder = viewerCanLiveCoder;
     window._rwTestHooks._setCaches = function (mine, assigned) {
       myTicketsCache = mine || [];

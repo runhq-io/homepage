@@ -214,6 +214,15 @@ type WidgetTicketResponse = {
    * Populated by listMyTickets; may be absent on other list shapes.
    */
   lastActivityAt?: Date | null;
+  /**
+   * Timestamp of the most recent live-session REPLY (a coder `agent` or teammate
+   * `team` chat message) on the ticket's linked conversation — independent of
+   * lastActivityAt. Tracked on its own axis so the widget can flag unread
+   * live-session replies that only clear when the assigner opens the session
+   * (not when they merely view the ticket detail). Populated by
+   * listTicketsAssignedByMe; absent on other list shapes.
+   */
+  liveSessionLastMessageAt?: string | null;
 };
 
 type PublicAttachmentSummary = {
@@ -2806,12 +2815,39 @@ export async function listTicketsAssignedByMe(
   if (rows.length === 0) return [];
 
   const ids = rows.map((r) => r.id);
-  const latest = await deriveLastActivity(ids, { includeLiveSession: true });
+  // lastActivityAt excludes live-session chat — that signal lives on its own
+  // axis (liveSessionLastMessageAt) so viewing the ticket detail (which marks
+  // the ticket seen up to lastActivityAt) cannot clear an unread live-session
+  // reply. Only opening the live session clears the dedicated axis.
+  const [latest, liveSession] = await Promise.all([
+    deriveLastActivity(ids, { includeLiveSession: false }),
+    // Most recent coder/teammate REPLY per task: role IN ('agent','team').
+    // `event` cards (proposals, mirrored status) are not replies and must not
+    // light the live-session indicator.
+    db
+      .select({
+        taskId: widgetChatConversations.createdTaskId,
+        max: sql<string>`max(${widgetChatMessages.createdAt})`,
+      })
+      .from(widgetChatMessages)
+      .innerJoin(widgetChatConversations, eq(widgetChatMessages.conversationId, widgetChatConversations.id))
+      .where(and(
+        inArray(widgetChatConversations.createdTaskId, ids),
+        inArray(widgetChatMessages.role, ['agent', 'team']),
+      ))
+      .groupBy(widgetChatConversations.createdTaskId),
+  ]);
+  const liveSessionByTask = new Map<string, string>();
+  for (const r of liveSession) {
+    if (r.taskId && r.max) liveSessionByTask.set(r.taskId, r.max);
+  }
   return rows.map((t) => {
     const dto = mapTaskToWidgetResponse(t);
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
     const activityMs = latest.get(t.id) ?? 0;
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    const lsMax = liveSessionByTask.get(t.id);
+    dto.liveSessionLastMessageAt = lsMax ? new Date(lsMax).toISOString() : null;
     return dto;
   });
 }
