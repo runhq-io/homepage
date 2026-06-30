@@ -6013,6 +6013,17 @@
       if (chatMessages.length === 0) {
         listEl.appendChild(renderLiveSessionIntro());
       }
+      // Reading the live session marks its ticket seen up to the freshest
+      // message, so the launcher/bell/dot clear and only re-light on the next
+      // reply. createdTaskId links the conversation to the ticket.
+      var liveTaskId = chatConversation && chatConversation.createdTaskId;
+      if (liveTaskId && chatMessages.length > 0) {
+        var seenMs = 0;
+        for (var si = 0; si < chatMessages.length; si++) {
+          seenMs = Math.max(seenMs, new Date(chatMessages[si].createdAt || 0).getTime() || 0);
+        }
+        if (seenMs > 0) { markTicketSeen(liveTaskId, seenMs); refreshNotifBell(); }
+      }
     } else {
       // Agentless threads open with a scripted offline notice that doubles as
       // submission guidance ("provide as much detail as possible, then Submit
@@ -7181,6 +7192,9 @@
         h("span", { className: "rw-staff-btn-ic" }, "⚡"),
         "Live session",
       ]);
+      if (ticketHasUnseenActivity(ticket)) {
+        liveBtn.insertBefore(h("span", { className: "rw-unseen-dot" }), liveBtn.firstChild);
+      }
       var liveOpening = false;
       liveBtn.addEventListener("click", function () {
         if (liveOpening) return;
@@ -8313,6 +8327,23 @@
     // Create action (which posts to chatCreateTicket against the conversation).
     window._rwTestHooks._setChatConversation = function (conv) {
       chatConversation = conv;
+    };
+    // Unread-badge test helpers: expose the badge counter, the seen-marker, and
+    // direct cache setters so vm tests can drive the full seen/unseen lifecycle
+    // without bootstrapping the full network layer.
+    window._rwTestHooks.launcherBadgeCount = launcherBadgeCount;
+    window._rwTestHooks.markTicketSeen = markTicketSeen;
+    window._rwTestHooks._setCaches = function (mine, assigned) {
+      myTicketsCache = mine || [];
+      assignedTicketsCache = assigned || [];
+    };
+    // Expose config + currentUser references so tests can set isIdentified /
+    // permissions without going through the full identity-fetch flow.
+    window._rwTestHooks._setConfig = function (updates) {
+      Object.assign(config, updates);
+    };
+    window._rwTestHooks._setCurrentUser = function (updates) {
+      Object.assign(currentUser, updates);
     };
   }
 
