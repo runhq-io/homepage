@@ -8241,6 +8241,15 @@ export function createHttpApp() {
           const task = await WorkspaceTaskService.getTaskById(serverId, taskId);
           return task ? { status: task.status } : null;
         },
+        // Webhook-path notifications are built once at registration (no request
+        // `server` in scope), so resolve it per-call from the serverId threaded
+        // through — mirrors the pushHandling wiring below.
+        notifyPrLinked: async (serverId, input) => {
+          const target = await ServerService.getServer(serverId);
+          if (target) {
+            await ServerService.serverTokenFetch(target, '/api/internal/pr-linked', input);
+          }
+        },
       },
       pushHandling: {
         findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,

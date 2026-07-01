@@ -109,6 +109,20 @@ describe('handlePullRequestReviewEvent', () => {
     expect(deps.updateTask).toHaveBeenCalledWith('ws_1', 'task_1', { status: 'reviewed' });
   });
 
+  it('pushes a workspace notify (state open) so the live status pill resyncs to reviewed', async () => {
+    const notifyPrLinked = vi.fn(async () => {});
+    const deps = makeDeps({ getTask: vi.fn().mockResolvedValue({ status: 'done' }), notifyPrLinked });
+    await handlePullRequestReviewEvent(reviewEvent('submitted', 'approved'), deps);
+    expect(notifyPrLinked).toHaveBeenCalledWith('ws_1', expect.objectContaining({ branch: BRANCH, number: 7, state: 'open' }));
+  });
+
+  it('does NOT push a workspace notify when the approval is a no-op (already merged)', async () => {
+    const notifyPrLinked = vi.fn(async () => {});
+    const deps = makeDeps({ getTask: vi.fn().mockResolvedValue({ status: 'merged' }), notifyPrLinked });
+    await handlePullRequestReviewEvent(reviewEvent('submitted', 'approved'), deps);
+    expect(notifyPrLinked).not.toHaveBeenCalled();
+  });
+
   it('accepts an upper-cased APPROVED state (GitHub casing tolerance)', async () => {
     const deps = makeDeps({ getTask: vi.fn().mockResolvedValue({ status: 'done' }) });
     expect(await handlePullRequestReviewEvent(reviewEvent('submitted', 'APPROVED'), deps)).toBe('reviewed');

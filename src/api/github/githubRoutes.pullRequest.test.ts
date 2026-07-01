@@ -394,6 +394,69 @@ describe('handlePullRequestEvent', () => {
     });
   });
 
+  describe('notifyPrLinked — workspace status-pill resync push', () => {
+    function makeClosed(merged: boolean, number = 42): PullRequestPayload {
+      return {
+        action: 'closed',
+        pull_request: {
+          number,
+          html_url: `https://github.com/acme/web/pull/${number}`,
+          state: 'closed',
+          merged,
+          head: { ref: 'session/job1/ticket-abcd1234' },
+        },
+        repository: { name: 'web', owner: { login: 'acme' } },
+      };
+    }
+    const linkedActivity = [
+      { id: 'act-1', type: 'pr_linked' as const, metadata: { number: 42, url: 'https://github.com/acme/web/pull/42', state: 'open', repoBranch: 'session/job1/ticket-abcd1234' } },
+    ];
+
+    it('pushes state:"merged" to the workspace on a merged close (the core fix)', async () => {
+      const notifyPrLinked = vi.fn(async () => {});
+      const deps = makeDeps({ listActivity: vi.fn(async () => linkedActivity), updateActivityMetadata: vi.fn(async () => {}), notifyPrLinked });
+      await handlePullRequestEvent(makeClosed(true), deps);
+      expect(notifyPrLinked).toHaveBeenCalledWith('ws_a', expect.objectContaining({
+        branch: 'session/job1/ticket-abcd1234', number: 42, state: 'merged',
+      }));
+    });
+
+    it('pushes state:"closed" to the workspace on a non-merged close', async () => {
+      const notifyPrLinked = vi.fn(async () => {});
+      const deps = makeDeps({ listActivity: vi.fn(async () => linkedActivity), updateActivityMetadata: vi.fn(async () => {}), notifyPrLinked });
+      await handlePullRequestEvent(makeClosed(false), deps);
+      expect(notifyPrLinked).toHaveBeenCalledWith('ws_a', expect.objectContaining({ state: 'closed' }));
+    });
+
+    it('does NOT push on a close for a PR that was never linked (skipped before the push)', async () => {
+      const notifyPrLinked = vi.fn(async () => {});
+      const deps = makeDeps({ listActivity: vi.fn(async () => []), notifyPrLinked });
+      const result = await handlePullRequestEvent(makeClosed(true, 999), deps);
+      expect(result).toBe('skipped');
+      expect(notifyPrLinked).not.toHaveBeenCalled();
+    });
+
+    it('pushes state:"open" on an externally-opened PR', async () => {
+      const notifyPrLinked = vi.fn(async () => {});
+      const deps = makeDeps({ notifyPrLinked });
+      await handlePullRequestEvent(makePayload({ action: 'opened' }), deps);
+      expect(notifyPrLinked).toHaveBeenCalledWith('ws_a', expect.objectContaining({ state: 'open' }));
+    });
+
+    it('a notify failure never turns into a handler error (best-effort)', async () => {
+      const notifyPrLinked = vi.fn(async () => { throw new Error('workspace unreachable'); });
+      const deps = makeDeps({ listActivity: vi.fn(async () => linkedActivity), updateActivityMetadata: vi.fn(async () => {}), notifyPrLinked });
+      const result = await handlePullRequestEvent(makeClosed(true), deps);
+      expect(result).toBe('updated'); // status + activity still succeeded
+    });
+
+    it('is a no-op when notifyPrLinked dep is absent (older wiring)', async () => {
+      const deps = makeDeps({ listActivity: vi.fn(async () => linkedActivity), updateActivityMetadata: vi.fn(async () => {}) });
+      const result = await handlePullRequestEvent(makeClosed(true), deps);
+      expect(result).toBe('updated');
+    });
+  });
+
 // ---------------------------------------------------------------------------
 // Route integration: pull_request via HTTP (signature + dep wiring)
 // ---------------------------------------------------------------------------
