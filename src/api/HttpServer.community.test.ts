@@ -694,8 +694,12 @@ describe('GET /api/widget/me/community', () => {
             // widgetUserBalances — uses .limit(1)
             return makeWhereResult([{ balance: 100, payoutsCount: 2, rank: 5 }]);
           }
-          // active member count — bare await (no .limit())
-          return makeWhereResult([{ totalMembers: 10 }]);
+          if (callCount === 2) {
+            // active member count — bare await (no .limit())
+            return makeWhereResult([{ totalMembers: 10 }]);
+          }
+          // step-advance grants for coinByTicket — bare await
+          return makeWhereResult([]);
         }),
       }),
     }));
@@ -708,6 +712,7 @@ describe('GET /api/widget/me/community', () => {
     expect(body.rank).toBe(5);
     expect(body.payoutsCount).toBe(2);
     expect(body.unreadNotificationCount).toBe(3);
+    expect(body.coinByTicket).toEqual({});
   });
 
   it('returns zero defaults when no balance row exists', async () => {
@@ -722,7 +727,10 @@ describe('GET /api/widget/me/community', () => {
           if (callCount === 1) {
             return makeWhereResult([]); // no balance row
           }
-          return makeWhereResult([{ totalMembers: 0 }]);
+          if (callCount === 2) {
+            return makeWhereResult([{ totalMembers: 0 }]);
+          }
+          return makeWhereResult([]); // no step-advance grants
         }),
       }),
     }));
@@ -734,6 +742,47 @@ describe('GET /api/widget/me/community', () => {
     expect(body.balance).toBe(0);
     expect(body.rank).toBeNull();
     expect(body.payoutsCount).toBe(0);
+    expect(body.coinByTicket).toEqual({});
+  });
+
+  it('groups step-advance grants into coinByTicket with tier-ordered reasons', async () => {
+    setupWidgetSession();
+    mockUnreadCount.mockResolvedValue(0);
+
+    let callCount = 0;
+    dbMock.select.mockImplementation(() => ({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) {
+            return makeWhereResult([{ balance: 3, payoutsCount: 3, rank: 1 }]);
+          }
+          if (callCount === 2) {
+            return makeWhereResult([{ totalMembers: 5 }]);
+          }
+          // step-advance grants: ticket T (reviewed then in_progress, out of order),
+          // ticket U (merged). Reasons must come back ordered by tier for T.
+          return makeWhereResult([
+            { ticketId: 'T', amount: 1, reason: 'You upvoted this and it reached Reviewed', metadata: { tier: 'reviewed' } },
+            { ticketId: 'T', amount: 1, reason: 'You upvoted this and it reached In progress', metadata: { tier: 'in_progress' } },
+            { ticketId: 'U', amount: 1, reason: 'You submitted this and it reached Merged', metadata: { tier: 'merged' } },
+          ]);
+        }),
+      }),
+    }));
+
+    const app = makeApp();
+    const res = await get(app, '/api/widget/me/community', { Authorization: WIDGET_BEARER });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.coinByTicket.T).toEqual({
+      coin: 2,
+      reasons: [
+        'You upvoted this and it reached In progress',
+        'You upvoted this and it reached Reviewed',
+      ],
+    });
+    expect(body.coinByTicket.U.coin).toBe(1);
   });
 });
 

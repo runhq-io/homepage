@@ -7708,6 +7708,42 @@ export function createHttpApp() {
       .from(widgetUsers)
       .where(and(eq(widgetUsers.projectId, projectId), eq(widgetUsers.status, 'active')));
     const unreadNotificationCount = await communityNotificationService.unreadCount(widgetUserId);
+
+    // Per-ticket earned coin for the calling user — drives the widget's per-post
+    // "+N 🪙" chip and its hover "why" tooltip. Grouped from this user's own
+    // step-advance grants; reasons ordered by lifecycle tier.
+    const grantRows = await db
+      .select({
+        ticketId: pointGrants.ticketId,
+        amount: pointGrants.amount,
+        reason: pointGrants.reason,
+        metadata: pointGrants.metadata,
+      })
+      .from(pointGrants)
+      .where(and(
+        eq(pointGrants.widgetUserId, widgetUserId),
+        eq(pointGrants.source, 'step_advance'),
+        isNotNull(pointGrants.ticketId),
+      ));
+
+    const TIER_ORD: Record<string, number> = { in_progress: 1, reviewed: 2, merged: 3, deployed: 4 };
+    const coinByTicket: Record<string, { coin: number; reasons: string[] }> = {};
+    for (const g of grantRows) {
+      const tid = g.ticketId;
+      if (!tid) continue;
+      const entry = coinByTicket[tid] ?? (coinByTicket[tid] = { coin: 0, reasons: [] });
+      entry.coin += g.amount;
+      const tier = (g.metadata as { tier?: string } | null)?.tier ?? '';
+      // Stash ordinal alongside the reason so we can order reasons by tier below.
+      entry.reasons.push(JSON.stringify({ o: TIER_ORD[tier] ?? 99, r: g.reason ?? '' }));
+    }
+    for (const tid of Object.keys(coinByTicket)) {
+      coinByTicket[tid]!.reasons = coinByTicket[tid]!.reasons
+        .map((s) => JSON.parse(s) as { o: number; r: string })
+        .sort((a, b) => a.o - b.o)
+        .map((x) => x.r);
+    }
+
     return c.json({
       widgetUserId,
       rank: bal?.rank ?? null,
@@ -7715,6 +7751,7 @@ export function createHttpApp() {
       balance: bal?.balance ?? 0,
       payoutsCount: bal?.payoutsCount ?? 0,
       unreadNotificationCount,
+      coinByTicket,
     });
   });
 
