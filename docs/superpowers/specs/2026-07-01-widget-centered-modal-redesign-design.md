@@ -113,3 +113,29 @@ loses no capability.
 - Verify agent mode and agentless intake mode both still reach ticket creation.
 - Mobile viewport (≤640px): the modal is fullscreen for all views.
 - Confirm no `rw-compact` class is ever added to the scrim during navigation.
+
+## Follow-up — land directly on the discussion board
+
+After review, the "Hi 👋 How can we help?" home menu proved redundant: its three
+cards all map to the discussion list view (Chat with Agent → `[+ New post]`,
+Join Open Discussion → Hot tab, View Latest Updates → Updates tab). So the
+widget now opens **directly on the discussion board (Hot tab)** and the home
+menu is retired from the flow.
+
+Changes (all in `public/widget.js`):
+
+- Default landing view is `list` on the `hot` tab — both the initial `view` /
+  `activeTab` and the `closePanel` reset (which controls the next open).
+- The list view's slim topbar swaps its back-to-home button for the board title
+  (`header.feedback` → "{name} Feedback", falling back to the greeting when the
+  project name has not loaded). The topbar stays so its right padding keeps the
+  title clear of the absolute-positioned shell actions.
+- Chat back-navigation returns to the discussion board in every normal case
+  (`[+ New post]` is the only entry point), so the `chatReturnView` bookkeeping
+  added above is removed and the chat back handler calls `goList()`.
+- `renderHomeView` / `renderHomeCard` / `goHome` stay defined but unwired — no
+  navigation path lands on `home` anymore — kept for possible re-use.
+
+Verification delta: clicking the launcher opens the discussion board (Hot tab)
+titled "{name} Feedback"; `[+ New post]` opens the agent chat and its back
+returns to the board; no normal navigation reaches the old home menu.

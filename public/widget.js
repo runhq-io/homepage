@@ -34,7 +34,7 @@
   var notifOutsideHandler = null;
 
   var isOpen = false;
-  var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
+  var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
   var theme = "light";
 
@@ -48,15 +48,18 @@
   // Always present as an object so reads never throw — defaults to anonymous.
   var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
 
-  // Modal-shell view state. The shell is a centered card with three faces:
-  //   "home"   — Intercom-style landing: greeting + navigation cards into
-  //              chat (when configured), the Hot discussion list, and the
-  //              Latest Updates list. Every open lands here (see closePanel).
-  //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
+  // Modal-shell view state. The shell is a centered card with these faces:
+  //   "list"   — the landing view: the discussion board (Hot / Updates / My
+  //              Submissions tabs + [+ New post], which opens chat). Every
+  //              open lands here on the Hot tab (see closePanel reset).
+  //   "chat"   — the agent conversation (opened from [+ New post]).
   //   "detail" — full-width ticket detail with a "Back to activity" button.
+  //   "home"   — legacy Intercom-style menu (greeting + navigation cards).
+  //              Retired from the flow but kept for possible re-use; no
+  //              navigation path lands here anymore.
   // Switching between faces re-renders the card body in place; the launcher
   // tab and outer modal chrome stay mounted so we don't pay a remount cost.
-  var view = "home";
+  var view = "list";
   var currentDetailTicket = null;
 
   // Polling interval handle for the ticket detail view.
@@ -106,10 +109,6 @@
   // was opened from (Home's message card vs the list's [+ New post]) — the
   // same pattern as detailReturnView above.
   var composeReturnView = "home";
-  // The normal (non-live) chat view's back control returns to the view it was
-  // opened from — Home's chat card keeps "home"; the discussion board's
-  // [+ New post] keeps "list". Same pattern as composeReturnView above.
-  var chatReturnView = "home";
 
   var CHAT_POLL_FAST_MS = 1500;    // while a turn is pending
   var CHAT_POLL_IDLE_MS = 5000;    // idle (matches DETAIL_POLL_INTERVAL_MS)
@@ -2679,9 +2678,13 @@
       '}',
       '.rw-home-btn:hover { color: var(--rw-fg); border-color: var(--rw-accent); }',
       '.rw-home-btn:active { transform: translateY(1px); }',
-      /* Slim list-view topbar hosting the back-to-home control. The split
-         layout below it is untouched — Home is a layer above the dashboard.
-         Right padding keeps clear of the absolute-positioned shell actions. */
+      /* Slim list-view topbar hosting the board title (the discussion board is
+         the widget's landing view). Right padding keeps the title clear of the
+         absolute-positioned shell actions (bell / theme / close). */
+      '.rw-list-title {',
+      '  font-size: 15px; font-weight: 600; color: var(--rw-fg);',
+      '  letter-spacing: -0.01em;',
+      '}',
       '.rw-list-topbar {',
       '  display: flex; align-items: center;',
       '  padding: 14px 80px 10px 22px;',
@@ -4966,13 +4969,16 @@
     } else if (view === "chat") {
       scrollEl.appendChild(renderChatViewShell());
     } else {
-      // Slim topbar with the back-to-home control. Home is a layer above
-      // the dashboard — the split layout below is untouched.
-      var listHomeBtn = h("button", {
-        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
-      }, [Icons.arrowLeft(13), h("span", null, t("home.back"))]);
-      listHomeBtn.addEventListener("click", goHome);
-      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [listHomeBtn]));
+      // The discussion board is the widget's landing view, so its slim topbar
+      // holds the board title (not a back-to-home control — Home was retired
+      // from the flow). The right padding on .rw-list-topbar keeps the title
+      // clear of the absolute-positioned shell actions (bell / theme / close).
+      var boardTitle = config.projectName
+        ? t("header.feedback", { name: config.projectName })
+        : t("home.greeting");
+      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [
+        h("span", { className: "rw-list-title" }, boardTitle),
+      ]));
 
       // Single full-width panel: tab bar (with [+ New post] on its right)
       // + list. The old left pane (intro copy, inline composer, Recent
@@ -5156,10 +5162,6 @@
       return;
     }
     stopDetailPoll();
-    // Record where chat was launched from so its back control returns there —
-    // Home's chat card keeps "home"; the discussion board's [+ New post] keeps
-    // "list". Must be captured before `view` is reassigned below.
-    chatReturnView = view === "list" ? "list" : "home";
     view = "chat";
     currentDetailTicket = null;
     renderPanelBody();
@@ -6484,16 +6486,12 @@
           currentDetailTicket = savedLiveTicket;
           renderPanelBody();
         } else {
-          goHome();
+          goList();
         }
       } else {
-        // Normal chat: back returns to wherever chat was opened from — Home's
-        // chat card (home) or the discussion board's [+ New post] (list).
-        if (chatReturnView === "list") {
-          goList();
-        } else {
-          goHome();
-        }
+        // Normal chat is reached from the discussion board's [+ New post], so
+        // back returns to that board (the widget's landing view).
+        goList();
       }
     });
 
@@ -8014,11 +8012,11 @@
     chatSubmitInFlight = false;
     detailReturnView = null;
     composeReturnView = "home";
-    // Reset the shell so re-opening lands on a fresh Home rather than
-    // wherever the user last left it (detail view, Hot tab, etc.).
-    view = "home";
+    // Reset the shell so re-opening lands on a fresh discussion board (Hot tab)
+    // rather than wherever the user last left it (detail view, chat, etc.).
+    view = "list";
     currentDetailTicket = null;
-    activeTab = "updates";
+    activeTab = "hot";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();
