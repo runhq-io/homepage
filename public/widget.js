@@ -332,6 +332,12 @@
   function chatLoadActive() {
     return api("/api/widget/chat/conversations/active");
   }
+  // Authoritative close-state for a SPECIFIC conversation by id. Unlike
+  // /conversations/active (intake-only — hides ticket-linked threads), this
+  // answers "is THIS conversation still open?" even after it produced a ticket.
+  function chatLoadStatus(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/status");
+  }
   function chatLoadMessages(conversationId, afterCursor) {
     var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages" + qs);
@@ -5402,10 +5408,16 @@
     });
   }
 
-  // After a ticket is created the agent gets a wrap-up turn and the BE
-  // closes the conversation. Status changes don't stream as message rows,
-  // so watch GET /conversations/active until this conversation stops being
-  // the active one, then flip the footer to "Start new conversation".
+  // After a ticket is created the agent gets a wrap-up turn and the BE closes
+  // the conversation once it has nothing left to resolve. Status changes don't
+  // stream as message rows, so poll for closure.
+  //
+  // We poll THIS conversation's own status (by id), NOT /conversations/active:
+  // the moment a ticket is filed the conversation gains a createdTaskId, which
+  // getActiveConversation deliberately excludes (it only surfaces intake
+  // threads). A multi-ticket intake keeps the conversation open to host the
+  // next proposal — reading "am I still the active intake thread?" would report
+  // that (legitimately open) conversation as closed and hide the pending card.
   function startChatClosedWatch() {
     if (chatClosedWatchTimerId !== null) return;
     var conv = chatConversation;
@@ -5415,10 +5427,9 @@
         chatClosedWatchTimerId = null;
         return;
       }
-      chatLoadActive().then(function (data) {
+      chatLoadStatus(conv.id).then(function (data) {
         if (view !== "chat" || chatConversation !== conv) return;
-        var active = data && data.conversation;
-        if (!active || active.id !== conv.id || active.status === "closed") chatMarkClosed();
+        if (!data || data.status === "closed") chatMarkClosed();
       }).catch(function (err) {
         if (view !== "chat" || chatConversation !== conv) return;
         if (err && err.status === 404) chatMarkClosed();

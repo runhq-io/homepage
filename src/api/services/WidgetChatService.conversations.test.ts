@@ -245,3 +245,32 @@ describe('listMessages', () => {
       .rejects.toMatchObject({ code: 'conversation_not_found' });
   });
 });
+
+describe('getConversationStatus (by-id close-state for the widget closed-watch)', () => {
+  it('reports a ticketed-but-active conversation as active (getActiveConversation would hide it)', async () => {
+    // The multi-ticket regression: once ticket #1 is filed the conversation
+    // gains a createdTaskId, so findActiveConversation excludes it. The BE keeps
+    // it open to host the next proposal — this by-id lookup must still say active.
+    const conv = await seedConversation();
+    await db.update(widgetChatConversations)
+      .set({ createdTaskId: '929791a0-5379-464b-8167-b5f16f99a112' })
+      .where(eq(widgetChatConversations.id, conv.id));
+    // Sanity: the intake-only lookup no longer surfaces it.
+    expect(await WidgetChatService.getActiveConversation(PROJECT_ID, OWNER_ID)).toBeNull();
+    // ...but the authoritative by-id status is still 'active'.
+    expect(await WidgetChatService.getConversationStatus(conv.id, PROJECT_ID, OWNER_ID, new Set())).toBe('active');
+  });
+
+  it('reports a closed conversation as closed', async () => {
+    const conv = await seedConversation();
+    await db.update(widgetChatConversations).set({ status: 'closed' })
+      .where(eq(widgetChatConversations.id, conv.id));
+    expect(await WidgetChatService.getConversationStatus(conv.id, PROJECT_ID, OWNER_ID, new Set())).toBe('closed');
+  });
+
+  it('404s for a non-owner (existence never leaks)', async () => {
+    const conv = await seedConversation();
+    await expect(WidgetChatService.getConversationStatus(conv.id, PROJECT_ID, STRANGER_ID, new Set()))
+      .rejects.toMatchObject({ code: 'conversation_not_found', status: 404 });
+  });
+});
