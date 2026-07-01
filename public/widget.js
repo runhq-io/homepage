@@ -1976,6 +1976,7 @@
       '  --rw-line: rgba(0,0,0,0.07); --rw-line-2: rgba(0,0,0,0.13);',
       '  --rw-fg: #0a0a0a; --rw-fg-2: #3f3f46; --rw-muted: #71717a; --rw-muted-2: #a1a1aa;',
       '  --rw-accent: #6366f1; --rw-accent-ink: #ffffff;',
+      '  --rw-warn: #b45309; --rw-warn-line: #f59e0b;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
       /* Warm charcoal dark — matches dashboard.css. */
@@ -1984,6 +1985,7 @@
       '  --rw-line: rgba(255,243,219,0.08); --rw-line-2: rgba(255,243,219,0.14);',
       '  --rw-fg: #f0e9d9; --rw-fg-2: #c8c0ad; --rw-muted: #8e8676; --rw-muted-2: #6e6759;',
       '  --rw-accent: #818cf8; --rw-accent-ink: #1f1a14;',
+      '  --rw-warn: #fbbf24; --rw-warn-line: #d97706;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
 
@@ -3878,6 +3880,22 @@
       '  border: 1px solid color-mix(in oklab, var(--rw-accent) 40%, var(--rw-line-2));',
       '}',
       '.rw-staff-btn--ghost:not(:disabled):hover { background: color-mix(in oklab, var(--rw-accent) 10%, var(--rw-bg)); border-color: var(--rw-accent); }',
+
+      /* Assign-agent feedback. A transient failure stays a small red line
+         (`.rw-assign-err`); the terminal "no agent is set up for this project"
+         case gets an amber callout that names the root cause and the exact
+         settings path to fix it — staff kept missing the bare red string. */
+      '.rw-assign-callout {',
+      '  display: flex; align-items: flex-start; gap: 8px; width: 100%;',
+      '  margin-top: 1px; padding: 9px 11px; border-radius: 9px;',
+      '  background: color-mix(in oklab, var(--rw-warn-line) 12%, var(--rw-panel));',
+      '  border: 1px solid color-mix(in oklab, var(--rw-warn-line) 34%, var(--rw-line-2));',
+      '  border-left: 3px solid var(--rw-warn-line);',
+      '}',
+      '.rw-assign-callout-ic { flex: 0 0 auto; font-size: 14px; line-height: 1.35; }',
+      '.rw-assign-callout-body { font-size: 12.5px; line-height: 1.45; color: var(--rw-fg-2); }',
+      '.rw-assign-callout-title { font-weight: 700; color: var(--rw-warn); }',
+      '.rw-assign-callout-path { font-weight: 600; color: var(--rw-fg); white-space: nowrap; }',
 
       /* "Created from a conversation" — collapsed transcript section on the
          ticket detail for tickets born from chat. Reporter-only by
@@ -7148,10 +7166,33 @@
     // suggest → assign tail; on success the detail re-fetches and this button
     // disappears (the ticket now shows its assigned agent + Live session).
     if (!loading && data.canAssign) {
-      var assignErrEl = h("span", {
-        className: "rw-assign-err",
-        style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+      // Feedback slot below the button. A transient failure renders as a small
+      // red line; the terminal "no agent is set up for this project" case
+      // renders an amber callout that names the cause and where to fix it.
+      var assignMsgEl = h("div", {
+        className: "rw-assign-msg",
+        style: { width: "100%" },
       }, "");
+      var clearAssignMsg = function () { assignMsgEl.textContent = ""; };
+      var showAssignError = function (text) {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("span", {
+          className: "rw-assign-err",
+          style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+        }, text));
+      };
+      var showNoAgentCallout = function () {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("div", { className: "rw-assign-callout" }, [
+          h("span", { className: "rw-assign-callout-ic", "aria-hidden": "true" }, "⚠️"),
+          h("div", { className: "rw-assign-callout-body" }, [
+            h("span", { className: "rw-assign-callout-title" }, "No agents are set up for this project."),
+            " To assign one, open ",
+            h("span", { className: "rw-assign-callout-path" }, "Workspace Settings → Widget → Permissions"),
+            " and expose at least one agent, then try again.",
+          ]),
+        ]));
+      };
       var assignBtn = h("button", {
         className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
@@ -7171,7 +7212,7 @@
         assigning = true;
         assignBtn.disabled = true;
         assignBtn.textContent = "Assigning…";
-        assignErrEl.textContent = "";
+        clearAssignMsg();
         assignTicketAgent(ticket.id).then(function (resp) {
           var status = resp && resp.outcome && resp.outcome.status;
           if (status === "assigned") {
@@ -7181,20 +7222,24 @@
               if (view !== "detail") return;
               renderDetailInto(card, freshData, false);
             }).catch(resetAssignBtn);
-          } else {
-            // Reached the server but it could not assign (no matching agent or
-            // a transient failure). Surface it and let the user retry.
+          } else if (status === "skipped_no_agent") {
+            // Terminal: the project has no exposed agent for the picker to
+            // choose. Retrying won't help until an operator exposes one, so
+            // guide them there instead of a bare red line.
             resetAssignBtn();
-            assignErrEl.textContent = status === "skipped_no_agent"
-              ? "No matching agent available"
-              : "Couldn't assign — try again";
+            showNoAgentCallout();
+          } else {
+            // Reached the server but a transient failure stopped the assign.
+            // Surface it and let the user retry.
+            resetAssignBtn();
+            showAssignError("Couldn't assign — try again");
           }
         }).catch(function (err) {
           resetAssignBtn();
-          assignErrEl.textContent =
+          showAssignError(
             (err && err.status === 409) ? "Already assigned"
             : (err && err.status === 403) ? "Not authorized"
-            : "Couldn't assign — try again";
+            : "Couldn't assign — try again");
         });
       });
       // Non-technical framing: state plainly that nobody is on the task yet,
@@ -7206,7 +7251,7 @@
       }, "No agent is working on this task yet.");
       var assignGroup = h("div", {
         style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
-      }, [assignNote, assignBtn, assignErrEl]);
+      }, [assignNote, assignBtn, assignMsgEl]);
       staffActionEls.push(assignGroup);
     }
 
