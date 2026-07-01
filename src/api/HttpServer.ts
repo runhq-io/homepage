@@ -62,7 +62,7 @@ import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions, widgetProjects } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, widgetProjects, widgetUsers, widgetUserBalances, widgetUserNotifications, pointGrants, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions } from '../db/schema';
 import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
 import { serializeNotification } from '../notifications/serialize';
 import { getOrCreatePreferences } from '../notifications/gates';
@@ -70,6 +70,13 @@ import { insertNotificationWithDeliveries, deriveServerTokenActor } from '../not
 import { dispatchNotification } from '../notifications/dispatch';
 import { broadcastToUser } from '../notifications/wsBroadcast';
 import { wsServer as getWsServer } from '../notifications/wsRegistry';
+import { CommunityPointsError } from './services/CommunityPointsService';
+import { type SortKey } from './services/CommunityLeaderboardService';
+import {
+  communityPointsService,
+  communityNotificationService,
+  communityLeaderboardService,
+} from './services/communityServices';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -5019,6 +5026,70 @@ export function createHttpApp() {
 
   const taskAttachmentStorage = new TaskAttachmentStorageService();
 
+  // ============================================================================
+  // Community Channel Points
+  // ============================================================================
+  //
+  // Service instances are shared singletons (see ./services/communityServices),
+  // wired to real WS topic delivery via communityBroadcaster. The same instances
+  // back the canonical awarding path in WorkspaceTaskService.
+
+  // ============================================================================
+  // Community helpers
+  // ============================================================================
+
+  /**
+   * Thrown by community route helpers when auth fails.
+   * Caught by callers via `try/catch` to produce the correct HTTP response.
+   */
+  class CommunityAuthError extends Error {
+    constructor(
+      public readonly status: 401 | 403 | 404,
+      message: string,
+    ) {
+      super(message);
+      this.name = 'CommunityAuthError';
+    }
+  }
+
+  /**
+   * Authenticate a signed community / widget session.
+   * Returns the session when widgetUserId is present; throws CommunityAuthError(401) otherwise.
+   */
+  async function requireWidgetSession(c: any): Promise<{ widgetUserId: string; projectId: string; projectSlug: string; authenticated: boolean }> {
+    const session = await WidgetService.authenticateWidget(c.req);
+    if (!session?.widgetUserId) {
+      throw new CommunityAuthError(401, 'unauthenticated');
+    }
+    return session as { widgetUserId: string; projectId: string; projectSlug: string; authenticated: boolean };
+  }
+
+  /**
+   * Verify that the calling cloud user is an admin for the widget project in the URL.
+   * Returns { userId, project } on success; throws CommunityAuthError otherwise.
+   */
+  async function requireProjectAdmin(c: any): Promise<{ userId: string; project: typeof widgetProjects.$inferSelect }> {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      throw new CommunityAuthError(401, 'unauthorized');
+    }
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) {
+      throw new CommunityAuthError(401, 'unauthorized');
+    }
+    const projectId = c.req.param('projectId');
+    const [project] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId)).limit(1);
+    if (!project) {
+      throw new CommunityAuthError(404, 'project not found');
+    }
+    // Cloud-op check: owner or is_admin mirror (local BE check, survives workspace outage).
+    const isAdmin = await ServerService.checkCloudOpPermission(project.serverId, userId);
+    if (!isAdmin) {
+      throw new CommunityAuthError(403, 'forbidden');
+    }
+    return { userId, project };
+  }
+
   async function requireAuthenticatedUser(c: any): Promise<string | null> {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return null;
@@ -6102,6 +6173,25 @@ export function createHttpApp() {
     }
   });
 
+  // Authoritative close-state for ONE conversation (addressed by id). The
+  // widget's post-ticket closed-watch polls this instead of /conversations/active
+  // (which hides ticket-linked conversations) so a conversation the BE keeps
+  // open — e.g. it still holds an unresolved proposal from a multi-ticket
+  // intake — is not mistaken for closed.
+  app.get('/api/widget/chat/conversations/:id/status', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const status = await WidgetChatService.getConversationStatus(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions,
+      );
+      return c.json({ status });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
   // Send a user message → triggers a workspace turn.
   app.post('/api/widget/chat/conversations/:id/messages', async (c) => {
     const gate = await requireChatUser(c);
@@ -6439,6 +6529,11 @@ export function createHttpApp() {
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Board visibility is a widget permission (`view_tickets`). A role without
+    // it sees an empty board — kept as a 200 empty list (not a 403) so the
+    // widget UI degrades gracefully. Default roles grant it, so this is a no-op
+    // for uncustomized projects.
+    if (!auth.permissions.has('view_tickets')) return c.json([]);
     const result = await WidgetService.listTickets(auth.projectId, auth.widgetUserId);
     return c.json(result);
   });
@@ -6616,6 +6711,7 @@ export function createHttpApp() {
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('ticket_creator')) return c.json({ error: 'ticket_creator_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
     if (limited) return limited;
     try {
@@ -6882,6 +6978,7 @@ export function createHttpApp() {
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('voter')) return c.json({ error: 'voter_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
     if (limited) return limited;
     try {
@@ -6896,6 +6993,7 @@ export function createHttpApp() {
   app.delete('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('voter')) return c.json({ error: 'voter_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
     if (limited) return limited;
     try {
@@ -7414,16 +7512,19 @@ export function createHttpApp() {
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const memberId = c.req.param('memberId');
+    // `permissionTier` is the wire field name (retained for stability); its
+    // value is now a widget role key validated against the project's roles.
     const { serverId, projectId, permissionTier } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const lookup = parseWidgetLookup(projectId);
     if (!lookup) return c.json({ error: 'projectId required' }, 400);
-    if (!WidgetService.isWidgetPermissionTier(permissionTier)) {
-      return c.json({ error: 'invalid permissionTier' }, 400);
+    if (typeof permissionTier !== 'string' || !permissionTier) {
+      return c.json({ error: 'role required' }, 400);
     }
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const result = await WidgetService.updateWidgetMemberTier(serverId, lookup, memberId, permissionTier);
+    const result = await WidgetService.updateWidgetMemberRole(serverId, lookup, memberId, permissionTier);
     if (result === 'no_project') return c.json({ error: 'widget not found' }, 404);
+    if (result === 'invalid_role') return c.json({ error: 'invalid role' }, 400);
     if (result === 'not_found') return c.json({ error: 'member not found' }, 404);
     return c.json({ success: true });
   });
@@ -7520,6 +7621,270 @@ export function createHttpApp() {
 
   // Legacy sync endpoints (unsynced, mark-synced, status) removed —
   // workspace_tasks is now the single source of truth.
+
+  // ============================================================================
+  // Task 8: Staff / project-admin routes
+  // ============================================================================
+
+  // GET /api/community/:projectId/members — paginated leaderboard
+  app.get('/api/community/:projectId/members', async (c) => {
+    try { await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const projectId = c.req.param('projectId');
+    const sort = (c.req.query('sort') ?? 'rank') as SortKey;
+    const limit = Math.min(Number(c.req.query('limit') ?? 50), 100);
+    const cursor = c.req.query('cursor');
+    const result = await communityLeaderboardService.listMembers({ projectId, sort, limit, cursor });
+    return c.json(result);
+  });
+
+  // GET /api/community/:projectId/members/:widgetUserId — member detail
+  app.get('/api/community/:projectId/members/:widgetUserId', async (c) => {
+    try { await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const projectId = c.req.param('projectId');
+    const widgetUserId = c.req.param('widgetUserId');
+    try {
+      const result = await communityLeaderboardService.getMember({ projectId, widgetUserId });
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Member not found') {
+        return c.json({ error: 'member not found' }, 404);
+      }
+      throw err;
+    }
+  });
+
+  // POST /api/community/:projectId/members/:widgetUserId/grants — award bonus points
+  app.post('/api/community/:projectId/members/:widgetUserId/grants', async (c) => {
+    let adminCtx: { userId: string; project: typeof widgetProjects.$inferSelect };
+    try { adminCtx = await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const { userId } = adminCtx;
+    const projectId = c.req.param('projectId');
+    const widgetUserId = c.req.param('widgetUserId');
+    const body = await c.req.json<{ amount: number; reason: string; reasonCode?: string; idempotencyKey: string }>();
+
+    if (typeof body.amount !== 'number' || !Number.isInteger(body.amount) || body.amount === 0 || Math.abs(body.amount) > 10000) {
+      return c.json({ error: 'amount must be a non-zero integer with |amount| <= 10000' }, 400);
+    }
+    if (!body.reason?.trim()) return c.json({ error: 'reason is required' }, 400);
+    if (!body.idempotencyKey) return c.json({ error: 'idempotencyKey is required' }, 400);
+
+    try {
+      const result = await communityPointsService.grantBonus({
+        projectId,
+        widgetUserId,
+        amount: body.amount,
+        reason: body.reason.trim(),
+        reasonCode: body.reasonCode,
+        grantedByUserId: userId,
+        clientRequestId: body.idempotencyKey,
+      });
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof CommunityPointsError && err.code === 'cross_tenant_user') {
+        return c.json({ error: 'widget user does not belong to this project' }, 400);
+      }
+      throw err;
+    }
+  });
+
+  // POST /api/community/:projectId/grants/:grantId/reversals — reverse a prior grant
+  app.post('/api/community/:projectId/grants/:grantId/reversals', async (c) => {
+    let adminCtx: { userId: string; project: typeof widgetProjects.$inferSelect };
+    try { adminCtx = await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const { userId } = adminCtx;
+    const projectId = c.req.param('projectId');
+    const grantId = c.req.param('grantId');
+    const body = await c.req.json<{ reason: string; idempotencyKey: string }>();
+    if (!body.reason?.trim()) return c.json({ error: 'reason is required' }, 400);
+    if (!body.idempotencyKey) return c.json({ error: 'idempotencyKey is required' }, 400);
+
+    try {
+      const result = await communityPointsService.reverseGrant({
+        projectId,
+        grantId,
+        reason: body.reason.trim(),
+        grantedByUserId: userId,
+        clientRequestId: body.idempotencyKey,
+      });
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof CommunityPointsError) {
+        switch (err.code) {
+          case 'grant_not_found':
+            return c.json({ error: 'grant not found' }, 404);
+          case 'cannot_reverse_reversal':
+            return c.json({ error: 'cannot reverse a reversal' }, 400);
+          case 'cross_tenant_grant':
+            return c.json({ error: 'grant does not belong to this project' }, 400);
+        }
+      }
+      throw err;
+    }
+  });
+
+  // DELETE /api/community/:projectId/members/:widgetUserId — soft-erase a member (GDPR)
+  app.delete('/api/community/:projectId/members/:widgetUserId', async (c) => {
+    try { await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const widgetUserId = c.req.param('widgetUserId');
+    await db
+      .update(widgetUsers)
+      .set({ status: 'deleted', name: '[deleted user]', username: null, avatarUrl: null })
+      .where(eq(widgetUsers.id, widgetUserId));
+    return c.json({ ok: true });
+  });
+
+  // GET /api/community/:projectId/members/:widgetUserId/export — data export (admin OR self)
+  app.get('/api/community/:projectId/members/:widgetUserId/export', async (c) => {
+    const projectId = c.req.param('projectId');
+    const widgetUserId = c.req.param('widgetUserId');
+
+    let authorized = false;
+    try {
+      await requireProjectAdmin(c);
+      authorized = true;
+    } catch (e) {
+      if (!(e instanceof CommunityAuthError)) throw e;
+      // Not an admin — check if the calling widget user is the subject.
+      try {
+        const session = await WidgetService.authenticateWidget(c.req);
+        if (session?.widgetUserId === widgetUserId) authorized = true;
+      } catch { /* fall through */ }
+    }
+    if (!authorized) return c.json({ error: 'forbidden' }, 403);
+
+    const [member] = await db.select().from(widgetUsers).where(eq(widgetUsers.id, widgetUserId));
+    if (!member || member.projectId !== projectId) return c.json({ error: 'member not found' }, 404);
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.widgetUserId, widgetUserId));
+    const notifications = await db.select().from(widgetUserNotifications).where(eq(widgetUserNotifications.widgetUserId, widgetUserId));
+    return c.json({ member, grants, notifications });
+  });
+
+  // ============================================================================
+  // Task 9: Widget user community routes
+  // ============================================================================
+
+  // GET /api/widget/me/community — calling widget user's rank, balance, and unread count
+  app.get('/api/widget/me/community', async (c) => {
+    let session: { widgetUserId: string; projectId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const { widgetUserId, projectId } = session;
+    const [bal] = await db
+      .select()
+      .from(widgetUserBalances)
+      .where(eq(widgetUserBalances.widgetUserId, widgetUserId));
+    const [countRow] = await db
+      .select({ totalMembers: sql<number>`count(*)::int` })
+      .from(widgetUsers)
+      .where(and(eq(widgetUsers.projectId, projectId), eq(widgetUsers.status, 'active')));
+    const unreadNotificationCount = await communityNotificationService.unreadCount(widgetUserId);
+
+    // Per-ticket earned coin for the calling user — drives the widget's per-post
+    // "+N 🪙" chip and its hover "why" tooltip. Grouped from this user's own
+    // step-advance grants; reasons ordered by lifecycle tier.
+    const grantRows = await db
+      .select({
+        ticketId: pointGrants.ticketId,
+        amount: pointGrants.amount,
+        reason: pointGrants.reason,
+        metadata: pointGrants.metadata,
+      })
+      .from(pointGrants)
+      .where(and(
+        eq(pointGrants.widgetUserId, widgetUserId),
+        eq(pointGrants.source, 'step_advance'),
+        isNotNull(pointGrants.ticketId),
+      ));
+
+    const TIER_ORD: Record<string, number> = { in_progress: 1, reviewed: 2, merged: 3, deployed: 4 };
+    const coinByTicket: Record<string, { coin: number; reasons: string[] }> = {};
+    for (const g of grantRows) {
+      const tid = g.ticketId;
+      if (!tid) continue;
+      const entry = coinByTicket[tid] ?? (coinByTicket[tid] = { coin: 0, reasons: [] });
+      entry.coin += g.amount;
+      const tier = (g.metadata as { tier?: string } | null)?.tier ?? '';
+      // Stash ordinal alongside the reason so we can order reasons by tier below.
+      entry.reasons.push(JSON.stringify({ o: TIER_ORD[tier] ?? 99, r: g.reason ?? '' }));
+    }
+    for (const tid of Object.keys(coinByTicket)) {
+      coinByTicket[tid]!.reasons = coinByTicket[tid]!.reasons
+        .map((s) => JSON.parse(s) as { o: number; r: string })
+        .sort((a, b) => a.o - b.o)
+        .map((x) => x.r);
+    }
+
+    return c.json({
+      widgetUserId,
+      rank: bal?.rank ?? null,
+      totalMembers: countRow?.totalMembers ?? 0,
+      balance: bal?.balance ?? 0,
+      payoutsCount: bal?.payoutsCount ?? 0,
+      unreadNotificationCount,
+      coinByTicket,
+    });
+  });
+
+  // GET /api/widget/notifications — paginated notification list for calling widget user
+  app.get('/api/widget/notifications', async (c) => {
+    let session: { widgetUserId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const limit = Math.min(Number(c.req.query('limit') ?? 25), 100);
+    const cursor = c.req.query('cursor');
+    const result = await communityNotificationService.list({ widgetUserId: session.widgetUserId, limit, cursor });
+    return c.json(result);
+  });
+
+  // POST /api/widget/notifications/:id/read — mark a single notification as read
+  app.post('/api/widget/notifications/:id/read', async (c) => {
+    let session: { widgetUserId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const notificationId = c.req.param('id');
+    try {
+      await communityNotificationService.markRead({ widgetUserId: session.widgetUserId, notificationId });
+      return c.json({ ok: true });
+    } catch (err) {
+      if (err instanceof Error) {
+        if (err.message === 'Notification not found') return c.json({ error: 'not found' }, 404);
+        if (err.message === 'Forbidden') return c.json({ error: 'forbidden' }, 403);
+      }
+      throw err;
+    }
+  });
+
+  // POST /api/widget/notifications/read-all — mark all of the calling user's notifications as read
+  app.post('/api/widget/notifications/read-all', async (c) => {
+    let session: { widgetUserId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const result = await communityNotificationService.markAllRead({ widgetUserId: session.widgetUserId });
+    return c.json(result);
+  });
 
   // ============================================================================
   // Notification REST endpoints

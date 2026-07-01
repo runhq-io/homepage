@@ -387,6 +387,27 @@ export async function getActiveConversation(
 }
 
 /**
+ * Authoritative close-state for ONE conversation, addressed by id. The widget's
+ * post-ticket "closed watch" needs this because getActiveConversation
+ * intentionally hides ticket-linked conversations (createdTaskId set), so it
+ * cannot answer "is THIS conversation still open?" — a ticketed conversation
+ * that the BE keeps open (e.g. it still holds an unresolved proposal from a
+ * multi-ticket intake) must not read as closed just because it stopped being
+ * the active intake thread. Scoped like the read paths: owner, or a live_coder
+ * viewer of a ticket-linked Live session. 404s (conversation_not_found) for
+ * anyone else — which the watch also treats as closed.
+ */
+export async function getConversationStatus(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetService.WidgetPermission>,
+): Promise<'active' | 'closed'> {
+  const conv = await getConversationForViewer(conversationId, projectId, widgetUserId, permissions);
+  return conv.status;
+}
+
+/**
  * Owner-scoped message listing. `after` = a message id cursor; only rows
  * strictly newer (by the canonical (created_at, id) order) are returned.
  * The comparison stays entirely in SQL: created_at has microsecond precision
@@ -1782,7 +1803,19 @@ export async function ingestTurnEvents(
       // "Assigned to …" (live repro 2026-06-07).
       if (turnDone && current.createdTaskId
         && (current.pendingTurnId === null || current.pendingTurnId === input.turnId)) {
-        updates.status = 'closed';
+        // ...UNLESS the conversation still holds an unresolved proposal. A
+        // multi-ticket intake (visitor asks the agent to file several tickets in
+        // one thread) files ticket #1, then the post-create turn proposes ticket
+        // #2 rather than a plain wrap-up. Closing here would orphan that fresh
+        // proposal: the [Create Ticket] card stays rendered but the conversation
+        // is closed, so acting on it fails — conversation_closed for the visitor,
+        // conversation_not_found for a staff member who opens the Live session
+        // (it reuses this same conversation, which they don't own). Stay open
+        // until every proposal is resolved; the next resolving turn closes it.
+        const pending = computePendingProposal(await loadAllMessages(input.conversationId));
+        if (!pending || !('noAction' in pending.resolution)) {
+          updates.status = 'closed';
+        }
       }
       await db
         .update(widgetChatConversations)

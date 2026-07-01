@@ -34,7 +34,7 @@
   var notifOutsideHandler = null;
 
   var isOpen = false;
-  var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
+  var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
   var theme = "light";
 
@@ -42,21 +42,28 @@
   var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
   var assignedTicketsCache = null; // /api/widget/tickets/assigned — live sessions the viewer assigned
+  // Community coin: the viewer's running total + per-post earnings, from
+  // /api/widget/me/community. Drives the header coin badge, the per-card "+N 🪙"
+  // chip, and its hover "why" tooltip. Refreshed on every panel open/refresh.
+  var communityStats = { identified: false, balance: 0, coinByTicket: {} };
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
   // Current authenticated user info, populated after auth via /api/widget/me.
   // Always present as an object so reads never throw — defaults to anonymous.
   var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
 
-  // Modal-shell view state. The shell is a centered card with three faces:
-  //   "home"   — Intercom-style landing: greeting + navigation cards into
-  //              chat (when configured), the Hot discussion list, and the
-  //              Latest Updates list. Every open lands here (see closePanel).
-  //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
+  // Modal-shell view state. The shell is a centered card with these faces:
+  //   "list"   — the landing view: the discussion board (Hot / Updates / My
+  //              Submissions tabs + [+ New post], which opens chat). Every
+  //              open lands here on the Hot tab (see closePanel reset).
+  //   "chat"   — the agent conversation (opened from [+ New post]).
   //   "detail" — full-width ticket detail with a "Back to activity" button.
+  //   "home"   — legacy Intercom-style menu (greeting + navigation cards).
+  //              Retired from the flow but kept for possible re-use; no
+  //              navigation path lands here anymore.
   // Switching between faces re-renders the card body in place; the launcher
   // tab and outer modal chrome stay mounted so we don't pay a remount cost.
-  var view = "home";
+  var view = "list";
   var currentDetailTicket = null;
 
   // Polling interval handle for the ticket detail view.
@@ -277,6 +284,7 @@
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
   function loadAssignedTickets()  { return api("/api/widget/tickets/assigned"); }
+  function loadCommunityStats()   { return api("/api/widget/me/community"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
     // Capture the project's deploy-env map from any detail load so status chips
     // resolve "deployed:<envId>" → "Deployed → <name>" even on the public page
@@ -341,6 +349,12 @@
   }
   function chatLoadActive() {
     return api("/api/widget/chat/conversations/active");
+  }
+  // Authoritative close-state for a SPECIFIC conversation by id. Unlike
+  // /conversations/active (intake-only — hides ticket-linked threads), this
+  // answers "is THIS conversation still open?" even after it produced a ticket.
+  function chatLoadStatus(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/status");
   }
   function chatLoadMessages(conversationId, afterCursor) {
     var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
@@ -1989,6 +2003,7 @@
       '  --rw-line: rgba(0,0,0,0.07); --rw-line-2: rgba(0,0,0,0.13);',
       '  --rw-fg: #0a0a0a; --rw-fg-2: #3f3f46; --rw-muted: #71717a; --rw-muted-2: #a1a1aa;',
       '  --rw-accent: #6366f1; --rw-accent-ink: #ffffff;',
+      '  --rw-warn: #b45309; --rw-warn-line: #f59e0b;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
       /* Warm charcoal dark — matches dashboard.css. */
@@ -1997,6 +2012,7 @@
       '  --rw-line: rgba(255,243,219,0.08); --rw-line-2: rgba(255,243,219,0.14);',
       '  --rw-fg: #f0e9d9; --rw-fg-2: #c8c0ad; --rw-muted: #8e8676; --rw-muted-2: #6e6759;',
       '  --rw-accent: #818cf8; --rw-accent-ink: #1f1a14;',
+      '  --rw-warn: #fbbf24; --rw-warn-line: #d97706;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
 
@@ -2265,8 +2281,8 @@
       /* widget shell — fixed full-viewport scrim layer. Pinned to the top of
          the stage; the launcher tab still sits at the screen edge as before.
          The card inside is absolutely positioned (not flex-centered) so every
-         geometry property is a transitionable length — that is what lets the
-         compact↔expanded morph animate (see .rw-compact below). */
+         geometry property is a transitionable length — that is what lets
+         in-panel navigation (home ↔ list ↔ chat) morph smoothly. */
       '.rw-shell-scrim {',
       '  position: fixed; inset: 0;',
       '  background: rgba(20,16,12,0.55);',
@@ -2307,27 +2323,6 @@
       '  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, transform .25s ease;',
       '}',
 
-      /* Compact corner panel (home + chat views). The scrim element stays
-         mounted (it is widgetEl, the open/close fade carrier) but goes fully
-         transparent AND click-transparent: the host page stays visible and
-         interactive, Intercom-style — outside clicks land on the page and do
-         NOT close the panel. Only the card itself accepts events. */
-      '.rw-shell-scrim.rw-compact {',
-      '  background: transparent;',
-      '  -webkit-backdrop-filter: none; backdrop-filter: none;',
-      '}',
-      '.rw-shell-scrim.rw-compact.rw-open { pointer-events: none; }',
-      /* Corner anchor, adjacent to the launcher edge: 20px inset from the
-         bottom + configured side. translate(-100%) is relative to the
-         panel\'s own box, so these are the same transitionable properties
-         the expanded state sets — the morph animates between them. */
-      '.rw-shell-scrim.rw-compact .rw-shell {',
-      '  top: 100%; left: ' + (isRight ? "100%" : "20px") + ';',
-      '  transform: translate(' + (isRight ? "calc(-100% - 20px)" : "0px") + ', calc(-100% - 20px));',
-      '  width: 400px;',
-      '  height: min(704px, calc(100vh - 40px));',
-      '  min-height: 0;',
-      '}',
       '@media (prefers-reduced-motion: reduce) {',
       '  .rw-shell-scrim.rw-open { transition: opacity .18s ease; }',
       '  .rw-shell-scrim.rw-open .rw-shell { transition: none; }',
@@ -2335,11 +2330,10 @@
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
-         browsers that don't parse dvh. The selector list also outguns the
-         compact rules above (mobile keeps one near-full-screen layout in
-         BOTH modes). */
+         browsers that don't parse dvh. Mobile keeps one near-full-screen
+         layout for every view. */
       '@media (max-width: 640px) {',
-      '  .rw-shell, .rw-shell-scrim.rw-compact .rw-shell {',
+      '  .rw-shell {',
       '    top: 0; left: 0; transform: none;',
       '    width: 100%; height: 100vh; height: 100dvh; min-height: 0;',
       '  }',
@@ -2713,15 +2707,52 @@
       '}',
       '.rw-home-btn:hover { color: var(--rw-fg); border-color: var(--rw-accent); }',
       '.rw-home-btn:active { transform: translateY(1px); }',
-      /* Slim list-view topbar hosting the back-to-home control. The split
-         layout below it is untouched — Home is a layer above the dashboard.
-         Right padding keeps clear of the absolute-positioned shell actions. */
+      /* Slim list-view topbar hosting the board title (the discussion board is
+         the widget's landing view). Right padding keeps the title clear of the
+         absolute-positioned shell actions (bell / theme / close). */
+      '.rw-list-title {',
+      '  font-size: 15px; font-weight: 600; color: var(--rw-fg);',
+      '  letter-spacing: -0.01em;',
+      '}',
       '.rw-list-topbar {',
       '  display: flex; align-items: center;',
-      '  padding: 14px 80px 10px 22px;',
+      /* Right padding clears the absolute shell actions (bell/theme/close reach',
+      '     ~110px from the edge) so the right-aligned coin total never overlaps them. */
+      '  padding: 14px 120px 10px 22px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '  flex: 0 0 auto;',
       '}',
+
+      /* Community coin — blatant header total + per-post earned chip + why tooltip. */
+      '.rw-coin-total {',
+      '  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;',
+      '  padding: 4px 10px; border-radius: 999px; white-space: nowrap;',
+      '  background: color-mix(in srgb, var(--rw-accent) 14%, transparent);',
+      '  color: var(--rw-accent); font-weight: 700; font-size: 13px;',
+      '}',
+      /* Zero balance: present but quiet — discoverable, not shouty. */
+      '.rw-coin-total--zero {',
+      '  background: color-mix(in srgb, var(--rw-fg) 7%, transparent);',
+      '  color: color-mix(in srgb, var(--rw-fg) 55%, transparent); font-weight: 600;',
+      '}',
+      '.rw-coin-glyph { font-size: 13px; line-height: 1; }',
+      '.rw-coin-chip {',
+      '  position: relative; align-self: flex-start;',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  margin-top: 8px; padding: 2px 8px; border-radius: 999px;',
+      '  background: color-mix(in srgb, var(--rw-accent) 12%, transparent);',
+      '  color: var(--rw-accent); font-weight: 600; font-size: 12px; cursor: default;',
+      '}',
+      '.rw-coin-tip {',
+      '  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;',
+      '  width: max-content; max-width: 260px; padding: 8px 10px; border-radius: 8px;',
+      '  background: var(--rw-fg); color: var(--rw-bg); text-align: left;',
+      '  font-size: 12px; font-weight: 500; line-height: 1.4;',
+      '  box-shadow: 0 6px 20px rgba(0,0,0,0.25); white-space: normal; pointer-events: none;',
+      '}',
+      '.rw-coin-tip-head { display: block; font-weight: 700; margin-bottom: 4px; }',
+      '.rw-coin-tip ul { margin: 0; padding-left: 16px; }',
+      '.rw-coin-tip li { margin: 2px 0; }',
 
       /* header */
       '.rw-hdr {',
@@ -3910,6 +3941,22 @@
       '}',
       '.rw-staff-btn--ghost:not(:disabled):hover { background: color-mix(in oklab, var(--rw-accent) 10%, var(--rw-bg)); border-color: var(--rw-accent); }',
 
+      /* Assign-agent feedback. A transient failure stays a small red line
+         (`.rw-assign-err`); the terminal "no agent is set up for this project"
+         case gets an amber callout that names the root cause and the exact
+         settings path to fix it — staff kept missing the bare red string. */
+      '.rw-assign-callout {',
+      '  display: flex; align-items: flex-start; gap: 8px; width: 100%;',
+      '  margin-top: 1px; padding: 9px 11px; border-radius: 9px;',
+      '  background: color-mix(in oklab, var(--rw-warn-line) 12%, var(--rw-panel));',
+      '  border: 1px solid color-mix(in oklab, var(--rw-warn-line) 34%, var(--rw-line-2));',
+      '  border-left: 3px solid var(--rw-warn-line);',
+      '}',
+      '.rw-assign-callout-ic { flex: 0 0 auto; font-size: 14px; line-height: 1.35; }',
+      '.rw-assign-callout-body { font-size: 12.5px; line-height: 1.45; color: var(--rw-fg-2); }',
+      '.rw-assign-callout-title { font-weight: 700; color: var(--rw-warn); }',
+      '.rw-assign-callout-path { font-weight: 600; color: var(--rw-fg); white-space: nowrap; }',
+
       /* "Created from a conversation" — collapsed transcript section on the
          ticket detail for tickets born from chat. Reporter-only by
          construction (the chat API is owner-scoped). */
@@ -4275,6 +4322,61 @@
   // Ticket card
   // ===========================================================================
 
+  // Compact number for the coin total (e.g. 1234 → "1,234"). Coin accrues one
+  // per lifecycle step, so totals stay small — a thousands separator is plenty.
+  function formatCoin(n) {
+    try { return Number(n).toLocaleString(); } catch (e) { return String(n); }
+  }
+
+  // Header coin total — ALWAYS shown for an identified viewer (blatant, per spec),
+  // even at zero, so the reward system is discoverable before the first coin. The
+  // tooltip explains how to earn while the balance is still 0. Hidden only for
+  // anonymous viewers, who have no community identity to score.
+  function renderCoinTotalBadge() {
+    if (!communityStats || !communityStats.identified) return null;
+    var bal = communityStats.balance || 0;
+    var label = bal > 0
+      ? "You've earned " + formatCoin(bal) + " coin from feedback you submitted or upvoted"
+      : "Earn coin when feedback you submit or upvote moves forward";
+    return h("span", {
+      className: "rw-coin-total" + (bal > 0 ? "" : " rw-coin-total--zero"),
+      title: label, "aria-label": label,
+    }, [
+      h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
+      h("span", null, formatCoin(bal)),
+    ]);
+  }
+
+  // Per-post "+N 🪙" chip with a hover tooltip explaining why the viewer earned
+  // it (e.g. "you upvoted this and it reached Merged"). `earned` is the
+  // coinByTicket[ticketId] entry: { coin, reasons }.
+  function renderCoinChip(earned) {
+    var reasons = (earned && earned.reasons) || [];
+    var chip = h("span", {
+      className: "rw-coin-chip",
+      "aria-label": "You earned " + earned.coin + " coin from this post. " + reasons.join(". "),
+    }, [
+      h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
+      h("span", null, "+" + earned.coin),
+    ]);
+    var tip = null;
+    function show() {
+      if (tip) return;
+      var items = reasons.length
+        ? reasons.map(function (r) { return h("li", null, r); })
+        : [h("li", null, "You helped this post make progress")];
+      tip = h("span", { className: "rw-coin-tip" }, [
+        h("span", { className: "rw-coin-tip-head" }, "Why you earned coin"),
+        h("ul", null, items),
+      ]);
+      chip.appendChild(tip);
+    }
+    function hide() { if (tip && tip.parentNode) { tip.parentNode.removeChild(tip); } tip = null; }
+    chip.addEventListener("mouseenter", show);
+    chip.addEventListener("mouseleave", hide);
+    return chip;
+  }
+
   function renderTicketCard(ticket, opts) {
     var hideStatus = !!(opts && opts.hideStatus);
     var voted = ticket.userVote === true;
@@ -4336,6 +4438,13 @@
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
+    // Per-post coin the viewer earned from this ticket ("if relevant" — only
+    // when they created/upvoted it and it advanced). Hover explains why.
+    var earned = communityStats.coinByTicket && communityStats.coinByTicket[ticket.id];
+    if (earned && earned.coin) {
+      mainChildren.push(renderCoinChip(earned));
+    }
+
     var row = h("button", {
       className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
       "aria-label": (unseen ? "New activity — " : "") + t("aria.openTicket", { title: ticket.title }),
@@ -4386,13 +4495,15 @@
       return btn;
     });
 
-    // [+ New post] sits on the tab row's right — the single message-entry
-    // affordance now that the inline composer left the list view.
+    // [+ New post] sits on the tab row's right. It now launches the agent chat
+    // (a guided, conversational way to file a ticket — the same surface as
+    // Home's chat card) rather than the direct compose form. goCompose /
+    // renderInlineComposer stay defined but unwired, kept for possible re-use.
     var newPostBtn = h("button", { className: "rw-new-post-btn", type: "button" }, [
       Icons.plus(13),
       h("span", null, t("compose.newPost")),
     ]);
-    newPostBtn.addEventListener("click", goCompose);
+    newPostBtn.addEventListener("click", openChat);
 
     return h("div", { className: "rw-dash-tabs" }, [
       h("div", { className: "rw-dash-tabs-row", role: "tablist" }, tabButtons),
@@ -4900,17 +5011,16 @@
   }
 
   // -----------------------------------------------------------------------
-  // Shell mode. Home, chat + compose live in a compact corner panel
-  // (Intercom-style); list + detail keep the large centered modal. The class lands on widgetEl
-  // (the scrim) so one toggle drives both the scrim treatment and the panel
-  // geometry. Synced from openPanel — BEFORE rw-open, so the very first
-  // paint is already in the right mode, including deep-link opens that
-  // pre-set view = "list" — and from renderPanelBody, which every in-panel
-  // navigation funnels through. closePanel deliberately does NOT re-sync
-  // (its view reset would snap the still-fading-out card to compact).
+  // Shell mode. Every view — home, chat, list, detail — renders in the same
+  // large centered modal over a full scrim overlay. The old Intercom-style
+  // compact corner panel (home/chat/compose) has been removed, so no view is
+  // ever compact. applyShellMode stays as the single funnel that keeps the
+  // scrim class in sync (belt-and-braces: it strips any stray rw-compact),
+  // called from openPanel — BEFORE rw-open, so the first paint is correct —
+  // and from renderPanelBody, which every in-panel navigation funnels through.
   // -----------------------------------------------------------------------
 
-  function isCompactView(v) { return v === "home" || v === "chat" || v === "compose"; }
+  function isCompactView(_v) { return false; }
 
   function applyShellMode() {
     if (!widgetEl) return;
@@ -4999,13 +5109,17 @@
     } else if (view === "chat") {
       scrollEl.appendChild(renderChatViewShell());
     } else {
-      // Slim topbar with the back-to-home control. Home is a layer above
-      // the dashboard — the split layout below is untouched.
-      var listHomeBtn = h("button", {
-        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
-      }, [Icons.arrowLeft(13), h("span", null, t("home.back"))]);
-      listHomeBtn.addEventListener("click", goHome);
-      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [listHomeBtn]));
+      // The discussion board is the widget's landing view, so its slim topbar
+      // holds the board title (not a back-to-home control — Home was retired
+      // from the flow). The right padding on .rw-list-topbar keeps the title
+      // clear of the absolute-positioned shell actions (bell / theme / close).
+      var boardTitle = config.projectName
+        ? t("header.feedback", { name: config.projectName })
+        : t("home.greeting");
+      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [
+        h("span", { className: "rw-list-title" }, boardTitle),
+        renderCoinTotalBadge(),
+      ]));
 
       // Single full-width panel: tab bar (with [+ New post] on its right)
       // + list. The old left pane (intro copy, inline composer, Recent
@@ -5063,8 +5177,21 @@
     var assignedP = (config.isIdentified && viewerCanLiveCoder())
       ? loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () { assignedTicketsCache = []; })
       : Promise.resolve().then(function () { assignedTicketsCache = []; });
+    // Community coin — only meaningful for an identified viewer (the endpoint
+    // 401s for anonymous project keys). Chained on topP so config.isIdentified
+    // is known. Best-effort: coin UI is non-critical and must never block the list.
+    var commP = topP.then(function () {
+      if (!config.isIdentified) { communityStats = { identified: false, balance: 0, coinByTicket: {} }; return; }
+      return loadCommunityStats().then(function (data) {
+        communityStats = {
+          identified: true,
+          balance: (data && data.balance) || 0,
+          coinByTicket: (data && data.coinByTicket) || {},
+        };
+      }).catch(function () { communityStats = { identified: true, balance: 0, coinByTicket: {} }; });
+    }).catch(function () { communityStats = { identified: false, balance: 0, coinByTicket: {} }; });
 
-    return Promise.all([topP, updP, mineP, assignedP]).then(function () {
+    return Promise.all([topP, updP, mineP, assignedP, commP]).then(function () {
       renderPanelBody();
       refreshTabLabel();
     }).catch(function (err) {
@@ -5509,10 +5636,16 @@
     });
   }
 
-  // After a ticket is created the agent gets a wrap-up turn and the BE
-  // closes the conversation. Status changes don't stream as message rows,
-  // so watch GET /conversations/active until this conversation stops being
-  // the active one, then flip the footer to "Start new conversation".
+  // After a ticket is created the agent gets a wrap-up turn and the BE closes
+  // the conversation once it has nothing left to resolve. Status changes don't
+  // stream as message rows, so poll for closure.
+  //
+  // We poll THIS conversation's own status (by id), NOT /conversations/active:
+  // the moment a ticket is filed the conversation gains a createdTaskId, which
+  // getActiveConversation deliberately excludes (it only surfaces intake
+  // threads). A multi-ticket intake keeps the conversation open to host the
+  // next proposal — reading "am I still the active intake thread?" would report
+  // that (legitimately open) conversation as closed and hide the pending card.
   function startChatClosedWatch() {
     if (chatClosedWatchTimerId !== null) return;
     var conv = chatConversation;
@@ -5522,10 +5655,9 @@
         chatClosedWatchTimerId = null;
         return;
       }
-      chatLoadActive().then(function (data) {
+      chatLoadStatus(conv.id).then(function (data) {
         if (view !== "chat" || chatConversation !== conv) return;
-        var active = data && data.conversation;
-        if (!active || active.id !== conv.id || active.status === "closed") chatMarkClosed();
+        if (!data || data.status === "closed") chatMarkClosed();
       }).catch(function (err) {
         if (view !== "chat" || chatConversation !== conv) return;
         if (err && err.status === 404) chatMarkClosed();
@@ -5666,8 +5798,13 @@
     if (kind === "proposal") {
       // Only the latest unresolved proposal is actionable; older / resolved
       // proposals collapse (their outcome renders from proposal_resolved).
+      // Never actionable in a Live session: that surface is a staff-to-coder
+      // relay that REUSES the reporter's intake conversation (which the staff
+      // viewer doesn't own), so filing a ticket from it 404s. An unresolved
+      // intake proposal belongs to the reporter's own chat thread.
       if (activeProposal && activeProposal.id === row.id
-          && chatConversation && chatConversation.status === "active") {
+          && chatConversation && chatConversation.status === "active"
+          && !chatIsLiveSession) {
         return renderChatProposalCard(row);
       }
       return null;
@@ -6611,12 +6748,12 @@
           currentDetailTicket = savedLiveTicket;
           renderPanelBody();
         } else {
-          goHome();
+          goList();
         }
       } else {
-        // The Home screen (Plan 1) is live: back returns to the landing view
-        // the chat card came from.
-        goHome();
+        // Normal chat is reached from the discussion board's [+ New post], so
+        // back returns to that board (the widget's landing view).
+        goList();
       }
     });
 
@@ -7273,10 +7410,33 @@
     // suggest → assign tail; on success the detail re-fetches and this button
     // disappears (the ticket now shows its assigned agent + Live session).
     if (!loading && data.canAssign) {
-      var assignErrEl = h("span", {
-        className: "rw-assign-err",
-        style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+      // Feedback slot below the button. A transient failure renders as a small
+      // red line; the terminal "no agent is set up for this project" case
+      // renders an amber callout that names the cause and where to fix it.
+      var assignMsgEl = h("div", {
+        className: "rw-assign-msg",
+        style: { width: "100%" },
       }, "");
+      var clearAssignMsg = function () { assignMsgEl.textContent = ""; };
+      var showAssignError = function (text) {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("span", {
+          className: "rw-assign-err",
+          style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+        }, text));
+      };
+      var showNoAgentCallout = function () {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("div", { className: "rw-assign-callout" }, [
+          h("span", { className: "rw-assign-callout-ic", "aria-hidden": "true" }, "⚠️"),
+          h("div", { className: "rw-assign-callout-body" }, [
+            h("span", { className: "rw-assign-callout-title" }, "No agents are set up for this project."),
+            " To assign one, open ",
+            h("span", { className: "rw-assign-callout-path" }, "Workspace Settings → Widget → Permissions"),
+            " and expose at least one agent, then try again.",
+          ]),
+        ]));
+      };
       var assignBtn = h("button", {
         className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
@@ -7296,7 +7456,7 @@
         assigning = true;
         assignBtn.disabled = true;
         assignBtn.textContent = "Assigning…";
-        assignErrEl.textContent = "";
+        clearAssignMsg();
         assignTicketAgent(ticket.id).then(function (resp) {
           var status = resp && resp.outcome && resp.outcome.status;
           if (status === "assigned") {
@@ -7306,20 +7466,24 @@
               if (view !== "detail") return;
               renderDetailInto(card, freshData, false);
             }).catch(resetAssignBtn);
-          } else {
-            // Reached the server but it could not assign (no matching agent or
-            // a transient failure). Surface it and let the user retry.
+          } else if (status === "skipped_no_agent") {
+            // Terminal: the project has no exposed agent for the picker to
+            // choose. Retrying won't help until an operator exposes one, so
+            // guide them there instead of a bare red line.
             resetAssignBtn();
-            assignErrEl.textContent = status === "skipped_no_agent"
-              ? "No matching agent available"
-              : "Couldn't assign — try again";
+            showNoAgentCallout();
+          } else {
+            // Reached the server but a transient failure stopped the assign.
+            // Surface it and let the user retry.
+            resetAssignBtn();
+            showAssignError("Couldn't assign — try again");
           }
         }).catch(function (err) {
           resetAssignBtn();
-          assignErrEl.textContent =
+          showAssignError(
             (err && err.status === 409) ? "Already assigned"
             : (err && err.status === 403) ? "Not authorized"
-            : "Couldn't assign — try again";
+            : "Couldn't assign — try again");
         });
       });
       // Non-technical framing: state plainly that nobody is on the task yet,
@@ -7331,7 +7495,7 @@
       }, "No agent is working on this task yet.");
       var assignGroup = h("div", {
         style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
-      }, [assignNote, assignBtn, assignErrEl]);
+      }, [assignNote, assignBtn, assignMsgEl]);
       staffActionEls.push(assignGroup);
     }
 
@@ -8140,11 +8304,11 @@
     chatSubmitInFlight = false;
     detailReturnView = null;
     composeReturnView = "home";
-    // Reset the shell so re-opening lands on a fresh Home rather than
-    // wherever the user last left it (detail view, Hot tab, etc.).
-    view = "home";
+    // Reset the shell so re-opening lands on a fresh discussion board (Hot tab)
+    // rather than wherever the user last left it (detail view, chat, etc.).
+    view = "list";
     currentDetailTicket = null;
-    activeTab = "updates";
+    activeTab = "hot";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();
@@ -8501,6 +8665,11 @@
     // Create action (which posts to chatCreateTicket against the conversation).
     window._rwTestHooks._setChatConversation = function (conv) {
       chatConversation = conv;
+    };
+    // Toggle the live-session flag so a vm test can assert that intake proposal
+    // cards are non-actionable in the staff-to-coder relay surface.
+    window._rwTestHooks._setChatIsLiveSession = function (on) {
+      chatIsLiveSession = !!on;
     };
     // Unread-badge test helpers: expose the badge counter, the seen-marker, and
     // direct cache setters so vm tests can drive the full seen/unseen lifecycle

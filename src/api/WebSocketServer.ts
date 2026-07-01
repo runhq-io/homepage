@@ -6,6 +6,8 @@ import type {
   DesktopToCloudMessage,
   CloudToDesktopMessage,
   AuthMessage,
+  AuthWidgetMessage,
+  AuthWidgetResultMessage,
   ScreenshotMessage,
   ActionResultMessage,
   AuthResultMessage,
@@ -13,19 +15,30 @@ import type {
   StartAgentMessage,
   StopAgentMessage,
   SessionId,
-	} from '@runhq/server-protocol';
+} from '@runhq/server-protocol';
+import { verifyWidgetUserJwt } from './services/WidgetService';
 
 interface ConnectedClient {
   ws: WebSocket;
   sessionId: SessionId;
   tempSessionId: SessionId; // Server-generated ID used before auth
+  /**
+   * Session kind — discriminates between a native RunHQ user ('user') and
+   * an embedded widget user ('widget'). Defaults to 'user' on first auth.
+   */
+  kind: 'user' | 'widget';
   userId?: string;
+  // Widget-session fields (only set when kind === 'widget')
+  widgetUserId?: string;
+  widgetProjectId?: string;
   authenticated: boolean;
   lastHeartbeat: number;
   // Task subscriptions - which tasks this client is watching
   subscribedTasks: Set<string>;
   // Tasks this client is hosting (streaming from)
   hostedTasks: Set<string>;
+  // Generic topic subscriptions (e.g. community:{projectId})
+  subscribedTopics: Set<string>;
 }
 
 type MessageHandler = (client: ConnectedClient, message: DesktopToCloudMessage) => void;
@@ -38,6 +51,8 @@ export class RunHQWebSocketServer {
   private taskSubscribers: Map<string, Set<SessionId>> = new Map();
   // Task host tracking: taskId -> host client sessionId
   private taskHosts: Map<string, SessionId> = new Map();
+  // Generic topic subscription tracking: topic -> Set of client sessionIds
+  private topicSubscribers: Map<string, Set<SessionId>> = new Map();
 
   constructor(opts?: { port?: number; noServer?: boolean }) {
     if (opts?.noServer) {
@@ -69,10 +84,12 @@ export class RunHQWebSocketServer {
         ws,
         sessionId: tempSessionId, // Will be updated to client's sessionId after auth
         tempSessionId,
+        kind: 'user',
         authenticated: false,
         lastHeartbeat: Date.now(),
         subscribedTasks: new Set(),
         hostedTasks: new Set(),
+        subscribedTopics: new Set(),
       };
 
       // Store under temp ID initially - will be moved to client's sessionId after auth
@@ -96,6 +113,10 @@ export class RunHQWebSocketServer {
         // Clean up hosted tasks
         for (const taskId of client.hostedTasks) {
           this.taskHosts.delete(taskId);
+        }
+        // Clean up generic topic subscriptions
+        for (const topic of client.subscribedTopics) {
+          this.topicSubscribers.get(topic)?.delete(client.sessionId);
         }
         // Delete by actual sessionId (could be temp or client's sessionId after auth)
         this.clients.delete(client.sessionId);
@@ -136,6 +157,21 @@ export class RunHQWebSocketServer {
         console.error('[WebSocket] Auth handling error:', error);
         const authError: AuthResultMessage = {
           type: 'auth_result',
+          success: false,
+          error: 'Internal authentication error',
+          timestamp: Date.now(),
+        };
+        this.send(client, authError);
+      });
+      return;
+    }
+
+    // Handle widget authentication
+    if (message.type === 'auth_widget') {
+      this.handleWidgetAuth(client, message as AuthWidgetMessage).catch((error) => {
+        console.error('[WebSocket] Widget auth handling error:', error);
+        const authError: AuthWidgetResultMessage = {
+          type: 'auth_widget_result',
           success: false,
           error: 'Internal authentication error',
           timestamp: Date.now(),
@@ -238,6 +274,28 @@ export class RunHQWebSocketServer {
       success: !!userId,
       userId: client.userId,
       error: userId ? undefined : 'Invalid or expired token',
+      timestamp: Date.now(),
+    };
+    this.send(client, authResult);
+  }
+
+  private async handleWidgetAuth(client: ConnectedClient, message: AuthWidgetMessage): Promise<void> {
+    const result = await verifyWidgetUserJwt(message.token);
+
+    if (result?.widgetUserId) {
+      client.authenticated = true;
+      client.kind = 'widget';
+      client.widgetUserId = result.widgetUserId;
+      client.widgetProjectId = result.projectId;
+      console.log(`[WebSocket] Widget client authenticated: widgetUserId=${result.widgetUserId} project=${result.projectId}`);
+    }
+
+    const authResult: AuthWidgetResultMessage = {
+      type: 'auth_widget_result',
+      success: !!(result?.widgetUserId),
+      widgetUserId: result?.widgetUserId,
+      projectId: result?.projectId,
+      error: result?.widgetUserId ? undefined : 'Invalid or expired widget token',
       timestamp: Date.now(),
     };
     this.send(client, authResult);
@@ -383,6 +441,74 @@ export class RunHQWebSocketServer {
   isSubscribedToTask(clientSessionId: SessionId, taskId: string): boolean {
     const client = this.clients.get(clientSessionId);
     return client?.subscribedTasks.has(taskId) ?? false;
+  }
+
+  // ============================================================================
+  // Generic Topic Subscription Methods
+  // ============================================================================
+
+  /**
+   * Subscribe a client to a named topic (e.g. 'community:{projectId}').
+   * Returns false if the client is not found.
+   */
+  subscribeToTopic(clientSessionId: SessionId, topic: string): boolean {
+    const client = this.clients.get(clientSessionId);
+    if (!client) return false;
+
+    if (!this.topicSubscribers.has(topic)) {
+      this.topicSubscribers.set(topic, new Set());
+    }
+    this.topicSubscribers.get(topic)!.add(clientSessionId);
+    client.subscribedTopics.add(topic);
+
+    console.log(`[WebSocket] Client ${clientSessionId} subscribed to topic ${topic}`);
+    return true;
+  }
+
+  /**
+   * Unsubscribe a client from a named topic.
+   * Returns false if the client is not found.
+   */
+  unsubscribeFromTopic(clientSessionId: SessionId, topic: string): boolean {
+    const client = this.clients.get(clientSessionId);
+    if (!client) return false;
+
+    this.topicSubscribers.get(topic)?.delete(clientSessionId);
+    client.subscribedTopics.delete(topic);
+
+    console.log(`[WebSocket] Client ${clientSessionId} unsubscribed from topic ${topic}`);
+    return true;
+  }
+
+  /**
+   * Broadcast a message to all clients subscribed to the given topic.
+   * Optionally excludes the sender's session.
+   */
+  broadcastToTopic(topic: string, message: CloudToDesktopMessage, excludeSessionId?: SessionId): void {
+    const subscribers = this.topicSubscribers.get(topic);
+    if (!subscribers) return;
+
+    const data = JSON.stringify(message);
+    for (const sessionId of subscribers) {
+      if (sessionId === excludeSessionId) continue;
+
+      const client = this.clients.get(sessionId);
+      if (client && client.authenticated && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(data);
+      }
+    }
+  }
+
+  /**
+   * Get all clients currently subscribed to a topic.
+   */
+  getTopicSubscribers(topic: string): ConnectedClient[] {
+    const subscribers = this.topicSubscribers.get(topic);
+    if (!subscribers) return [];
+
+    return Array.from(subscribers)
+      .map(sessionId => this.clients.get(sessionId))
+      .filter((client): client is ConnectedClient => !!client);
   }
 
   /**

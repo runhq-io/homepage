@@ -6,6 +6,8 @@ import {
   workspaceTaskActivity,
   workspaceTaskAttachments,
   workspaceTaskVotes,
+  widgetProjects,
+  widgetUsers,
   type WorkspaceTask,
 } from '../../db/schema';
 import { emitTaskNotification, type NotificationActor } from '../../notifications/emitTaskNotification';
@@ -27,6 +29,9 @@ import type {
   CanonicalTaskStatus,
 } from '@runhq/server-protocol';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
+// Shared instance wired to real WS broadcasting (see communityServices/communityBroadcaster).
+// This is the single canonical awarding path: every task status update flows through updateTask.
+import { communityPointsService } from './communityServices';
 
 type CreateWorkspaceTaskInput = {
   workspaceProjectId?: string | null;
@@ -505,6 +510,12 @@ export async function updateTask(
     status: 'done' | 'reviewed' | 'merged';
   };
   let pendingEmit: PendingEmit | null = null;
+  // Community-points awarding payload, captured in-transaction and fired
+  // post-commit — same discipline as pendingEmit: best-effort, must never roll
+  // back the authoritative task-status update. This is the single canonical
+  // awarding path (every task status change flows through updateTask).
+  type PendingAward = { row: WorkspaceTask; oldStatus: string; newStatus: string };
+  let pendingAward: PendingAward | null = null;
 
   await db.transaction(async (tx) => {
     // Fetch the existing row for visibility comparison and status-transition detection.
@@ -560,6 +571,13 @@ export async function updateTask(
       .where(and(eq(workspaceTasks.serverId, serverId), eq(workspaceTasks.id, taskId)))
       .returning();
     if (!row) return;
+
+    // Capture a community-awarding payload on any real status transition.
+    // Eligibility (widget source, terminal-success, no double-award) is decided
+    // later by the awarding policy; here we only need the before/after statuses.
+    if (input.status !== undefined && existing.status !== row.status) {
+      pendingAward = { row, oldStatus: existing.status, newStatus: row.status };
+    }
 
     // Capture the data needed to emit a notification. We do NOT emit inside
     // this transaction: notification delivery is best-effort and must never
@@ -620,6 +638,16 @@ export async function updateTask(
       console.error('[WorkspaceTaskService] notification emit failed (task update preserved)', err);
     }
   }
+  // Fire community awarding AFTER the task-update transaction commits —
+  // best-effort, never blocks or rolls back the status update.
+  if (pendingAward) {
+    const award: PendingAward = pendingAward;
+    try {
+      await triggerCommunityAwarding(award.row, award.oldStatus, award.newStatus);
+    } catch (err) {
+      console.error('[WorkspaceTaskService] community awarding failed', { taskId, err });
+    }
+  }
 
   // If a notification was emitted, fetch the full row so the caller can ship
   // it down to clients (via the existing per-server WS) for sub-second push
@@ -641,6 +669,70 @@ export async function updateTask(
   }
 
   return { task: resultTask, notification: emittedNotification };
+}
+
+/**
+ * Resolves the data needed by CommunityPointsService.awardForStepAdvance and calls it.
+ *
+ * Community step-coins: the ticket creator and every external up-voter earn coin
+ * for each lifecycle tier this transition crosses. Widget-source tickets only.
+ *
+ * sourceType mapping: 'workspace' (DB) → 'native' (policy); 'widget' (DB) → 'widget'.
+ *
+ * creatorWidgetUserId: for widget tasks, workspace_tasks.createdById holds a
+ * widgetUsers.id UUID directly — passed through as the creator recipient.
+ *
+ * projectId resolution: workspace_tasks has no direct widgetProjectId. We resolve it
+ * from the creator's widgetUsers.projectId, falling back to widgetProjects by
+ * (serverId, channelId) for legacy tasks whose createdById no longer links a widget user.
+ */
+async function triggerCommunityAwarding(
+  row: WorkspaceTask,
+  oldStatus: string,
+  newStatus: string,
+): Promise<void> {
+  const sourceType: 'native' | 'widget' = row.sourceType === 'widget' ? 'widget' : 'native';
+  if (sourceType !== 'widget') return;
+
+  let projectId: string | null = null;
+  let creatorWidgetUserId: string | null = null;
+
+  if (row.createdById) {
+    // createdById for widget tasks is the widgetUsers.id UUID
+    const [widgetUser] = await db
+      .select({ id: widgetUsers.id, projectId: widgetUsers.projectId })
+      .from(widgetUsers)
+      .where(eq(widgetUsers.id, row.createdById))
+      .limit(1);
+    if (widgetUser) {
+      creatorWidgetUserId = widgetUser.id;
+      projectId = widgetUser.projectId;
+    }
+  }
+
+  // Fallback: derive project from serverId (+ channelId) when the creator link is missing.
+  if (!projectId) {
+    const conditions = [eq(widgetProjects.serverId, row.serverId)];
+    if (row.workspaceChannelId) {
+      conditions.push(eq(widgetProjects.channelId, row.workspaceChannelId));
+    }
+    const [project] = await db
+      .select({ id: widgetProjects.id })
+      .from(widgetProjects)
+      .where(and(...conditions))
+      .limit(1);
+    projectId = project?.id ?? null;
+  }
+  if (!projectId) return;
+
+  await communityPointsService.awardForStepAdvance({
+    ticketId: row.id,
+    projectId,
+    sourceType,
+    creatorWidgetUserId,
+    oldStatus,
+    newStatus,
+  });
 }
 
 export async function listComments(taskId: string): Promise<CanonicalTaskComment[]> {
