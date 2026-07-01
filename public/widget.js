@@ -2726,13 +2726,13 @@
       '  background: color-mix(in srgb, var(--rw-fg) 7%, transparent);',
       '  color: color-mix(in srgb, var(--rw-fg) 55%, transparent); font-weight: 600;',
       '}',
-      '.rw-coin-glyph { font-size: 13px; line-height: 1; }',
+      '.rw-coin-glyph { font-size: 1em; line-height: 1; }',
       '.rw-coin-chip {',
-      '  position: relative; align-self: flex-start;',
-      '  display: inline-flex; align-items: center; gap: 4px;',
-      '  margin-top: 8px; padding: 2px 8px; border-radius: 999px;',
+      '  position: relative;',
+      '  display: inline-flex; align-items: center; gap: 3px;',
+      '  padding: 1px 7px; border-radius: 999px;',
       '  background: color-mix(in srgb, var(--rw-accent) 12%, transparent);',
-      '  color: var(--rw-accent); font-weight: 600; font-size: 12px; cursor: default;',
+      '  color: var(--rw-accent); font-weight: 600; font-size: 11px; cursor: default;',
       '}',
       '.rw-coin-tip {',
       '  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;',
@@ -4414,6 +4414,15 @@
     if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
     metaChildren.push(h("span", { className: "rw-meta-when" }, timeAgo(ticket.completedAt || ticket.createdAt)));
 
+    // Per-post coin the viewer earned from this ticket ("if relevant" — only
+    // when they created/upvoted it and it advanced). Sits at the tail of the
+    // meta row; hovering the chip explains why.
+    var earned = communityStats.coinByTicket && communityStats.coinByTicket[ticket.id];
+    if (earned && earned.coin) {
+      metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      metaChildren.push(renderCoinChip(earned));
+    }
+
     // "Needs your attention" marker — a dot on the title + a highlighted row —
     // for the viewer's OWN tickets that have new activity since they last
     // looked. Only own tickets carry lastActivityAt, so this naturally shows
@@ -4428,13 +4437,6 @@
       mainChildren.push(h("div", { className: "rw-dash-row-body" }, renderMarkdownText(ticket.description)));
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
-
-    // Per-post coin the viewer earned from this ticket ("if relevant" — only
-    // when they created/upvoted it and it advanced). Hover explains why.
-    var earned = communityStats.coinByTicket && communityStats.coinByTicket[ticket.id];
-    if (earned && earned.coin) {
-      mainChildren.push(renderCoinChip(earned));
-    }
 
     var row = h("button", {
       className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
