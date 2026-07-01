@@ -33,6 +33,7 @@ import {
 import * as ServerService from './ServerService';
 import * as WidgetService from './WidgetService';
 import { autoAssignTicket as autoAssignTicketDefault } from './WidgetAutoAssign';
+import { notifyTaskAudience } from './WidgetNotifications';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
 /**
@@ -1627,6 +1628,7 @@ export async function ingestTurnEvents(
 
   const events = [...input.events].sort((a, b) => a.seq - b.seq);
   let inserted = 0;
+  let insertedReply = false; // an agent/team message (a live-session "reply")
   let turnDone = false;
   let turnError = false;
 
@@ -1755,8 +1757,16 @@ export async function ingestTurnEvents(
       .returning();
     if (ins[0]) {
       inserted++;
+      if (row.role === 'agent' || row.role === 'team') insertedReply = true;
       publish(ins[0]);
     }
+  }
+
+  // A coder/teammate reply in a live session drives the assigner's (and
+  // reporter's) unread badge, but does NOT flow through publishTicketUpdate.
+  // Ping their notification channels directly so the badge updates in real time.
+  if (insertedReply && found.conversation.createdTaskId) {
+    void notifyTaskAudience(found.conversation.createdTaskId);
   }
 
   if (turnError || turnDone) {

@@ -11,6 +11,8 @@
  * WidgetRateLimiter already makes.
  */
 
+import { notifyTaskAudience } from './WidgetNotifications';
+
 type TicketSubscriber = () => void;
 
 const subscribers = new Map<string, Set<TicketSubscriber>>();
@@ -35,6 +37,11 @@ export function subscribeToTicket(taskId: string, cb: TicketSubscriber): () => v
  * that must not be rolled back by a notification failure.
  */
 export function publishTicketUpdate(taskId: string): void {
+  // Fan out to the per-user notifications bus too (fire-and-forget), so a
+  // reporter/assigner's launcher badge updates in real time even when they are
+  // NOT viewing this ticket's detail. Self-guarded + never throws.
+  void notifyTaskAudience(taskId);
+
   const set = subscribers.get(taskId);
   if (!set) return;
   for (const cb of set) {
