@@ -79,6 +79,12 @@
   // disrupts scroll or an in-progress interaction.
   var badgePollTimerId = null;
   var BADGE_POLL_INTERVAL_MS = 20000;
+  // Real-time unread: one per-user SSE stream drives the launcher/bell badge.
+  // Runs for the page lifetime (open or closed). The poll above is its fallback.
+  var notifEventSourceRef = null;
+  var notifReconnectTimerId = null;
+  var notifStreamConnected = false;
+  var NOTIF_RECONNECT_MS = 30000;
   // Live ticket-status stream (SSE). Preferred over polling; at most one of
   // detailEventSourceRef / detailPollIntervalId is armed at a time.
   var detailEventSourceRef = null;
@@ -631,6 +637,9 @@
           .then(function (d) { assignedTicketsCache = d.tickets || []; refreshTabLabel(); })
           .catch(function () {});
       }
+      // Idempotent: ensures the real-time stream is up once identity is
+      // confirmed (covers identity resolving after the initial bootstrap).
+      if (config.isIdentified) startNotificationsStream();
       // Re-render so the badge appears/disappears in the eyebrow row.
       if (scrollEl) renderPanelBody();
     }).catch(function () {
@@ -5193,8 +5202,10 @@
     });
   }
 
-  // Refresh ONLY the unread-driving caches + the label/bell (not the list body),
-  // so the badge reflects new activity without disrupting the current view.
+  // Refresh ONLY the unread-driving caches + the label/bell/launcher (not the
+  // list body), so the badge reflects new activity without disrupting the
+  // current view. refreshTabLabel rebuilds the launcher tab, so this updates the
+  // closed "HQ N" pill too — not just the in-panel bell.
   function refreshBadgeCaches() {
     if (!config.isIdentified) return Promise.resolve();
     var jobs = [
@@ -5203,20 +5214,90 @@
     if (viewerCanLiveCoder()) {
       jobs.push(loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () {}));
     }
-    return Promise.all(jobs).then(function () { if (isOpen) refreshTabLabel(); });
+    return Promise.all(jobs).then(function () { refreshTabLabel(); });
   }
 
+  // Fallback poll for the unread badge while the panel is open — only does work
+  // when the real-time notifications stream is NOT connected (the stream is the
+  // primary, instant path; see startNotificationsStream). Runs while open so an
+  // engaged user still gets updates if SSE is unavailable.
   function startBadgePoll() {
     stopBadgePoll();
     if (!config.isIdentified) return;
     badgePollTimerId = setInterval(function () {
       if (!isOpen || !config.isIdentified) { stopBadgePoll(); return; }
+      if (notifStreamConnected) return; // SSE is handling it
       refreshBadgeCaches();
     }, BADGE_POLL_INTERVAL_MS);
   }
 
   function stopBadgePoll() {
     if (badgePollTimerId !== null) { clearInterval(badgePollTimerId); badgePollTimerId = null; }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-time unread: a single per-user SSE stream (GET /notifications/events)
+  // that fires a payload-free 'ping' whenever a ticket the viewer reported or
+  // assigned changes — including a coder/teammate live-session reply. On a ping
+  // we re-fetch the badge caches. Runs for the page lifetime (open OR closed) so
+  // the launcher pill lights up without the widget being open. Degrades to the
+  // open-panel poll if EventSource is unavailable or the stream errors.
+  // ---------------------------------------------------------------------------
+  function notificationsEventsUrl() {
+    var url = RUNHQ_API + "/api/widget/notifications/events";
+    var params = [];
+    if (config.identitySource !== "runhq" && config.token) {
+      params.push("token=" + encodeURIComponent(config.token));
+    }
+    // ?project= lets cookie-auth members authenticate (EventSource can't send
+    // the X-RW-Project header); the BE shims it in.
+    if (config.project) params.push("project=" + encodeURIComponent(config.project));
+    return params.length ? url + "?" + params.join("&") : url;
+  }
+
+  function startNotificationsStream() {
+    if (!config.isIdentified) return;
+    if (notifEventSourceRef) return; // already streaming
+    if (typeof window.EventSource !== "function") return; // no SSE → poll covers it
+    if (notifReconnectTimerId !== null) { clearTimeout(notifReconnectTimerId); notifReconnectTimerId = null; }
+    try {
+      var es = new EventSource(notificationsEventsUrl(), { withCredentials: wantsCookieAuth() });
+      es.addEventListener("ready", function () { notifStreamConnected = true; });
+      es.addEventListener("ping", function () {
+        notifStreamConnected = true;
+        refreshBadgeCaches();
+      });
+      es.onerror = function () {
+        // A stream that errors is not silently retried in a tight loop: close it
+        // and schedule ONE delayed reconnect, so a transient blip self-heals but
+        // a hard failure (e.g. cookie project shim unsupported) falls back to the
+        // open-panel poll rather than hammering the endpoint.
+        notifStreamConnected = false;
+        try { es.close(); } catch (_) {}
+        if (notifEventSourceRef === es) {
+          notifEventSourceRef = null;
+          if (notifReconnectTimerId === null) {
+            notifReconnectTimerId = setTimeout(function () {
+              notifReconnectTimerId = null;
+              startNotificationsStream();
+            }, NOTIF_RECONNECT_MS);
+          }
+        }
+      };
+      notifEventSourceRef = es;
+    } catch (_) {
+      notifEventSourceRef = null;
+      notifStreamConnected = false;
+    }
+  }
+
+  function stopNotificationsStream() {
+    if (notifEventSourceRef) {
+      try { notifEventSourceRef.close(); } catch (_) {}
+      notifEventSourceRef = null;
+    }
+    if (notifReconnectTimerId !== null) { clearTimeout(notifReconnectTimerId); notifReconnectTimerId = null; }
+    notifStreamConnected = false;
   }
 
   // ===========================================================================
@@ -8516,6 +8597,9 @@
         if (config.isIdentified) {
           loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
+          // Open the real-time unread stream for the page lifetime so the
+          // launcher pill lights up even while the widget is closed.
+          startNotificationsStream();
         } else {
           myTicketsCache = [];
           assignedTicketsCache = [];
