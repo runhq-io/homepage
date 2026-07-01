@@ -34,7 +34,7 @@
   var notifOutsideHandler = null;
 
   var isOpen = false;
-  var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
+  var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
   var theme = "light";
 
@@ -48,15 +48,18 @@
   // Always present as an object so reads never throw — defaults to anonymous.
   var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
 
-  // Modal-shell view state. The shell is a centered card with three faces:
-  //   "home"   — Intercom-style landing: greeting + navigation cards into
-  //              chat (when configured), the Hot discussion list, and the
-  //              Latest Updates list. Every open lands here (see closePanel).
-  //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
+  // Modal-shell view state. The shell is a centered card with these faces:
+  //   "list"   — the landing view: the discussion board (Hot / Updates / My
+  //              Submissions tabs + [+ New post], which opens chat). Every
+  //              open lands here on the Hot tab (see closePanel reset).
+  //   "chat"   — the agent conversation (opened from [+ New post]).
   //   "detail" — full-width ticket detail with a "Back to activity" button.
+  //   "home"   — legacy Intercom-style menu (greeting + navigation cards).
+  //              Retired from the flow but kept for possible re-use; no
+  //              navigation path lands here anymore.
   // Switching between faces re-renders the card body in place; the launcher
   // tab and outer modal chrome stay mounted so we don't pay a remount cost.
-  var view = "home";
+  var view = "list";
   var currentDetailTicket = null;
 
   // Polling interval handle for the ticket detail view.
@@ -2249,8 +2252,8 @@
       /* widget shell — fixed full-viewport scrim layer. Pinned to the top of
          the stage; the launcher tab still sits at the screen edge as before.
          The card inside is absolutely positioned (not flex-centered) so every
-         geometry property is a transitionable length — that is what lets the
-         compact↔expanded morph animate (see .rw-compact below). */
+         geometry property is a transitionable length — that is what lets
+         in-panel navigation (home ↔ list ↔ chat) morph smoothly. */
       '.rw-shell-scrim {',
       '  position: fixed; inset: 0;',
       '  background: rgba(20,16,12,0.55);',
@@ -2291,27 +2294,6 @@
       '  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, transform .25s ease;',
       '}',
 
-      /* Compact corner panel (home + chat views). The scrim element stays
-         mounted (it is widgetEl, the open/close fade carrier) but goes fully
-         transparent AND click-transparent: the host page stays visible and
-         interactive, Intercom-style — outside clicks land on the page and do
-         NOT close the panel. Only the card itself accepts events. */
-      '.rw-shell-scrim.rw-compact {',
-      '  background: transparent;',
-      '  -webkit-backdrop-filter: none; backdrop-filter: none;',
-      '}',
-      '.rw-shell-scrim.rw-compact.rw-open { pointer-events: none; }',
-      /* Corner anchor, adjacent to the launcher edge: 20px inset from the
-         bottom + configured side. translate(-100%) is relative to the
-         panel\'s own box, so these are the same transitionable properties
-         the expanded state sets — the morph animates between them. */
-      '.rw-shell-scrim.rw-compact .rw-shell {',
-      '  top: 100%; left: ' + (isRight ? "100%" : "20px") + ';',
-      '  transform: translate(' + (isRight ? "calc(-100% - 20px)" : "0px") + ', calc(-100% - 20px));',
-      '  width: 400px;',
-      '  height: min(704px, calc(100vh - 40px));',
-      '  min-height: 0;',
-      '}',
       '@media (prefers-reduced-motion: reduce) {',
       '  .rw-shell-scrim.rw-open { transition: opacity .18s ease; }',
       '  .rw-shell-scrim.rw-open .rw-shell { transition: none; }',
@@ -2319,11 +2301,10 @@
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
-         browsers that don't parse dvh. The selector list also outguns the
-         compact rules above (mobile keeps one near-full-screen layout in
-         BOTH modes). */
+         browsers that don't parse dvh. Mobile keeps one near-full-screen
+         layout for every view. */
       '@media (max-width: 640px) {',
-      '  .rw-shell, .rw-shell-scrim.rw-compact .rw-shell {',
+      '  .rw-shell {',
       '    top: 0; left: 0; transform: none;',
       '    width: 100%; height: 100vh; height: 100dvh; min-height: 0;',
       '  }',
@@ -2697,9 +2678,13 @@
       '}',
       '.rw-home-btn:hover { color: var(--rw-fg); border-color: var(--rw-accent); }',
       '.rw-home-btn:active { transform: translateY(1px); }',
-      /* Slim list-view topbar hosting the back-to-home control. The split
-         layout below it is untouched — Home is a layer above the dashboard.
-         Right padding keeps clear of the absolute-positioned shell actions. */
+      /* Slim list-view topbar hosting the board title (the discussion board is
+         the widget's landing view). Right padding keeps the title clear of the
+         absolute-positioned shell actions (bell / theme / close). */
+      '.rw-list-title {',
+      '  font-size: 15px; font-weight: 600; color: var(--rw-fg);',
+      '  letter-spacing: -0.01em;',
+      '}',
       '.rw-list-topbar {',
       '  display: flex; align-items: center;',
       '  padding: 14px 80px 10px 22px;',
@@ -4370,13 +4355,15 @@
       return btn;
     });
 
-    // [+ New post] sits on the tab row's right — the single message-entry
-    // affordance now that the inline composer left the list view.
+    // [+ New post] sits on the tab row's right. It now launches the agent chat
+    // (a guided, conversational way to file a ticket — the same surface as
+    // Home's chat card) rather than the direct compose form. goCompose /
+    // renderInlineComposer stay defined but unwired, kept for possible re-use.
     var newPostBtn = h("button", { className: "rw-new-post-btn", type: "button" }, [
       Icons.plus(13),
       h("span", null, t("compose.newPost")),
     ]);
-    newPostBtn.addEventListener("click", goCompose);
+    newPostBtn.addEventListener("click", openChat);
 
     return h("div", { className: "rw-dash-tabs" }, [
       h("div", { className: "rw-dash-tabs-row", role: "tablist" }, tabButtons),
@@ -4884,17 +4871,16 @@
   }
 
   // -----------------------------------------------------------------------
-  // Shell mode. Home, chat + compose live in a compact corner panel
-  // (Intercom-style); list + detail keep the large centered modal. The class lands on widgetEl
-  // (the scrim) so one toggle drives both the scrim treatment and the panel
-  // geometry. Synced from openPanel — BEFORE rw-open, so the very first
-  // paint is already in the right mode, including deep-link opens that
-  // pre-set view = "list" — and from renderPanelBody, which every in-panel
-  // navigation funnels through. closePanel deliberately does NOT re-sync
-  // (its view reset would snap the still-fading-out card to compact).
+  // Shell mode. Every view — home, chat, list, detail — renders in the same
+  // large centered modal over a full scrim overlay. The old Intercom-style
+  // compact corner panel (home/chat/compose) has been removed, so no view is
+  // ever compact. applyShellMode stays as the single funnel that keeps the
+  // scrim class in sync (belt-and-braces: it strips any stray rw-compact),
+  // called from openPanel — BEFORE rw-open, so the first paint is correct —
+  // and from renderPanelBody, which every in-panel navigation funnels through.
   // -----------------------------------------------------------------------
 
-  function isCompactView(v) { return v === "home" || v === "chat" || v === "compose"; }
+  function isCompactView(_v) { return false; }
 
   function applyShellMode() {
     if (!widgetEl) return;
@@ -4983,13 +4969,16 @@
     } else if (view === "chat") {
       scrollEl.appendChild(renderChatViewShell());
     } else {
-      // Slim topbar with the back-to-home control. Home is a layer above
-      // the dashboard — the split layout below is untouched.
-      var listHomeBtn = h("button", {
-        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
-      }, [Icons.arrowLeft(13), h("span", null, t("home.back"))]);
-      listHomeBtn.addEventListener("click", goHome);
-      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [listHomeBtn]));
+      // The discussion board is the widget's landing view, so its slim topbar
+      // holds the board title (not a back-to-home control — Home was retired
+      // from the flow). The right padding on .rw-list-topbar keeps the title
+      // clear of the absolute-positioned shell actions (bell / theme / close).
+      var boardTitle = config.projectName
+        ? t("header.feedback", { name: config.projectName })
+        : t("home.greeting");
+      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [
+        h("span", { className: "rw-list-title" }, boardTitle),
+      ]));
 
       // Single full-width panel: tab bar (with [+ New post] on its right)
       // + list. The old left pane (intro copy, inline composer, Recent
@@ -6497,12 +6486,12 @@
           currentDetailTicket = savedLiveTicket;
           renderPanelBody();
         } else {
-          goHome();
+          goList();
         }
       } else {
-        // The Home screen (Plan 1) is live: back returns to the landing view
-        // the chat card came from.
-        goHome();
+        // Normal chat is reached from the discussion board's [+ New post], so
+        // back returns to that board (the widget's landing view).
+        goList();
       }
     });
 
@@ -8023,11 +8012,11 @@
     chatSubmitInFlight = false;
     detailReturnView = null;
     composeReturnView = "home";
-    // Reset the shell so re-opening lands on a fresh Home rather than
-    // wherever the user last left it (detail view, Hot tab, etc.).
-    view = "home";
+    // Reset the shell so re-opening lands on a fresh discussion board (Hot tab)
+    // rather than wherever the user last left it (detail view, chat, etc.).
+    view = "list";
     currentDetailTicket = null;
-    activeTab = "updates";
+    activeTab = "hot";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();

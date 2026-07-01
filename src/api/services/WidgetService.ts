@@ -1416,12 +1416,14 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   const internalPr = deriveLinkedPr(activity);
 
   // Partner-facing progress stepper — derived purely from a status enum, the
-  // clarification status, whether an agent was assigned, and the PR state.
+  // clarification status, whether an agent was assigned, and the PR state. The
+  // env map only resolves a `deployed:<env>` status to "Deployed → <name>".
   const milestones = deriveTicketMilestones({
     status: task.status,
     clarificationStatus: clar?.status ?? null,
     agentAssigned: !!lastAssign,
     prState: internalPr?.state ?? null,
+    environments: project.deployEnvironments ?? [],
   });
 
   // Resolve the chat conversation that originated this ticket, if any.

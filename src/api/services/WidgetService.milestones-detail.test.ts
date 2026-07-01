@@ -72,22 +72,41 @@ describe('getPublicTicketDetail — milestones', () => {
       expect(detail).not.toBeNull();
       expect(Array.isArray(detail!.milestones)).toBe(true);
       const keys = detail!.milestones.map((m) => m.key);
-      expect(keys).toEqual(['received', 'in_progress', 'in_review', 'shipped']);
+      expect(keys).toEqual(['received', 'in_progress', 'in_review', 'reviewed', 'merged', 'deployed']);
       expect(detail!.milestones.find((m) => m.key === 'in_progress')!.state).toBe('current');
     } finally {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
     }
   });
 
-  it('deployed status marks every milestone done (Shipped)', async () => {
+  it('deployed status marks every milestone done', async () => {
     const id = await makeTask('deployed');
     try {
       const detail = await getPublicTicketDetail(PROJECT_ID, id);
-      const shipped = detail!.milestones.find((m) => m.key === 'shipped');
-      expect(shipped!.state).toBe('done');
+      const deployed = detail!.milestones.find((m) => m.key === 'deployed');
+      expect(deployed!.state).toBe('done');
       expect(detail!.milestones.every((m) => m.state === 'done')).toBe(true);
     } finally {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
+    }
+  });
+
+  it('resolves a deployed:<env> status to a "Deployed → <name>" label from the project env map', async () => {
+    const ENV_ID = `env-${RUN_HEX}`;
+    await db.update(widgetProjects)
+      .set({ deployEnvironments: [{ id: ENV_ID, name: 'production' }] })
+      .where(eq(widgetProjects.id, PROJECT_ID));
+    const id = await makeTask(`deployed:${ENV_ID}`);
+    try {
+      const detail = await getPublicTicketDetail(PROJECT_ID, id);
+      const deployed = detail!.milestones.find((m) => m.key === 'deployed');
+      expect(deployed!.label).toBe('Deployed → production');
+      expect(deployed!.state).toBe('done');
+      // The raw env id must never surface in the partner-facing label.
+      expect(deployed!.label).not.toContain(ENV_ID);
+    } finally {
+      await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
+      await db.update(widgetProjects).set({ deployEnvironments: null }).where(eq(widgetProjects.id, PROJECT_ID));
     }
   });
 
