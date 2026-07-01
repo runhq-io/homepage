@@ -24,6 +24,7 @@ import {
   widgetUserBalances,
   widgetUserNotifications,
   pointGrants,
+  workspaceTaskVotes,
   type PointGrant,
   type WidgetUserBalance,
 } from '../../db/schema';
@@ -33,6 +34,10 @@ import {
   autoCompletionIdempotencyKey,
   adminGrantIdempotencyKey,
   reversalIdempotencyKey,
+  crossedTiers,
+  STEP_COIN,
+  stepAdvanceIdempotencyKey,
+  stepReason,
   type StatusChangeEvent,
 } from './communityAwardingPolicy';
 
@@ -81,6 +86,20 @@ export interface AwardResult {
   applied: boolean;
   amount?: number;
   grantId?: string;
+}
+
+export interface StepAdvanceEvent {
+  ticketId: string;
+  projectId: string;
+  sourceType: 'native' | 'widget';
+  creatorWidgetUserId: string | null;
+  oldStatus: string;
+  newStatus: string;
+}
+
+export interface StepAdvanceResult {
+  applied: boolean;
+  grantsCreated: number;
 }
 
 export interface GrantBonusResult {
@@ -263,6 +282,153 @@ export class CommunityPointsService {
     });
 
     return { applied: true, amount, grantId };
+  }
+
+  // -------------------------------------------------------------------------
+  // 1b. awardForStepAdvance
+  // -------------------------------------------------------------------------
+
+  /**
+   * Grants STEP_COIN to the ticket creator and every external up-voter for each
+   * lifecycle tier this transition crosses (planned → in_progress → reviewed →
+   * merged → deployed). Idempotent per (ticket, tier, widgetUser). Widget-source
+   * tickets only; native / no-project / non-forward transitions are a no-op.
+   *
+   * This is the awarding path fired from WorkspaceTaskService.updateTask; it
+   * supersedes awardForCompletion.
+   */
+  async awardForStepAdvance(event: StepAdvanceEvent): Promise<StepAdvanceResult> {
+    const tiers = crossedTiers(event.oldStatus, event.newStatus);
+    if (tiers.length === 0) return { applied: false, grantsCreated: 0 };
+    if (event.sourceType !== 'widget' || !event.projectId) return { applied: false, grantsCreated: 0 };
+
+    // Resolve recipients: creator (tagged 'creator') + external up-voters
+    // (tagged 'voter'), deduped by widgetUserId with creator taking precedence.
+    const roleByUser = new Map<string, 'creator' | 'voter'>();
+    if (event.creatorWidgetUserId) roleByUser.set(event.creatorWidgetUserId, 'creator');
+    const voters = await this.db
+      .select({ voterId: workspaceTaskVotes.voterId })
+      .from(workspaceTaskVotes)
+      .where(and(
+        eq(workspaceTaskVotes.taskId, event.ticketId),
+        eq(workspaceTaskVotes.voterType, 'external'),
+        eq(workspaceTaskVotes.value, true),
+      ));
+    for (const v of voters) {
+      if (v.voterId && !roleByUser.has(v.voterId)) roleByUser.set(v.voterId, 'voter');
+    }
+    if (roleByUser.size === 0) return { applied: false, grantsCreated: 0 };
+
+    const now = this.now();
+    const touched: Array<{
+      widgetUserId: string;
+      oldBalance: number;
+      newBalance: number;
+      oldRank: number | null;
+      newRank: number | null;
+      notificationId: string | null;
+    }> = [];
+    let grantsCreated = 0;
+
+    await this.db.transaction(async (tx) => {
+      for (const [widgetUserId, role] of roleByUser) {
+        let userDelta = 0;
+        let lastGrantId: string | null = null;
+
+        for (const tier of tiers) {
+          const [inserted] = await tx
+            .insert(pointGrants)
+            .values({
+              projectId: event.projectId,
+              widgetUserId,
+              amount: STEP_COIN,
+              source: 'step_advance',
+              idempotencyKey: stepAdvanceIdempotencyKey(event.ticketId, tier, widgetUserId),
+              ticketId: event.ticketId,
+              reason: stepReason(role, tier),
+              reasonCode: `${role}_step`,
+              metadata: { tier, role },
+              createdAt: now,
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (inserted) {
+            userDelta += STEP_COIN;
+            grantsCreated += 1;
+            lastGrantId = inserted.id;
+          }
+        }
+
+        if (userDelta === 0) continue; // fully idempotent for this user
+
+        const [existingBalance] = await tx
+          .select()
+          .from(widgetUserBalances)
+          .where(eq(widgetUserBalances.widgetUserId, widgetUserId));
+        const oldBalance = existingBalance?.balance ?? 0;
+        const oldRank = existingBalance?.rank ?? null;
+
+        const [updated] = await tx
+          .insert(widgetUserBalances)
+          .values({ widgetUserId, projectId: event.projectId, balance: userDelta, payoutsCount: 1, lastPayoutAt: now, rank: null })
+          .onConflictDoUpdate({
+            target: widgetUserBalances.widgetUserId,
+            set: {
+              balance: sql`${widgetUserBalances.balance} + ${userDelta}`,
+              payoutsCount: sql`${widgetUserBalances.payoutsCount} + 1`,
+              lastPayoutAt: now,
+            },
+          })
+          .returning();
+
+        const [notif] = await tx
+          .insert(widgetUserNotifications)
+          .values({
+            widgetUserId,
+            projectId: event.projectId,
+            type: 'points.awarded',
+            payload: { ticketId: event.ticketId, amount: userDelta, grantId: lastGrantId, oldBalance, newBalance: updated!.balance },
+          })
+          .returning({ id: widgetUserNotifications.id });
+
+        touched.push({ widgetUserId, oldBalance, newBalance: updated!.balance, oldRank, newRank: null, notificationId: notif!.id });
+      }
+
+      if (touched.length > 0) {
+        await recomputeProjectRanks(tx, event.projectId);
+        for (const t of touched) {
+          const [r] = await tx
+            .select({ rank: widgetUserBalances.rank })
+            .from(widgetUserBalances)
+            .where(eq(widgetUserBalances.widgetUserId, t.widgetUserId));
+          t.newRank = r?.rank ?? null;
+        }
+      }
+    });
+
+    // Post-commit pubsub — never inside the transaction.
+    for (const t of touched) {
+      this.publish(`community:${event.projectId}`, {
+        type: 'community_balance_changed',
+        projectId: event.projectId,
+        widgetUserId: t.widgetUserId,
+        oldBalance: t.oldBalance,
+        newBalance: t.newBalance,
+        oldRank: t.oldRank,
+        newRank: t.newRank,
+        grantId: t.notificationId ?? '',
+      });
+      if (t.notificationId) {
+        this.publish(`community:widget_user:${t.widgetUserId}`, {
+          type: 'community_notification',
+          projectId: event.projectId,
+          widgetUserId: t.widgetUserId,
+          notificationId: t.notificationId,
+        });
+      }
+    }
+
+    return { applied: grantsCreated > 0, grantsCreated };
   }
 
   // -------------------------------------------------------------------------

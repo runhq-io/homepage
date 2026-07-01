@@ -18,6 +18,8 @@ import {
   pointGrants,
   widgetUserBalances,
   widgetUserNotifications,
+  workspaceTasks,
+  workspaceTaskVotes,
 } from '../../db/schema';
 import { CommunityPointsService } from './CommunityPointsService';
 import type { StatusChangeEvent } from './communityAwardingPolicy';
@@ -87,6 +89,8 @@ afterAll(async () => {
     .delete(widgetUserBalances)
     .where(eq(widgetUserBalances.projectId, PROJECT_ID));
   await db.delete(pointGrants).where(eq(pointGrants.projectId, PROJECT_ID));
+  await db.delete(workspaceTaskVotes).where(eq(workspaceTaskVotes.serverId, SERVER_ID));
+  await db.delete(workspaceTasks).where(eq(workspaceTasks.serverId, SERVER_ID));
   await db.delete(widgetUsers).where(eq(widgetUsers.projectId, PROJECT_ID));
   await db.delete(widgetProjects).where(eq(widgetProjects.id, PROJECT_ID));
   await db.delete(servers).where(eq(servers.id, SERVER_ID));
@@ -821,5 +825,129 @@ describe('rank tie-breaking', () => {
     ]);
     expect(alice[0]!.rank).toBe(1);
     expect(carol[0]!.rank).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// awardForStepAdvance
+// ---------------------------------------------------------------------------
+async function seedTicket(createdById: string): Promise<string> {
+  const id = makeUUID();
+  await db.insert(workspaceTasks).values({
+    id,
+    serverId: SERVER_ID,
+    title: `step-test ${id.slice(0, 8)}`,
+    sourceType: 'widget',
+    createdByType: 'external',
+    createdById,
+  });
+  return id;
+}
+
+async function seedExternalVote(ticketId: string, widgetUserId: string): Promise<void> {
+  await db.insert(workspaceTaskVotes).values({
+    serverId: SERVER_ID,
+    taskId: ticketId,
+    voterType: 'external',
+    voterId: widgetUserId,
+    value: true,
+  });
+}
+
+describe('awardForStepAdvance', () => {
+  it('grants 1 coin per crossed tier to creator and each external voter', async () => {
+    const { service } = makeService();
+    const ticketId = await seedTicket(WIDGET_USER_ID);
+    await seedExternalVote(ticketId, WIDGET_USER_ID_B);
+    await seedExternalVote(ticketId, WIDGET_USER_ID_C);
+
+    const res = await service.awardForStepAdvance({
+      ticketId, projectId: PROJECT_ID, sourceType: 'widget',
+      creatorWidgetUserId: WIDGET_USER_ID, oldStatus: 'planned', newStatus: 'reviewed',
+    });
+
+    // 2 crossed tiers (in_progress, reviewed) x 3 recipients = 6 grants; each balance += 2.
+    expect(res.applied).toBe(true);
+    expect(res.grantsCreated).toBe(6);
+    for (const uid of [WIDGET_USER_ID, WIDGET_USER_ID_B, WIDGET_USER_ID_C]) {
+      const [bal] = await db.select().from(widgetUserBalances).where(eq(widgetUserBalances.widgetUserId, uid));
+      expect(bal!.balance).toBe(2);
+    }
+  });
+
+  it('is idempotent: replaying the same transition creates no new grants', async () => {
+    const { service } = makeService();
+    const ticketId = await seedTicket(WIDGET_USER_ID);
+    const ev = {
+      ticketId, projectId: PROJECT_ID, sourceType: 'widget' as const,
+      creatorWidgetUserId: WIDGET_USER_ID, oldStatus: 'planned', newStatus: 'in_progress',
+    };
+    const first = await service.awardForStepAdvance(ev);
+    const second = await service.awardForStepAdvance(ev);
+    expect(first.grantsCreated).toBe(1);
+    expect(second.grantsCreated).toBe(0);
+    const [bal] = await db.select().from(widgetUserBalances).where(eq(widgetUserBalances.widgetUserId, WIDGET_USER_ID));
+    expect(bal!.balance).toBe(1);
+  });
+
+  it('a creator who also upvoted earns once per tier, tagged creator', async () => {
+    const { service } = makeService();
+    const ticketId = await seedTicket(WIDGET_USER_ID);
+    await seedExternalVote(ticketId, WIDGET_USER_ID); // self-upvote
+    const res = await service.awardForStepAdvance({
+      ticketId, projectId: PROJECT_ID, sourceType: 'widget',
+      creatorWidgetUserId: WIDGET_USER_ID, oldStatus: 'planned', newStatus: 'in_progress',
+    });
+    expect(res.grantsCreated).toBe(1);
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.widgetUserId, WIDGET_USER_ID));
+    expect(grants).toHaveLength(1);
+    expect(grants[0]!.reasonCode).toBe('creator_step');
+  });
+
+  it('multi-tier jump grants every crossed tier once', async () => {
+    const { service } = makeService();
+    const ticketId = await seedTicket(WIDGET_USER_ID);
+    const res = await service.awardForStepAdvance({
+      ticketId, projectId: PROJECT_ID, sourceType: 'widget',
+      creatorWidgetUserId: WIDGET_USER_ID, oldStatus: 'planned', newStatus: 'deployed',
+    });
+    expect(res.grantsCreated).toBe(4); // in_progress, reviewed, merged, deployed
+    const [bal] = await db.select().from(widgetUserBalances).where(eq(widgetUserBalances.widgetUserId, WIDGET_USER_ID));
+    expect(bal!.balance).toBe(4);
+  });
+
+  it('native-source or missing project is a no-op', async () => {
+    const { service } = makeService();
+    const res = await service.awardForStepAdvance({
+      ticketId: makeUUID(), projectId: '', sourceType: 'native',
+      creatorWidgetUserId: null, oldStatus: 'planned', newStatus: 'deployed',
+    });
+    expect(res.applied).toBe(false);
+    expect(res.grantsCreated).toBe(0);
+  });
+
+  it('backward transition grants nothing', async () => {
+    const { service } = makeService();
+    const ticketId = await seedTicket(WIDGET_USER_ID);
+    const res = await service.awardForStepAdvance({
+      ticketId, projectId: PROJECT_ID, sourceType: 'widget',
+      creatorWidgetUserId: WIDGET_USER_ID, oldStatus: 'merged', newStatus: 'in_progress',
+    });
+    expect(res.applied).toBe(false);
+    expect(res.grantsCreated).toBe(0);
+  });
+
+  it('publishes balance_changed + notification per touched user, post-commit', async () => {
+    const { service, published } = makeService();
+    const ticketId = await seedTicket(WIDGET_USER_ID);
+    await seedExternalVote(ticketId, WIDGET_USER_ID_B);
+    await service.awardForStepAdvance({
+      ticketId, projectId: PROJECT_ID, sourceType: 'widget',
+      creatorWidgetUserId: WIDGET_USER_ID, oldStatus: 'planned', newStatus: 'in_progress',
+    });
+    const balanceMsgs = (published as Array<{ payload: { type: string } }>).filter((p) => p.payload.type === 'community_balance_changed');
+    const notifMsgs = (published as Array<{ payload: { type: string } }>).filter((p) => p.payload.type === 'community_notification');
+    expect(balanceMsgs).toHaveLength(2); // creator + voter
+    expect(notifMsgs).toHaveLength(2);
   });
 });
