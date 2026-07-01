@@ -106,6 +106,10 @@
   // was opened from (Home's message card vs the list's [+ New post]) — the
   // same pattern as detailReturnView above.
   var composeReturnView = "home";
+  // The normal (non-live) chat view's back control returns to the view it was
+  // opened from — Home's chat card keeps "home"; the discussion board's
+  // [+ New post] keeps "list". Same pattern as composeReturnView above.
+  var chatReturnView = "home";
 
   var CHAT_POLL_FAST_MS = 1500;    // while a turn is pending
   var CHAT_POLL_IDLE_MS = 5000;    // idle (matches DETAIL_POLL_INTERVAL_MS)
@@ -2249,8 +2253,8 @@
       /* widget shell — fixed full-viewport scrim layer. Pinned to the top of
          the stage; the launcher tab still sits at the screen edge as before.
          The card inside is absolutely positioned (not flex-centered) so every
-         geometry property is a transitionable length — that is what lets the
-         compact↔expanded morph animate (see .rw-compact below). */
+         geometry property is a transitionable length — that is what lets
+         in-panel navigation (home ↔ list ↔ chat) morph smoothly. */
       '.rw-shell-scrim {',
       '  position: fixed; inset: 0;',
       '  background: rgba(20,16,12,0.55);',
@@ -2291,27 +2295,6 @@
       '  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, transform .25s ease;',
       '}',
 
-      /* Compact corner panel (home + chat views). The scrim element stays
-         mounted (it is widgetEl, the open/close fade carrier) but goes fully
-         transparent AND click-transparent: the host page stays visible and
-         interactive, Intercom-style — outside clicks land on the page and do
-         NOT close the panel. Only the card itself accepts events. */
-      '.rw-shell-scrim.rw-compact {',
-      '  background: transparent;',
-      '  -webkit-backdrop-filter: none; backdrop-filter: none;',
-      '}',
-      '.rw-shell-scrim.rw-compact.rw-open { pointer-events: none; }',
-      /* Corner anchor, adjacent to the launcher edge: 20px inset from the
-         bottom + configured side. translate(-100%) is relative to the
-         panel\'s own box, so these are the same transitionable properties
-         the expanded state sets — the morph animates between them. */
-      '.rw-shell-scrim.rw-compact .rw-shell {',
-      '  top: 100%; left: ' + (isRight ? "100%" : "20px") + ';',
-      '  transform: translate(' + (isRight ? "calc(-100% - 20px)" : "0px") + ', calc(-100% - 20px));',
-      '  width: 400px;',
-      '  height: min(704px, calc(100vh - 40px));',
-      '  min-height: 0;',
-      '}',
       '@media (prefers-reduced-motion: reduce) {',
       '  .rw-shell-scrim.rw-open { transition: opacity .18s ease; }',
       '  .rw-shell-scrim.rw-open .rw-shell { transition: none; }',
@@ -2319,11 +2302,10 @@
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
-         browsers that don't parse dvh. The selector list also outguns the
-         compact rules above (mobile keeps one near-full-screen layout in
-         BOTH modes). */
+         browsers that don't parse dvh. Mobile keeps one near-full-screen
+         layout for every view. */
       '@media (max-width: 640px) {',
-      '  .rw-shell, .rw-shell-scrim.rw-compact .rw-shell {',
+      '  .rw-shell {',
       '    top: 0; left: 0; transform: none;',
       '    width: 100%; height: 100vh; height: 100dvh; min-height: 0;',
       '  }',
@@ -4370,13 +4352,15 @@
       return btn;
     });
 
-    // [+ New post] sits on the tab row's right — the single message-entry
-    // affordance now that the inline composer left the list view.
+    // [+ New post] sits on the tab row's right. It now launches the agent chat
+    // (a guided, conversational way to file a ticket — the same surface as
+    // Home's chat card) rather than the direct compose form. goCompose /
+    // renderInlineComposer stay defined but unwired, kept for possible re-use.
     var newPostBtn = h("button", { className: "rw-new-post-btn", type: "button" }, [
       Icons.plus(13),
       h("span", null, t("compose.newPost")),
     ]);
-    newPostBtn.addEventListener("click", goCompose);
+    newPostBtn.addEventListener("click", openChat);
 
     return h("div", { className: "rw-dash-tabs" }, [
       h("div", { className: "rw-dash-tabs-row", role: "tablist" }, tabButtons),
@@ -4884,17 +4868,16 @@
   }
 
   // -----------------------------------------------------------------------
-  // Shell mode. Home, chat + compose live in a compact corner panel
-  // (Intercom-style); list + detail keep the large centered modal. The class lands on widgetEl
-  // (the scrim) so one toggle drives both the scrim treatment and the panel
-  // geometry. Synced from openPanel — BEFORE rw-open, so the very first
-  // paint is already in the right mode, including deep-link opens that
-  // pre-set view = "list" — and from renderPanelBody, which every in-panel
-  // navigation funnels through. closePanel deliberately does NOT re-sync
-  // (its view reset would snap the still-fading-out card to compact).
+  // Shell mode. Every view — home, chat, list, detail — renders in the same
+  // large centered modal over a full scrim overlay. The old Intercom-style
+  // compact corner panel (home/chat/compose) has been removed, so no view is
+  // ever compact. applyShellMode stays as the single funnel that keeps the
+  // scrim class in sync (belt-and-braces: it strips any stray rw-compact),
+  // called from openPanel — BEFORE rw-open, so the first paint is correct —
+  // and from renderPanelBody, which every in-panel navigation funnels through.
   // -----------------------------------------------------------------------
 
-  function isCompactView(v) { return v === "home" || v === "chat" || v === "compose"; }
+  function isCompactView(_v) { return false; }
 
   function applyShellMode() {
     if (!widgetEl) return;
@@ -5173,6 +5156,10 @@
       return;
     }
     stopDetailPoll();
+    // Record where chat was launched from so its back control returns there —
+    // Home's chat card keeps "home"; the discussion board's [+ New post] keeps
+    // "list". Must be captured before `view` is reassigned below.
+    chatReturnView = view === "list" ? "list" : "home";
     view = "chat";
     currentDetailTicket = null;
     renderPanelBody();
@@ -6500,9 +6487,13 @@
           goHome();
         }
       } else {
-        // The Home screen (Plan 1) is live: back returns to the landing view
-        // the chat card came from.
-        goHome();
+        // Normal chat: back returns to wherever chat was opened from — Home's
+        // chat card (home) or the discussion board's [+ New post] (list).
+        if (chatReturnView === "list") {
+          goList();
+        } else {
+          goHome();
+        }
       }
     });
 
