@@ -193,12 +193,22 @@ export function resolveWidgetPermissions(
   if (authenticated) {
     add(m[WIDGET_ROLE_LOGGED_IN]);
     if (assignedRole && assignedRole !== WIDGET_ROLE_EVERYONE) add(m[assignedRole]);
+  } else {
+    // Anonymous visitors can never do more than view the board, regardless of
+    // what the `everyone` role grants in the stored map — voting, creating,
+    // assigning and previewing all require an identified user. This clamp is
+    // the server-side enforcement behind the grid disabling those cells for
+    // the Everyone row.
+    for (const p of [...out]) if (!ANON_ALLOWED_PERMISSIONS.has(p)) out.delete(p);
   }
   // Derive internal capabilities from the visible grid permissions.
   if (out.has('ticket_creator')) out.add('attach_image');
   if (out.has('assign_agent')) out.add('live_coder');
   return out;
 }
+
+/** The only permission an anonymous (unauthenticated) visitor may ever hold. */
+const ANON_ALLOWED_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set(['view_tickets']);
 
 /**
  * Is `role` a valid per-member assignable role for `map`? Assignable = any
