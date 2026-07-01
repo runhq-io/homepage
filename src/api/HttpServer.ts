@@ -42,6 +42,7 @@ import * as ClarifierService from './services/ClarifierService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WidgetChatService from './services/WidgetChatService';
 import { subscribeToTicket } from './services/WidgetTicketEvents';
+import { subscribeToUser } from './services/WidgetNotifications';
 import { streamSSE } from 'hono/streaming';
 import { getCookie, setCookie } from 'hono/cookie';
 import { RW_SESSION_COOKIE, rwSessionCookieOptions, rwSessionMatchesUser } from './services/WidgetCookieAuth';
@@ -6548,6 +6549,52 @@ export function createHttpApp() {
       // Initial snapshot reuses the visibility-checked `initial` payload.
       await stream.writeSSE({ event: 'snapshot', data: JSON.stringify(initial) });
 
+      while (open) {
+        await stream.sleep(25_000);
+        if (!open) break;
+        await stream.write(': hb\n\n');
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/widget/notifications/events
+  //
+  // One per-user SSE stream that drives the whole launcher/bell unread badge in
+  // real time (instead of polling). Emits a payload-free 'ping' whenever a
+  // ticket the viewer reported or assigned changes — including a coder/teammate
+  // live-session reply — and the client re-fetches its counts. Identified users
+  // only; app-JWT embeds pass ?token= (shimmed to Authorization), runhq cookie
+  // auth is native (withCredentials).
+  // ---------------------------------------------------------------------------
+  app.get('/api/widget/notifications/events', async (c) => {
+    const tokenQ = c.req.query('token');
+    const reqForAuth = tokenQ && !c.req.header('Authorization')
+      ? {
+          header: (name: string) =>
+            name.toLowerCase() === 'authorization' ? `Bearer ${tokenQ}` : c.req.header(name),
+          method: 'GET',
+          raw: c.req.raw,
+        }
+      : c.req;
+    const auth = await WidgetService.authenticateWidget(reqForAuth as any);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.authenticated || !auth.widgetUserId) {
+      return c.json({ error: 'identified_user_required' }, 403);
+    }
+    const widgetUserId = auth.widgetUserId;
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      const unsubscribe = subscribeToUser(widgetUserId, () => {
+        void stream.writeSSE({ event: 'ping', data: '1' }).catch(() => {});
+      });
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+      // Announce readiness so the client knows the stream is live before pings.
+      await stream.writeSSE({ event: 'ready', data: '1' });
       while (open) {
         await stream.sleep(25_000);
         if (!open) break;
