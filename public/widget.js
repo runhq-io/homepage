@@ -68,6 +68,13 @@
   // on back-navigation, view switches, and panel close.
   var detailPollIntervalId = null;
   var DETAIL_POLL_INTERVAL_MS = 5000;
+  // Background refresh of the launcher/bell unread counts while the panel is
+  // open, so a team reply or a coder/teammate live-session message bumps the
+  // badge without the user reopening the widget. Only the badge caches are
+  // reloaded + the label/bell re-rendered (never the list body) so it never
+  // disrupts scroll or an in-progress interaction.
+  var badgePollTimerId = null;
+  var BADGE_POLL_INTERVAL_MS = 20000;
   // Live ticket-status stream (SSE). Preferred over polling; at most one of
   // detailEventSourceRef / detailPollIntervalId is armed at a time.
   var detailEventSourceRef = null;
@@ -331,6 +338,12 @@
   }
   function chatLoadActive() {
     return api("/api/widget/chat/conversations/active");
+  }
+  // Authoritative close-state for a SPECIFIC conversation by id. Unlike
+  // /conversations/active (intake-only — hides ticket-linked threads), this
+  // answers "is THIS conversation still open?" even after it produced a ticket.
+  function chatLoadStatus(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/status");
   }
   function chatLoadMessages(conversationId, afterCursor) {
     var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
@@ -5064,6 +5077,32 @@
     });
   }
 
+  // Refresh ONLY the unread-driving caches + the label/bell (not the list body),
+  // so the badge reflects new activity without disrupting the current view.
+  function refreshBadgeCaches() {
+    if (!config.isIdentified) return Promise.resolve();
+    var jobs = [
+      loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {}),
+    ];
+    if (viewerCanLiveCoder()) {
+      jobs.push(loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () {}));
+    }
+    return Promise.all(jobs).then(function () { if (isOpen) refreshTabLabel(); });
+  }
+
+  function startBadgePoll() {
+    stopBadgePoll();
+    if (!config.isIdentified) return;
+    badgePollTimerId = setInterval(function () {
+      if (!isOpen || !config.isIdentified) { stopBadgePoll(); return; }
+      refreshBadgeCaches();
+    }, BADGE_POLL_INTERVAL_MS);
+  }
+
+  function stopBadgePoll() {
+    if (badgePollTimerId !== null) { clearInterval(badgePollTimerId); badgePollTimerId = null; }
+  }
+
   // ===========================================================================
   // Modal infra
   // ===========================================================================
@@ -5402,10 +5441,16 @@
     });
   }
 
-  // After a ticket is created the agent gets a wrap-up turn and the BE
-  // closes the conversation. Status changes don't stream as message rows,
-  // so watch GET /conversations/active until this conversation stops being
-  // the active one, then flip the footer to "Start new conversation".
+  // After a ticket is created the agent gets a wrap-up turn and the BE closes
+  // the conversation once it has nothing left to resolve. Status changes don't
+  // stream as message rows, so poll for closure.
+  //
+  // We poll THIS conversation's own status (by id), NOT /conversations/active:
+  // the moment a ticket is filed the conversation gains a createdTaskId, which
+  // getActiveConversation deliberately excludes (it only surfaces intake
+  // threads). A multi-ticket intake keeps the conversation open to host the
+  // next proposal — reading "am I still the active intake thread?" would report
+  // that (legitimately open) conversation as closed and hide the pending card.
   function startChatClosedWatch() {
     if (chatClosedWatchTimerId !== null) return;
     var conv = chatConversation;
@@ -5415,10 +5460,9 @@
         chatClosedWatchTimerId = null;
         return;
       }
-      chatLoadActive().then(function (data) {
+      chatLoadStatus(conv.id).then(function (data) {
         if (view !== "chat" || chatConversation !== conv) return;
-        var active = data && data.conversation;
-        if (!active || active.id !== conv.id || active.status === "closed") chatMarkClosed();
+        if (!data || data.status === "closed") chatMarkClosed();
       }).catch(function (err) {
         if (view !== "chat" || chatConversation !== conv) return;
         if (err && err.status === 404) chatMarkClosed();
@@ -5559,8 +5603,13 @@
     if (kind === "proposal") {
       // Only the latest unresolved proposal is actionable; older / resolved
       // proposals collapse (their outcome renders from proposal_resolved).
+      // Never actionable in a Live session: that surface is a staff-to-coder
+      // relay that REUSES the reporter's intake conversation (which the staff
+      // viewer doesn't own), so filing a ticket from it 404s. An unresolved
+      // intake proposal belongs to the reporter's own chat thread.
       if (activeProposal && activeProposal.id === row.id
-          && chatConversation && chatConversation.status === "active") {
+          && chatConversation && chatConversation.status === "active"
+          && !chatIsLiveSession) {
         return renderChatProposalCard(row);
       }
       return null;
@@ -7910,6 +7959,8 @@
     if (afterRefresh && p && typeof p.then === "function") {
       p.then(afterRefresh);
     }
+    // Keep the unread badge/bell current while the panel is open.
+    startBadgePoll();
   }
 
   // ---------------------------------------------------------------------------
@@ -8052,6 +8103,7 @@
     // Stop any running detail poll before resetting view state.
     stopDetailPoll();
     stopChatTransport();
+    stopBadgePoll();
     chatUi = null;
     chatTurnPending = false;
     chatSubmitInFlight = false;
@@ -8415,6 +8467,11 @@
     // Create action (which posts to chatCreateTicket against the conversation).
     window._rwTestHooks._setChatConversation = function (conv) {
       chatConversation = conv;
+    };
+    // Toggle the live-session flag so a vm test can assert that intake proposal
+    // cards are non-actionable in the staff-to-coder relay surface.
+    window._rwTestHooks._setChatIsLiveSession = function (on) {
+      chatIsLiveSession = !!on;
     };
     // Unread-badge test helpers: expose the badge counter, the seen-marker, and
     // direct cache setters so vm tests can drive the full seen/unseen lifecycle

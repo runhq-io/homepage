@@ -122,6 +122,8 @@ interface TestHooks {
   _setConfig?: (updates: Record<string, unknown>) => void;
   _setCurrentUser?: (updates: Record<string, unknown>) => void;
   viewerCanLiveCoder?: () => boolean;
+  _setChatConversation?: (conv: { id?: string; status?: string } | null) => void;
+  _setChatIsLiveSession?: (on: boolean) => void;
 }
 
 function makeLocalStorageMock() {
@@ -235,6 +237,36 @@ describe('widget.js — Live session opening acknowledgement', () => {
     expect(intro._find((n) => hasClass(n, 'rw-chat-intro-title'))).toBeNull();
     expect(intro._find((n) => hasClass(n, 'rw-intro-status'))).not.toBeNull();
     expect(allText(intro)).toContain('Suha (Support)');
+  });
+});
+
+describe('widget.js — intake proposal cards are inert in a Live session', () => {
+  // Live repro 2026-07-01 (ticket #929791A0): the reporter's multi-ticket intake
+  // left an unresolved proposal in the conversation the Live session reuses. A
+  // staff viewer (who does NOT own that conversation) saw an actionable
+  // [Create Ticket] card and got "conversation_not_found" on click.
+  const proposalRow = {
+    id: 'p1',
+    payload: { kind: 'proposal', title: 'Purchased artillery not installed', description: 'Gold deducted.', toolUseId: 'tu_1' },
+  };
+
+  it('renders the actionable card in the reporter\'s own (non-live) chat', () => {
+    const { hooks } = loadWidget();
+    hooks._setChatConversation!({ id: 'c1', status: 'active' });
+    hooks._setChatIsLiveSession!(false);
+    const node = hooks.renderChatEventRow!(proposalRow, proposalRow);
+    expect(node).not.toBeNull();
+    expect(hasClass(node!, 'rw-chat-proposal-card')).toBe(true);
+  });
+
+  it('collapses the same card to nothing in a Live session (staff relay)', () => {
+    const { hooks } = loadWidget();
+    hooks._setChatConversation!({ id: 'c1', status: 'active' });
+    hooks._setChatIsLiveSession!(true);
+    const node = hooks.renderChatEventRow!(proposalRow, proposalRow);
+    // No card — the staff viewer cannot file a ticket from a conversation they
+    // don't own, so the affordance is suppressed entirely.
+    expect(node).toBeNull();
   });
 });
 

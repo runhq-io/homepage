@@ -6101,6 +6101,25 @@ export function createHttpApp() {
     }
   });
 
+  // Authoritative close-state for ONE conversation (addressed by id). The
+  // widget's post-ticket closed-watch polls this instead of /conversations/active
+  // (which hides ticket-linked conversations) so a conversation the BE keeps
+  // open — e.g. it still holds an unresolved proposal from a multi-ticket
+  // intake — is not mistaken for closed.
+  app.get('/api/widget/chat/conversations/:id/status', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const status = await WidgetChatService.getConversationStatus(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions,
+      );
+      return c.json({ status });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
   // Send a user message → triggers a workspace turn.
   app.post('/api/widget/chat/conversations/:id/messages', async (c) => {
     const gate = await requireChatUser(c);
