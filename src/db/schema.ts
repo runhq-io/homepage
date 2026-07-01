@@ -1539,7 +1539,7 @@ export const pointGrants = pgTable('point_grants', {
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
   amount: integer('amount').notNull(),
-  source: text('source').$type<'auto_completion' | 'admin_grant' | 'reversal' | 'backfill'>().notNull(),
+  source: text('source').$type<'auto_completion' | 'admin_grant' | 'reversal' | 'backfill' | 'step_advance'>().notNull(),
   reason: text('reason'),
   reasonCode: text('reason_code'),
   ticketId: uuid('ticket_id'),
