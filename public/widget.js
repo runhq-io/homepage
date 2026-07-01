@@ -2707,7 +2707,9 @@
       '}',
       '.rw-list-topbar {',
       '  display: flex; align-items: center;',
-      '  padding: 14px 80px 10px 22px;',
+      /* Right padding clears the absolute shell actions (bell/theme/close reach',
+      '     ~110px from the edge) so the right-aligned coin total never overlaps them. */
+      '  padding: 14px 120px 10px 22px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '  flex: 0 0 auto;',
       '}',
