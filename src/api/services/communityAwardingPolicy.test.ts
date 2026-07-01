@@ -102,3 +102,83 @@ describe('idempotency key builders', () => {
     expect(backfillIdempotencyKey('t-abc')).toBe('backfill:t-abc');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Step-coins policy
+// ---------------------------------------------------------------------------
+import {
+  tierOrdinal,
+  crossedTiers,
+  STEP_COIN,
+  stepAdvanceIdempotencyKey,
+  tierLabel,
+  stepReason,
+} from './communityAwardingPolicy';
+
+describe('tierOrdinal', () => {
+  it('maps the ladder', () => {
+    expect(tierOrdinal('planned')).toBe(0);
+    expect(tierOrdinal('in_progress')).toBe(1);
+    expect(tierOrdinal('reviewed')).toBe(2);
+    expect(tierOrdinal('merged')).toBe(3);
+    expect(tierOrdinal('deployed')).toBe(4);
+  });
+  it('treats done as the reviewed tier', () => {
+    expect(tierOrdinal('done')).toBe(2);
+  });
+  it('normalizes deployed:<env> to the deployed tier', () => {
+    expect(tierOrdinal('deployed:prod')).toBe(4);
+    expect(tierOrdinal('deployed:staging-123')).toBe(4);
+  });
+  it('puts off-ladder statuses at -1', () => {
+    expect(tierOrdinal('pending')).toBe(-1);
+    expect(tierOrdinal('needs_review')).toBe(-1);
+    expect(tierOrdinal('cancelled')).toBe(-1);
+    expect(tierOrdinal('nonsense')).toBe(-1);
+  });
+});
+
+describe('crossedTiers', () => {
+  it('single forward step', () => {
+    expect(crossedTiers('planned', 'in_progress')).toEqual(['in_progress']);
+  });
+  it('multi-step forward jump crosses every tier once, in order', () => {
+    expect(crossedTiers('planned', 'merged')).toEqual(['in_progress', 'reviewed', 'merged']);
+  });
+  it('full run', () => {
+    expect(crossedTiers('planned', 'deployed')).toEqual(['in_progress', 'reviewed', 'merged', 'deployed']);
+  });
+  it('backward transition rewards nothing', () => {
+    expect(crossedTiers('merged', 'in_progress')).toEqual([]);
+  });
+  it('same-tier transition rewards nothing', () => {
+    expect(crossedTiers('reviewed', 'reviewed')).toEqual([]);
+    expect(crossedTiers('done', 'reviewed')).toEqual([]); // done == reviewed ordinal
+  });
+  it('coming from an off-ladder status counts from the planned baseline', () => {
+    expect(crossedTiers('pending', 'reviewed')).toEqual(['in_progress', 'reviewed']);
+  });
+  it('into an off-ladder status rewards nothing', () => {
+    expect(crossedTiers('merged', 'cancelled')).toEqual([]);
+  });
+  it('into planned rewards nothing', () => {
+    expect(crossedTiers('pending', 'planned')).toEqual([]);
+  });
+});
+
+describe('step keys, labels, reasons', () => {
+  it('STEP_COIN is 1', () => {
+    expect(STEP_COIN).toBe(1);
+  });
+  it('idempotency key format is stable', () => {
+    expect(stepAdvanceIdempotencyKey('t1', 'merged', 'u1')).toBe('step:t1:merged:u1');
+  });
+  it('tier labels are human', () => {
+    expect(tierLabel('in_progress')).toBe('In progress');
+    expect(tierLabel('deployed')).toBe('Deployed');
+  });
+  it('reasons read naturally', () => {
+    expect(stepReason('creator', 'reviewed')).toBe('You submitted this and it reached Reviewed');
+    expect(stepReason('voter', 'merged')).toBe('You upvoted this and it reached Merged');
+  });
+});
