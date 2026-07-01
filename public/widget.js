@@ -65,6 +65,13 @@
   // on back-navigation, view switches, and panel close.
   var detailPollIntervalId = null;
   var DETAIL_POLL_INTERVAL_MS = 5000;
+  // Background refresh of the launcher/bell unread counts while the panel is
+  // open, so a team reply or a coder/teammate live-session message bumps the
+  // badge without the user reopening the widget. Only the badge caches are
+  // reloaded + the label/bell re-rendered (never the list body) so it never
+  // disrupts scroll or an in-progress interaction.
+  var badgePollTimerId = null;
+  var BADGE_POLL_INTERVAL_MS = 20000;
   // Live ticket-status stream (SSE). Preferred over polling; at most one of
   // detailEventSourceRef / detailPollIntervalId is armed at a time.
   var detailEventSourceRef = null;
@@ -5057,6 +5064,32 @@
     });
   }
 
+  // Refresh ONLY the unread-driving caches + the label/bell (not the list body),
+  // so the badge reflects new activity without disrupting the current view.
+  function refreshBadgeCaches() {
+    if (!config.isIdentified) return Promise.resolve();
+    var jobs = [
+      loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {}),
+    ];
+    if (viewerCanLiveCoder()) {
+      jobs.push(loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () {}));
+    }
+    return Promise.all(jobs).then(function () { if (isOpen) refreshTabLabel(); });
+  }
+
+  function startBadgePoll() {
+    stopBadgePoll();
+    if (!config.isIdentified) return;
+    badgePollTimerId = setInterval(function () {
+      if (!isOpen || !config.isIdentified) { stopBadgePoll(); return; }
+      refreshBadgeCaches();
+    }, BADGE_POLL_INTERVAL_MS);
+  }
+
+  function stopBadgePoll() {
+    if (badgePollTimerId !== null) { clearInterval(badgePollTimerId); badgePollTimerId = null; }
+  }
+
   // ===========================================================================
   // Modal infra
   // ===========================================================================
@@ -7876,6 +7909,8 @@
     if (afterRefresh && p && typeof p.then === "function") {
       p.then(afterRefresh);
     }
+    // Keep the unread badge/bell current while the panel is open.
+    startBadgePoll();
   }
 
   // ---------------------------------------------------------------------------
@@ -8018,6 +8053,7 @@
     // Stop any running detail poll before resetting view state.
     stopDetailPoll();
     stopChatTransport();
+    stopBadgePoll();
     chatUi = null;
     chatTurnPending = false;
     chatSubmitInFlight = false;
