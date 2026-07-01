@@ -65,6 +65,18 @@ describe('widget role-based permissions', () => {
     expect(p.has('assign_agent')).toBe(false);
   });
 
+  it('clamps anonymous to view_tickets even if the everyone role over-grants', () => {
+    const map = { everyone: ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview'] };
+    const anon = resolveWidgetPermissions(map, null, false);
+    expect([...anon]).toEqual(['view_tickets']);
+    // and no derived caps leak in (attach/live derive from create/assign)
+    expect(anon.has('attach_image')).toBe(false);
+    expect(anon.has('live_coder')).toBe(false);
+    // an authenticated user on the SAME map is unaffected by the clamp
+    const authed = resolveWidgetPermissions(map, null, true);
+    expect(authed.has('voter')).toBe(true);
+  });
+
   it('everyone is NOT added twice / assigned role never leaks to anonymous', () => {
     const map = { everyone: ['view_tickets'], logged_in: ['voter'], staff: ['assign_agent'] };
     const anon = resolveWidgetPermissions(map, 'staff', false);
