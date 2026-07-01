@@ -6569,10 +6569,20 @@ export function createHttpApp() {
   // ---------------------------------------------------------------------------
   app.get('/api/widget/notifications/events', async (c) => {
     const tokenQ = c.req.query('token');
-    const reqForAuth = tokenQ && !c.req.header('Authorization')
+    const projectQ = c.req.query('project');
+    // EventSource can't set headers: accept the app-JWT via ?token= (shimmed to
+    // Authorization) and the project via ?project= (shimmed to X-RW-Project).
+    // The project shim is what lets runhq-COOKIE members authenticate here — the
+    // cookie doesn't carry the project, and the header can't be set on an
+    // EventSource. Origin + cookie still gate the cookie path (unchanged).
+    const reqForAuth = (tokenQ || projectQ)
       ? {
-          header: (name: string) =>
-            name.toLowerCase() === 'authorization' ? `Bearer ${tokenQ}` : c.req.header(name),
+          header: (name: string) => {
+            const lower = name.toLowerCase();
+            if (lower === 'authorization' && tokenQ && !c.req.header('Authorization')) return `Bearer ${tokenQ}`;
+            if (lower === 'x-rw-project' && projectQ && !c.req.header('X-RW-Project')) return projectQ;
+            return c.req.header(name);
+          },
           method: 'GET',
           raw: c.req.raw,
         }
