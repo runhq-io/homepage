@@ -5559,8 +5559,13 @@
     if (kind === "proposal") {
       // Only the latest unresolved proposal is actionable; older / resolved
       // proposals collapse (their outcome renders from proposal_resolved).
+      // Never actionable in a Live session: that surface is a staff-to-coder
+      // relay that REUSES the reporter's intake conversation (which the staff
+      // viewer doesn't own), so filing a ticket from it 404s. An unresolved
+      // intake proposal belongs to the reporter's own chat thread.
       if (activeProposal && activeProposal.id === row.id
-          && chatConversation && chatConversation.status === "active") {
+          && chatConversation && chatConversation.status === "active"
+          && !chatIsLiveSession) {
         return renderChatProposalCard(row);
       }
       return null;
@@ -8415,6 +8420,11 @@
     // Create action (which posts to chatCreateTicket against the conversation).
     window._rwTestHooks._setChatConversation = function (conv) {
       chatConversation = conv;
+    };
+    // Toggle the live-session flag so a vm test can assert that intake proposal
+    // cards are non-actionable in the staff-to-coder relay surface.
+    window._rwTestHooks._setChatIsLiveSession = function (on) {
+      chatIsLiveSession = !!on;
     };
     // Unread-badge test helpers: expose the badge counter, the seen-marker, and
     // direct cache setters so vm tests can drive the full seen/unseen lifecycle
