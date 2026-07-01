@@ -139,3 +139,34 @@ Changes (all in `public/widget.js`):
 Verification delta: clicking the launcher opens the discussion board (Hot tab)
 titled "{name} Feedback"; `[+ New post]` opens the agent chat and its back
 returns to the board; no normal navigation reaches the old home menu.
+
+## Follow-up — ticket-detail stepper reflects the new lifecycle
+
+The ticket-detail progress stepper collapsed the new lifecycle statuses
+(`done`/`reviewed`/`merged` → one "In review" step, `deployed` → "Shipped"),
+so it didn't reflect `reviewed`, `merged`, or the deploy environment. The
+stepper is derived server-side in `src/api/services/ticketMilestones.ts` (the
+widget renders whatever milestone array it receives — code-safe), so the fix is
+there, not in `widget.js`.
+
+New track (mirrors the runhq lifecycle; `Clarifying` still appears only when a
+clarification session exists):
+
+`Received → Clarifying → In progress → In review → Reviewed → Merged → Deployed`
+
+Status → step: `pending`/`planned` → Received; `in_progress` → In progress;
+`done` → In review; `reviewed` → Reviewed; `merged` → Merged; `deployed` /
+`deployed:<env>` → Deployed (whole track complete); `cancelled` → `Received` +
+a terminal `Cancelled` step. A merged PR advances to Merged; an open PR to In
+review (status stays authoritative via `max()` across signals).
+
+The deploy step resolves `deployed:<envId>` to **"Deployed → <name>"** using the
+project's `deploy_environments` id→name map (synced from the workspace
+heartbeat, already carried on the ticket-detail response as `environments`).
+Falls back to a bare "Deployed" for legacy `deployed`, unknown envs, no map, or
+an upcoming (not-yet-deployed) step — the raw env id is never shown.
+
+Note: this required rebasing the branch onto `origin/master`, which had shipped
+the env-name resolution (`widget_projects.deploy_environments` + the
+`environments` field on bootstrap/detail responses) that the original task
+branch predated.
