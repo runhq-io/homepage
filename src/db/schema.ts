@@ -1198,7 +1198,7 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   workspaceChannelId: text('workspace_channel_id'),
   title: text('title').notNull(),
   description: text('description'),
-  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled'>().default('pending'),
+  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled' | 'deployed' | `deployed:${string}`>().default('pending'),
   visibility: text('visibility').notNull().$type<'public' | 'private'>().default('private'),
   isPublished: boolean('is_published').notNull().default(false),
   sourceType: text('source_type').notNull().$type<'workspace' | 'widget'>().default('workspace'),
@@ -1399,6 +1399,10 @@ export const widgetProjects = pgTable('widget_projects', {
   // authenticated user); values are arrays of WidgetPermission strings.
   // Example: { "*": ["attach_image"], "team_member": ["assign_agent","live_coder","preview"] }
   widgetRolePermissions: jsonb('widget_role_permissions').$type<Record<string, string[]>>().notNull().default({}),
+  // Deploy-environment id→name map for this project, synced from the workspace
+  // on the server heartbeat. Lets the widget resolve `deployed:<envId>` ticket
+  // statuses to a human label ("Deployed → Production"). Null until first sync.
+  deployEnvironments: jsonb('deploy_environments').$type<Array<{ id: string; name: string }>>(),
   // Feature flag enabling the live-coder UI for this widget project.
   widgetLiveCoderEnabled: boolean('widget_live_coder_enabled').notNull().default(false),
   // Origins (e.g. https://acme.com) where the widget is allowed to use
@@ -1495,7 +1499,7 @@ export const widgetTickets = pgTable('widget_tickets', {
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   description: text('description'),
-  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled'>().default('pending'),
+  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled' | 'deployed' | `deployed:${string}`>().default('pending'),
   moderationStatus: text('moderation_status').notNull().$type<'pending' | 'approved' | 'rejected'>().default('pending'),
   isPrivate: boolean('is_private').default(false).notNull(),
   source: text('source').default('widget').notNull(),
@@ -1663,7 +1667,13 @@ export type WidgetChatEventPayload =
   // Live-coder forward rejected by injection guard. The reason string carries
   // a machine-readable code ('injection_guard') so the widget can show a
   // localized error without parsing human text.
-  | { kind: 'live_coder_rejected'; reason: string };
+  | { kind: 'live_coder_rejected'; reason: string }
+  // A ticket activity (status change / milestone / PR lifecycle) mirrored INTO
+  // the live session so the chat thread shows the same progress timeline as the
+  // public ticket screen. Carries the source activity row's shape so the widget
+  // renders it with its existing describeEvent() formatter (identical wording to
+  // the activity feed). See WidgetChatService.mirrorActivityToLiveSession.
+  | { kind: 'activity'; activityType: string; content: string | null; metadata: Record<string, unknown> | null };
 
 /**
  * Attribution payload on role='team' rows (workspace-member replies from the
@@ -1726,6 +1736,39 @@ export type WidgetChatConversation = typeof widgetChatConversations.$inferSelect
 export type NewWidgetChatConversation = typeof widgetChatConversations.$inferInsert;
 export type WidgetChatMessage = typeof widgetChatMessages.$inferSelect;
 export type NewWidgetChatMessage = typeof widgetChatMessages.$inferInsert;
+
+// Server-owned image references for widget chat. The client only ever sees the
+// opaque `id`; all storage keys are kept server-side.
+// Both the original upload and the model-sized JPEG derivative are stored so the
+// derivative can be regenerated or audited independently.
+export const widgetChatImages = pgTable('widget_chat_images', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id').notNull().references(() => widgetChatConversations.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  /** Null while the message row doesn't exist yet; updated in a later task. */
+  messageId: uuid('message_id').references(() => widgetChatMessages.id, { onDelete: 'cascade' }),
+  /** Server that owns the storage keys. */
+  serverId: text('server_id').references(() => servers.id).notNull(),
+  /** MIME type of the original upload (model image is always image/jpeg). */
+  mimeType: text('mime_type').notNull(),
+  /** Original filename as supplied by the uploader. */
+  originalName: text('original_name'),
+  /** Original upload as received from the client. */
+  originalStorageProvider: text('original_storage_provider').notNull().$type<'r2' | 's3'>(),
+  originalStorageKey: text('original_storage_key').notNull(),
+  /** Model-ready derivative (JPEG ≤ 1024px long edge). */
+  modelStorageProvider: text('model_storage_provider').notNull().$type<'r2' | 's3'>(),
+  modelStorageKey: text('model_storage_key').notNull(),
+  width: integer('width').notNull(),
+  height: integer('height').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => [
+  index('widget_chat_images_conversation_idx').on(t.conversationId),
+  index('widget_chat_images_message_idx').on(t.messageId),
+]);
+
+export type ChatImageRow = typeof widgetChatImages.$inferSelect;
+export type NewChatImage = typeof widgetChatImages.$inferInsert;
 
 // Per-channel naming: the widget is now anchored to a single todo channel,
 // so the row type is named `WidgetChannel` (the underlying table keeps the

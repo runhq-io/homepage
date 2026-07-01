@@ -135,6 +135,32 @@ describe('ingestTurnEvents', () => {
     const rows = await messages();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ role: 'team', content: 'Pushed a fix — can you re-test?', turnId: TURN_ID });
+    // No author supplied → null payload, so the widget falls back to "Team".
+    expect(rows[0]!.payload).toBeNull();
+  });
+
+  it('attributes a team_message to its author (multiple staff in a live session)', async () => {
+    // The live-chat → live-session mirror carries the workspace member's display
+    // name so a session with several staff shows each sender's name, not "Team".
+    const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'team_message', text: 'On it — deploying now.', authorName: '  Suha  ' }],
+    });
+    expect(result).toEqual({ inserted: 1, turnDone: false });
+    const rows = await messages();
+    expect(rows).toHaveLength(1);
+    // Same {authorName} shape sendTeamReply uses; trimmed before persisting.
+    expect(rows[0]).toMatchObject({ role: 'team', content: 'On it — deploying now.', payload: { authorName: 'Suha' } });
+  });
+
+  it('falls back to a null payload when team_message authorName is blank', async () => {
+    const result = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'team_message', text: 'Whitespace author', authorName: '   ' }],
+    });
+    expect(result).toEqual({ inserted: 1, turnDone: false });
+    const rows = await messages();
+    expect(rows[0]!.payload).toBeNull();
   });
 
   it('per-message turn ids: same seq + different turn ids both persist; same turn id dedups (mirror convergence contract)', async () => {
@@ -288,6 +314,69 @@ describe('ingestTurnEvents', () => {
     const rows = await messages();
     expect(rows).toHaveLength(1); // notice deleted, late reply kept
     expect(rows[0]).toMatchObject({ role: 'agent', content: 'Created your ticket — assigning it now.' });
+
+    const [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
+    expect(conv).toMatchObject({ status: 'closed', pendingTurnId: null });
+  });
+
+  it('does NOT close a created conversation whose post-create turn proposes ANOTHER ticket (multi-ticket intake)', async () => {
+    // Live repro 2026-07-01 (project tank_MylBVnEy5UfPeQI4, ticket #929791A0):
+    // the visitor asked the agent to file TWO tickets. createTicketFromChat
+    // files ticket #1, sets createdTaskId, and dispatches a post-create turn.
+    // That turn — instead of a plain wrap-up — proposes ticket #2. The
+    // close-on-turn_done contract must NOT fire while that fresh proposal is
+    // unresolved, or the conversation closes and the visitor (and any staff who
+    // opens the Live session, which reuses this conversation) is left with a
+    // dead "Create Ticket" card that 404s / 409s. The conversation stays open
+    // until every proposal it holds is resolved.
+    await db.update(widgetChatConversations)
+      .set({ createdTaskId: TASK_ID, pendingTurnId: TURN_ID })
+      .where(eq(widgetChatConversations.id, CONV_ID));
+
+    const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [
+        { seq: 0, kind: 'agent_message', text: 'First ticket filed! Now for the artillery one:' },
+        { seq: 1, kind: 'proposal', title: 'Purchased artillery not installed', description: 'Gold deducted, not equipped.', toolUseId: 'tu_artillery' },
+        { seq: 2, kind: 'turn_done' },
+      ],
+    });
+    expect(res).toEqual({ inserted: 2, turnDone: true });
+
+    // Pending slot still clears (the turn genuinely finished), but the
+    // conversation stays ACTIVE so the second proposal is actionable.
+    const [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
+    expect(conv).toMatchObject({ status: 'active', pendingTurnId: null });
+  });
+
+  it('closes once the LAST outstanding proposal in a created conversation resolves', async () => {
+    // Continuation of the multi-ticket flow: the second proposal is created
+    // (createTicketFromChat writes proposal_resolved{created}) and its own
+    // post-create turn is a plain wrap-up (no new proposal). With no unresolved
+    // proposal left, the close-on-turn_done contract fires as normal.
+    // Separate statements (distinct created_at) so loadAllMessages orders the
+    // resolve strictly AFTER the proposal — mirrors production, where each row
+    // is its own insert (never a same-timestamp batch).
+    await db.insert(widgetChatMessages).values({
+      conversationId: CONV_ID, role: 'event', turnId: 'earlier', seq: 0,
+      payload: { kind: 'proposal', title: 'Artillery', description: 'x', toolUseId: 'tu_artillery' },
+    });
+    await db.insert(widgetChatMessages).values({
+      conversationId: CONV_ID, role: 'event', turnId: null, seq: null,
+      payload: { kind: 'proposal_resolved', created: true, ticketId: TASK_ID },
+    });
+    await db.update(widgetChatConversations)
+      .set({ createdTaskId: TASK_ID, pendingTurnId: TURN_ID })
+      .where(eq(widgetChatConversations.id, CONV_ID));
+
+    const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [
+        { seq: 0, kind: 'agent_message', text: 'Both tickets filed — handing off now.' },
+        { seq: 1, kind: 'turn_done' },
+      ],
+    });
+    expect(res).toEqual({ inserted: 1, turnDone: true });
 
     const [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
     expect(conv).toMatchObject({ status: 'closed', pendingTurnId: null });

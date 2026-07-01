@@ -13,22 +13,27 @@
  * conversation_not_found, never an existence signal.
  */
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { db } from '../../db/index';
 import {
   servers,
   widgetChatConversations,
+  widgetChatImages,
   widgetChatMessages,
   widgetClarifications,
   widgetExposedAgents,
   widgetProjects,
   widgetUsers,
+  workspaceTaskActivity,
   workspaceTasks,
+  type ChatImageRow,
   type WidgetChatEventPayload,
+  type WidgetChatMessagePayload,
 } from '../../db/schema';
 import * as ServerService from './ServerService';
 import * as WidgetService from './WidgetService';
 import { autoAssignTicket as autoAssignTicketDefault } from './WidgetAutoAssign';
+import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
 /**
  * Fire-and-forget auto-assign hook, invoked after a widget ticket is created
@@ -73,7 +78,7 @@ export type { WidgetChatEventPayload };
 /** Events the workspace reports back for a turn. seq orders them; turn_done completes the turn. */
 export type TurnEventInput =
   | { seq: number; kind: 'agent_message'; text?: unknown }
-  | { seq: number; kind: 'team_message'; text?: unknown }
+  | { seq: number; kind: 'team_message'; text?: unknown; authorName?: unknown }
   | { seq: number; kind: 'proposal'; title?: unknown; description?: unknown; toolUseId?: unknown }
   | { seq: number; kind: 'ticket_link'; ticketId?: unknown }
   | { seq: number; kind: 'search_performed'; query?: unknown; resultText?: unknown }
@@ -339,6 +344,34 @@ export async function getOrCreateActiveConversation(
   return { conversation: conversation!, messages: [], hasAgentTurns: false };
 }
 
+/**
+ * Discard the user's current intake conversation and open a brand-new one.
+ * Closes any active intake conversation (so it stops being resumed as the
+ * active "Chat with Agent" thread — its transcript is preserved, just no
+ * longer surfaced) and returns a fresh, empty bundle. Ticket-linked / Live
+ * conversations are untouched: findActiveConversation already excludes rows
+ * with a createdTaskId, so only true intake threads are ever closed here.
+ */
+export async function startFreshConversation(
+  projectId: string,
+  widgetUserId: string,
+): Promise<ConversationBundle> {
+  const project = await getChatProject(projectId);
+  if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
+  const existing = await findActiveConversation(projectId, widgetUserId);
+  if (existing) {
+    await db
+      .update(widgetChatConversations)
+      .set({ status: 'closed', updatedAt: new Date() })
+      .where(eq(widgetChatConversations.id, existing.id));
+  }
+  const [conversation] = await db
+    .insert(widgetChatConversations)
+    .values({ widgetProjectId: projectId, widgetUserId })
+    .returning();
+  return { conversation: conversation!, messages: [], hasAgentTurns: false };
+}
+
 export async function getActiveConversation(
   projectId: string,
   widgetUserId: string,
@@ -397,28 +430,100 @@ export async function listMessages(
 // Pure transcript helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Attachment storage seam (injectable for tests)
+// ---------------------------------------------------------------------------
+
+interface AttachmentStorage {
+  isConfigured(): boolean;
+  getObjectBuffer(input: { storageProvider: 'r2' | 's3'; storageKey: string }): Promise<Buffer>;
+  createDownloadUrl(input: { storageProvider: 'r2' | 's3'; storageKey: string; originalName?: string | null }, options?: { ttlSeconds?: number }): Promise<string | null>;
+}
+
+let attachmentStorageImpl: AttachmentStorage = new TaskAttachmentStorageService();
+
+/** Test seam: override the attachment storage service. Returns a restore function. */
+export function __setAttachmentStorageForTests(svc: AttachmentStorage): () => void {
+  const prev = attachmentStorageImpl;
+  attachmentStorageImpl = svc;
+  return () => {
+    attachmentStorageImpl = prev;
+  };
+}
+
 export type TranscriptEntry =
-  | { role: 'user' | 'agent'; content: string }
+  | { role: 'user' | 'agent'; content: string; images?: { mime: string; dataBase64: string }[] }
   | { role: 'event'; payload: WidgetChatEventPayload };
 
 /**
- * Map persisted rows onto the turn-dispatch transcript shape. Defensive:
- * payload-less event rows and empty user/agent rows are dropped. role='team'
- * rows are EXCLUDED — the workspace turn contract only knows
- * user/agent/event entries, and team replies are a human side-channel the
- * agent does not consume (widening the workspace ingest is a separate,
- * cross-repo contract change).
+ * Map persisted rows onto the turn-dispatch transcript shape. Async: when
+ * `conversationId` is provided and object storage is configured, user rows that
+ * have linked `widget_chat_images` are enriched with the base64-encoded model
+ * derivative (≤1024px JPEG). The `images` field is OMITTED (not `[]`) when a
+ * user row has no linked images, keeping the shape additive and backward-compatible.
+ *
+ * Non-user rows (agent, event) never carry images. role='team' rows are EXCLUDED —
+ * the workspace turn contract only knows user/agent/event entries.
+ *
+ * When `conversationId` is omitted the function behaves identically to the
+ * previous pure-sync version (no DB or storage access).
  */
-export function buildTranscript(
-  rows: Pick<ChatMessageRow, 'role' | 'content' | 'payload'>[],
-): TranscriptEntry[] {
+export async function buildTranscript(
+  rows: Array<Pick<ChatMessageRow, 'role' | 'content' | 'payload'> & { id?: string }>,
+  conversationId?: string,
+): Promise<TranscriptEntry[]> {
+  // Collect IDs of all user rows — including image-only (empty-content) rows.
+  const userRowIds: string[] = [];
+  for (const row of rows) {
+    if (row.role === 'user' && row.id) {
+      userRowIds.push(row.id);
+    }
+  }
+
+  // Batch-load images when all conditions are met: we have user rows, a
+  // conversationId to scope the query, and configured storage to fetch bytes.
+  const byMessageId = new Map<string, Array<{ modelStorageProvider: 'r2' | 's3'; modelStorageKey: string }>>();
+  if (userRowIds.length > 0 && conversationId && attachmentStorageImpl.isConfigured()) {
+    const imageRows = await db
+      .select({
+        messageId: widgetChatImages.messageId,
+        modelStorageProvider: widgetChatImages.modelStorageProvider,
+        modelStorageKey: widgetChatImages.modelStorageKey,
+      })
+      .from(widgetChatImages)
+      .where(inArray(widgetChatImages.messageId, userRowIds));
+    for (const img of imageRows) {
+      if (!img.messageId) continue;
+      const list = byMessageId.get(img.messageId);
+      if (list) {
+        list.push({ modelStorageProvider: img.modelStorageProvider, modelStorageKey: img.modelStorageKey });
+      } else {
+        byMessageId.set(img.messageId, [{ modelStorageProvider: img.modelStorageProvider, modelStorageKey: img.modelStorageKey }]);
+      }
+    }
+  }
+
   const out: TranscriptEntry[] = [];
   for (const row of rows) {
     if (row.role === 'event') {
       // 'kind' in — narrows away the role='team' attribution payload shape.
       if (row.payload && 'kind' in row.payload) out.push({ role: 'event', payload: row.payload });
-    } else if (row.role !== 'team' && row.content) {
-      out.push({ role: row.role, content: row.content });
+    } else if (row.role !== 'team' && (row.content || (row.role === 'user' && row.id && byMessageId.has(row.id)))) {
+      if (row.role === 'user' && row.id && byMessageId.has(row.id)) {
+        // User row with linked images: fetch each model derivative and base64-encode.
+        const imgList = byMessageId.get(row.id)!;
+        const images: { mime: string; dataBase64: string }[] = [];
+        for (const img of imgList) {
+          const buffer = await attachmentStorageImpl.getObjectBuffer({
+            storageProvider: img.modelStorageProvider,
+            storageKey: img.modelStorageKey,
+          });
+          images.push({ mime: 'image/jpeg', dataBase64: buffer.toString('base64') });
+        }
+        out.push({ role: 'user', content: row.content, images });
+      } else {
+        out.push({ role: row.role as 'user' | 'agent', content: row.content });
+      }
     }
   }
   return out;
@@ -586,7 +691,7 @@ async function dispatchTurn(
         agentEntityId: project.widgetChatAgentEntityId,
         chatInstructions: null,
         forceProposal: opts.forceProposal === true,
-        transcript: buildTranscript(rows),
+        transcript: await buildTranscript(rows, conversation.id),
         pendingProposal: pending
           ? { toolUseId: pending.toolUseId, resolution: pending.resolution }
           : null,
@@ -632,17 +737,26 @@ async function ensureCollectPrompt(conversationId: string): Promise<void> {
  * on the very next message. Caps: 4000 chars per message, 30 user turns per
  * conversation (abuse backstop — each turn is paid model time). The HTTP
  * layer additionally rate-limits via the chat_message bucket.
+ *
+ * Optional imageIds: previously-uploaded chat images to attach to this message.
+ * Validated BEFORE the message row is inserted (invalid refs produce no row).
+ * After insert, the image rows are updated to set their message_id.
  */
 export async function sendUserMessage(
   conversationId: string,
   projectId: string,
   widgetUserId: string,
   content: string,
+  imageIds?: string[],
 ): Promise<ChatMessageRow> {
   const text = content.trim();
-  if (!text) throw new WidgetService.WidgetError('message_required', 400);
   if (text.length > MAX_MESSAGE_LENGTH) {
     throw new WidgetService.WidgetError('message_too_long', 400);
+  }
+
+  // Count cap: fast path, no DB query needed.
+  if (imageIds && imageIds.length > WidgetService.MAX_CHAT_IMAGES_PER_MESSAGE) {
+    throw new WidgetService.WidgetError('attachment_count_exceeded', 400);
   }
 
   const conversation = await requireWritableConversation(conversationId, projectId, widgetUserId);
@@ -652,11 +766,35 @@ export async function sendUserMessage(
   const project = await getChatProject(projectId);
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
+  // Image ref validation: BEFORE the message insert — invalid refs must not
+  // produce a message row. The query enforces ownership (conversationId +
+  // widgetUserId) and confirms no prior link (messageId IS NULL).
+  let validatedImageIds: string[] = [];
+  if (imageIds && imageIds.length > 0) {
+    const validRows = await db
+      .select({ id: widgetChatImages.id })
+      .from(widgetChatImages)
+      .where(and(
+        inArray(widgetChatImages.id, imageIds),
+        eq(widgetChatImages.conversationId, conversationId),
+        eq(widgetChatImages.widgetUserId, widgetUserId),
+        isNull(widgetChatImages.messageId),
+      ));
+    if (validRows.length !== imageIds.length) {
+      throw new WidgetService.WidgetError('invalid_image_ref', 400);
+    }
+    validatedImageIds = validRows.map((r) => r.id);
+  }
+
+  // Require either non-empty text or at least one validated image.
+  if (!text && validatedImageIds.length === 0) {
+    throw new WidgetService.WidgetError('message_required', 400);
+  }
+
   const [message] = await db
     .insert(widgetChatMessages)
     .values({ conversationId, role: 'user', content: text })
     .returning();
-  publish(message!);
 
   await db
     .update(widgetChatConversations)
@@ -665,6 +803,16 @@ export async function sendUserMessage(
       updatedAt: new Date(),
     })
     .where(eq(widgetChatConversations.id, conversationId));
+
+  // Link images to the new message after the row exists; publish AFTER so SSE
+  // subscribers see the FK already written.
+  if (validatedImageIds.length > 0) {
+    await db
+      .update(widgetChatImages)
+      .set({ messageId: message!.id })
+      .where(inArray(widgetChatImages.id, validatedImageIds));
+  }
+  publish(message!);
 
   if (project.widgetChatAgentEntityId) {
     await dispatchTurn(conversation);
@@ -704,6 +852,54 @@ export async function forceProposal(
 const MAX_DRAFT_TITLE_LENGTH = 300;
 const MAX_DRAFT_DESCRIPTION_LENGTH = 10_000;
 
+/**
+ * Shared helper: carry all `widget_chat_images` for a conversation onto a
+ * newly-created task as `workspaceTaskAttachments`. References the ORIGINAL
+ * storage object directly — no copy needed or possible. Best-effort: a
+ * failing insert for one image logs a warning and moves on; the other images
+ * and the ticket itself are unaffected.
+ */
+async function carryConversationImagesToTask(
+  conversationId: string,
+  serverId: string,
+  taskId: string,
+): Promise<void> {
+  let imgs: (typeof widgetChatImages.$inferSelect)[];
+  try {
+    imgs = await db
+      .select()
+      .from(widgetChatImages)
+      .where(
+        and(
+          eq(widgetChatImages.conversationId, conversationId),
+          isNotNull(widgetChatImages.messageId),
+        ),
+      );
+  } catch (err) {
+    console.warn('[WidgetChatService] failed to load chat images for carry-over', { conversationId, taskId, err });
+    return;
+  }
+  for (const img of imgs) {
+    try {
+      await WidgetService.linkExistingTaskAttachment({
+        serverId,
+        taskId,
+        storageProvider: img.originalStorageProvider,
+        storageKey: img.originalStorageKey,
+        mimeType: img.mimeType,
+        originalName: img.originalName,
+      });
+    } catch (err) {
+      console.warn('[WidgetChatService] failed to carry chat image onto ticket', {
+        conversationId,
+        taskId,
+        imageId: img.id,
+        err,
+      });
+    }
+  }
+}
+
 /** The latest proposal, iff still unresolved. Throws no_pending_proposal otherwise. */
 async function requirePendingProposal(conversationId: string): Promise<PendingProposal> {
   const rows = await loadAllMessages(conversationId);
@@ -730,7 +926,7 @@ export async function createTicketFromChat(
   conversationId: string,
   projectId: string,
   widgetUserId: string,
-  draft: { title?: string; description?: string },
+  draft: { title?: string; description?: string; isPrivate?: boolean },
   /** Whether the reporter holds `assign_agent`; gates automatic assignment. */
   creatorCanAssign = true,
 ): Promise<{ ticketId: string }> {
@@ -746,7 +942,13 @@ export async function createTicketFromChat(
   const project = await getChatProject(projectId);
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
-  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+  const task = await WidgetService.createTicket(projectId, widgetUserId, {
+    title, description, isPrivate: draft.isPrivate === true,
+  });
+
+  // Carry all images from the conversation onto the new ticket as task attachments.
+  // Best-effort: a failing insert must not abort the already-created ticket.
+  await carryConversationImagesToTask(conversationId, project.serverId, task.id);
 
   // Clarifier suppression: 'skipped' is the codebase's native "no clarifying
   // state" marker (getTicketClarification orders 'skipped' rows last; the
@@ -858,6 +1060,10 @@ export async function submitTicketFromConversation(
 
   const { title, description } = deriveTicketDraft(userMessages);
   const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+
+  // Carry all images from the conversation onto the new ticket as task attachments.
+  // Best-effort: a failing insert must not abort the already-created ticket.
+  await carryConversationImagesToTask(conversationId, project.serverId, task.id);
 
   // Born ready: same clarifier-suppression marker createTicketFromChat writes.
   await db.insert(widgetClarifications).values({
@@ -1209,24 +1415,165 @@ export async function sendLiveCoderMessage(
   return { message: message!, jobChannelId, canonicalTaskId: conv.createdTaskId ?? null };
 }
 
-/**
- * Append a rejection event row into the conversation transcript (e.g. when
- * forwardLiveMessage returns 'flagged'). The event is surfaced to the widget
- * SSE stream so the live-coder UI can show an inline error.
- */
-export async function appendLiveCoderRejectionEvent(
+// Ticket activity types worth showing INSIDE the live session as a progress
+// timeline: status transitions, agent milestones (`runhq milestone` →
+// agent_update), and PR lifecycle. `assigned`/`agent_assigned` are deliberately
+// excluded — agent assignment already reaches the chat thread as its own
+// `assigned` event (ingestTurnEvents), so mirroring them here would double up.
+// Comments/edits/archive/etc. are activity-feed-only and would be noise in chat.
+const LIVE_SESSION_MIRRORED_ACTIVITY = new Set([
+  'status_change',
+  'agent_update',   // `runhq milestone`
+  'pr_linked',
+  'agent_assigned',
+  'agent_unassigned',
+  'assigned',
+  'unassigned',
+]);
+// Assignment activity types. When a ticket is assigned THROUGH the widget chat,
+// the workspace already emits a dedicated `assigned` chat event (ingestTurnEvents)
+// — so mirroring the agent_assigned/assigned ACTIVITY too would double the line.
+// For these types we skip the mirror when the thread already shows an `assigned`
+// event. (Auto-PR / triage assignment has no such chat event, so it still shows.)
+const ASSIGNMENT_ACTIVITY = new Set(['agent_assigned', 'agent_unassigned', 'assigned', 'unassigned']);
+
+// How far back to look when backfilling a freshly-opened live session.
+const ACTIVITY_BACKFILL_LIMIT = 100;
+
+// True when the conversation already carries the chat-native `assigned` event,
+// so an assignment ACTIVITY row would be a duplicate line.
+async function conversationHasAssignedEvent(conversationId: string): Promise<boolean> {
+  const [hit] = await db
+    .select({ id: widgetChatMessages.id })
+    .from(widgetChatMessages)
+    .where(and(
+      eq(widgetChatMessages.conversationId, conversationId),
+      eq(widgetChatMessages.role, 'event'),
+      sql`${widgetChatMessages.payload}->>'kind' = 'assigned'`,
+    ))
+    .limit(1);
+  return !!hit;
+}
+
+// Insert one activity event into a conversation, idempotently. The turn id is
+// `act:<conversationId>:<activityId>` so the live forward-mirror and the
+// open-time backfill of the SAME activity collide on the (turn_id, seq) unique
+// index (onConflictDoNothing) — neither can produce a duplicate — while the same
+// activity can still land in a sibling conversation of a multi-conversation
+// ticket (different conversationId → different turn id). Returns true on insert.
+async function insertActivityEvent(
   conversationId: string,
-  reason: string,
-): Promise<void> {
+  activity: { id: string; type: string; content: string | null; metadata: Record<string, unknown> | null },
+): Promise<boolean> {
+  if (ASSIGNMENT_ACTIVITY.has(activity.type) && await conversationHasAssignedEvent(conversationId)) {
+    return false;
+  }
+  const payload: WidgetChatMessagePayload = {
+    kind: 'activity',
+    activityType: activity.type,
+    content: activity.content,
+    metadata: activity.metadata,
+  };
   const [row] = await db
     .insert(widgetChatMessages)
-    .values({
-      conversationId,
-      role: 'event',
-      payload: { kind: 'live_coder_rejected', reason },
-    })
+    .values({ conversationId, role: 'event', content: '', payload, turnId: `act:${conversationId}:${activity.id}`, seq: 0 })
+    .onConflictDoNothing()
     .returning();
-  if (row) publish(row);
+  if (row) { publish(row); return true; }
+  return false;
+}
+
+/**
+ * Mirror a ticket activity row into its live-session chat thread (if one
+ * exists), so the live session shows the same progress timeline as the public
+ * ticket screen. Persisted as a role='event' row with the source activity's
+ * shape; the widget renders it through its existing describeEvent() formatter,
+ * giving identical wording to the activity feed with zero duplicated copy.
+ *
+ * Best-effort and idempotent-by-construction: addActivity inserts exactly one
+ * activity row per call, so this fires once per activity (no turnId dedup
+ * needed). Only mirrors into a conversation that ALREADY exists — it never
+ * creates one, so a status change on a ticket nobody opened a session on is a
+ * no-op. Never throws (the caller wraps it; a mirror failure must not break the
+ * activity write).
+ */
+export async function mirrorActivityToLiveSession(
+  taskId: string,
+  activity: { id: string; type: string; content?: string | null; metadata?: Record<string, unknown> | null },
+): Promise<void> {
+  if (!LIVE_SESSION_MIRRORED_ACTIVITY.has(activity.type)) return;
+
+  // A ticket can be backed by more than one conversation (the intake thread that
+  // created it AND a lazily-created live-session thread for a directly-assigned
+  // ticket), so mirror into every conversation linked to the task.
+  const convs = await db
+    .select({ id: widgetChatConversations.id })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.createdTaskId, taskId));
+
+  for (const conv of convs) {
+    await insertActivityEvent(conv.id, {
+      id: activity.id,
+      type: activity.type,
+      content: activity.content ?? null,
+      metadata: activity.metadata ?? null,
+    });
+  }
+}
+
+/**
+ * Backfill a live session's progress timeline when it is opened. A directly-
+ * assigned (auto-PR / triage) ticket has no conversation until staff open the
+ * Live session, so everything that already happened — assignment, status
+ * changes, milestones, PR events — predates the thread and the forward mirror
+ * never saw it. This replays the ticket's recent allowlisted activity into the
+ * conversation. Idempotent: each row reuses the `act:<activityId>` turn id, so
+ * re-opening the session, or an event that was also live-mirrored, never
+ * duplicates. Comments live in a separate table and never reach this path.
+ * Best-effort; never throws.
+ */
+export async function backfillLiveSessionForConversation(conversationId: string): Promise<void> {
+  if (!UUID_RE.test(conversationId)) return;
+  const [conv] = await db
+    .select({ createdTaskId: widgetChatConversations.createdTaskId })
+    .from(widgetChatConversations)
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  // Only ticket-linked (live-session) conversations have a timeline to backfill;
+  // a plain intake conversation has no createdTaskId and is a no-op.
+  if (!conv?.createdTaskId) return;
+  await backfillLiveSessionActivity(conversationId, conv.createdTaskId);
+}
+
+export async function backfillLiveSessionActivity(conversationId: string, taskId: string): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        id: workspaceTaskActivity.id,
+        type: workspaceTaskActivity.type,
+        content: workspaceTaskActivity.content,
+        metadata: workspaceTaskActivity.metadata,
+      })
+      .from(workspaceTaskActivity)
+      .where(and(
+        eq(workspaceTaskActivity.taskId, taskId),
+        inArray(workspaceTaskActivity.type, [...LIVE_SESSION_MIRRORED_ACTIVITY]),
+      ))
+      .orderBy(desc(workspaceTaskActivity.createdAt))
+      .limit(ACTIVITY_BACKFILL_LIMIT);
+
+    // Insert oldest-first so created_at order matches the original timeline.
+    for (const row of rows.reverse()) {
+      await insertActivityEvent(conversationId, {
+        id: row.id,
+        type: row.type,
+        content: row.content ?? null,
+        metadata: (row.metadata as Record<string, unknown> | null) ?? null,
+      });
+    }
+  } catch (err) {
+    console.warn('[WidgetChatService] live-session activity backfill failed', err);
+  }
 }
 
 /**
@@ -1269,7 +1616,7 @@ export async function ingestTurnEvents(
       continue;
     }
 
-    let row: { role: 'agent' | 'team' | 'event'; content: string; payload: WidgetChatEventPayload | null } | null = null;
+    let row: { role: 'agent' | 'team' | 'event'; content: string; payload: WidgetChatMessagePayload | null } | null = null;
     switch (ev.kind) {
       case 'agent_message': {
         if (typeof ev.text === 'string' && ev.text.length > 0) {
@@ -1282,8 +1629,18 @@ export async function ingestTurnEvents(
         // session. Persisted as a `team` row so the external viewer sees what the
         // team said (the live session mirrors the workspace live chat). Not part
         // of the agent's turn transcript (buildTranscript excludes role='team').
+        //
+        // authorName attributes the reply to the human who sent it, so a live
+        // session with MULTIPLE staff shows each sender's name rather than a
+        // generic "Team" (the widget renders payload.authorName, falling back to
+        // "Team" when absent). Same {authorName} payload shape as sendTeamReply.
         if (typeof ev.text === 'string' && ev.text.length > 0) {
-          row = { role: 'team', content: ev.text, payload: null };
+          const authorName = typeof ev.authorName === 'string' ? ev.authorName.trim() : '';
+          row = {
+            role: 'team',
+            content: ev.text,
+            payload: authorName ? { authorName } : null,
+          };
         }
         break;
       }
@@ -1415,7 +1772,19 @@ export async function ingestTurnEvents(
       // "Assigned to …" (live repro 2026-06-07).
       if (turnDone && current.createdTaskId
         && (current.pendingTurnId === null || current.pendingTurnId === input.turnId)) {
-        updates.status = 'closed';
+        // ...UNLESS the conversation still holds an unresolved proposal. A
+        // multi-ticket intake (visitor asks the agent to file several tickets in
+        // one thread) files ticket #1, then the post-create turn proposes ticket
+        // #2 rather than a plain wrap-up. Closing here would orphan that fresh
+        // proposal: the [Create Ticket] card stays rendered but the conversation
+        // is closed, so acting on it fails — conversation_closed for the visitor,
+        // conversation_not_found for a staff member who opens the Live session
+        // (it reuses this same conversation, which they don't own). Stay open
+        // until every proposal is resolved; the next resolving turn closes it.
+        const pending = computePendingProposal(await loadAllMessages(input.conversationId));
+        if (!pending || !('noAction' in pending.resolution)) {
+          updates.status = 'closed';
+        }
       }
       await db
         .update(widgetChatConversations)
@@ -1425,4 +1794,150 @@ export async function ingestTurnEvents(
   }
 
   return { inserted, turnDone };
+}
+
+// ============================================================================
+// Chat image upload
+// ============================================================================
+
+/** Publicly safe image descriptor — never includes storage keys. */
+export interface PublicChatImage {
+  id: string;
+  mimeType: string;
+  originalName: string | null;
+  width: number;
+  height: number;
+}
+
+/**
+ * Map a full ChatImageRow to the public-safe descriptor.
+ * MUST NOT include storageProvider, storageKey, or any derivative storage fields.
+ */
+export function toPublicChatImage(row: Pick<ChatImageRow, 'id' | 'mimeType' | 'originalName' | 'width' | 'height'>): PublicChatImage {
+  return {
+    id: row.id,
+    mimeType: row.mimeType,
+    originalName: row.originalName ?? null,
+    width: row.width,
+    height: row.height,
+  };
+}
+
+/**
+ * Batch-load all widget_chat_images linked to a set of message ids.
+ * Returns a Map<messageId, PublicChatImage[]> for O(1) lookup per message.
+ * Empty input returns an empty Map without querying the DB.
+ */
+export async function loadChatImagesForMessages(
+  messageIds: string[],
+): Promise<Map<string, PublicChatImage[]>> {
+  if (messageIds.length === 0) return new Map();
+  const rows = await db
+    .select({
+      id: widgetChatImages.id,
+      mimeType: widgetChatImages.mimeType,
+      originalName: widgetChatImages.originalName,
+      width: widgetChatImages.width,
+      height: widgetChatImages.height,
+      messageId: widgetChatImages.messageId,
+    })
+    .from(widgetChatImages)
+    .where(inArray(widgetChatImages.messageId, messageIds));
+  const map = new Map<string, PublicChatImage[]>();
+  for (const row of rows) {
+    if (!row.messageId) continue;
+    const existing = map.get(row.messageId);
+    if (existing) {
+      existing.push(toPublicChatImage(row));
+    } else {
+      map.set(row.messageId, [toPublicChatImage(row)]);
+    }
+  }
+  return map;
+}
+
+/**
+ * Gate an image upload behind conversation writability + per-conversation cap,
+ * then delegate storage to WidgetService.storeWidgetChatImage. Returns only
+ * the public-safe fields — storage keys are never exposed to callers.
+ *
+ * Error codes thrown:
+ *   conversation_not_found (404) — not the owner or doesn't exist
+ *   conversation_closed (409)    — conversation is no longer active
+ *   attachment_count_exceeded (400) — per-conversation cap reached
+ *   + any errors from storeWidgetChatImage (type, size, guard, storage)
+ */
+export async function attachConversationImage(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetService.WidgetPermission>,
+  file: WidgetService.WidgetUploadFile,
+): Promise<PublicChatImage> {
+  // 1. Verify conversation ownership + active status
+  await requireWritableConversation(conversationId, projectId, widgetUserId);
+
+  // 2. Fail fast before any storage: check per-conversation cap
+  const [countRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(widgetChatImages)
+    .where(eq(widgetChatImages.conversationId, conversationId));
+  if (Number(countRow?.count ?? 0) >= WidgetService.MAX_CHAT_IMAGES_PER_CONVERSATION) {
+    throw new WidgetService.WidgetError('attachment_count_exceeded', 400);
+  }
+
+  // 3. Delegate type/size/guard/storage to WidgetService
+  const row = await WidgetService.storeWidgetChatImage(projectId, conversationId, widgetUserId, permissions, file);
+
+  // 4. Strip storage keys before returning
+  return toPublicChatImage(row);
+}
+
+/**
+ * Load a widget_chat_images row owned by the caller and return a presigned
+ * download URL for the ORIGINAL rendition. Used by the GET serve endpoint.
+ *
+ * Throws:
+ *   conversation_not_found (404) — unknown conversationId, wrong user, or wrong project.
+ *   image_not_found (404)        — unknown imageId, wrong conversation, or wrong user.
+ */
+export async function resolveConversationImageForServe(
+  conversationId: string,
+  imageId: string,
+  projectId: string,
+  widgetUserId: string,
+): Promise<string> {
+  // 1. Verify conversation ownership (also asserts projectId)
+  await getConversationOwned(conversationId, projectId, widgetUserId);
+
+  // 2. Load the image row, asserting conversation + user ownership
+  const [row] = await db
+    .select({
+      originalStorageProvider: widgetChatImages.originalStorageProvider,
+      originalStorageKey: widgetChatImages.originalStorageKey,
+      originalName: widgetChatImages.originalName,
+    })
+    .from(widgetChatImages)
+    .where(
+      and(
+        eq(widgetChatImages.id, imageId),
+        eq(widgetChatImages.conversationId, conversationId),
+        eq(widgetChatImages.widgetUserId, widgetUserId),
+      ),
+    )
+    .limit(1);
+
+  if (!row) throw new WidgetService.WidgetError('image_not_found', 404);
+
+  // 3. Generate presigned URL for the original rendition — short-lived (5 min)
+  // because chat images are private and the URL is served directly to the user.
+  const url = await attachmentStorageImpl.createDownloadUrl({
+    storageProvider: row.originalStorageProvider,
+    storageKey: row.originalStorageKey,
+    originalName: row.originalName,
+  }, { ttlSeconds: 300 });
+
+  if (!url) throw new WidgetService.WidgetError('image_not_found', 404);
+
+  return url;
 }

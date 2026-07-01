@@ -43,8 +43,8 @@ import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimit
 import * as WidgetChatService from './services/WidgetChatService';
 import { subscribeToTicket } from './services/WidgetTicketEvents';
 import { streamSSE } from 'hono/streaming';
-import { setCookie } from 'hono/cookie';
-import { RW_SESSION_COOKIE, rwSessionCookieOptions } from './services/WidgetCookieAuth';
+import { getCookie, setCookie } from 'hono/cookie';
+import { RW_SESSION_COOKIE, rwSessionCookieOptions, rwSessionMatchesUser } from './services/WidgetCookieAuth';
 import * as WorkspaceTaskService from './services/WorkspaceTaskService';
 import {
   listFeed as listActivityFeed,
@@ -79,12 +79,11 @@ import {
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
-import { calculateCost, type TokenCounts } from './services/pricing';
+import { calculateCost, resolveModel, type TokenCounts } from './services/pricing';
 import { trackUsage, type TrackUsageContext } from './services/UsageService';
 import { sendInviteEmail } from '../lib/email';
 import { nanoid } from 'nanoid';
 import { createHmac, createHash } from 'node:crypto';
-import * as InjectionGuardService from './services/InjectionGuardService';
 import { forwardLiveMessage } from './services/LiveCoderForward';
 
 type BuildInfo = {
@@ -3815,6 +3814,19 @@ export function createHttpApp() {
         return c.json({ error: 'Invalid server token' }, 401);
       }
 
+      // Sync the workspace's per-project deploy-environment id→name map so the
+      // widget can resolve `deployed:<envId>` statuses to a human name. Stored
+      // server-side here so public widget reads never have to reach the (possibly
+      // suspended) workspace. Best-effort — never fail the heartbeat over it.
+      if (body.deployEnvironments && typeof body.deployEnvironments === 'object' && !Array.isArray(body.deployEnvironments)) {
+        try {
+          const server = await ServerService.getServerByToken(serverToken);
+          if (server) await WidgetService.syncDeployEnvironments(server.id, body.deployEnvironments);
+        } catch (err) {
+          console.warn('[HttpServer] deploy-environment sync failed', err);
+        }
+      }
+
       return c.json({ success: true });
     } catch (error) {
       console.error('[HttpServer] Server heartbeat error:', error);
@@ -4669,9 +4681,59 @@ export function createHttpApp() {
           });
           return c.json({ error: 'Server is provisioning. Please try again shortly.', serverName: server.name }, 503);
         } else {
-          // Machine exists, wake it if needed (using internal version to skip redundant access/fetch)
+          // Machine exists, wake it if needed (using internal version to skip redundant access/fetch).
+          //
+          // Cold starts of a suspended/stopped machine can take far longer than
+          // the edge gateway — and the client's own ~60s fetch abort — will
+          // wait: a heavy workspace boot + health can run 90s+. Blocking the
+          // whole session request on that is exactly what surfaced to users as a
+          // raw 504 "server won't load". The BE was still faithfully waiting,
+          // but the gateway gave up first and returned a 504 the client can't
+          // recover from.
+          //
+          // So bound how long we block. `wakeRemoteServerInternal` keeps running
+          // in the background regardless — `startMachine` has already been
+          // issued to Fly, and the promise flips status→online once health
+          // passes (and the workspace's own register call does the same on
+          // boot). If the machine isn't ready within the budget we return a
+          // fast, structured `503 { starting }` — comfortably under any gateway
+          // timeout — and the client polls the session endpoint until the
+          // fast-path (online + fresh heartbeat) succeeds.
           console.log(`[HttpServer] Waking machine for server ${serverId} before session...`);
-          const wakeResult = await ServerService.wakeRemoteServerInternal(server);
+          const wakePromise = ServerService.wakeRemoteServerInternal(server);
+          // A background rejection (the wake failing after we've already replied
+          // 503-starting) must not bubble up as an unhandledRejection.
+          wakePromise.catch((err) => {
+            console.error(`[HttpServer] Background wake failed for server ${serverId}:`, err);
+          });
+
+          const SESSION_WAKE_BUDGET_MS = 20_000;
+          let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+          const timedOut = Symbol('wake-timeout');
+          const raced = await Promise.race([
+            wakePromise,
+            new Promise<typeof timedOut>((resolve) => {
+              wakeTimer = setTimeout(() => resolve(timedOut), SESSION_WAKE_BUDGET_MS);
+            }),
+          ]);
+          if (wakeTimer) clearTimeout(wakeTimer);
+
+          if (raced === timedOut) {
+            // Still booting. The wake continues in the background; tell the
+            // client to poll. `starting:true` is the explicit signal the client
+            // routes into its auto-reconnect loop — kept distinct from
+            // `provisioning`, which would collide with the migration guard in
+            // wakeRemoteServerInternal.
+            console.log(
+              `[HttpServer] Machine for server ${serverId} still starting after ${SESSION_WAKE_BUDGET_MS}ms; returning 503 starting`,
+            );
+            return c.json(
+              { error: 'Server is starting. Please try again shortly.', starting: true, serverName: server.name },
+              503,
+            );
+          }
+
+          const wakeResult = raced;
           if (!wakeResult.success) {
             // Never auto-reprovision based on a wake error string. String
             // matching on "destroyed" / "not found" is how transient Fly API
@@ -5985,7 +6047,10 @@ export function createHttpApp() {
   // gets 403 (the widget shows its login-prompt path).
   // ---------------------------------------------------------------------------
 
-  function chatMessageDto(m: WidgetChatService.ChatMessageRow) {
+  function chatMessageDto(
+    m: WidgetChatService.ChatMessageRow,
+    images?: WidgetChatService.PublicChatImage[],
+  ) {
     return {
       id: m.id,
       role: m.role,
@@ -5994,7 +6059,21 @@ export function createHttpApp() {
       turnId: m.turnId ?? null,
       seq: m.seq ?? null,
       createdAt: m.createdAt.toISOString(),
+      images: images ?? [],
     };
+  }
+
+  /**
+   * Batch-map a page of messages to DTOs. Loads all linked images in one query
+   * (no N+1) and attaches them per message. Use this for all multi-message
+   * list responses.
+   */
+  async function chatMessageDtos(
+    messages: WidgetChatService.ChatMessageRow[],
+  ): Promise<ReturnType<typeof chatMessageDto>[]> {
+    if (messages.length === 0) return [];
+    const imagesMap = await WidgetChatService.loadChatImagesForMessages(messages.map((m) => m.id));
+    return messages.map((m) => chatMessageDto(m, imagesMap.get(m.id)));
   }
 
   function chatConversationDto(conv: {
@@ -6035,13 +6114,18 @@ export function createHttpApp() {
     const gate = await requireChatUser(c);
     if ('response' in gate) return gate.response;
     const { auth } = gate;
+    // `{ fresh: true }` discards the current intake conversation and opens a
+    // new one (the widget's "new conversation" control); otherwise this
+    // resumes-or-creates the active conversation.
+    const body = await c.req.json().catch(() => null) as { fresh?: unknown } | null;
+    const fresh = !!(body && body.fresh === true);
     try {
-      const { conversation, messages, hasAgentTurns } = await WidgetChatService.getOrCreateActiveConversation(
-        auth.projectId, auth.widgetUserId,
-      );
+      const { conversation, messages, hasAgentTurns } = fresh
+        ? await WidgetChatService.startFreshConversation(auth.projectId, auth.widgetUserId)
+        : await WidgetChatService.getOrCreateActiveConversation(auth.projectId, auth.widgetUserId);
       return c.json({
         conversation: chatConversationDto(conversation, hasAgentTurns),
-        messages: messages.map(chatMessageDto),
+        messages: await chatMessageDtos(messages),
       });
     } catch (err) {
       return widgetErrorResponse(c, err);
@@ -6057,7 +6141,7 @@ export function createHttpApp() {
       if (!bundle) return c.json({ error: 'not_found' }, 404);
       return c.json({
         conversation: chatConversationDto(bundle.conversation, bundle.hasAgentTurns),
-        messages: bundle.messages.map(chatMessageDto),
+        messages: await chatMessageDtos(bundle.messages),
       });
     } catch (err) {
       return widgetErrorResponse(c, err);
@@ -6070,10 +6154,19 @@ export function createHttpApp() {
     if ('response' in gate) return gate.response;
     const { auth } = gate;
     try {
+      const after = c.req.query('after') || undefined;
+      // On an initial (non-cursor) load, backfill the live-session progress
+      // timeline so a session opened from a directly-assigned ticket — or one
+      // created before this existed — shows the assignment/status/PR history,
+      // not a blank thread. Idempotent + a no-op for non-live-session threads;
+      // skipped on incremental polls (which carry ?after=).
+      if (!after) {
+        await WidgetChatService.backfillLiveSessionForConversation(c.req.param('id'));
+      }
       const messages = await WidgetChatService.listMessages(
-        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, c.req.query('after') || undefined,
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, after,
       );
-      return c.json({ messages: messages.map(chatMessageDto) });
+      return c.json({ messages: await chatMessageDtos(messages) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6086,13 +6179,23 @@ export function createHttpApp() {
     const { auth } = gate;
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'chat_message');
     if (limited) return limited;
-    const body = await c.req.json().catch(() => null) as { content?: unknown } | null;
+    const body = await c.req.json().catch(() => null) as { content?: unknown; imageIds?: unknown } | null;
     if (!body || typeof body.content !== 'string') return c.json({ error: 'content required' }, 400);
+    // imageIds: optional array of strings; 400 if present but wrong shape.
+    let imageIds: string[] | undefined;
+    if (body.imageIds !== undefined) {
+      if (!Array.isArray(body.imageIds) || !body.imageIds.every((id) => typeof id === 'string')) {
+        return c.json({ error: 'imageIds must be an array of strings' }, 400);
+      }
+      imageIds = body.imageIds as string[];
+    }
     try {
       const message = await WidgetChatService.sendUserMessage(
-        c.req.param('id'), auth.projectId, auth.widgetUserId, body.content,
+        c.req.param('id'), auth.projectId, auth.widgetUserId, body.content, imageIds,
       );
-      return c.json({ message: chatMessageDto(message) });
+      // Load linked images for the response (single-element batch — no N+1).
+      const imagesMap = await WidgetChatService.loadChatImagesForMessages([message.id]);
+      return c.json({ message: chatMessageDto(message, imagesMap.get(message.id)) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6120,14 +6223,18 @@ export function createHttpApp() {
     const { auth } = gate;
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
     if (limited) return limited;
-    const body = await c.req.json().catch(() => null) as { title?: unknown; description?: unknown } | null;
+    const body = await c.req.json().catch(() => null) as { title?: unknown; description?: unknown; isPrivate?: unknown } | null;
     if (!body || typeof body.title !== 'string' || typeof body.description !== 'string') {
       return c.json({ error: 'title and description required' }, 400);
+    }
+    // isPrivate is optional; only an explicit `true` files the ticket privately.
+    if (body.isPrivate !== undefined && typeof body.isPrivate !== 'boolean') {
+      return c.json({ error: 'isPrivate must be a boolean' }, 400);
     }
     try {
       const result = await WidgetChatService.createTicketFromChat(
         c.req.param('id'), auth.projectId, auth.widgetUserId,
-        { title: body.title, description: body.description },
+        { title: body.title, description: body.description, isPrivate: body.isPrivate === true },
         auth.permissions.has('assign_agent'),
       );
       return c.json({ ticketId: result.ticketId });
@@ -6170,6 +6277,74 @@ export function createHttpApp() {
   });
 
   // ---------------------------------------------------------------------------
+  // POST /api/widget/chat/conversations/:id/images
+  //
+  // Upload an image to a chat conversation. The image is stored and returned
+  // as a PublicChatImage (id, mimeType, originalName, width, height) — storage
+  // keys are NEVER included in the response.
+  //
+  // Auth: identified widget user (widgetUserId required; 403 for anon).
+  // RBAC: requires attach_image permission.
+  // Rate limit: shared with ticket attachment_upload bucket.
+  // Multipart: field name "file", mirrors POST /api/widget/tickets/:id/attachments.
+  // ---------------------------------------------------------------------------
+  app.post('/api/widget/chat/conversations/:id/images', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'attachment_upload');
+    if (limited) return limited;
+    if (!auth.permissions.has('attach_image')) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
+    try {
+      const formData = await c.req.raw.formData();
+      const file = formData.get('file');
+      if (!file || typeof (file as any).arrayBuffer !== 'function') {
+        return c.json({ error: 'file_required' }, 400);
+      }
+      const inputFile = file as globalThis.File;
+      const buffer = Buffer.from(await inputFile.arrayBuffer());
+      const mimeType = inputFile.type || 'application/octet-stream';
+      const filename = inputFile.name || 'image';
+      const image = await WidgetChatService.attachConversationImage(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions,
+        { buffer, mimeType, filename, originalName: inputFile.name },
+      );
+      return c.json({ image }, 201);
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/widget/chat/conversations/:id/images/:imageId
+  //
+  // Return a short-lived presigned download URL for a chat image owned by
+  // the caller. Storage keys are never included in the response.
+  //
+  // Auth: identified widget user (widgetUserId required; 403 for anon).
+  // Ownership: conversationId + widgetUserId + projectId all asserted.
+  // Not-found / foreign: 404 (no leakage).
+  // ---------------------------------------------------------------------------
+  app.get('/api/widget/chat/conversations/:id/images/:imageId', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const url = await WidgetChatService.resolveConversationImageForServe(
+        c.req.param('id'),
+        c.req.param('imageId'),
+        auth.projectId,
+        auth.widgetUserId,
+      );
+      return c.json({ url });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // POST /api/widget/chat/conversations/:id/live-message
   //
   // Staff-to-agent forward: a widget-authenticated staff member with the
@@ -6181,9 +6356,12 @@ export function createHttpApp() {
   //
   // Flow:
   //   1. Persist the staff message (role='user') via sendLiveCoderMessage.
-  //   2. Screen + forward via forwardLiveMessage.
-  //   3. On 'flagged': append a rejection event row.
-  //   4. Return { status } to the client.
+  //   2. Forward via forwardLiveMessage.
+  //   3. Return { status } to the client.
+  //
+  // Inbound live-session messages are NOT AI-screened — this endpoint is
+  // RBAC-gated to the `live_coder` permission, so they are trusted staff
+  // instructions to their own coder and are forwarded verbatim.
   // ---------------------------------------------------------------------------
   app.post('/api/widget/chat/conversations/:id/live-message', async (c) => {
     const gate = await requireChatUser(c);
@@ -6218,10 +6396,7 @@ export function createHttpApp() {
 
       const server = wp ? await ServerService.getServer(wp.serverId) : null;
 
-      // Build the default screen + sendToWorkspace deps.
-      const screenDep = async (t: string) =>
-        InjectionGuardService.checkTicket({ title: t, description: null });
-
+      // Build the sendToWorkspace dep.
       const sendToWorkspaceDep = async (p: {
         jobChannelId: string;
         text: string;
@@ -6255,15 +6430,8 @@ export function createHttpApp() {
           text,
           actor,
         },
-        { screen: screenDep, sendToWorkspace: sendToWorkspaceDep },
+        { sendToWorkspace: sendToWorkspaceDep },
       );
-
-      if (result.status === 'flagged') {
-        await WidgetChatService.appendLiveCoderRejectionEvent(
-          conversationId,
-          'injection_guard',
-        );
-      }
 
       // Return the authoritative message row (same shape the SSE stream emits)
       // so the widget client merges by server id instead of falling back to an
@@ -6310,7 +6478,10 @@ export function createHttpApp() {
     return streamSSE(c, async (stream) => {
       let open = true;
       const unsubscribe = WidgetChatService.subscribeToConversation(conversationId, (row) => {
-        void stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row)) });
+        void (async () => {
+          const imagesByMessage = await WidgetChatService.loadChatImagesForMessages([row.id]);
+          await stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row, imagesByMessage.get(row.id))) });
+        })();
       });
       stream.onAbort(() => {
         open = false;
@@ -6319,8 +6490,9 @@ export function createHttpApp() {
       if (after) {
         try {
           const missed = await WidgetChatService.listMessages(conversationId, projectId, widgetUserId, permissions, after);
-          for (const m of missed) {
-            await stream.writeSSE({ event: 'message', id: m.id, data: JSON.stringify(chatMessageDto(m)) });
+          const missedDtos = await chatMessageDtos(missed);
+          for (const dto of missedDtos) {
+            await stream.writeSSE({ event: 'message', id: dto.id, data: JSON.stringify(dto) });
           }
         } catch {
           // invalid cursor → client falls back to a full refetch via the messages endpoint
@@ -6345,6 +6517,16 @@ export function createHttpApp() {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'Unauthorized' }, 401);
     const tickets = await WidgetService.listMyTickets(auth.projectId, auth.widgetUserId);
+    return c.json({ tickets });
+  });
+
+  // Tickets the viewer assigned a coder to, with live-session activity folded
+  // into lastActivityAt — drives the widget's live-session unread indicators.
+  app.get('/api/widget/tickets/assigned', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    const tickets = await WidgetService.listTicketsAssignedByMe(auth.projectId, auth.widgetUserId);
     return c.json({ tickets });
   });
 
@@ -7118,8 +7300,19 @@ export function createHttpApp() {
     // (mobile), which verifyRwSession can't validate. The /api/widget/ CORS
     // envelope already echoes the allowlisted origin + Allow-Credentials, so
     // the browser stores and later sends this cookie cross-subdomain.
-    const sessionToken = await createToken(userId);
-    setCookie(c, RW_SESSION_COOKIE, sessionToken, rwSessionCookieOptions());
+    //
+    // Crucially, only mint when the caller has NO valid rw_session for this
+    // user. The console hits this endpoint on every load and on every auth-token
+    // rotation, but the widget's `init()` is idempotent and captures its
+    // per-session CSRF token (bound to the session `iat`) exactly once. Blindly
+    // re-minting here would assign a new `iat` and silently invalidate that
+    // captured CSRF token, making every later widget write (assign agent, open
+    // Live session, …) fail the cookie-path CSRF check with a 401. Reusing the
+    // existing session keeps `iat` — and the CSRF token — stable.
+    if (!(await rwSessionMatchesUser(getCookie(c, RW_SESSION_COOKIE), userId))) {
+      const sessionToken = await createToken(userId);
+      setCookie(c, RW_SESSION_COOKIE, sessionToken, rwSessionCookieOptions());
+    }
 
     return c.json({ success: true, data: result });
   });
@@ -7311,7 +7504,7 @@ export function createHttpApp() {
       const detail = await WidgetChatService.getTeamConversation(serverId, conversationId);
       return c.json({
         conversation: detail.conversation,
-        messages: detail.messages.map(chatMessageDto),
+        messages: await chatMessageDtos(detail.messages),
       });
     } catch (err) {
       return widgetErrorResponse(c, err);
@@ -7920,6 +8113,10 @@ export function createHttpApp() {
           await WorkspaceTaskService.updateTask(serverId, taskId, input);
         },
         updateActivityMetadata: WorkspaceTaskService.updateActivityMetadata,
+        getTask: async (serverId, taskId) => {
+          const task = await WorkspaceTaskService.getTaskById(serverId, taskId);
+          return task ? { status: task.status } : null;
+        },
       },
       pushHandling: {
         findByOwnerRepo: GithubProjectReposService.findByOwnerRepo,
@@ -8006,16 +8203,8 @@ export function createHttpApp() {
 // Helper Functions
 // ============================================================================
 
-// Upgrade legacy model IDs to their latest equivalents
-const MODEL_UPGRADES: Record<string, string> = {
-  'claude-sonnet-4-20250514': 'claude-sonnet-4-6',
-  'claude-opus-4-20250514': 'claude-opus-4-6',
-  'claude-haiku-4-5-20251001': 'claude-haiku-4-5',
-};
-
-function resolveModel(model: string): string {
-  return MODEL_UPGRADES[model] || model;
-}
+// Model id normalisation (retired/dated → current tier model) lives next to the
+// pricing registry in services/pricing.ts and is imported as `resolveModel`.
 
 
 // ============================================================================

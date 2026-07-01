@@ -57,6 +57,13 @@
       "when": 1778890527002,
       "tag": "0007_glorious_silk_fever",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782737948087,
+      "tag": "0008_colorful_mandarin",
+      "breakpoints": true
     }
   ]
 }

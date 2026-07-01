@@ -3,6 +3,7 @@ import { verifyGithubWebhook } from './verifyWebhook.js';
 import { verifyInstallState } from './installState.js';
 import type { GithubAppConfig } from './config.js';
 import type { ActivityType, CanonicalTaskStatus } from '@runhq/server-protocol';
+import { todoStatusRank } from '@runhq/server-protocol';
 import type { TaskShareIdQuery, TaskCandidate } from '../services/WorkspaceTaskService.js';
 
 // ---------------------------------------------------------------------------
@@ -27,10 +28,16 @@ export interface PrLinkedDeps {
     createdById?: string | null;
     createdByName?: string | null;
   }) => Promise<void>;
-  /** Update a task's fields (used to set status → needs_review). */
+  /** Update a task's fields (e.g. set status → done / reviewed / merged). */
   updateTask: (serverId: string, taskId: string, input: { status: CanonicalTaskStatus }) => Promise<void>;
   /** Replace the metadata of an existing activity row (used to update PR state on close/merge). */
   updateActivityMetadata: (activityId: string, metadata: Record<string, unknown>) => Promise<void>;
+  /**
+   * Read a task's current status — used to gate monotonic status writes so a
+   * late/duplicate webhook never downgrades a further-along task. Optional for
+   * version skew; when absent the guard is skipped (write proceeds).
+   */
+  getTask?: (serverId: string, taskId: string) => Promise<{ status: CanonicalTaskStatus } | null>;
 }
 
 export interface GithubRoutesDeps {
@@ -139,6 +146,33 @@ async function resolvePrTask(
 }
 
 /**
+ * Advance a task's status to `target` only when it is strictly forward in the
+ * lifecycle (monotonic). Reads the current status via `deps.getTask` and skips
+ * the write when the task is already at or past `target` — so a late or
+ * duplicate webhook never downgrades a further-along task (e.g. an `approved`
+ * review arriving after merge must not move `merged` back to `reviewed`). When
+ * no task read is available the guard is skipped and the write proceeds.
+ *
+ * Note: env ordering is not known here (deploy environments live on the runhq
+ * side), so ranking uses the default base ordering — sufficient for the base
+ * phases this handler writes (done/reviewed/merged) and the terminal deploy
+ * statuses which always out-rank them.
+ */
+async function maybeAdvanceTaskStatus(
+  serverId: string,
+  taskId: string,
+  target: CanonicalTaskStatus,
+  deps: PrLinkedDeps,
+): Promise<boolean> {
+  const current = await deps.getTask?.(serverId, taskId);
+  if (current && todoStatusRank(current.status) >= todoStatusRank(target)) {
+    return false;
+  }
+  await deps.updateTask(serverId, taskId, { status: target });
+  return true;
+}
+
+/**
  * Handle a GitHub `pull_request` webhook event.
  *
  * Returns `'linked'` when a pr_linked activity was written, `'updated'` when
@@ -181,7 +215,9 @@ export async function handlePullRequestEvent(
       return 'skipped';
     }
 
-    // Write the pr_linked activity + set status → needs_review
+    // Write the pr_linked activity + set status → done ("work complete, PR up,
+    // awaiting review"). Guard monotonically so a re-opened PR on an already
+    // merged/deployed task never drags it backwards.
     await deps.addActivity(serverId, taskId, {
       type: 'pr_linked',
       content: `Pull request #${pr.number} opened`,
@@ -194,7 +230,7 @@ export async function handlePullRequestEvent(
       createdByType: 'system',
     });
 
-    await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+    await maybeAdvanceTaskStatus(serverId, taskId, 'done', deps);
 
     console.info('[github/pr_linked] linked PR to task', { serverId, taskId, pr: pr.number, branch });
     return 'linked';
@@ -221,6 +257,12 @@ export async function handlePullRequestEvent(
     const updatedMetadata = { ...(linkedActivity.metadata ?? {}), state: newState };
     await deps.updateActivityMetadata(linkedActivity.id, updatedMetadata);
 
+    // A merged PR advances the task → merged (monotonic, never downgrades a task
+    // already at/past merged, e.g. one already deployed:<env>).
+    if (pr.merged) {
+      await maybeAdvanceTaskStatus(resolved.serverId, taskId, 'merged', deps);
+    }
+
     console.info('[github/pr_linked] updated PR state on task activity', {
       taskId,
       pr: pr.number,
@@ -231,6 +273,72 @@ export async function handlePullRequestEvent(
 
   // All other actions (synchronize, labeled, review_requested, etc.) → no-op
   return 'skipped';
+}
+
+// ---------------------------------------------------------------------------
+// Pull-request review → set task `reviewed` on approval
+// ---------------------------------------------------------------------------
+
+export interface PullRequestReviewPayload {
+  action: string;
+  review: {
+    /** GitHub sends e.g. 'approved' | 'changes_requested' | 'commented' | 'dismissed'. */
+    state: string;
+    user?: { login?: string } | null;
+  };
+  pull_request: PullRequestPayload['pull_request'];
+  repository: PullRequestPayload['repository'];
+}
+
+/**
+ * Handle a GitHub `pull_request_review` webhook event.
+ *
+ * Only a *submitted* + *approved* review advances the linked task → `reviewed`
+ * (monotonic — never downgrades a task already at/past reviewed, e.g. one that
+ * has since been merged or deployed). All other review states (commented,
+ * changes_requested, dismissed) and unresolvable PRs are quiet no-ops, matching
+ * the `pull_request` handler's behavior.
+ *
+ * NOTE (ops): the GitHub App must be subscribed to the `pull_request_review`
+ * event in its settings for this to fire — no code can enable that subscription.
+ *
+ * Returns `'reviewed'` when the status was advanced, `'skipped'` for an
+ * intentional no-op, and `'error'` on unexpected failure (caller still 200s).
+ */
+export async function handlePullRequestReviewEvent(
+  payload: PullRequestReviewPayload,
+  deps: PrLinkedDeps,
+): Promise<'reviewed' | 'skipped' | 'error'> {
+  if (payload.action !== 'submitted') return 'skipped';
+  if ((payload.review?.state ?? '').toLowerCase() !== 'approved') return 'skipped';
+
+  const resolved = await resolvePrTask(payload.pull_request, payload.repository, deps);
+  if (!resolved) return 'skipped';
+  const { serverId, taskId } = resolved;
+
+  // Monotonic guard up front so an approval arriving after merge/deploy neither
+  // writes a noisy pr_reviewed activity nor downgrades the status.
+  const current = await deps.getTask?.(serverId, taskId);
+  if (current && todoStatusRank(current.status) >= todoStatusRank('reviewed')) {
+    return 'skipped';
+  }
+
+  await deps.addActivity(serverId, taskId, {
+    type: 'pr_reviewed',
+    content: `Pull request #${payload.pull_request.number} approved`,
+    metadata: {
+      number: payload.pull_request.number,
+      url: payload.pull_request.html_url,
+      reviewer: payload.review?.user?.login ?? null,
+    },
+    createdByType: 'system',
+  });
+  await deps.updateTask(serverId, taskId, { status: 'reviewed' });
+
+  console.info('[github/pr_reviewed] approved PR advanced task → reviewed', {
+    serverId, taskId, pr: payload.pull_request.number,
+  });
+  return 'reviewed';
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +508,26 @@ function hasOpenLinkedPr(
 }
 
 /**
+ * Whether the task already has a MERGED pull request (optionally scoped to one
+ * branch). A task whose previous PR landed is past its draft phase — so a PR
+ * opened for newly-pushed follow-up work should start ready for review, not as a
+ * draft the user would have to manually un-draft on every iteration after the
+ * first merge.
+ */
+function hasMergedLinkedPr(
+  activity: Array<{ type: ActivityType; metadata?: Record<string, any> | null }>,
+  branch?: string,
+): boolean {
+  return activity.some(
+    (a) =>
+      a.type === 'pr_linked' &&
+      typeof a.metadata?.number === 'number' &&
+      a.metadata?.state === 'merged' &&
+      (branch === undefined || a.metadata?.repoBranch === branch),
+  );
+}
+
+/**
  * Outcome of {@link openPullRequestForReadyTask}. `reason` (skipped) and
  * `message` (error) carry a human-readable explanation so callers can surface
  * *why* nothing opened instead of failing silently.
@@ -417,7 +545,7 @@ export type ReadyPrResult =
  *               is already present, 'skipped' when pr_linked is already recorded.
  *
  * mode='ready'  (done-signal, default): un-draft an existing PR if needed,
- *               ensure pr_linked is written, then set status to needs_review.
+ *               ensure pr_linked is written, then set status to done.
  *               The early existingLinked short-circuit is intentionally absent
  *               here so that a draft opened on push is always promoted.
  */
@@ -453,22 +581,41 @@ export async function openPullRequestForReadyTask(
 
     // ── DRAFT mode (push webhook): ensure a draft PR exists, no status change ──
     if (mode === 'draft') {
+      const afterMerge = hasMergedLinkedPr(activity, branch);
       if (existing) {
+        // Follow-up work pushed after a previous PR merged: an open PR left as a
+        // draft would block the merge button, so promote it to ready.
+        if (existing.isDraft && afterMerge) {
+          await deps.markPullRequestReady(installationId, existing.nodeId);
+          console.info('[github/draft] promoted existing draft PR to ready (a previous PR already merged)', { owner, repo, branch, taskId, pr: existing.number });
+          return { status: 'marked_ready', prNumber: existing.number, url: existing.url };
+        }
         return { status: 'linked_existing', prNumber: existing.number, url: existing.url };
       }
       if (hasOpenLinkedPr(activity, branch)) {
         return { status: 'skipped', reason: 'A pull request is already open for this branch.' };
       }
+      // A task whose previous PR already merged is past its draft phase — open
+      // the follow-up PR ready for review, not as a draft. Otherwise every
+      // post-merge iteration on the same branch would re-open as a draft the
+      // user has to manually un-draft before merging.
       const pr = await deps.createPullRequest(installationId, owner, repo, {
         title,
         head: branch,
         base,
-        draft: true,
-        body: `Automated draft pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ when the ticket branch was pushed. It is marked ready for review when the agent signals completion.`,
+        draft: !afterMerge,
+        body: afterMerge
+          ? `Automated pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ for new commits pushed after this ticket's previous pull request was merged.`
+          : `Automated draft pull request for ticket \`${shortId}\`: ${title}\n\nOpened by RunHQ when the ticket branch was pushed. It is marked ready for review when the agent signals completion.`,
       });
       await writePrLinked(serverId, taskId, branch, pr.number, pr.url, deps);
       await notify(deps, serverId, branch, pr.number, pr.url);
-      console.info('[github/draft] opened draft PR for ticket branch', { owner, repo, branch, taskId, pr: pr.number });
+      console.info(
+        afterMerge
+          ? '[github/draft] opened READY follow-up PR (a previous PR already merged)'
+          : '[github/draft] opened draft PR for ticket branch',
+        { owner, repo, branch, taskId, pr: pr.number },
+      );
       return { status: 'opened', prNumber: pr.number, url: pr.url };
     }
 
@@ -505,7 +652,7 @@ export async function openPullRequestForReadyTask(
     if (!latest.some((a) => a.type === 'pr_linked' && a.metadata?.number === number)) {
       await writePrLinked(serverId, taskId, branch, number, url, deps);
     }
-    await deps.updateTask(serverId, taskId, { status: 'needs_review' });
+    await deps.updateTask(serverId, taskId, { status: 'done' });
     await notify(deps, serverId, branch, number, url);
 
     console.info(existing ? '[github/ready] marked PR ready for review for ticket branch' : '[github/ready] opened PR for ready ticket branch', {
@@ -605,6 +752,13 @@ export function registerGithubRoutes(app: Hono, deps: GithubRoutesDeps): void {
       } catch (err) {
         // Always 200 to GitHub; log the error but don't surface it.
         console.error('[github/pull_request] unexpected error in handler', err);
+      }
+    } else if (event === 'pull_request_review' && deps.prLinked) {
+      try {
+        await handlePullRequestReviewEvent(payload as PullRequestReviewPayload, deps.prLinked);
+      } catch (err) {
+        // Always 200 to GitHub; log the error but don't surface it.
+        console.error('[github/pull_request_review] unexpected error in handler', err);
       }
     } else if (event === 'push' && deps.pushHandling) {
       try {

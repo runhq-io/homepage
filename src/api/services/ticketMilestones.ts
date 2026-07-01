@@ -10,14 +10,18 @@
  * ordered list of milestones.
  */
 
+import { isDeployedStatus, deployedEnvId } from '@runhq/server-protocol';
+
 export type TicketStatus =
   | 'pending'
   | 'planned'
   | 'in_progress'
-  | 'needs_review'
   | 'done'
+  | 'reviewed'
+  | 'merged'
+  | 'cancelled'
   | 'deployed'
-  | 'cancelled';
+  | `deployed:${string}`;
 
 export type ClarificationStatus = 'asking' | 'ready' | 'skipped' | 'duplicate' | 'started';
 
@@ -31,6 +35,12 @@ export interface MilestoneInput {
   agentAssigned?: boolean;
   /** State of the linked PR, if any. We use only the state — never the URL. */
   prState?: PrState | null;
+  /**
+   * Deploy-environment id→name map for the project, used only to resolve a
+   * `deployed:<envId>` status to a human label ("Deployed → Production").
+   * Empty/omitted ⇒ the deploy step falls back to the bare "Deployed" label.
+   */
+  environments?: Array<{ id: string; name: string }>;
 }
 
 export type MilestoneState = 'done' | 'current' | 'upcoming';
@@ -41,13 +51,20 @@ export interface Milestone {
   state: MilestoneState;
 }
 
-/** Absolute position of each step on the canonical linear track. */
+/**
+ * Absolute position of each step on the canonical linear track. Mirrors the
+ * runhq lifecycle statuses: the internal `done`/`reviewed`/`merged`/`deployed`
+ * states each get their own partner-facing step (previously all collapsed into
+ * "In review" / "Shipped"). `pending` + `planned` still share "Received".
+ */
 const TRACK = {
   received: 0,
   clarifying: 1,
   in_progress: 2,
   in_review: 3,
-  shipped: 4,
+  reviewed: 4,
+  merged: 5,
+  deployed: 6,
 } as const;
 
 const LABELS: Record<string, string> = {
@@ -55,9 +72,26 @@ const LABELS: Record<string, string> = {
   clarifying: 'Clarifying',
   in_progress: 'In progress',
   in_review: 'In review',
-  shipped: 'Shipped',
-  closed: 'Closed',
+  reviewed: 'Reviewed',
+  merged: 'Merged',
+  deployed: 'Deployed',
+  cancelled: 'Cancelled',
 };
+
+/**
+ * Label for the deploy step. Resolves an env-qualified `deployed:<envId>` status
+ * to "Deployed → <name>" when the project's environment map is available; every
+ * other case (upcoming step, legacy bare `deployed`, unknown env) uses the bare
+ * "Deployed" label. Never leaks the raw env id.
+ */
+function deployedLabel(status: string, environments: Array<{ id: string; name: string }>): string {
+  const envId = deployedEnvId(status);
+  if (envId) {
+    const env = environments.find((e) => e.id === envId);
+    if (env) return `${LABELS.deployed} → ${env.name}`;
+  }
+  return LABELS.deployed;
+}
 
 /**
  * How far the ticket has progressed along the canonical track, as the index of
@@ -66,18 +100,25 @@ const LABELS: Record<string, string> = {
  */
 function reachedIndex(input: MilestoneInput): number {
   let statusReached: number = TRACK.received;
-  switch (input.status) {
-    case 'in_progress':
-      statusReached = TRACK.in_progress;
-      break;
-    case 'needs_review':
-    case 'done':
-      statusReached = TRACK.in_review;
-      break;
-    case 'deployed':
-      statusReached = TRACK.shipped;
-      break;
-    // pending / planned → received
+  if (isDeployedStatus(input.status)) {
+    // Any deploy status (legacy bare `deployed` or env-qualified `deployed:<env>`).
+    statusReached = TRACK.deployed;
+  } else {
+    switch (input.status) {
+      case 'in_progress':
+        statusReached = TRACK.in_progress;
+        break;
+      case 'done':       // PR up, under review
+        statusReached = TRACK.in_review;
+        break;
+      case 'reviewed':   // approved, awaiting merge
+        statusReached = TRACK.reviewed;
+        break;
+      case 'merged':     // landed in base, pre-ship
+        statusReached = TRACK.merged;
+        break;
+      // pending / planned → received
+    }
   }
 
   let clarReached: number = TRACK.received;
@@ -89,7 +130,12 @@ function reachedIndex(input: MilestoneInput): number {
   }
 
   const agentReached = input.agentAssigned ? TRACK.in_progress : TRACK.received;
-  const prReached = input.prState ? TRACK.in_review : TRACK.received;
+  // An open/closed PR means the work is at least under review; a merged PR
+  // means it has landed in the base branch.
+  const prReached =
+    input.prState === 'merged' ? TRACK.merged :
+    input.prState ? TRACK.in_review :
+    TRACK.received;
 
   return Math.max(statusReached, clarReached, agentReached, prReached);
 }
@@ -104,16 +150,16 @@ function step(key: keyof typeof TRACK, reached: number, complete: boolean): Mile
 }
 
 export function deriveTicketMilestones(input: MilestoneInput): Milestone[] {
-  // Cancelled is a terminal alternate: the work was received, then closed.
+  // Cancelled is a terminal alternate: the work was received, then cancelled.
   if (input.status === 'cancelled') {
     return [
       { key: 'received', label: LABELS.received, state: 'done' },
-      { key: 'closed', label: LABELS.closed, state: 'current' },
+      { key: 'cancelled', label: LABELS.cancelled, state: 'current' },
     ];
   }
 
   const reached = reachedIndex(input);
-  const complete = input.status === 'deployed';
+  const complete = isDeployedStatus(input.status);
 
   const milestones: Milestone[] = [step('received', reached, complete)];
   // The clarifying step appears only when a clarification session exists.
@@ -122,7 +168,14 @@ export function deriveTicketMilestones(input: MilestoneInput): Milestone[] {
   }
   milestones.push(step('in_progress', reached, complete));
   milestones.push(step('in_review', reached, complete));
-  milestones.push(step('shipped', reached, complete));
+  milestones.push(step('reviewed', reached, complete));
+  milestones.push(step('merged', reached, complete));
+
+  // The final deploy step resolves the environment name when the ticket is
+  // actually deployed (deployed:<env>); otherwise it reads a bare "Deployed".
+  const deployed = step('deployed', reached, complete);
+  deployed.label = deployedLabel(input.status, input.environments ?? []);
+  milestones.push(deployed);
 
   return milestones;
 }

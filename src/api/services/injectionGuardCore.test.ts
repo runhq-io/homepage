@@ -64,6 +64,20 @@ describe('buildInjectionGuardMessages', () => {
     expect(lower).toContain('api');
   });
 
+  it('only flags URLs presented as an action — a merely-visible URL is not unsafe', () => {
+    // Regression: the guard used to flag ANY visible URL ("Contains links to
+    // third-party websites or URLs"), which rejected legitimate bug screenshots
+    // that show a URL (address bar, console output). Pattern 3 must be scoped to
+    // URLs presented as an ACTION for the agent to take.
+    const { system } = buildInjectionGuardMessages({ title: 't', description: 'd' });
+    const lower = system.toLowerCase();
+    // The old blanket wording must be gone…
+    expect(lower).not.toContain('contains links to third-party websites or urls');
+    // …replaced by action-scoped wording + an explicit benign-visible-URL carve-out.
+    expect(lower).toContain('as an action for the agent to take');
+    expect(lower).toContain('visible urls');
+  });
+
   it('puts the ticket title and description in the user message', () => {
     const { messages } = buildInjectionGuardMessages({
       title: 'Dark mode toggle',

@@ -143,9 +143,82 @@ export interface ServiceCredentialWithContent extends ServiceCredential {
 
 // --- Todos (project todo list items) ---
 
-export type TodoStatus = 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled';
+export type TodoStatusBase =
+  | 'pending' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled';
+/** Env-qualified deploy status: `deployed:<DeployEnvironment.id>`. */
+export type DeployedStatus = `deployed:${string}`;
+/** Concrete status value. `'deployed'` (bare) is retained only for legacy rows. */
+export type TodoStatus = TodoStatusBase | DeployedStatus | 'deployed';
 export type TodoType = 'regular' | 'delayed' | 'scheduled';
 export type TodoVisibility = 'public' | 'private';
+
+export const DEPLOYED_PREFIX = 'deployed:';
+
+/**
+ * Lifecycle ordering of the base phases. `cancelled` is terminal/orthogonal —
+ * never auto-advance from it. Deploy statuses rank after `merged`; see
+ * {@link todoStatusRank}.
+ */
+export const TODO_STATUS_BASE_ORDER: Record<TodoStatusBase, number> = {
+  pending: 0,
+  planned: 1,
+  in_progress: 2,
+  done: 3,
+  reviewed: 4,
+  merged: 5,
+  cancelled: -1,
+};
+
+/** True for any deploy status, including the legacy bare `'deployed'`. */
+export function isDeployedStatus(s: string): boolean {
+  return s === 'deployed' || s.startsWith(DEPLOYED_PREFIX);
+}
+/** Extract the environment id from `deployed:<id>`; null for legacy bare `deployed`. */
+export function deployedEnvId(s: string): string | null {
+  if (!s.startsWith(DEPLOYED_PREFIX)) return null;
+  return s.slice(DEPLOYED_PREFIX.length) || null;
+}
+/** Build the env-qualified deploy status for an environment id. */
+export function makeDeployedStatus(envId: string): DeployedStatus {
+  return `${DEPLOYED_PREFIX}${envId}`;
+}
+/** Terminal = fully shipped (any deployed) or abandoned (cancelled). */
+export function isTerminalStatus(s: string): boolean {
+  return s === 'cancelled' || isDeployedStatus(s);
+}
+/** Open/active = anything not terminal (incl. done/reviewed/merged). */
+export function isOpenStatus(s: string): boolean {
+  return !isTerminalStatus(s);
+}
+/**
+ * Lifecycle rank used to gate monotonic status writes and to sort. Deploy envs
+ * rank after `merged` in `environments` (deployConfig) order; legacy bare
+ * `deployed` and unknown env ids sort after all known envs. `cancelled` is -1.
+ */
+export function todoStatusRank(status: string, environments: { id: string }[] = []): number {
+  if (status === 'cancelled') return -1;
+  if (isDeployedStatus(status)) {
+    const base = TODO_STATUS_BASE_ORDER.merged + 1; // first deployed rank
+    const envId = deployedEnvId(status);
+    if (envId == null) return base + environments.length; // legacy bare `deployed`
+    const idx = environments.findIndex((e) => e.id === envId);
+    return idx >= 0 ? base + idx : base + environments.length + 1; // unknown env last
+  }
+  return TODO_STATUS_BASE_ORDER[status as TodoStatusBase] ?? 0;
+}
+/** Human label for any status, resolving the env name for deploy statuses. */
+export function todoStatusLabel(status: string, environments: { id: string; name: string }[] = []): string {
+  if (isDeployedStatus(status)) {
+    const envId = deployedEnvId(status);
+    const env = envId ? environments.find((e) => e.id === envId) : null;
+    return env ? `Deployed → ${env.name}` : 'Deployed';
+  }
+  const labels: Record<TodoStatusBase, string> = {
+    pending: 'Pending', planned: 'Planned', in_progress: 'In Progress',
+    done: 'Done', reviewed: 'Reviewed', merged: 'Merged', cancelled: 'Cancelled',
+  };
+  return labels[status as TodoStatusBase] ?? status;
+}
 
 /**
  * Visual metadata for rendering a TodoStatus chip in customer-facing UIs
@@ -164,27 +237,37 @@ export interface TodoStatusDisplay {
 
 /**
  * Single source of truth for status display metadata across all surfaces
- * (widget, embeds, dashboards). Adding a new TodoStatus value to the union
- * above is a compile error here until an entry is registered, which is the
- * point — `Record<TodoStatus, ...>` enforces exhaustiveness so the widget
- * cannot silently fall back to an incorrect label (the `'deployed'`
- * regression that previously rendered as `'Open'`).
+ * (widget, embeds, dashboards). Keyed on the base phases plus the legacy bare
+ * `deployed` (the customer-facing label for any env-qualified `deployed:<env>`
+ * status — the env name is not resolved on the BE). Use {@link todoStatusDisplay}
+ * to resolve an arbitrary status string (incl. `deployed:<env>`) to its display.
  *
  * Labels MUST mirror RunHQ's canonical status vocabulary — do not invent
  * synonyms (no "Open" for pending, no "Shipped" for done).
  */
-export const TODO_STATUS_DISPLAY: Record<TodoStatus, TodoStatusDisplay> = {
+export const TODO_STATUS_DISPLAY: Record<TodoStatusBase | 'deployed', TodoStatusDisplay> = {
   pending:      { label: 'Pending',      dot: '#8a857d', bg: 'rgba(85,80,74,0.08)',    fg: '#55504a' },
   planned:      { label: 'Planned',      dot: '#7a8aa3', bg: 'rgba(122,138,163,0.10)', fg: '#4f5a70' },
   in_progress:  { label: 'In progress',  dot: '#a97432', bg: 'rgba(169,116,50,0.12)',  fg: '#a97432' },
-  needs_review: { label: 'Needs review', dot: '#5b8a96', bg: 'rgba(91,138,150,0.12)',  fg: '#3d6470' },
   done:         { label: 'Done',         dot: '#6b8a6a', bg: 'rgba(107,138,106,0.14)', fg: '#556e54' },
+  reviewed:     { label: 'Reviewed',     dot: '#8a7bb0', bg: 'rgba(138,123,176,0.12)', fg: '#5f5288' },
+  merged:       { label: 'Merged',       dot: '#7a6fc0', bg: 'rgba(122,111,192,0.14)', fg: '#574d96' },
   deployed:     { label: 'Deployed',     dot: '#4a7558', bg: 'rgba(74,117,88,0.16)',   fg: '#3a5a44' },
   cancelled:    { label: 'Cancelled',    dot: '#b0aa9f', bg: 'rgba(176,170,159,0.10)', fg: '#8a857d' },
 };
 
 /**
- * Ordered list of TodoStatus values in display order. Derived from the
+ * Resolve any status string to its display metadata. Env-qualified deploy
+ * statuses (`deployed:<env>`) and the legacy bare `deployed` both map to the
+ * `deployed` entry; unknown values fall back to `pending`.
+ */
+export function todoStatusDisplay(status: string): TodoStatusDisplay {
+  const base = isDeployedStatus(status) ? 'deployed' : (status as TodoStatusBase);
+  return TODO_STATUS_DISPLAY[base as keyof typeof TODO_STATUS_DISPLAY] ?? TODO_STATUS_DISPLAY.pending;
+}
+
+/**
+ * Ordered list of base status values in display order. Derived from the
  * registry keys so the two cannot drift; insertion order in
  * TODO_STATUS_DISPLAY is the canonical display order.
  */
@@ -311,6 +394,8 @@ export type ActivityType =
   | 'task_deleted'
   | 'branch_pushed'
   | 'pr_linked'
+  // A human approved the linked PR on GitHub (pull_request_review, state=APPROVED).
+  | 'pr_reviewed'
   // Agent-authored, customer-facing ticket status update. The ONLY activity
   // type whose free-form `content` is surfaced to external widget viewers; it
   // is produced exclusively through the runhq-side screening gate.

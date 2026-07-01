@@ -34,28 +34,32 @@
   var notifOutsideHandler = null;
 
   var isOpen = false;
-  var activeTab = "updates"; // "updates" | "hot" | "mine"  — every open lands here (see closePanel reset)
+  var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
   var theme = "light";
 
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
   var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
+  var assignedTicketsCache = null; // /api/widget/tickets/assigned — live sessions the viewer assigned
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
   // Current authenticated user info, populated after auth via /api/widget/me.
   // Always present as an object so reads never throw — defaults to anonymous.
   var currentUser = { permissions: [], matchedRoles: [], isTriager: false };
 
-  // Modal-shell view state. The shell is a centered card with three faces:
-  //   "home"   — Intercom-style landing: greeting + navigation cards into
-  //              chat (when configured), the Hot discussion list, and the
-  //              Latest Updates list. Every open lands here (see closePanel).
-  //   "list"   — split layout: composer + recent on the left, tabbed activity on the right.
+  // Modal-shell view state. The shell is a centered card with these faces:
+  //   "list"   — the landing view: the discussion board (Hot / Updates / My
+  //              Submissions tabs + [+ New post], which opens chat). Every
+  //              open lands here on the Hot tab (see closePanel reset).
+  //   "chat"   — the agent conversation (opened from [+ New post]).
   //   "detail" — full-width ticket detail with a "Back to activity" button.
+  //   "home"   — legacy Intercom-style menu (greeting + navigation cards).
+  //              Retired from the flow but kept for possible re-use; no
+  //              navigation path lands here anymore.
   // Switching between faces re-renders the card body in place; the launcher
   // tab and outer modal chrome stay mounted so we don't pay a remount cost.
-  var view = "home";
+  var view = "list";
   var currentDetailTicket = null;
 
   // Polling interval handle for the ticket detail view.
@@ -92,6 +96,9 @@
   // button disabled across the full list re-renders that incoming SSE rows
   // trigger (the slot is rebuilt on every render).
   var chatSubmitInFlight = false;
+  // Guards the discard-and-start-fresh flow against a double-trigger while the
+  // POST is outstanding.
+  var chatFreshInFlight = false;
   // Element refs for the mounted chat view ({listEl, footerEl, hatchSlot,
   // inputEl}); null whenever view !== "chat".
   var chatUi = null;
@@ -108,11 +115,17 @@
   var CHAT_CLOSED_WATCH_MS = 5000;
   var CHAT_INPUT_MAX = 4000;
   var CHAT_ESCAPE_HATCH_MIN_TURNS = 4;
+  var CHAT_IMAGE_MAX = 3; // max images per message
   // True when the chat view is a Live session (staff → running job), rather
   // than the ordinary user → agent intake conversation. Set by openLiveSession;
   // cleared when the chat view exits. Controls: send route (liveCoderSend vs
   // chatSendMessage), topbar label, back destination, and hatch-slot visibility.
   var chatIsLiveSession = false;
+  // Pending image uploads for the chat composer. Each entry:
+  //   { id: null|string, dataUrl: string, name: string, mimeType: string, uploading: bool, failed: bool }
+  // id is null while the upload is in flight; set to the server-returned opaque
+  // id on success. Cleared when the chat shell is rebuilt and on successful send.
+  var pendingChatImages = [];
   // When chatIsLiveSession is true: the ticket the live session was opened from
   // (used to restore the detail view on back-navigation).
   var liveSessionTicket = null;
@@ -253,7 +266,14 @@
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
-  function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)); }
+  function loadAssignedTickets()  { return api("/api/widget/tickets/assigned"); }
+  function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
+    // Capture the project's deploy-env map from any detail load so status chips
+    // resolve "deployed:<envId>" → "Deployed → <name>" even on the public page
+    // (which may open a detail without going through the panel bootstrap).
+    if (data && data.environments) setDeployEnvironments(data.environments);
+    return data;
+  }); }
   function assignTicketAgent(id)  { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/assign", { method: "POST" }); }
   function ensureTicketLiveSession(id) { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/live-session", { method: "POST" }); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
@@ -303,6 +323,12 @@
   function chatOpenConversation() {
     return api("/api/widget/chat/conversations", { method: "POST", body: {} });
   }
+  // Clear the current intake conversation and open a fresh one in a single
+  // round trip (the BE closes any active intake conversation, then creates a
+  // new one). Returns the same shape as chatOpenConversation.
+  function chatStartFreshConversation() {
+    return api("/api/widget/chat/conversations", { method: "POST", body: { fresh: true } });
+  }
   function chatLoadActive() {
     return api("/api/widget/chat/conversations/active");
   }
@@ -310,10 +336,28 @@
     var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages" + qs);
   }
-  function chatSendMessage(conversationId, content) {
+  function chatSendMessage(conversationId, content, imageIds) {
+    var body = { content: content };
+    if (imageIds && imageIds.length) body.imageIds = imageIds;
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/messages", {
-      method: "POST", body: { content: content },
+      method: "POST", body: body,
     });
+  }
+
+  function chatUploadImage(conversationId, file) {
+    var fd = new FormData();
+    fd.append("file", file, file.name || "upload");
+    var init = {
+      method: "POST",
+      headers: authHeaders({}, { method: "POST" }),
+      body: fd,
+    };
+    if (wantsCookieAuth()) init.credentials = "include";
+    return fetch(RUNHQ_API + "/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/images", init).then(readJsonOrThrow);
+  }
+
+  function chatGetImageUrl(conversationId, imageId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/images/" + encodeURIComponent(imageId));
   }
   // Staff-only: send a message into the running job via the front-door agent.
   // Requires the `live_coder` permission (enforced server-side; 403 otherwise).
@@ -328,9 +372,9 @@
       method: "POST", body: {},
     });
   }
-  function chatCreateTicket(conversationId, title, description) {
+  function chatCreateTicket(conversationId, title, description, isPrivate) {
     return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/create-ticket", {
-      method: "POST", body: { title: title, description: description },
+      method: "POST", body: { title: title, description: description, isPrivate: !!isPrivate },
     });
   }
   function chatDismissProposal(conversationId) {
@@ -564,6 +608,11 @@
       currentUser.permissions = (me && me.permissions) || [];
       currentUser.matchedRoles = (me && me.matchedRoles) || [];
       currentUser.isTriager = !!(me && me.isTriager);
+      if (config.isIdentified && viewerCanLiveCoder()) {
+        loadAssignedTickets()
+          .then(function (d) { assignedTicketsCache = d.tickets || []; refreshTabLabel(); })
+          .catch(function () {});
+      }
       // Re-render so the badge appears/disappears in the eyebrow row.
       if (scrollEl) renderPanelBody();
     }).catch(function () {
@@ -781,6 +830,9 @@
     arrowUp:   function (s) { return icon([{ d: "M12 19V5M5 12l7-7 7 7" }], s, 2); },
     arrowLeft: function (s) { return icon([{ d: "M19 12H5M12 19l-7-7 7-7" }], s, 2); },
     paperclip: function (s) { return icon([{ d: "M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8" }], s); },
+    // Compose / "new conversation" glyph (document + pencil) — the conventional
+    // new-message affordance, kept distinct from the paperclip attach icon.
+    compose:   function (s) { return icon([{ d: "M12 20h9" }, { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" }], s); },
     lock:      function (s) { return icon([{ tag: "rect", x: 4, y: 11, width: 16, height: 10, rx: 2 }, { d: "M8 11V7a4 4 0 0 1 8 0v4" }], s); },
     send:      function (s) { return icon([{ d: "M22 2L11 13" }, { d: "M22 2l-7 20-4-9-9-4 20-7z" }], s); },
     sun:       function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 4 }, { d: "M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" }], s); },
@@ -790,6 +842,7 @@
     image:     function (s) { return icon([{ tag: "rect", x: 3, y: 4, width: 18, height: 16, rx: 2 }, { tag: "circle", cx: 9, cy: 10, r: 1.5 }, { d: "M21 16l-5-5-8 8" }], s); },
     globe:     function (s) { return icon([{ tag: "circle", cx: 12, cy: 12, r: 10 }, { d: "M2 12h20" }, { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" }], s); },
     chevRight: function (s) { return icon([{ d: "M9 6l6 6-6 6" }], s, 2); },
+    chevLeft:  function (s) { return icon([{ d: "M15 6l-6 6 6 6" }], s, 2); },
     home:      function (s) { return icon([{ d: "M3 11l9-8 9 8" }, { d: "M5 9.5V21h14V9.5" }], s, 2); },
   };
 
@@ -902,6 +955,7 @@
       visibility: {
         private: "Private",
         public: "Public",
+        privateHint: "Only you can see this.",
         privateTooltip: "Only you can see this. Click to make it public.",
         publicTooltip: "Anyone can see this. Click to make it private.",
         failed: "Couldn't update visibility — try again.",
@@ -992,6 +1046,8 @@
         agentDefault: "Support",
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
+        liveSessionStatus: "{name} is working in the background",
+        liveSessionIntro: "Updates show up here as they happen — message anytime to ask a question or steer the work.",
         agentlessIntro: "Our support agent is currently offline. You can still submit a ticket directly — describe your issue or request with as much detail as possible (what happened, steps to reproduce, what you expected), then tap Submit Ticket below.",
         collectPrompt: "Anything more you'd like to add? When you're ready, tap Submit Ticket below — the more detail, the faster we can help.",
         submitTicket: "Submit Ticket",
@@ -1007,12 +1063,17 @@
         signInPrompt: "Sign in to chat with our support agent.",
         sendFailed: "Could not send: {msg}",
         rateLimited: "You're sending messages too quickly — please wait a moment and try again.",
+        uploadFailed: "That image couldn't be uploaded. Please try again.",
         turnCap: "This conversation has reached its message limit. Create a ticket from it or start a new conversation.",
         unavailable: "The agent is unavailable right now — try Open Discussion instead.",
         proposalTitle: "Ready to create this ticket?",
         proposalTitleLabel: "Title",
         proposalDescLabel: "Description",
         proposalIncomplete: "Title and description are both required.",
+        proposalPrivate: "Private",
+        proposalPublic: "Public",
+        proposalPrivateOn: "Only you will see this.",
+        proposalPrivateOff: "Others can see and upvote this.",
         createTicket: "Create Ticket",
         creating: "Creating…",
         createFailed: "Could not create the ticket: {msg}",
@@ -1027,6 +1088,13 @@
         forceRequested: "Preparing a ticket draft from this conversation…",
         closed: "This conversation has ended.",
         startNew: "Start new conversation",
+        clearAria: "Start a new conversation",
+        clearTitle: "New conversation",
+        clearConfirmTitle: "Start a new conversation?",
+        clearConfirmBody: "This clears the current chat and starts fresh. Your messages here won't be sent as a ticket.",
+        clearConfirm: "Start new",
+        clearCancel: "Keep editing",
+        clearFailed: "Could not start a new conversation: {msg}",
         transcriptTitle: "Created from a conversation",
         transcriptShow: "Show transcript",
         transcriptHide: "Hide transcript",
@@ -1117,6 +1185,7 @@
       visibility: {
         private: "비공개",
         public: "공개",
+        privateHint: "본인만 볼 수 있습니다.",
         privateTooltip: "본인만 볼 수 있습니다. 클릭하면 공개로 전환됩니다.",
         publicTooltip: "누구나 볼 수 있습니다. 클릭하면 비공개로 전환됩니다.",
         failed: "공개 설정을 변경하지 못했습니다. 다시 시도해 주세요.",
@@ -1207,6 +1276,8 @@
         agentDefault: "지원 담당",
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
+        liveSessionStatus: "{name}이(가) 백그라운드에서 작업 중이에요",
+        liveSessionIntro: "진행 상황이 여기에 표시돼요 — 궁금한 점이나 방향이 있으면 언제든 메시지를 보내 주세요.",
         agentlessIntro: "지금은 상담원이 오프라인 상태예요. 그래도 바로 티켓을 제출하실 수 있어요 — 무슨 일이 있었는지, 재현 방법, 기대했던 동작 등 가능한 한 자세히 알려주신 뒤 아래 '티켓 제출'을 눌러주세요.",
         collectPrompt: "더 추가하실 내용이 있나요? 준비되셨으면 아래 '티켓 제출'을 눌러주세요 — 자세할수록 빠르게 도와드릴 수 있어요.",
         submitTicket: "티켓 제출",
@@ -1222,12 +1293,17 @@
         signInPrompt: "상담을 시작하려면 로그인하세요.",
         sendFailed: "전송 실패: {msg}",
         rateLimited: "메시지를 너무 빠르게 보내고 있습니다 — 잠시 후 다시 시도해 주세요.",
+        uploadFailed: "이미지를 업로드하지 못했습니다. 다시 시도해 주세요.",
         turnCap: "이 대화는 메시지 한도에 도달했습니다. 대화 내용으로 티켓을 만들거나 새 대화를 시작하세요.",
         unavailable: "지금은 에이전트를 이용할 수 없습니다 — 공개 토론을 이용해 보세요.",
         proposalTitle: "이 티켓을 생성할까요?",
         proposalTitleLabel: "제목",
         proposalDescLabel: "설명",
         proposalIncomplete: "제목과 설명을 모두 입력해 주세요.",
+        proposalPrivate: "비공개",
+        proposalPublic: "공개",
+        proposalPrivateOn: "본인에게만 표시됩니다.",
+        proposalPrivateOff: "다른 사용자가 보고 추천할 수 있습니다.",
         createTicket: "티켓 생성",
         creating: "생성 중…",
         createFailed: "티켓을 생성하지 못했습니다: {msg}",
@@ -1242,6 +1318,13 @@
         forceRequested: "대화 내용으로 티켓 초안을 준비하고 있습니다…",
         closed: "대화가 종료되었습니다.",
         startNew: "새 대화 시작",
+        clearAria: "새 대화 시작",
+        clearTitle: "새 대화",
+        clearConfirmTitle: "새 대화를 시작할까요?",
+        clearConfirmBody: "현재 대화를 지우고 새로 시작합니다. 여기에 입력한 메시지는 티켓으로 전송되지 않습니다.",
+        clearConfirm: "새로 시작",
+        clearCancel: "계속 작성",
+        clearFailed: "새 대화를 시작하지 못했습니다: {msg}",
         transcriptTitle: "대화에서 생성됨",
         transcriptShow: "대화 내용 보기",
         transcriptHide: "대화 내용 숨기기",
@@ -1285,6 +1368,31 @@
     var c = (typeof window !== "undefined" && window.__RW_CONSTANTS__) || null;
     return (c && c.status) || null;
   }
+  // Deploy-environment id→name map for this project, captured from the bootstrap
+  // (GET /api/widget/tickets) and ticket-detail responses. Lets us resolve a
+  // `deployed:<envId>` status to a human label ("Deployed → Production") instead
+  // of leaking the raw env id. Empty until a response carries it.
+  var deployEnvironments = [];
+  function setDeployEnvironments(list) {
+    if (Array.isArray(list)) deployEnvironments = list;
+  }
+  function isDeployedStatus(s) {
+    return s === "deployed" || (typeof s === "string" && s.indexOf("deployed:") === 0);
+  }
+  // Resolve a `deployed:<envId>` status to its environment name, or null when
+  // it's the bare `deployed`, has no env id, or the id isn't in the synced map.
+  function deployedEnvName(s) {
+    if (typeof s !== "string") return null;
+    var i = s.indexOf(":");
+    var envId = i >= 0 ? s.slice(i + 1) : "";
+    if (!envId) return null;
+    for (var k = 0; k < deployEnvironments.length; k++) {
+      if (deployEnvironments[k] && deployEnvironments[k].id === envId) {
+        return deployEnvironments[k].name || null;
+      }
+    }
+    return null;
+  }
   // Last-resort visual when the registry is unavailable (cached pre-injection
   // bundle, mounted via an unexpected path, etc.). Surfaces the raw status
   // value so divergence is visible rather than silently mislabeled.
@@ -1294,6 +1402,15 @@
   // LOCALES.{lang}.status. We use the locale label when it exists for the
   // active language, otherwise fall back to the registry's English label.
   function localizedStatusLabel(s) {
+    // Compound deploy statuses (`deployed:<envId>`) aren't registry keys; label
+    // them off the base `deployed` vocabulary + the resolved environment name.
+    // Guarded to the compound form (has ':') so the bare `deployed` recurses
+    // into the normal registry/locale path below instead of looping.
+    if (typeof s === "string" && s.indexOf("deployed:") === 0) {
+      var base = localizedStatusLabel("deployed") || "Deployed";
+      var envName = deployedEnvName(s);
+      return envName ? base + " → " + envName : base;
+    }
     var path = "status." + s;
     var localized = t(path);
     if (localized && localized !== path) return localized;
@@ -1302,7 +1419,9 @@
   }
   function statusMeta(s) {
     var R = getStatusRegistry();
-    var entry = R && R[s];
+    // A `deployed:<envId>` status carries the base `deployed` colors; only its
+    // label changes (resolved to "Deployed → <env name>").
+    var entry = R && (isDeployedStatus(s) ? R["deployed"] : R[s]);
     var localized = localizedStatusLabel(s);
     if (entry) {
       return { label: localized || entry.label, dot: entry.dot, bg: entry.bg, fg: entry.fg };
@@ -1379,6 +1498,45 @@
     } catch (_) {}
   }
 
+  // Live-session unread is tracked on its OWN axis, separate from ticketSeen
+  // above. The detail view marks a ticket seen up to its general activity
+  // (updatedAt/comments/activity), which can be NEWER than an unread coder
+  // reply — so sharing one mark would let merely opening the detail silently
+  // clear a live-session reply the assigner never read. This per-ticket mark is
+  // advanced ONLY when the live session itself is opened (renderChatMessageList).
+  function liveSessionSeenKey() {
+    return "rw-livesession-seen:" + (config.projectId || config.project || "default");
+  }
+  function getLiveSessionSeen() {
+    try { return JSON.parse(localStorage.getItem(liveSessionSeenKey()) || "{}") || {}; }
+    catch (_) { return {}; }
+  }
+  function markLiveSessionSeen(id, whenMs) {
+    if (!id) return;
+    try {
+      var m = getLiveSessionSeen();
+      var v = whenMs && !isNaN(whenMs) ? whenMs : Date.now();
+      if (!(m[id] >= v)) {
+        m[id] = v;
+        localStorage.setItem(liveSessionSeenKey(), JSON.stringify(m));
+      }
+    } catch (_) {}
+  }
+
+  // True when a ticket's linked live session has a coder/teammate reply
+  // (liveSessionLastMessageAt, populated only on assigned-ticket DTOs) that the
+  // assigner hasn't read. Baseline = when they last OPENED the session, or — if
+  // never opened — the ticket's creation time. Independent of ticketSeen, so
+  // viewing the ticket detail does not clear it; only opening the session does.
+  function hasUnreadLiveSession(ticket) {
+    if (!config.isIdentified || !ticket || !ticket.liveSessionLastMessageAt) return false;
+    var msg = new Date(ticket.liveSessionLastMessageAt).getTime();
+    if (isNaN(msg)) return false;
+    var seen = getLiveSessionSeen();
+    var base = seen[ticket.id] != null ? seen[ticket.id] : new Date(ticket.createdAt || 0).getTime();
+    return msg > base;
+  }
+
   // True when one of the viewer's OWN tickets has activity/comments they
   // haven't viewed yet (a team reply or status change). The single source of
   // truth for both the launcher count and the per-row "needs attention" dot.
@@ -1400,17 +1558,43 @@
     return updated > base;
   }
 
-  // Launcher badge = how many of the viewer's OWN submitted tickets have unseen
-  // activity. Deliberately NOT unioned with the community "Updates" feed — that
-  // count lives on the "View Latest Updates" home card (newUpdatesCount).
+  // Gate the assigned-session unread signal on live_coder ONLY — the same
+  // permission that gates the "Live session" button (the only surface that
+  // clears live-session unread). An assign_agent-only viewer can assign a coder
+  // but cannot open the session, so giving them the badge would strand it
+  // unclearable. Lighting it only for live_coder holders keeps it clearable.
+  function viewerCanLiveCoder() {
+    var p = currentUser.permissions || [];
+    return p.indexOf("live_coder") !== -1;
+  }
+
+  // Deduped list of the viewer's tickets that warrant attention, by TWO distinct
+  // signals kept on their own axes:
+  //   - reported tickets (myTicketsCache) → general activity unread
+  //     (ticketHasUnseenActivity: a team reply / status change since last view)
+  //   - assigned live sessions (assignedTicketsCache) → an unread coder/teammate
+  //     REPLY (hasUnreadLiveSession), cleared only by opening the session
+  // A ticket the viewer both reported AND assigned is counted once (either
+  // signal qualifies it). Deliberately NOT unioned with the community "Updates"
+  // feed — that count lives on the "View Latest Updates" home card.
+  function unreadTickets() {
+    if (!config.isIdentified) return [];
+    var byId = {};
+    var out = [];
+    var consider = function (tk, isUnread) {
+      if (!tk || !tk.id || byId[tk.id]) return;
+      if (!isUnread(tk)) return;
+      byId[tk.id] = true; out.push(tk);
+    };
+    (myTicketsCache || []).forEach(function (tk) { consider(tk, ticketHasUnseenActivity); });
+    (assignedTicketsCache || []).forEach(function (tk) { consider(tk, hasUnreadLiveSession); });
+    return out;
+  }
+
+  // Launcher badge = how many of the viewer's submitted-or-assigned tickets need
+  // attention (see unreadTickets).
   function launcherBadgeCount() {
-    if (!config.isIdentified) return 0;
-    var mine = myTicketsCache || [];
-    var n = 0;
-    for (var j = 0; j < mine.length; j++) {
-      if (ticketHasUnseenActivity(mine[j])) n++;
-    }
-    return n;
+    return unreadTickets().length;
   }
 
   // Community "Updates" newer than the last panel-open (bounded to a week) —
@@ -1687,7 +1871,7 @@
 
   function renderNotifDropdown() {
     if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
-    var items = (myTicketsCache || []).filter(ticketHasUnseenActivity);
+    var items = unreadTickets();
     var listEl = h("div", { className: "rw-notif-list" });
     if (items.length === 0) {
       listEl.appendChild(h("div", { className: "rw-notif-empty" }, t("filters.noUnread")));
@@ -1792,6 +1976,7 @@
       '  --rw-line: rgba(0,0,0,0.07); --rw-line-2: rgba(0,0,0,0.13);',
       '  --rw-fg: #0a0a0a; --rw-fg-2: #3f3f46; --rw-muted: #71717a; --rw-muted-2: #a1a1aa;',
       '  --rw-accent: #6366f1; --rw-accent-ink: #ffffff;',
+      '  --rw-warn: #b45309; --rw-warn-line: #f59e0b;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
       /* Warm charcoal dark — matches dashboard.css. */
@@ -1800,6 +1985,7 @@
       '  --rw-line: rgba(255,243,219,0.08); --rw-line-2: rgba(255,243,219,0.14);',
       '  --rw-fg: #f0e9d9; --rw-fg-2: #c8c0ad; --rw-muted: #8e8676; --rw-muted-2: #6e6759;',
       '  --rw-accent: #818cf8; --rw-accent-ink: #1f1a14;',
+      '  --rw-warn: #fbbf24; --rw-warn-line: #d97706;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
 
@@ -2068,8 +2254,8 @@
       /* widget shell — fixed full-viewport scrim layer. Pinned to the top of
          the stage; the launcher tab still sits at the screen edge as before.
          The card inside is absolutely positioned (not flex-centered) so every
-         geometry property is a transitionable length — that is what lets the
-         compact↔expanded morph animate (see .rw-compact below). */
+         geometry property is a transitionable length — that is what lets
+         in-panel navigation (home ↔ list ↔ chat) morph smoothly. */
       '.rw-shell-scrim {',
       '  position: fixed; inset: 0;',
       '  background: rgba(20,16,12,0.55);',
@@ -2110,27 +2296,6 @@
       '  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, transform .25s ease;',
       '}',
 
-      /* Compact corner panel (home + chat views). The scrim element stays
-         mounted (it is widgetEl, the open/close fade carrier) but goes fully
-         transparent AND click-transparent: the host page stays visible and
-         interactive, Intercom-style — outside clicks land on the page and do
-         NOT close the panel. Only the card itself accepts events. */
-      '.rw-shell-scrim.rw-compact {',
-      '  background: transparent;',
-      '  -webkit-backdrop-filter: none; backdrop-filter: none;',
-      '}',
-      '.rw-shell-scrim.rw-compact.rw-open { pointer-events: none; }',
-      /* Corner anchor, adjacent to the launcher edge: 20px inset from the
-         bottom + configured side. translate(-100%) is relative to the
-         panel\'s own box, so these are the same transitionable properties
-         the expanded state sets — the morph animates between them. */
-      '.rw-shell-scrim.rw-compact .rw-shell {',
-      '  top: 100%; left: ' + (isRight ? "100%" : "20px") + ';',
-      '  transform: translate(' + (isRight ? "calc(-100% - 20px)" : "0px") + ', calc(-100% - 20px));',
-      '  width: 400px;',
-      '  height: min(704px, calc(100vh - 40px));',
-      '  min-height: 0;',
-      '}',
       '@media (prefers-reduced-motion: reduce) {',
       '  .rw-shell-scrim.rw-open { transition: opacity .18s ease; }',
       '  .rw-shell-scrim.rw-open .rw-shell { transition: none; }',
@@ -2138,11 +2303,10 @@
       /* 100dvh excludes the iOS/Android dynamic toolbar so the top
          (shell-actions) and bottom (composer) aren't clipped behind
          browser chrome. The 100vh line is the fallback for older
-         browsers that don't parse dvh. The selector list also outguns the
-         compact rules above (mobile keeps one near-full-screen layout in
-         BOTH modes). */
+         browsers that don't parse dvh. Mobile keeps one near-full-screen
+         layout for every view. */
       '@media (max-width: 640px) {',
-      '  .rw-shell, .rw-shell-scrim.rw-compact .rw-shell {',
+      '  .rw-shell {',
       '    top: 0; left: 0; transform: none;',
       '    width: 100%; height: 100vh; height: 100dvh; min-height: 0;',
       '  }',
@@ -2349,6 +2513,10 @@
          inline so the title keeps its 2-line clamp. */
       '.rw-dash-row--unseen .rw-dash-row-title { font-weight: 650; }',
       '.rw-unseen-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); margin-right: 7px; vertical-align: middle; flex: 0 0 auto; }',
+      // On the accent-filled "Live session" button the default accent dot blends
+      // into the button background — give it an alert red + white ring so it
+      // reads as an unread indicator regardless of theme.
+      '.rw-staff-btn--primary .rw-unseen-dot { background: #ef4444; box-shadow: 0 0 0 1.5px rgba(255,255,255,0.85); }',
       /* "Unread only" filter toggle (My Submissions) */
       '.rw-unread-filter-row { display: flex; padding: 2px 10px 10px; }',
       '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
@@ -2369,6 +2537,18 @@
       '.rw-dash-row-meta {',
       '  display: flex; align-items: center; gap: 6px;',
       '  font-size: 11px; color: var(--rw-muted); flex-wrap: wrap;',
+      '}',
+      /* "Private" badge on a card's meta row — a non-interactive marker (the
+         clickable toggle lives in the detail head). Mirrors .rw-vis-chip's
+         resting look so the two read as the same concept. */
+      '.rw-meta-private {',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  padding: 1px 7px 1px 6px;',
+      '  border-radius: 999px;',
+      '  background: var(--rw-panel-2);',
+      '  border: 1px solid var(--rw-line);',
+      '  color: var(--rw-fg-2);',
+      '  font-size: 10.5px; font-weight: 500; line-height: 1.6; white-space: nowrap;',
       '}',
 
       /* vote pill (right side of row) — replaces the old vertical .rw-vote */
@@ -2500,9 +2680,13 @@
       '}',
       '.rw-home-btn:hover { color: var(--rw-fg); border-color: var(--rw-accent); }',
       '.rw-home-btn:active { transform: translateY(1px); }',
-      /* Slim list-view topbar hosting the back-to-home control. The split
-         layout below it is untouched — Home is a layer above the dashboard.
-         Right padding keeps clear of the absolute-positioned shell actions. */
+      /* Slim list-view topbar hosting the board title (the discussion board is
+         the widget's landing view). Right padding keeps the title clear of the
+         absolute-positioned shell actions (bell / theme / close). */
+      '.rw-list-title {',
+      '  font-size: 15px; font-weight: 600; color: var(--rw-fg);',
+      '  letter-spacing: -0.01em;',
+      '}',
       '.rw-list-topbar {',
       '  display: flex; align-items: center;',
       '  padding: 14px 80px 10px 22px;',
@@ -2828,6 +3012,21 @@
       '}',
       '.rw-chip-attach > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
       '.rw-modal-mount[data-theme="light"] .rw-chip-attach { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-thumb {',
+      '  position: relative; display: inline-block; flex: 0 0 auto;',
+      '  width: 56px; height: 56px; border-radius: 8px; overflow: hidden;',
+      '  border: 1px solid var(--rw-line-2); background: rgba(255,255,255,0.06);',
+      '}',
+      '.rw-modal-mount[data-theme="light"] .rw-chip-thumb { background: rgba(15,20,35,0.04); }',
+      '.rw-chip-thumb-img {',
+      '  width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in;',
+      '}',
+      '.rw-chip-thumb .rw-chip-x {',
+      '  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;',
+      '  background: rgba(4,6,11,0.62); color: #fff; border-radius: 999px;',
+      '  font-size: 13px; line-height: 1;',
+      '}',
+      '.rw-chip-thumb .rw-chip-x:hover { background: rgba(4,6,11,0.85); color: #fff; }',
       '.rw-chip-attach.rw-uploading { opacity: 0.75; }',
       '.rw-chip-attach.rw-failed { border-color: rgba(220,38,38,0.55); color: #fca5a5; }',
       '.rw-chip-mini-spinner {',
@@ -3052,6 +3251,18 @@
       '  transition: background .15s ease, border-color .15s ease;',
       '}',
       '.rw-lightbox-close:hover { background: rgba(0,0,0,0.7); border-color: rgba(255,255,255,0.28); }',
+      '.rw-lightbox-nav {',
+      '  position: absolute; top: 50%; transform: translateY(-50%);',
+      '  width: 44px; height: 44px;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  border-radius: 999px; border: 1px solid rgba(255,255,255,0.14);',
+      '  background: rgba(0,0,0,0.4); color: rgba(255,255,255,0.92);',
+      '  cursor: pointer; padding: 0;',
+      '  transition: background .15s ease, border-color .15s ease;',
+      '}',
+      '.rw-lightbox-nav:hover { background: rgba(0,0,0,0.7); border-color: rgba(255,255,255,0.28); }',
+      '.rw-lightbox-prev { left: 16px; }',
+      '.rw-lightbox-next { right: 16px; }',
 
       /* composer */
       '.rw-td-composer { border-top: 1px solid var(--rw-line); padding: 10px 12px; background: rgba(255,255,255,0.015); flex: 0 0 auto; }',
@@ -3386,6 +3597,30 @@
       '  display: flex; flex-direction: column; gap: 10px;',
       '}',
       '.rw-chat-empty { font-size: 13px; color: var(--rw-muted); text-align: center; padding: 24px 12px; }',
+      '.rw-chat-intro { padding: 36px 22px; display: flex; flex-direction: column; align-items: center; gap: 12px; }',
+      '.rw-intro-status {',
+      '  display: inline-flex; align-items: center; gap: 7px;',
+      '  font-size: 12px; font-weight: 600; color: var(--rw-fg-2);',
+      '  background: var(--rw-panel-2); border: 1px solid var(--rw-panel-3);',
+      '  padding: 5px 11px 5px 9px; border-radius: 999px;',
+      '}',
+      '.rw-intro-pulse {',
+      '  width: 8px; height: 8px; border-radius: 50%; flex: none;',
+      '  background: #16a34a; box-shadow: 0 0 0 0 rgba(22,163,74,0.5);',
+      '  animation: rw-intro-pulse 2s ease-out infinite;',
+      '}',
+      '@keyframes rw-intro-pulse {',
+      '  0% { box-shadow: 0 0 0 0 rgba(22,163,74,0.45); }',
+      '  70% { box-shadow: 0 0 0 6px rgba(22,163,74,0); }',
+      '  100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }',
+      '}',
+      '@media (prefers-reduced-motion: reduce) { .rw-intro-pulse { animation: none; } }',
+      '.rw-chat-intro-title {',
+      '  font-size: 15px; font-weight: 700; color: var(--rw-fg);',
+      '  line-height: 1.35; max-width: 34ch; margin: 0;',
+      '  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;',
+      '}',
+      '.rw-intro-body { font-size: 13px; color: var(--rw-muted); line-height: 1.5; max-width: 32ch; }',
       '.rw-chat-msg { display: flex; gap: 8px; }',
       '.rw-chat-msg-user { justify-content: flex-end; }',
       '.rw-chat-msg-agent { justify-content: flex-start; align-items: flex-start; }',
@@ -3420,6 +3655,7 @@
       '.rw-chat-typing-dot:nth-child(3) { animation-delay: 0.3s; }',
       '@keyframes rw-chat-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }',
       '.rw-chat-event-line { font-size: 11.5px; color: var(--rw-muted); text-align: center; padding: 2px 8px; }',
+      '.rw-chat-event-chips { display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; }',
       '.rw-chat-footer {',
       '  flex: 0 0 auto; border-top: 1px solid var(--rw-line);',
       '  padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px;',
@@ -3459,6 +3695,81 @@
       '  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;',
       '}',
       '.rw-chat-newconv-btn:disabled { cursor: not-allowed; opacity: 0.45; }',
+
+      /* Discard-conversation confirmation dialog (rendered via mountModal). */
+      '.rw-confirm-modal {',
+      '  width: min(360px, 100%); box-sizing: border-box;',
+      '  background: var(--rw-bg); border: 1px solid var(--rw-line-2);',
+      '  border-radius: 14px; padding: 20px;',
+      '  box-shadow: 0 18px 48px -16px rgba(0,0,0,0.55);',
+      '  display: flex; flex-direction: column; gap: 8px; color: var(--rw-fg);',
+      '  animation: rw-modal-in .2s cubic-bezier(0.16, 1, 0.3, 1);',
+      '}',
+      '.rw-confirm-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--rw-fg); }',
+      '.rw-confirm-body { margin: 0; font-size: 13px; line-height: 1.5; color: var(--rw-muted); }',
+      '.rw-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }',
+      '.rw-confirm-btn {',
+      '  height: 30px; padding: 0 14px; border-radius: 999px;',
+      '  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;',
+      '  border: 1px solid transparent; transition: all .15s ease;',
+      '}',
+      '.rw-confirm-cancel { background: transparent; border-color: var(--rw-line-2); color: var(--rw-fg-2); }',
+      '.rw-confirm-cancel:hover { color: var(--rw-fg); border-color: var(--rw-muted); }',
+      '.rw-confirm-go { background: var(--rw-accent); border-color: var(--rw-accent); color: var(--rw-accent-ink); }',
+      '.rw-confirm-go:hover { filter: brightness(1.06); }',
+
+      /* Chat image attach affordance: thumbnail chips above input + attach btn */
+      '.rw-chat-img-chips { display: flex; gap: 6px; padding: 0 2px 4px; flex-wrap: wrap; }',
+      '.rw-chat-img-chip {',
+      '  position: relative; width: 56px; height: 56px; border-radius: 8px;',
+      '  overflow: hidden; flex-shrink: 0;',
+      '  border: 1px solid var(--rw-line-2); background: var(--rw-bg);',
+      '}',
+      '.rw-chat-img-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }',
+      '.rw-chat-img-chip-x {',
+      '  position: absolute; top: 2px; right: 2px;',
+      '  width: 16px; height: 16px; border-radius: 50%;',
+      '  background: rgba(0,0,0,0.65); border: none; color: #fff;',
+      '  cursor: pointer; font-size: 13px; line-height: 1;',
+      '  display: flex; align-items: center; justify-content: center; padding: 0;',
+      '}',
+      '.rw-chat-img-chip.rw-uploading::after {',
+      '  content: ""; position: absolute; inset: 0; background: rgba(0,0,0,0.35);',
+      '}',
+      '.rw-chat-img-chip.rw-failed { border-color: rgba(220,38,38,0.55); }',
+      '.rw-chat-attach-btn {',
+      '  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;',
+      '  width: 30px; height: 30px; border-radius: 50%;',
+      '  border: 1px solid var(--rw-line); background: transparent;',
+      '  color: var(--rw-muted); cursor: pointer;',
+      '}',
+      '.rw-chat-attach-btn:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-line-2); }',
+      '.rw-chat-attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }',
+      /* New-conversation strip — right-aligned, directly below the header.
+         Its own row so it reads as a distinct chat action, clear of both the
+         global icon cluster and the composer. */
+      '.rw-chat-actionbar {',
+      '  flex: 0 0 auto; display: flex; justify-content: flex-end;',
+      '  padding: 8px 18px 0;',
+      '}',
+      '.rw-chat-newconv-pill {',
+      '  display: inline-flex; align-items: center; gap: 5px;',
+      '  height: 26px; padding: 0 10px;',
+      '  background: transparent; border: 1px solid var(--rw-line-2);',
+      '  border-radius: 999px; color: var(--rw-muted);',
+      '  font: inherit; font-size: 11.5px; font-weight: 500; cursor: pointer;',
+      '  transition: color .15s ease, border-color .15s ease;',
+      '}',
+      '.rw-chat-newconv-pill:hover:not(:disabled) { color: var(--rw-fg); border-color: var(--rw-muted); }',
+      '.rw-chat-newconv-pill:disabled { opacity: 0.45; cursor: not-allowed; }',
+
+      /* Chat bubble: images sent by the user */
+      '.rw-chat-bubble-imgs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }',
+      '.rw-chat-bubble-img {',
+      '  width: 72px; height: 72px; border-radius: 8px; object-fit: cover;',
+      '  cursor: pointer; display: block;',
+      '  border: 1px solid rgba(255,255,255,0.12);',
+      '}',
 
       /* Chat ticket cards: compact reference cards rendered inline in the
          conversation (existing-ticket deflection links and the created-
@@ -3509,6 +3820,10 @@
       '  font-size: 11px; font-weight: 600; color: var(--rw-muted); margin: 2px 0 0;',
       '}',
       '.rw-chat-proposal-desc { resize: vertical; min-height: 84px; font-family: inherit; }',
+      /* Visibility row in the proposal card — Public/Private pill + hint,
+         mirroring the standalone composer's privacy control. */
+      '.rw-chat-proposal-visibility { display: flex; align-items: center; flex-wrap: wrap; margin: 2px 0 0; }',
+      '.rw-chat-proposal-visibility .rw-priv-hint { margin-left: 8px; }',
       '.rw-chat-dismiss-link {',
       '  background: none; border: none; padding: 0; font: inherit;',
       '  font-size: 12px; color: var(--rw-muted); cursor: pointer;',
@@ -3565,6 +3880,22 @@
       '  border: 1px solid color-mix(in oklab, var(--rw-accent) 40%, var(--rw-line-2));',
       '}',
       '.rw-staff-btn--ghost:not(:disabled):hover { background: color-mix(in oklab, var(--rw-accent) 10%, var(--rw-bg)); border-color: var(--rw-accent); }',
+
+      /* Assign-agent feedback. A transient failure stays a small red line
+         (`.rw-assign-err`); the terminal "no agent is set up for this project"
+         case gets an amber callout that names the root cause and the exact
+         settings path to fix it — staff kept missing the bare red string. */
+      '.rw-assign-callout {',
+      '  display: flex; align-items: flex-start; gap: 8px; width: 100%;',
+      '  margin-top: 1px; padding: 9px 11px; border-radius: 9px;',
+      '  background: color-mix(in oklab, var(--rw-warn-line) 12%, var(--rw-panel));',
+      '  border: 1px solid color-mix(in oklab, var(--rw-warn-line) 34%, var(--rw-line-2));',
+      '  border-left: 3px solid var(--rw-warn-line);',
+      '}',
+      '.rw-assign-callout-ic { flex: 0 0 auto; font-size: 14px; line-height: 1.35; }',
+      '.rw-assign-callout-body { font-size: 12.5px; line-height: 1.45; color: var(--rw-fg-2); }',
+      '.rw-assign-callout-title { font-weight: 700; color: var(--rw-warn); }',
+      '.rw-assign-callout-path { font-weight: 600; color: var(--rw-fg); white-space: nowrap; }',
 
       /* "Created from a conversation" — collapsed transcript section on the
          ticket detail for tickets born from chat. Reporter-only by
@@ -3682,8 +4013,17 @@
     return h("div", { className: "rw-notice rw-notice-" + type }, msg);
   }
 
-  function openImageLightbox(url, name) {
-    var img = h("img", { className: "rw-lightbox-img", src: url, alt: name || "" });
+  // Full-screen image lightbox with optional gallery navigation. Accepts
+  // either a single image — openImageLightbox(url, name) — or a gallery:
+  // openImageLightbox([{ url, name }, …], startIndex). When more than one image
+  // is present, prev/next arrows appear only on the side(s) where another image
+  // exists, and ←/→ navigate between them.
+  function openImageLightbox(items, start) {
+    if (typeof items === "string") items = [{ url: items, name: start }];
+    if (!items || !items.length) return;
+    var i = Math.max(0, Math.min(items.length - 1, start | 0));
+
+    var img = h("img", { className: "rw-lightbox-img" });
     img.addEventListener("mousedown", function (e) { e.stopPropagation(); });
 
     var closeBtn = h("button", {
@@ -3692,12 +4032,41 @@
       "aria-label": "Close image",
     }, Icons.close(18));
 
+    var prevBtn = h("button", {
+      className: "rw-lightbox-nav rw-lightbox-prev",
+      type: "button",
+      "aria-label": "Previous image",
+    }, Icons.chevLeft(26));
+    var nextBtn = h("button", {
+      className: "rw-lightbox-nav rw-lightbox-next",
+      type: "button",
+      "aria-label": "Next image",
+    }, Icons.chevRight(26));
+
     var scrim = h("div", {
       className: "rw-lightbox-scrim",
       role: "dialog",
       "aria-modal": "true",
-      "aria-label": name || "Image preview",
-    }, [img, closeBtn]);
+    }, [img, prevBtn, nextBtn, closeBtn]);
+
+    function render() {
+      var it = items[i];
+      img.setAttribute("src", it.url);
+      img.setAttribute("alt", it.name || "");
+      scrim.setAttribute("aria-label", it.name || "Image preview");
+      // Arrows show only when an adjacent image exists on that side.
+      prevBtn.style.display = i > 0 ? "inline-flex" : "none";
+      nextBtn.style.display = i < items.length - 1 ? "inline-flex" : "none";
+    }
+    function go(delta, e) {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      var ni = i + delta;
+      if (ni < 0 || ni > items.length - 1) return;
+      i = ni;
+      render();
+    }
+    prevBtn.addEventListener("click", function (e) { go(-1, e); });
+    nextBtn.addEventListener("click", function (e) { go(1, e); });
 
     function close() {
       document.removeEventListener("keydown", onKey, true);
@@ -3708,6 +4077,12 @@
         e.stopImmediatePropagation();
         e.preventDefault();
         close();
+      } else if (e.key === "ArrowLeft") {
+        e.stopImmediatePropagation();
+        go(-1, e);
+      } else if (e.key === "ArrowRight") {
+        e.stopImmediatePropagation();
+        go(1, e);
       }
     };
 
@@ -3716,22 +4091,106 @@
       if (e.target === scrim) close();
     });
 
+    render();
     document.addEventListener("keydown", onKey, true);
     modalMountEl.appendChild(scrim);
   }
 
-  function renderShotThumb(att) {
+  // ---------------------------------------------------------------------------
+  // Staged-attachment previews (composer chips)
+  //
+  // A file the user has chosen but not yet uploaded is held as { file }. To
+  // show the actual image — not just its name — we mint an object URL over the
+  // chosen bytes and embed it as a thumbnail. The URL is cached on the entry so
+  // repeated chip re-renders reuse one allocation, and released the moment the
+  // entry is removed or cleared so we never leak object URLs.
+  // ---------------------------------------------------------------------------
+  function attachPreviewUrl(entry) {
+    if (!entry || !entry.file) return null;
+    var type = entry.file.type || "";
+    if (type.indexOf("image/") !== 0) return null;
+    if (!entry.previewUrl) {
+      try { entry.previewUrl = URL.createObjectURL(entry.file); }
+      catch (e) { return null; }
+    }
+    return entry.previewUrl;
+  }
+  function releaseAttachPreview(entry) {
+    if (entry && entry.previewUrl) {
+      try { URL.revokeObjectURL(entry.previewUrl); } catch (e) { /* noop */ }
+      entry.previewUrl = null;
+    }
+  }
+  function releaseAllAttachPreviews(entries) {
+    if (entries && entries.length) entries.forEach(releaseAttachPreview);
+  }
+
+  // A staged-attachment chip rendered in a composer before upload. Image files
+  // render as a standalone thumbnail tile — no filename — that expands to a
+  // full-screen lightbox on click (the same one posted attachments use); the
+  // corner × removes it. Non-images (rare: composers only accept image/*) fall
+  // back to a compact icon chip. onRemove(entry) fires when × is clicked.
+  // getGallery (optional) returns the ordered [{ url, name }] of all staged
+  // images so the lightbox can page between them with prev/next arrows.
+  function renderAttachChip(entry, onRemove, getGallery) {
+    var name = entry.file.name || t("composer.pastedImage");
+    var removeBtn = h("button", {
+      className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+    }, "×");
+    removeBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      onRemove(entry);
+    });
+    var previewUrl = attachPreviewUrl(entry);
+    if (previewUrl) {
+      var img = h("img", {
+        className: "rw-chip-thumb-img", src: previewUrl, alt: name,
+        title: name, role: "button", tabindex: "0", "aria-label": name,
+      });
+      function expand(e) {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        var items = (getGallery && getGallery()) || [{ url: previewUrl, name: name }];
+        var idx = 0;
+        for (var k = 0; k < items.length; k++) { if (items[k].url === previewUrl) { idx = k; break; } }
+        openImageLightbox(items, idx);
+      }
+      img.addEventListener("click", expand);
+      img.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") expand(e);
+      });
+      return h("span", { className: "rw-chip-thumb", title: name }, [img, removeBtn]);
+    }
+    return h("span", { className: "rw-chip-attach", title: name }, [Icons.image(13), removeBtn]);
+  }
+
+  // Ordered [{ url, name }] of every staged image in a composer's entry list —
+  // the gallery a thumbnail's lightbox pages through.
+  function stagedGallery(entries) {
+    var items = [];
+    entries.forEach(function (e) {
+      var url = attachPreviewUrl(e);
+      if (url) items.push({ url: url, name: e.file.name || t("composer.pastedImage") });
+    });
+    return items;
+  }
+
+  function shotIsImage(att) {
+    return (att.mimeType || att.mime || "").indexOf("image/") === 0;
+  }
+  function shotName(att) {
+    return att.originalName || att.filename || "image";
+  }
+  function renderShotThumb(att, gallery) {
     // Attachment shape from be/: { id, filename, originalName, mimeType, url, ... }
     var aspect = att.width && att.height ? (att.width + " / " + att.height) : "16 / 10";
-    var name = att.originalName || att.filename || "image";
-    var isImage = (att.mimeType || att.mime || "").indexOf("image/") === 0;
+    var name = shotName(att);
     var img = h("img", {
       className: "rw-shot-img",
       src: att.url,
       alt: name, loading: "lazy",
       style: { aspectRatio: aspect, objectFit: "cover" },
     });
-    if (!isImage) {
+    if (!shotIsImage(att)) {
       // Non-image — render a tile with filename only
       return h("a", {
         className: "rw-shot",
@@ -3745,13 +4204,23 @@
       type: "button",
       title: name,
     }, [img, h("span", { className: "rw-shot-name" }, name)]);
-    thumb.addEventListener("click", function () { openImageLightbox(att.url, name); });
+    thumb.addEventListener("click", function () {
+      var items = gallery || [{ url: att.url, name: name }];
+      var idx = 0;
+      for (var k = 0; k < items.length; k++) { if (items[k].url === att.url) { idx = k; break; } }
+      openImageLightbox(items, idx);
+    });
     return thumb;
   }
   function renderShotGrid(attachments, tight) {
     if (!attachments || attachments.length === 0) return null;
     var grid = h("div", { className: "rw-shots" + (tight ? " rw-shots--tight" : "") });
-    attachments.forEach(function (a) { grid.appendChild(renderShotThumb(a)); });
+    // Gallery = the image attachments, in grid order, so the lightbox can page
+    // between them with prev/next arrows.
+    var gallery = attachments.filter(shotIsImage).map(function (a) {
+      return { url: a.url, name: shotName(a) };
+    });
+    attachments.forEach(function (a) { grid.appendChild(renderShotThumb(a, gallery)); });
     return grid;
   }
 
@@ -3815,9 +4284,23 @@
     });
 
     var authorName = displayNameFromTicket(ticket);
+    var metaChildren = [];
+    // Private marker leads the meta row so the viewer can tell at a glance
+    // which of their submissions are visible only to them. Private tickets
+    // surface only to their owner (My Submissions), so this never leaks.
+    if (ticket.isPrivate) {
+      metaChildren.push(h("span", {
+        className: "rw-meta-private",
+        title: t("visibility.privateHint"),
+        "aria-label": t("visibility.private"),
+      }, [Icons.lock(11), h("span", null, t("visibility.private"))]));
+    }
     // Status chip is suppressed on the Latest Updates tab — every ticket there
     // is already shipped (done/deployed), so the chip carries no information.
-    var metaChildren = hideStatus ? [] : [renderStatusChip(ticket.status)];
+    if (!hideStatus) {
+      if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      metaChildren.push(renderStatusChip(ticket.status));
+    }
     if (authorName) {
       if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
       metaChildren.push(h("span", { className: "rw-meta-author" }, authorName));
@@ -3890,13 +4373,15 @@
       return btn;
     });
 
-    // [+ New post] sits on the tab row's right — the single message-entry
-    // affordance now that the inline composer left the list view.
+    // [+ New post] sits on the tab row's right. It now launches the agent chat
+    // (a guided, conversational way to file a ticket — the same surface as
+    // Home's chat card) rather than the direct compose form. goCompose /
+    // renderInlineComposer stay defined but unwired, kept for possible re-use.
     var newPostBtn = h("button", { className: "rw-new-post-btn", type: "button" }, [
       Icons.plus(13),
       h("span", null, t("compose.newPost")),
     ]);
-    newPostBtn.addEventListener("click", goCompose);
+    newPostBtn.addEventListener("click", openChat);
 
     return h("div", { className: "rw-dash-tabs" }, [
       h("div", { className: "rw-dash-tabs-row", role: "tablist" }, tabButtons),
@@ -4019,18 +4504,11 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.removeAttach") }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
+        chipsEl.appendChild(renderAttachChip(entry, function (target) {
+          var i = entries.indexOf(target);
+          if (i >= 0) { releaseAttachPreview(entries[i]); entries.splice(i, 1); }
           renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || t("composer.pastedImage")),
-          removeBtn,
-        ]));
+        }, function () { return stagedGallery(entries); }));
       });
     }
     function addFiles(files) {
@@ -4211,13 +4689,14 @@
       request.then(function (data) {
         createdTicket = (data && data.ticket) || null;
         ta.value = "";
+        releaseAllAttachPreviews(entries);
         entries.length = 0;
         renderChips();
         isPrivate = false;
         refreshPrivateBtn();
         privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
-        topTicketsCache = null; updatesCache = null; myTicketsCache = null;
+        topTicketsCache = null; updatesCache = null; myTicketsCache = null; assignedTicketsCache = null;
         composeReturnView = "home";
         activeTab = "mine";
 
@@ -4410,17 +4889,16 @@
   }
 
   // -----------------------------------------------------------------------
-  // Shell mode. Home, chat + compose live in a compact corner panel
-  // (Intercom-style); list + detail keep the large centered modal. The class lands on widgetEl
-  // (the scrim) so one toggle drives both the scrim treatment and the panel
-  // geometry. Synced from openPanel — BEFORE rw-open, so the very first
-  // paint is already in the right mode, including deep-link opens that
-  // pre-set view = "list" — and from renderPanelBody, which every in-panel
-  // navigation funnels through. closePanel deliberately does NOT re-sync
-  // (its view reset would snap the still-fading-out card to compact).
+  // Shell mode. Every view — home, chat, list, detail — renders in the same
+  // large centered modal over a full scrim overlay. The old Intercom-style
+  // compact corner panel (home/chat/compose) has been removed, so no view is
+  // ever compact. applyShellMode stays as the single funnel that keeps the
+  // scrim class in sync (belt-and-braces: it strips any stray rw-compact),
+  // called from openPanel — BEFORE rw-open, so the first paint is correct —
+  // and from renderPanelBody, which every in-panel navigation funnels through.
   // -----------------------------------------------------------------------
 
-  function isCompactView(v) { return v === "home" || v === "chat" || v === "compose"; }
+  function isCompactView(_v) { return false; }
 
   function applyShellMode() {
     if (!widgetEl) return;
@@ -4509,13 +4987,16 @@
     } else if (view === "chat") {
       scrollEl.appendChild(renderChatViewShell());
     } else {
-      // Slim topbar with the back-to-home control. Home is a layer above
-      // the dashboard — the split layout below is untouched.
-      var listHomeBtn = h("button", {
-        className: "rw-home-btn", type: "button", "aria-label": t("home.back"),
-      }, [Icons.arrowLeft(13), h("span", null, t("home.back"))]);
-      listHomeBtn.addEventListener("click", goHome);
-      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [listHomeBtn]));
+      // The discussion board is the widget's landing view, so its slim topbar
+      // holds the board title (not a back-to-home control — Home was retired
+      // from the flow). The right padding on .rw-list-topbar keeps the title
+      // clear of the absolute-positioned shell actions (bell / theme / close).
+      var boardTitle = config.projectName
+        ? t("header.feedback", { name: config.projectName })
+        : t("home.greeting");
+      scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [
+        h("span", { className: "rw-list-title" }, boardTitle),
+      ]));
 
       // Single full-width panel: tab bar (with [+ New post] on its right)
       // + list. The old left pane (intro copy, inline composer, Recent
@@ -4553,6 +5034,9 @@
       // Re-read chat config on every panel open so enabling/disabling the
       // support agent in settings picks up without an embed reload.
       config.chat = data.chat || null;
+      // Deploy-environment id→name map, for resolving `deployed:<envId>` status
+      // labels to "Deployed → <name>" across the list/detail/live-session.
+      setDeployEnvironments(data.environments);
       // Image-attach affordances are gated server-side (currently off). Absent
       // ⇒ false ⇒ hidden, which is the safe default against an older server.
       config.attachmentsEnabled = !!data.attachmentsEnabled;
@@ -4567,8 +5051,11 @@
     var mineP = config.isIdentified
       ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
       : Promise.resolve().then(function () { myTicketsCache = []; });
+    var assignedP = (config.isIdentified && viewerCanLiveCoder())
+      ? loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () { assignedTicketsCache = []; })
+      : Promise.resolve().then(function () { assignedTicketsCache = []; });
 
-    return Promise.all([topP, updP, mineP]).then(function () {
+    return Promise.all([topP, updP, mineP, assignedP]).then(function () {
       renderPanelBody();
       refreshTabLabel();
     }).catch(function (err) {
@@ -4780,6 +5267,23 @@
       var m = chatMessages[i];
       if (String(m.id).indexOf("local-") !== 0) continue;
       if (row.role === "user" && m.role === "user" && m.content === row.content) {
+        // Carry local _dataUrl previews forward to the authoritative server row
+        // so images remain visible while the data URL is still in memory.
+        // The serve endpoint (chatGetImageUrl) fetches a presigned URL for
+        // authoritative rows that have no local preview.
+        var localImgs = m.images || [];
+        var serverImgs = row.images || [];
+        if (localImgs.length > 0) {
+          if (serverImgs.length === 0) {
+            row.images = localImgs;
+          } else {
+            for (var j = 0; j < Math.min(localImgs.length, serverImgs.length); j++) {
+              if (localImgs[j]._dataUrl && !serverImgs[j]._dataUrl) {
+                serverImgs[j]._dataUrl = localImgs[j]._dataUrl;
+              }
+            }
+          }
+        }
         chatMessages[i] = row;
         return true;
       }
@@ -4948,8 +5452,62 @@
   }
 
   function renderChatUserRow(row) {
+    var bubbleChildren = [];
+    if (row.content) bubbleChildren.push(renderMarkdownText(row.content));
+    var images = row.images || [];
+    if (images.length > 0) {
+      var imgRow = h("div", { className: "rw-chat-bubble-imgs" });
+      images.forEach(function (img) {
+        var url = img._dataUrl || null;
+        var name = img.originalName || "image";
+        if (url) {
+          // Local data URL captured at send time (and carried forward by
+          // chatReplaceLocalEcho). Authoritative rows use the serve endpoint
+          // below to fetch a presigned URL when no local preview is available.
+          var imgEl = h("img", { className: "rw-chat-bubble-img", src: url, alt: name });
+          imgEl.addEventListener("click", function () { openImageLightbox(url, name); });
+          imgRow.appendChild(imgEl);
+        } else {
+          // No local preview. Fetch the presigned URL from the serve endpoint
+          // (authenticated), then update the img src. The conversation id comes
+          // from the module-level chatConversation state.
+          var convId = chatConversation && chatConversation.id;
+          if (convId && img.id) {
+            var imgEl = h("img", { className: "rw-chat-bubble-img", src: "", alt: name });
+            imgEl.style.minWidth = "60px";
+            imgEl.style.minHeight = "60px";
+            imgEl.style.background = "rgba(255,255,255,0.07)";
+            imgRow.appendChild(imgEl);
+            (function (el, cId, iId, iName) {
+              chatGetImageUrl(cId, iId).then(function (data) {
+                if (data && data.url) {
+                  el.src = data.url;
+                  el.addEventListener("click", function () { openImageLightbox(data.url, iName); });
+                }
+              }).catch(function () {
+                // Fetch failed — replace with filename chip as fallback
+                if (el.parentNode) {
+                  var chip = h("span", { className: "rw-chip-attach" }, [
+                    Icons.image(11),
+                    h("span", null, iName),
+                  ]);
+                  el.parentNode.replaceChild(chip, el);
+                }
+              });
+            }(imgEl, convId, img.id, name));
+          } else {
+            // No conversation context (shouldn't happen in normal flow)
+            imgRow.appendChild(h("span", { className: "rw-chip-attach" }, [
+              Icons.image(11),
+              h("span", null, name),
+            ]));
+          }
+        }
+      });
+      bubbleChildren.push(imgRow);
+    }
     return h("div", { className: "rw-chat-msg rw-chat-msg-user" },
-      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, renderMarkdownText(row.content || "")));
+      h("div", { className: "rw-chat-bubble rw-chat-bubble-user" }, bubbleChildren));
   }
 
   function renderChatAgentRow(row) {
@@ -5001,8 +5559,13 @@
     if (kind === "proposal") {
       // Only the latest unresolved proposal is actionable; older / resolved
       // proposals collapse (their outcome renders from proposal_resolved).
+      // Never actionable in a Live session: that surface is a staff-to-coder
+      // relay that REUSES the reporter's intake conversation (which the staff
+      // viewer doesn't own), so filing a ticket from it 404s. An unresolved
+      // intake proposal belongs to the reporter's own chat thread.
       if (activeProposal && activeProposal.id === row.id
-          && chatConversation && chatConversation.status === "active") {
+          && chatConversation && chatConversation.status === "active"
+          && !chatIsLiveSession) {
         return renderChatProposalCard(row);
       }
       return null;
@@ -5030,6 +5593,30 @@
     }
     if (kind === "force_proposal_requested") {
       return h("div", { className: "rw-chat-event-line" }, t("chat.forceRequested"));
+    }
+    if (kind === "activity") {
+      // A ticket status change / milestone / PR event mirrored from the public
+      // activity feed, rendered as an inline line in the thread's timeline.
+      var aMeta = payload.metadata || {};
+      // Status changes render as from→to chips — exactly like the public activity
+      // page (renderEventNode). describeEvent's text form collapses to a vague
+      // "changed status" whenever a label can't be resolved (e.g. a deployed:<env>
+      // status), losing the transition; the chips keep it clear.
+      if (payload.activityType === "status_change" && (aMeta.from || aMeta.to)) {
+        var chips = [];
+        if (aMeta.from) chips.push(renderStatusChip(aMeta.from));
+        if (aMeta.from && aMeta.to) chips.push(h("span", { className: "rw-event-arrow" }, " → "));
+        if (aMeta.to) chips.push(renderStatusChip(aMeta.to));
+        return h("div", { className: "rw-chat-event-line rw-chat-event-chips" }, chips);
+      }
+      // Everything else (milestones, PR, assignment, …) keeps the feed's wording.
+      var text = describeEvent({
+        type: payload.activityType,
+        content: payload.content,
+        metadata: payload.metadata,
+      });
+      if (!text) return null;
+      return h("div", { className: "rw-chat-event-line" }, renderInlineMarkdown(text));
     }
     return null;
   }
@@ -5092,6 +5679,29 @@
     var createBtn = h("button", { className: "rw-clarif-send-btn", type: "button" }, t("chat.createTicket"));
     var dismissBtn = h("button", { className: "rw-chat-dismiss-link", type: "button" }, t("chat.dismiss"));
 
+    // Visibility toggle: mirrors the composer's Public/Private pill (label +
+    // icon flip rather than a single pill lighting up). The chosen state is
+    // threaded into chatCreateTicket so the born-ready ticket is filed with
+    // the right visibility — matching the standalone new-ticket composer.
+    var isPrivate = false;
+    var privateBtn = h("button", { className: "rw-pill-btn rw-priv-toggle", type: "button", "data-rw-private": "false" }, [
+      Icons.globe(12),
+      h("span", null, t("chat.proposalPublic")),
+    ]);
+    var privHint = h("span", { className: "rw-priv-hint" }, t("chat.proposalPrivateOff"));
+    function refreshPrivateBtn() {
+      clearChildren(privateBtn);
+      privateBtn.appendChild(isPrivate ? Icons.lock(12) : Icons.globe(12));
+      privateBtn.appendChild(h("span", null, isPrivate ? t("chat.proposalPrivate") : t("chat.proposalPublic")));
+      privateBtn.setAttribute("data-rw-private", isPrivate ? "true" : "false");
+      privHint.textContent = isPrivate ? t("chat.proposalPrivateOn") : t("chat.proposalPrivateOff");
+    }
+    privateBtn.addEventListener("click", function () {
+      if (createBtn.disabled) return;
+      isPrivate = !isPrivate;
+      refreshPrivateBtn();
+    });
+
     function resolveLocally(created, ticketId) {
       // SSE may have delivered the BE's authoritative proposal_resolved (and
       // even the wrap-up turn's rows) before this POST resolved — only echo
@@ -5128,7 +5738,7 @@
       createBtn.disabled = true;
       dismissBtn.disabled = true;
       createBtn.textContent = t("chat.creating");
-      chatCreateTicket(chatConversation.id, title, description).then(function (data) {
+      chatCreateTicket(chatConversation.id, title, description, isPrivate).then(function (data) {
         var ticketId = (data && (data.ticketId || (data.ticket && data.ticket.id))) || null;
         if (ticketId) {
           chatRememberTicketConversation(ticketId, chatConversation.id);
@@ -5164,6 +5774,7 @@
       titleInput,
       h("label", { className: "rw-chat-proposal-label" }, t("chat.proposalDescLabel")),
       descTa,
+      h("div", { className: "rw-chat-proposal-visibility" }, [privateBtn, privHint]),
       h("div", { className: "rw-clarif-actions" }, [createBtn, dismissBtn, errorEl]),
     ]);
   }
@@ -5422,24 +6033,74 @@
   // Full rebuild of the message list from chatMessages. Cheap at the ≤50-
   // message history scale this view operates at; guarded by chatUi so a
   // stale async callback after navigation is a no-op.
+  // Opening acknowledgement for a Live session that has no messages yet. This
+  // is NOT a fabricated chat message — it is a UI affordance (styled like the
+  // intake empty state) that names the ticket and sets expectations: the
+  // assigned agent is already working in the background and progress/updates
+  // will appear here. Without it a freshly-opened Live session reads as a blank
+  // screen with nothing going on, even though a coder job is running.
+  function renderLiveSessionIntro() {
+    var children = [];
+    // Signature element: a live "working" pill whose pulsing dot signals that
+    // work is actively happening in the background — the direct answer to the
+    // blank-screen "is anything going on?" feeling. The dot is decorative
+    // (aria-hidden); the text carries the meaning.
+    children.push(h("div", { className: "rw-intro-status" }, [
+      h("span", { className: "rw-intro-pulse", "aria-hidden": "true" }),
+      h("span", null, t("chat.liveSessionStatus", { name: chatIdentityName() })),
+    ]));
+    // The ticket the session is about, clamped to two lines with an ellipsis
+    // (full text on hover via title=) so a long subject can't blow out the
+    // layout. Reads as "working on → this".
+    var title = liveSessionTicket && liveSessionTicket.title;
+    if (title) {
+      children.push(h("div", { className: "rw-chat-intro-title", title: title }, title));
+    }
+    children.push(h("div", { className: "rw-intro-body" }, t("chat.liveSessionIntro")));
+    return h("div", { className: "rw-chat-empty rw-chat-intro" }, children);
+  }
+
   function renderChatMessageList() {
     if (!chatUi) return;
     var listEl = chatUi.listEl;
     clearChildren(listEl);
 
-    // Agentless threads open with a scripted offline notice that doubles as
-    // submission guidance ("provide as much detail as possible, then Submit
-    // Ticket"). Rendered as a bot bubble pinned to the top of the thread —
-    // including before the first message — so the user always knows who is
-    // (not) on the other end. Threads an agent has joined skip it; the
-    // agent speaks for itself.
-    if (!chatAgentMode() && !chatThreadHasAgent()) {
-      listEl.appendChild(renderChatAgentRow({ content: t("chat.agentlessIntro") }));
-    }
+    if (chatIsLiveSession) {
+      // Live session against a running coder job: replace the generic intake
+      // empty state with an acknowledgement of the ticket + reassurance that
+      // work is happening in the background. The footer input stays live, so
+      // the user can ask a question or steer the work at any time.
+      if (chatMessages.length === 0) {
+        listEl.appendChild(renderLiveSessionIntro());
+      }
+      // Reading the live session advances the DEDICATED live-session-seen mark
+      // up to the newest message shown, so the launcher/bell/dot clear and
+      // re-light only on the next coder/teammate reply. This is separate from
+      // ticketSeen (the detail view), so merely viewing the ticket detail never
+      // clears an unread live-session reply.
+      var liveTaskId = chatConversation && chatConversation.createdTaskId;
+      if (liveTaskId && chatMessages.length > 0) {
+        var seenMs = 0;
+        for (var si = 0; si < chatMessages.length; si++) {
+          seenMs = Math.max(seenMs, new Date(chatMessages[si].createdAt || 0).getTime() || 0);
+        }
+        if (seenMs > 0) { markLiveSessionSeen(liveTaskId, seenMs); refreshTabLabel(); }
+      }
+    } else {
+      // Agentless threads open with a scripted offline notice that doubles as
+      // submission guidance ("provide as much detail as possible, then Submit
+      // Ticket"). Rendered as a bot bubble pinned to the top of the thread —
+      // including before the first message — so the user always knows who is
+      // (not) on the other end. Threads an agent has joined skip it; the
+      // agent speaks for itself.
+      if (!chatAgentMode() && !chatThreadHasAgent()) {
+        listEl.appendChild(renderChatAgentRow({ content: t("chat.agentlessIntro") }));
+      }
 
-    if (chatMessages.length === 0 && chatAgentMode()) {
-      listEl.appendChild(h("div", { className: "rw-chat-empty" },
-        t("chat.empty", { name: chatAgentName() })));
+      if (chatMessages.length === 0 && chatAgentMode()) {
+        listEl.appendChild(h("div", { className: "rw-chat-empty" },
+          t("chat.empty", { name: chatAgentName() })));
+      }
     }
 
     var activeProposal = chatFindActiveProposal();
@@ -5461,11 +6122,105 @@
     listEl.scrollTop = listEl.scrollHeight;
   }
 
+  // Whether the current intake conversation has anything worth confirming
+  // before discarding — at least one thing the user said or the agent replied.
+  function chatHasDiscardableContent() {
+    for (var i = 0; i < chatMessages.length; i++) {
+      var role = chatMessages[i].role;
+      if (role === "user" || role === "agent" || role === "team") return true;
+    }
+    return false;
+  }
+
+  // Show the below-header "New conversation" strip only for an active intake
+  // conversation (never in a Live session; hidden once closed, where the footer
+  // already offers "Start new conversation").
+  function updateChatActionBar() {
+    if (!chatUi || !chatUi.actionBar) return;
+    var show = !chatIsLiveSession && chatConversation && chatConversation.status === "active";
+    chatUi.actionBar.style.display = show ? "" : "none";
+  }
+
+  // Clear the current intake conversation and open a fresh one. A non-empty
+  // conversation prompts for confirmation first (a half-typed chat is easy to
+  // discard by accident); an empty one starts fresh silently.
+  function requestFreshConversation() {
+    if (chatFreshInFlight) return;
+    if (chatHasDiscardableContent()) {
+      confirmClearConversation(beginFreshConversation);
+    } else {
+      beginFreshConversation();
+    }
+  }
+
+  // Abandon the active conversation server-side and swap in the new one. The
+  // current transcript stays visible until the fresh conversation loads, so a
+  // failed request leaves the user exactly where they were. chatFreshInFlight
+  // guards against a double-trigger while the request is outstanding.
+  function beginFreshConversation() {
+    if (chatFreshInFlight) return;
+    chatFreshInFlight = true;
+    stopChatTransport();
+    chatStartFreshConversation().then(function (data) {
+      chatFreshInFlight = false;
+      if (view !== "chat" || !chatUi) return;
+      chatConversation = (data && data.conversation) || null;
+      chatMessages = ((data && data.messages) || []).slice();
+      chatTurnPending = false;
+      chatSubmitInFlight = false;
+      pendingChatImages = [];
+      renderChatMessageList();
+      renderChatFooter();
+      startChatTransport();
+    }).catch(function (err) {
+      chatFreshInFlight = false;
+      if (view !== "chat" || !chatUi) return;
+      // Restore real-time delivery for the conversation we left intact, then
+      // surface the failure inline.
+      if (chatConversation && chatConversation.status === "active") startChatTransport();
+      renderChatMessageList();
+      renderChatFooter();
+      chatSystemNotice(t("chat.clearFailed", { msg: (err && err.message) || "" }));
+    });
+  }
+
+  // Push an inline system-notice event into the thread (same shape the
+  // agentless [Submit Ticket] flow uses for its local errors).
+  function chatSystemNotice(text) {
+    chatApplyMessages([{
+      id: "local-notice-" + Date.now(),
+      role: "event",
+      content: null,
+      payload: { kind: "system_notice", text: text },
+      createdAt: new Date().toISOString(),
+    }]);
+    renderChatMessageList();
+  }
+
+  // Small themed confirmation dialog for discarding the conversation. Uses the
+  // shared modal infra (scrim + Escape/outside-click to cancel).
+  function confirmClearConversation(onConfirm) {
+    var cancelBtn = h("button", { className: "rw-confirm-btn rw-confirm-cancel", type: "button" }, t("chat.clearCancel"));
+    var confirmBtn = h("button", { className: "rw-confirm-btn rw-confirm-go", type: "button" }, t("chat.clearConfirm"));
+    cancelBtn.addEventListener("click", function () { closeActiveModal(); });
+    confirmBtn.addEventListener("click", function () { closeActiveModal(); onConfirm(); });
+    var modal = h("div", { className: "rw-confirm-modal" }, [
+      h("h3", { className: "rw-confirm-title" }, t("chat.clearConfirmTitle")),
+      h("p", { className: "rw-confirm-body" }, t("chat.clearConfirmBody")),
+      h("div", { className: "rw-confirm-actions" }, [cancelBtn, confirmBtn]),
+    ]);
+    mountModal(modal);
+    confirmBtn.focus();
+  }
+
   // Footer: closed bar OR (hatch slot + notice slot + input row). Rebuilt
   // only on conversation lifecycle changes — NOT per message — so an
   // in-progress draft in the textarea survives incoming messages.
   function renderChatFooter() {
     if (!chatUi) return;
+    // Keep the below-header new-conversation strip in sync with the
+    // conversation lifecycle (footer rebuilds on every lifecycle change).
+    updateChatActionBar();
     var footerEl = chatUi.footerEl;
     clearChildren(footerEl);
     if (!chatConversation) return;
@@ -5503,6 +6258,38 @@
 
     var noticeSlot = h("div", { className: "rw-chat-notice-slot" });
 
+    // Image attach affordance: gated on the attach_image permission; disabled
+    // in live sessions (staff → coder) because that path doesn't support images.
+    var canAttachImages = !chatIsLiveSession
+      && currentUser.permissions
+      && currentUser.permissions.indexOf("attach_image") !== -1;
+
+    // Thumbnail strip rendered above the input row while images are pending.
+    var pendingChipsRow = canAttachImages ? h("div", { className: "rw-chat-img-chips" }) : null;
+
+    function renderPendingChips() {
+      if (!pendingChipsRow) return;
+      clearChildren(pendingChipsRow);
+      pendingChipsRow.style.display = pendingChatImages.length > 0 ? "flex" : "none";
+      pendingChatImages.forEach(function (entry, idx) {
+        var chip = h("div", {
+          className: "rw-chat-img-chip" + (entry.uploading ? " rw-uploading" : "") + (entry.failed ? " rw-failed" : ""),
+        });
+        var img = h("img", { src: entry.dataUrl, alt: entry.name || "image" });
+        chip.appendChild(img);
+        var xBtn = h("button", {
+          className: "rw-chat-img-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+        }, "×");
+        xBtn.addEventListener("click", function () {
+          pendingChatImages.splice(idx, 1);
+          renderPendingChips();
+          updateSendState();
+        });
+        chip.appendChild(xBtn);
+        pendingChipsRow.appendChild(chip);
+      });
+    }
+
     var ta = h("textarea", {
       className: "rw-chat-input",
       placeholder: t("chat.inputPlaceholder"),
@@ -5514,6 +6301,83 @@
       className: "rw-chat-send-btn", type: "button", "aria-label": t("chat.send"),
     }, Icons.send(14));
 
+    var attachBtn = canAttachImages ? h("button", {
+      className: "rw-chat-attach-btn", type: "button", "aria-label": t("composer.attach"),
+      title: t("composer.attach"),
+    }, Icons.image(14)) : null;
+
+    var fileInput = canAttachImages ? h("input", {
+      type: "file", accept: "image/*", style: { display: "none" },
+    }) : null;
+
+    // Whether any upload is still in flight — blocks send until settled.
+    function anyUploading() {
+      for (var k = 0; k < pendingChatImages.length; k++) {
+        if (pendingChatImages[k].uploading) return true;
+      }
+      return false;
+    }
+
+    function updateSendState() {
+      if (!canAttachImages) return;
+      var busy = anyUploading();
+      sendBtn.disabled = busy;
+      attachBtn.disabled = busy || pendingChatImages.length >= CHAT_IMAGE_MAX;
+    }
+
+    function queueImageFile(file) {
+      if (!file || !file.type || file.type.indexOf("image/") !== 0) return;
+      if (pendingChatImages.length >= CHAT_IMAGE_MAX) return;
+      var convId = chatConversation && chatConversation.id;
+      if (!convId) return;
+      // Read as data URL for immediate preview, then upload.
+      var reader = new FileReader();
+      var entry = { id: null, dataUrl: "", name: file.name || "image", mimeType: file.type, uploading: true, failed: false };
+      pendingChatImages.push(entry);
+      renderPendingChips();
+      updateSendState();
+      reader.onload = function () {
+        entry.dataUrl = String(reader.result || "");
+        renderPendingChips();
+      };
+      reader.readAsDataURL(file);
+      chatUploadImage(convId, file).then(function (data) {
+        var img = data && data.image;
+        if (!img) throw new Error("upload_empty_response");
+        entry.id = img.id;
+        entry.mimeType = img.mimeType || entry.mimeType;
+        entry.uploading = false;
+        renderPendingChips();
+        updateSendState();
+      }).catch(function () {
+        entry.uploading = false;
+        entry.failed = true;
+        renderPendingChips();
+        updateSendState();
+        showChatNotice(t("chat.uploadFailed"));
+      });
+    }
+
+    if (canAttachImages) {
+      attachBtn.addEventListener("click", function () { fileInput.click(); });
+      fileInput.addEventListener("change", function () {
+        Array.prototype.forEach.call(fileInput.files, queueImageFile);
+        fileInput.value = "";
+      });
+      ta.addEventListener("paste", function (e) {
+        var items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        var found = false;
+        for (var k = 0; k < items.length; k++) {
+          if (items[k].type && items[k].type.indexOf("image/") === 0) {
+            var pf = items[k].getAsFile();
+            if (pf) { found = true; queueImageFile(pf); }
+          }
+        }
+        if (found) e.preventDefault();
+      });
+    }
+
     function showChatNotice(msg) {
       clearChildren(noticeSlot);
       noticeSlot.appendChild(h("div", { className: "rw-chat-inline-notice" }, msg));
@@ -5522,16 +6386,32 @@
     function doSend() {
       if (!chatConversation || chatConversation.status !== "active") return;
       var content = ta.value.trim();
-      if (!content || sendBtn.disabled) return;
+      // Collect successfully-uploaded image ids (skip failed).
+      var imageIds = canAttachImages
+        ? pendingChatImages.filter(function (p) { return p.id && !p.failed; }).map(function (p) { return p.id; })
+        : [];
+      // Require either text or at least one image; block while upload in flight.
+      if ((!content && imageIds.length === 0) || sendBtn.disabled) return;
+      if (anyUploading()) return;
       if (content.length > CHAT_INPUT_MAX) content = content.slice(0, CHAT_INPUT_MAX);
       sendBtn.disabled = true;
       ta.disabled = true;
+      if (canAttachImages) attachBtn.disabled = true;
       clearChildren(noticeSlot);
+      // Capture local previews so the optimistic echo can show images before
+      // the authoritative row (which has no fetch URL) arrives from the server.
+      // Only include successfully-uploaded images (mirrors the imageIds filter).
+      var localImagePreviews = pendingChatImages
+        .filter(function (p) { return p.id && !p.failed; })
+        .map(function (p) { return { id: p.id, mimeType: p.mimeType, originalName: p.name, _dataUrl: p.dataUrl }; });
       // Live session: route through the staff-only live-message endpoint.
       // Regular chat: route through the user-message endpoint.
       var sendFn = chatIsLiveSession ? liveCoderSend : chatSendMessage;
-      sendFn(chatConversation.id, content).then(function (data) {
+      sendFn(chatConversation.id, content, imageIds.length ? imageIds : undefined).then(function (data) {
         ta.value = "";
+        // Clear pending images and chips on success.
+        pendingChatImages = [];
+        renderPendingChips();
         // Use the server's row when returned; otherwise an optimistic echo
         // that chatReplaceLocalEcho swaps for the authoritative row later.
         var row = (data && data.message) || {
@@ -5541,6 +6421,18 @@
           payload: null,
           createdAt: new Date().toISOString(),
         };
+        // Attach local previews to the echo so the bubble renders images.
+        if (localImagePreviews.length > 0) {
+          if (row.images && row.images.length > 0) {
+            // Server returned an authoritative row with image ids — enrich with dataUrl.
+            for (var j = 0; j < Math.min(localImagePreviews.length, row.images.length); j++) {
+              if (!row.images[j]._dataUrl) row.images[j]._dataUrl = localImagePreviews[j]._dataUrl;
+            }
+          } else {
+            // Optimistic echo (no images field from server yet): set directly.
+            row.images = localImagePreviews;
+          }
+        }
         // Merge through chatApplyMessages — SSE may have already delivered
         // this row (and even the turn's reply) before the POST resolved, so
         // a raw push would duplicate it. Pending state is recomputed from
@@ -5557,7 +6449,9 @@
       }).then(function () {
         sendBtn.disabled = false;
         ta.disabled = false;
+        if (canAttachImages) attachBtn.disabled = false;
         ta.focus();
+        updateSendState();
       });
     }
 
@@ -5570,8 +6464,17 @@
     });
 
     footerEl.appendChild(noticeSlot);
-    footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [ta, sendBtn]));
+    if (canAttachImages && pendingChipsRow) footerEl.appendChild(pendingChipsRow);
+    footerEl.appendChild(h("div", { className: "rw-chat-input-row" }, [
+      canAttachImages ? attachBtn : null,
+      ta,
+      sendBtn,
+    ]));
+    if (canAttachImages) footerEl.appendChild(fileInput);
     chatUi.inputEl = ta;
+    // Render chips from any images still pending (e.g. footer rebuilt while
+    // uploads were in flight).
+    if (canAttachImages) { renderPendingChips(); updateSendState(); }
     // The slot was just (re)created empty — populate it now so a resumed
     // agentless conversation shows [Submit Ticket] immediately instead of
     // waiting for the next message-driven list render.
@@ -5582,6 +6485,8 @@
   // the active conversation or creates one — this is the "resume on reopen"
   // behavior). Called from renderPanelBody when view === "chat".
   function renderChatViewShell() {
+    // Discard any images queued in the previous session.
+    pendingChatImages = [];
     var root = h("div", { className: "rw-chat-full" });
 
     // Live session: back returns to the ticket detail. Regular chat: back goes home.
@@ -5604,12 +6509,12 @@
           currentDetailTicket = savedLiveTicket;
           renderPanelBody();
         } else {
-          goHome();
+          goList();
         }
       } else {
-        // The Home screen (Plan 1) is live: back returns to the landing view
-        // the chat card came from.
-        goHome();
+        // Normal chat is reached from the discussion board's [+ New post], so
+        // back returns to that board (the widget's landing view).
+        goList();
       }
     });
 
@@ -5625,11 +6530,29 @@
       ]),
     ]));
 
+    // New-conversation control — its own right-aligned strip directly below the
+    // header (intake chats only; a Live session is a staff↔job channel, never
+    // discardable). Kept out of both the global icon cluster and the composer.
+    // Visibility is synced to the conversation lifecycle by updateChatActionBar.
+    var actionBar = null;
+    if (!isLive) {
+      var newConvBtn = h("button", {
+        className: "rw-chat-newconv-pill", type: "button",
+        "aria-label": t("chat.clearAria"), title: t("chat.clearTitle"),
+      }, [Icons.compose(13), h("span", null, t("chat.clearTitle"))]);
+      newConvBtn.addEventListener("click", function () {
+        if (newConvBtn.disabled) return;
+        requestFreshConversation();
+      });
+      actionBar = h("div", { className: "rw-chat-actionbar", style: { display: "none" } }, [newConvBtn]);
+      root.appendChild(actionBar);
+    }
+
     var listEl = h("div", { className: "rw-chat-scroll" });
     var footerEl = h("div", { className: "rw-chat-footer" });
     root.appendChild(listEl);
     root.appendChild(footerEl);
-    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null };
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, actionBar: actionBar };
 
     listEl.appendChild(renderLoading());
 
@@ -6248,10 +7171,33 @@
     // suggest → assign tail; on success the detail re-fetches and this button
     // disappears (the ticket now shows its assigned agent + Live session).
     if (!loading && data.canAssign) {
-      var assignErrEl = h("span", {
-        className: "rw-assign-err",
-        style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+      // Feedback slot below the button. A transient failure renders as a small
+      // red line; the terminal "no agent is set up for this project" case
+      // renders an amber callout that names the cause and where to fix it.
+      var assignMsgEl = h("div", {
+        className: "rw-assign-msg",
+        style: { width: "100%" },
       }, "");
+      var clearAssignMsg = function () { assignMsgEl.textContent = ""; };
+      var showAssignError = function (text) {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("span", {
+          className: "rw-assign-err",
+          style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+        }, text));
+      };
+      var showNoAgentCallout = function () {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("div", { className: "rw-assign-callout" }, [
+          h("span", { className: "rw-assign-callout-ic", "aria-hidden": "true" }, "⚠️"),
+          h("div", { className: "rw-assign-callout-body" }, [
+            h("span", { className: "rw-assign-callout-title" }, "No agents are set up for this project."),
+            " To assign one, open ",
+            h("span", { className: "rw-assign-callout-path" }, "Workspace Settings → Widget → Permissions"),
+            " and expose at least one agent, then try again.",
+          ]),
+        ]));
+      };
       var assignBtn = h("button", {
         className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
@@ -6271,7 +7217,7 @@
         assigning = true;
         assignBtn.disabled = true;
         assignBtn.textContent = "Assigning…";
-        assignErrEl.textContent = "";
+        clearAssignMsg();
         assignTicketAgent(ticket.id).then(function (resp) {
           var status = resp && resp.outcome && resp.outcome.status;
           if (status === "assigned") {
@@ -6281,20 +7227,24 @@
               if (view !== "detail") return;
               renderDetailInto(card, freshData, false);
             }).catch(resetAssignBtn);
-          } else {
-            // Reached the server but it could not assign (no matching agent or
-            // a transient failure). Surface it and let the user retry.
+          } else if (status === "skipped_no_agent") {
+            // Terminal: the project has no exposed agent for the picker to
+            // choose. Retrying won't help until an operator exposes one, so
+            // guide them there instead of a bare red line.
             resetAssignBtn();
-            assignErrEl.textContent = status === "skipped_no_agent"
-              ? "No matching agent available"
-              : "Couldn't assign — try again";
+            showNoAgentCallout();
+          } else {
+            // Reached the server but a transient failure stopped the assign.
+            // Surface it and let the user retry.
+            resetAssignBtn();
+            showAssignError("Couldn't assign — try again");
           }
         }).catch(function (err) {
           resetAssignBtn();
-          assignErrEl.textContent =
+          showAssignError(
             (err && err.status === 409) ? "Already assigned"
             : (err && err.status === 403) ? "Not authorized"
-            : "Couldn't assign — try again";
+            : "Couldn't assign — try again");
         });
       });
       // Non-technical framing: state plainly that nobody is on the task yet,
@@ -6306,7 +7256,7 @@
       }, "No agent is working on this task yet.");
       var assignGroup = h("div", {
         style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
-      }, [assignNote, assignBtn, assignErrEl]);
+      }, [assignNote, assignBtn, assignMsgEl]);
       staffActionEls.push(assignGroup);
     }
 
@@ -6331,6 +7281,13 @@
         h("span", { className: "rw-staff-btn-ic" }, "⚡"),
         "Live session",
       ]);
+      // Unread dot = an unread coder/teammate reply in THIS ticket's live
+      // session. The detail ticket may not carry liveSessionLastMessageAt, so
+      // resolve it from the assigned cache (which does).
+      var assignedMatch = (assignedTicketsCache || []).find(function (a) { return a && a.id === ticket.id; });
+      if (assignedMatch && hasUnreadLiveSession(assignedMatch)) {
+        liveBtn.insertBefore(h("span", { className: "rw-unseen-dot" }), liveBtn.firstChild);
+      }
       var liveOpening = false;
       liveBtn.addEventListener("click", function () {
         if (liveOpening) return;
@@ -6787,18 +7744,11 @@
       if (entries.length === 0) { chipsEl.style.display = "none"; return; }
       chipsEl.style.display = "flex";
       entries.forEach(function (entry) {
-        var removeBtn = h("button", { className: "rw-chip-x", type: "button", "aria-label": t("aria.remove") }, "×");
-        removeBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var i = entries.indexOf(entry);
-          if (i >= 0) entries.splice(i, 1);
+        chipsEl.appendChild(renderAttachChip(entry, function (target) {
+          var i = entries.indexOf(target);
+          if (i >= 0) { releaseAttachPreview(entries[i]); entries.splice(i, 1); }
           renderChips(); updateSubmitEnabled();
-        });
-        chipsEl.appendChild(h("span", { className: "rw-chip-attach", title: entry.file.name }, [
-          Icons.image(11),
-          h("span", null, entry.file.name || t("composer.pastedImage")),
-          removeBtn,
-        ]));
+        }, function () { return stagedGallery(entries); }));
       });
     }
     function addFiles(files) {
@@ -6887,6 +7837,7 @@
       }).then(function (newComment) {
         ta.value = "";
         ta.style.height = "auto";
+        releaseAllAttachPreviews(entries);
         entries.length = 0;
         renderChips();
         submitBtn.firstChild.textContent = t("reply.submit");
@@ -7111,11 +8062,11 @@
     chatSubmitInFlight = false;
     detailReturnView = null;
     composeReturnView = "home";
-    // Reset the shell so re-opening lands on a fresh Home rather than
-    // wherever the user last left it (detail view, Hot tab, etc.).
-    view = "home";
+    // Reset the shell so re-opening lands on a fresh discussion board (Hot tab)
+    // rather than wherever the user last left it (detail view, chat, etc.).
+    view = "list";
     currentDetailTicket = null;
-    activeTab = "updates";
+    activeTab = "hot";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();
@@ -7404,6 +8355,7 @@
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
         } else {
           myTicketsCache = [];
+          assignedTicketsCache = [];
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () { updatesCache = []; });
         }
 
@@ -7448,6 +8400,52 @@
   // ---------------------------------------------------------------------------
   if (window._rwTestHooks && typeof window._rwTestHooks === "object") {
     window._rwTestHooks.renderDetailInto = renderDetailInto;
+    window._rwTestHooks.renderAttachChip = renderAttachChip;
+    window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
+    window._rwTestHooks.stagedGallery = stagedGallery;
+    window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
+    window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
+    window._rwTestHooks.renderChatEventRow = renderChatEventRow;
+    window._rwTestHooks.renderChatProposalCard = renderChatProposalCard;
+    window._rwTestHooks.statusMeta = statusMeta;
+    window._rwTestHooks.renderStatusChip = renderStatusChip;
+    window._rwTestHooks.setDeployEnvironments = setDeployEnvironments;
+    // Seed the closure state the live-session intro reads (ticket + chat config),
+    // so a vm test can render it without bootstrapping the whole widget.
+    window._rwTestHooks._setLiveSessionState = function (ticket, chatConfig) {
+      liveSessionTicket = ticket;
+      if (chatConfig) config.chat = chatConfig;
+    };
+    // Seed the active conversation so a vm test can drive the proposal card's
+    // Create action (which posts to chatCreateTicket against the conversation).
+    window._rwTestHooks._setChatConversation = function (conv) {
+      chatConversation = conv;
+    };
+    // Toggle the live-session flag so a vm test can assert that intake proposal
+    // cards are non-actionable in the staff-to-coder relay surface.
+    window._rwTestHooks._setChatIsLiveSession = function (on) {
+      chatIsLiveSession = !!on;
+    };
+    // Unread-badge test helpers: expose the badge counter, the seen-marker, and
+    // direct cache setters so vm tests can drive the full seen/unseen lifecycle
+    // without bootstrapping the full network layer.
+    window._rwTestHooks.launcherBadgeCount = launcherBadgeCount;
+    window._rwTestHooks.markTicketSeen = markTicketSeen;
+    window._rwTestHooks.markLiveSessionSeen = markLiveSessionSeen;
+    window._rwTestHooks.hasUnreadLiveSession = hasUnreadLiveSession;
+    window._rwTestHooks.viewerCanLiveCoder = viewerCanLiveCoder;
+    window._rwTestHooks._setCaches = function (mine, assigned) {
+      myTicketsCache = mine || [];
+      assignedTicketsCache = assigned || [];
+    };
+    // Expose config + currentUser references so tests can set isIdentified /
+    // permissions without going through the full identity-fetch flow.
+    window._rwTestHooks._setConfig = function (updates) {
+      Object.assign(config, updates);
+    };
+    window._rwTestHooks._setCurrentUser = function (updates) {
+      Object.assign(currentUser, updates);
+    };
   }
 
 })();

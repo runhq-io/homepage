@@ -507,7 +507,7 @@ export async function updateTask(
   type PendingEmit = {
     rowShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
     prevShape: import('../../notifications/emitTaskNotification').TaskRowForNotification;
-    status: 'needs_review' | 'done';
+    status: 'done' | 'reviewed' | 'merged';
   };
   let pendingEmit: PendingEmit | null = null;
   // Community-points awarding payload, captured in-transaction and fired
@@ -528,9 +528,12 @@ export async function updateTask(
     const existing = existingRows[0];
     const existingVisibility = existing.visibility as 'public' | 'private';
 
-    // Detect whether this update will transition the task to a notification-worthy status.
+    // Detect whether this update will transition the task to a notification-worthy
+    // status. In the PR lifecycle the recipient cares about the review/merge
+    // milestones: `done` (PR up, awaiting review), `reviewed` (approved), and
+    // `merged` (landed in base). `needs_review` was folded into `done`.
     const willTransition =
-      (input.status === 'needs_review' || input.status === 'done') &&
+      (input.status === 'done' || input.status === 'reviewed' || input.status === 'merged') &&
       input.status !== existing.status;
 
     const updates: Record<string, unknown> = { updatedAt: new Date() };
@@ -604,7 +607,7 @@ export async function updateTask(
           createdById: row.createdById,
           lastInteractorUserId: row.lastInteractorUserId,
         },
-        status: input.status as 'needs_review' | 'done',
+        status: input.status as 'done' | 'reviewed' | 'merged',
       };
     }
 
@@ -1025,6 +1028,16 @@ export async function addActivity(
   // partner-facing milestone stepper — push to live SSE subscribers. Best-effort.
   try { publishTicketUpdate(taskId); } catch (err) {
     console.warn('[WorkspaceTaskService] publishTicketUpdate failed', err);
+  }
+  // Also mirror progress-bearing activity (status change / milestone / PR) into
+  // the ticket's live-session chat thread so the session shows the same timeline
+  // as the public screen. Best-effort; the dynamic import avoids a module cycle
+  // (WidgetChatService → WidgetService → WorkspaceTaskService).
+  try {
+    const { mirrorActivityToLiveSession } = await import('./WidgetChatService');
+    await mirrorActivityToLiveSession(taskId, { id: row.id, type: row.type, content: row.content, metadata: row.metadata });
+  } catch (err) {
+    console.warn('[WorkspaceTaskService] live-session activity mirror failed', err);
   }
   return toCanonicalActivity(row, attachmentGroups.get(taskId)?.byOwnerId.get(row.id) ?? null);
 }

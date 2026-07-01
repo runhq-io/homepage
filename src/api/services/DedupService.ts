@@ -11,7 +11,7 @@
 
 import { db } from '../../db/index';
 import { workspaceTasks } from '../../db/schema';
-import { eq, and, ne, isNull, notInArray, desc } from 'drizzle-orm';
+import { eq, and, ne, isNull, notLike, desc } from 'drizzle-orm';
 import type { CallModel } from './ClarifierService';
 import { MODEL_CALL_TIMEOUT_MS, MODEL_CALL_MAX_RETRIES } from './ClarifierService';
 import { buildDedupMessages, parseDedupVerdict, DedupParseError } from './dedupCore';
@@ -22,17 +22,6 @@ import { buildDedupMessages, parseDedupVerdict, DedupParseError } from './dedupC
 
 /** Maximum number of open tickets to compare against. */
 const MAX_CANDIDATES = 50;
-
-/**
- * Task statuses that are considered "open" / not yet resolved.
- * Statuses 'done', 'deployed', and 'cancelled' are excluded.
- */
-const OPEN_STATUSES: Array<'pending' | 'planned' | 'in_progress' | 'needs_review'> = [
-  'pending',
-  'planned',
-  'in_progress',
-  'needs_review',
-];
 
 // ---------------------------------------------------------------------------
 // Default real model call (Haiku) — lazy import mirrors ClarifierService
@@ -98,9 +87,14 @@ export async function findLikelyDuplicate(
       eq(workspaceTasks.serverId, args.serverId),
       isNull(workspaceTasks.deletedAt),
       ne(workspaceTasks.id, args.ticketId),
-      // status IN (...open statuses) — drizzle doesn't have inArray for enum unions,
-      // but notInArray with the closed statuses is equivalent and simpler:
-      notInArray(workspaceTasks.status, ['done', 'deployed', 'cancelled'] as any[]),
+      // Open = not terminal. Terminal = `cancelled` OR any deployed status
+      // (legacy bare `deployed` OR env-qualified `deployed:<env>`). In the PR
+      // lifecycle `done`/`reviewed`/`merged` are mid-pipeline and remain open,
+      // so they are still deduped against. SQL mirror of isOpenStatus() from
+      // @runhq/server-protocol.
+      ne(workspaceTasks.status, 'cancelled'),
+      ne(workspaceTasks.status, 'deployed'),
+      notLike(workspaceTasks.status, 'deployed:%'),
       // Public only: the verdict serves widget flows, where `duplicateOf` is
       // surfaced to an anonymous visitor (duplicate card links to the ticket).
       // A private ticket can neither be shown nor opened by them, and its

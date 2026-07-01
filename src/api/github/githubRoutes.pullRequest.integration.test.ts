@@ -3,7 +3,7 @@
  *
  * Seeds: server + workspace_task + github_app_installation +
  *        github_project_repos.
- * Verifies: pr_linked activity written, task status set to needs_review,
+ * Verifies: pr_linked activity written, task status set to done,
  * and idempotency (two firings → one activity row).
  *
  * DATABASE_URL must point at the scratch Postgres DB (runhq_clarifier_test).
@@ -32,6 +32,7 @@ import {
   addActivity,
   updateTask,
   updateActivityMetadata,
+  getTaskById,
 } from '../services/WorkspaceTaskService.js';
 import { findByOwnerRepo } from '../services/GithubProjectReposService.js';
 
@@ -124,6 +125,10 @@ function realDeps() {
       await updateTask(serverId, taskId, input);
     },
     updateActivityMetadata,
+    getTask: async (serverId: string, taskId: string) => {
+      const task = await getTaskById(serverId, taskId);
+      return task ? { status: task.status } : null;
+    },
   };
 }
 
@@ -166,7 +171,7 @@ describe('pull_request webhook — real DB integration', () => {
     expect(rows.some((r) => r.serverId === SERVER_ID)).toBe(true);
   });
 
-  it('happy path: writes pr_linked activity and sets task status to needs_review', async () => {
+  it('happy path: writes pr_linked activity and sets task status to done', async () => {
     const result = await handlePullRequestEvent(makePayload({ number: 101 }), realDeps());
     expect(result).toBe('linked');
 
@@ -181,7 +186,7 @@ describe('pull_request webhook — real DB integration', () => {
     // task status updated
     const [row] = await db.select({ status: workspaceTasks.status }).from(workspaceTasks)
       .where(eq(workspaceTasks.id, TASK_ID));
-    expect(row?.status).toBe('needs_review');
+    expect(row?.status).toBe('done');
   });
 
   it('idempotency: firing the same PR opened event twice produces only one pr_linked activity', async () => {

@@ -307,14 +307,14 @@ describe('handlePullRequestEvent', () => {
       );
     });
 
-    it('sets task status to needs_review', async () => {
+    it('sets task status to done (PR up, awaiting review)', async () => {
       const deps = makeDeps();
       await handlePullRequestEvent(makePayload(), deps);
 
       expect(deps.updateTask).toHaveBeenCalledWith(
         'ws_a',
         'abcd1234-0000-4000-a000-000000000000',
-        { status: 'needs_review' },
+        { status: 'done' },
       );
     });
   });
@@ -581,7 +581,7 @@ describe('pull_request webhook via HTTP route', () => {
     expect(updateTask).toHaveBeenCalledWith(
       'ws_a',
       'abcd1234-0000-4000-a000-000000000000',
-      { status: 'needs_review' },
+      { status: 'done' },
     );
   });
 

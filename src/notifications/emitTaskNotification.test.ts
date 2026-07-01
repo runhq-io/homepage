@@ -45,7 +45,7 @@ function makeRow(overrides?: Partial<TaskRowForNotification>): TaskRowForNotific
 async function emit(
   row: TaskRowForNotification,
   prev: TaskRowForNotification,
-  newStatus: 'needs_review' | 'done',
+  newStatus: 'done' | 'reviewed' | 'merged',
   actor: NotificationActor,
 ): Promise<string | null> {
   let result: string | null = null;
@@ -118,11 +118,13 @@ afterAll(async () => {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('emitTaskNotification', () => {
-  // 1. Transition to needs_review with last_interactor set
-  it('emits need_help when transitioning to needs_review with lastInteractor set', async () => {
+  // 1. Transition to done (PR up, awaiting review) → "needs your attention".
+  //    `done` is no longer terminal in the PR lifecycle; the "completed" signal
+  //    moved up to `merged` (landed in base).
+  it('emits need_help when transitioning to done with lastInteractor set', async () => {
     const row = makeRow({ lastInteractorUserId: TEST_USER_1 });
     const prev = makeRow({ lastInteractorUserId: TEST_USER_1 });
-    const id = await emit(row, prev, 'needs_review', { type: 'agent' });
+    const id = await emit(row, prev, 'done', { type: 'agent' });
 
     expect(id).not.toBeNull();
     const [notif] = await db.select().from(notifications).where(eq(notifications.id, id!));
@@ -130,16 +132,27 @@ describe('emitTaskNotification', () => {
     expect(notif.userId).toBe(TEST_USER_1);
   });
 
-  // 2. Transition to done with last_interactor set
-  it('emits completed when transitioning to done with lastInteractor set', async () => {
+  // 2. Transition to merged (landed in base) → "completed".
+  it('emits completed when transitioning to merged with lastInteractor set', async () => {
     const row = makeRow({ lastInteractorUserId: TEST_USER_1 });
     const prev = makeRow({ lastInteractorUserId: TEST_USER_1 });
-    const id = await emit(row, prev, 'done', { type: 'agent' });
+    const id = await emit(row, prev, 'merged', { type: 'agent' });
 
     expect(id).not.toBeNull();
     const [notif] = await db.select().from(notifications).where(eq(notifications.id, id!));
     expect(notif.eventType).toBe('completed');
     expect(notif.userId).toBe(TEST_USER_1);
+  });
+
+  // 2b. reviewed (approved, awaiting merge) → still "needs your attention".
+  it('emits need_help when transitioning to reviewed', async () => {
+    const row = makeRow({ lastInteractorUserId: TEST_USER_1 });
+    const prev = makeRow({ lastInteractorUserId: TEST_USER_1 });
+    const id = await emit(row, prev, 'reviewed', { type: 'agent' });
+
+    expect(id).not.toBeNull();
+    const [notif] = await db.select().from(notifications).where(eq(notifications.id, id!));
+    expect(notif.eventType).toBe('need_help');
   });
 
   // 3. Falls back to createdById when no lastInteractor
@@ -166,7 +179,7 @@ describe('emitTaskNotification', () => {
   it('suppresses notification when actor user is the recipient', async () => {
     const row = makeRow({ lastInteractorUserId: TEST_USER_1 });
     const prev = makeRow({ lastInteractorUserId: TEST_USER_1 });
-    const id = await emit(row, prev, 'needs_review', { type: 'user', userId: TEST_USER_1 });
+    const id = await emit(row, prev, 'done', { type: 'user', userId: TEST_USER_1 });
 
     expect(id).toBeNull();
   });
@@ -276,7 +289,7 @@ describe('emitTaskNotification', () => {
   it('creates distinct notification rows for two different status transitions', async () => {
     const row1 = makeRow({ lastInteractorUserId: TEST_USER_1 });
     const prev1 = makeRow({ lastInteractorUserId: TEST_USER_1 });
-    const id1 = await emit(row1, prev1, 'needs_review', { type: 'agent' });
+    const id1 = await emit(row1, prev1, 'reviewed', { type: 'agent' });
 
     const row2 = makeRow({ lastInteractorUserId: TEST_USER_1 });
     const prev2 = makeRow({ lastInteractorUserId: TEST_USER_1 });
@@ -297,7 +310,7 @@ describe('emitTaskNotification', () => {
   it('emits notification when actor is system (no self-suppression)', async () => {
     const row = makeRow({ lastInteractorUserId: TEST_USER_1 });
     const prev = makeRow({ lastInteractorUserId: TEST_USER_1 });
-    const id = await emit(row, prev, 'needs_review', { type: 'system' });
+    const id = await emit(row, prev, 'done', { type: 'system' });
 
     expect(id).not.toBeNull();
   });

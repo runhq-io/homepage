@@ -50,7 +50,7 @@ afterAll(async () => {
   await db.delete(users).where(eq(users.id, USER_ID));
 });
 
-async function makeTask(title: string, status: 'pending' | 'in_progress' | 'done' | 'cancelled' = 'pending') {
+async function makeTask(title: string, status: string = 'pending') {
   const [task] = await db.insert(workspaceTasks).values({
     serverId: SERVER_ID,
     workspaceChannelId: CHANNEL_ID,
@@ -109,14 +109,29 @@ describe('getPublicTicketDetail — canAssign field', () => {
     }
   });
 
-  it('canAssign is false for a terminal status (done) even when unassigned', async () => {
+  it('canAssign is true for done (open work: PR up, awaiting review) when unassigned', async () => {
+    // In the PR lifecycle `done` is mid-pipeline, not terminal — still assignable
+    // (e.g. reassign an agent for follow-up fixes before it ships).
     const id = await makeTask('Done ticket', 'done');
     try {
       const detail = await getPublicTicketDetail(PROJECT_ID, id, undefined, ASSIGN_PERM);
       expect(detail).not.toBeNull();
-      expect(detail!.canAssign).toBe(false);
+      expect(detail!.canAssign).toBe(true);
     } finally {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
+    }
+  });
+
+  it('canAssign is false for terminal statuses (cancelled / deployed / deployed:<env>) even when unassigned', async () => {
+    for (const status of ['cancelled', 'deployed', 'deployed:11111111-2222-3333-4444-555555555555']) {
+      const id = await makeTask(`Terminal ${status} ticket`, status);
+      try {
+        const detail = await getPublicTicketDetail(PROJECT_ID, id, undefined, ASSIGN_PERM);
+        expect(detail).not.toBeNull();
+        expect(detail!.canAssign).toBe(false);
+      } finally {
+        await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
+      }
     }
   });
 });

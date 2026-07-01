@@ -13,8 +13,8 @@ const agent = (content: string) => ({ role: 'agent' as const, content, payload: 
 const event = (payload: WidgetChatEventPayload) => ({ role: 'event' as const, content: '', payload });
 
 describe('buildTranscript', () => {
-  it('maps user/agent rows to content entries and event rows to payload entries', () => {
-    expect(buildTranscript([
+  it('maps user/agent rows to content entries and event rows to payload entries', async () => {
+    expect(await buildTranscript([
       user('hi'),
       agent('hello! what broke?'),
       event({ kind: 'proposal', title: 'T', description: 'D', toolUseId: 'tu_1' }),
@@ -25,8 +25,8 @@ describe('buildTranscript', () => {
     ]);
   });
 
-  it('drops empty content rows and payload-less event rows', () => {
-    expect(buildTranscript([
+  it('drops empty content rows and payload-less event rows', async () => {
+    expect(await buildTranscript([
       user(''),
       { role: 'event' as const, content: '', payload: null },
       agent('still here'),

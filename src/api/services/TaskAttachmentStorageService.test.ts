@@ -66,4 +66,28 @@ describe('TaskAttachmentStorageService', () => {
     expect(input.ResponseContentDisposition).toContain('filename=');
     expect(input.ResponseContentDisposition).toContain("filename*=UTF-8''%EC%A0%9C%EC%A3%BC");
   });
+
+  describe('getObjectBuffer', () => {
+    it('fetches object bytes via GetObjectCommand and returns a Buffer', async () => {
+      const fakeBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]); // JPEG magic
+      awsMocks.send.mockResolvedValueOnce({
+        Body: { transformToByteArray: async () => fakeBytes },
+      });
+      const service = new TaskAttachmentStorageService();
+      const buf = await service.getObjectBuffer({ storageProvider: 'r2', storageKey: 'servers/ws/model/img-1.jpg' });
+
+      expect(buf).toEqual(Buffer.from(fakeBytes));
+      const input = vi.mocked(GetObjectCommand).mock.calls[0]?.[0] as any;
+      expect(input.Bucket).toBe('bucket');
+      expect(input.Key).toBe('servers/ws/model/img-1.jpg');
+    });
+
+    it('throws when storage is not configured', async () => {
+      delete process.env.TASK_ATTACHMENT_STORAGE_BUCKET;
+      const service = new TaskAttachmentStorageService();
+      await expect(
+        service.getObjectBuffer({ storageProvider: 'r2', storageKey: 'servers/ws/model/img.jpg' }),
+      ).rejects.toThrow('not configured');
+    });
+  });
 });

@@ -24,9 +24,13 @@ import {
   users,
   widgetExposedAgents,
   widgetChatConversations,
+  widgetChatMessages,
+  widgetChatImages,
+  type ChatImageRow,
 } from '../../db/schema';
+import { resizeForModel } from './widgetChatImage';
 import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
-import type { CanonicalTaskActorType, CanonicalTaskComment } from '@runhq/server-protocol';
+import type { CanonicalTaskActorType, CanonicalTaskComment, TodoStatus } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
@@ -181,13 +185,14 @@ interface WidgetProjectContext {
   serverId: string;
   channelId: string | null;
   widgetChatAgentEntityId: string | null;
+  deployEnvironments: Array<{ id: string; name: string }> | null;
 }
 
 type WidgetTicketResponse = {
   id: string;
   title: string;
   description: string | null;
-  status: 'pending' | 'planned' | 'in_progress' | 'needs_review' | 'done' | 'deployed' | 'cancelled';
+  status: TodoStatus;
   moderationStatus: 'pending' | 'approved' | 'rejected';
   isPrivate: boolean;
   source: string;
@@ -209,6 +214,15 @@ type WidgetTicketResponse = {
    * Populated by listMyTickets; may be absent on other list shapes.
    */
   lastActivityAt?: Date | null;
+  /**
+   * Timestamp of the most recent live-session REPLY (a coder `agent` or teammate
+   * `team` chat message) on the ticket's linked conversation — independent of
+   * lastActivityAt. Tracked on its own axis so the widget can flag unread
+   * live-session replies that only clear when the assigner opens the session
+   * (not when they merely view the ticket detail). Populated by
+   * listTicketsAssignedByMe; absent on other list shapes.
+   */
+  liveSessionLastMessageAt?: string | null;
 };
 
 type PublicAttachmentSummary = {
@@ -325,6 +339,12 @@ export type PublicTicketDetail = {
    * outcome is recorded (questions, assignment, or a skip).
    */
   processing: boolean;
+  /**
+   * Deploy-environment id→name map for this project, so the widget resolves
+   * `deployed:<envId>` statuses to a human label ("Deployed → Production").
+   * Empty until the workspace heartbeat has synced its deploy config.
+   */
+  environments: Array<{ id: string; name: string }>;
 };
 
 type PublicAttachmentLike = {
@@ -457,6 +477,7 @@ async function getWidgetProjectContext(projectId: string): Promise<WidgetProject
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      deployEnvironments: widgetProjects.deployEnvironments,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
@@ -488,6 +509,7 @@ async function getWidgetProjectBySlug(slug: string): Promise<WidgetProjectContex
       serverId: widgetProjects.serverId,
       channelId: widgetProjects.channelId,
       widgetChatAgentEntityId: widgetProjects.widgetChatAgentEntityId,
+      deployEnvironments: widgetProjects.deployEnvironments,
     })
     .from(widgetProjects)
     .where(and(eq(widgetProjects.slug, slug), eq(widgetProjects.enabled, true)))
@@ -1305,6 +1327,9 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     // get redirected, and non-public projects must not leak owner config.
     loginUrl: !widgetUserId && project?.isPublic ? project.widgetLoginUrl : null,
     chat: await getChatBootstrapInfo(project),
+    // Deploy-environment id→name map so the widget resolves `deployed:<envId>`
+    // ticket statuses to a human label ("Deployed → Production").
+    environments: project?.deployEnvironments ?? [],
     // Drives whether the client shows image-attach affordances. The upload
     // routes still return explicit errors, but bootstrap hides controls when
     // storage is absent or the kill switch is off.
@@ -1492,12 +1517,14 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   const internalPr = deriveLinkedPr(activity);
 
   // Partner-facing progress stepper — derived purely from a status enum, the
-  // clarification status, whether an agent was assigned, and the PR state.
+  // clarification status, whether an agent was assigned, and the PR state. The
+  // env map only resolves a `deployed:<env>` status to "Deployed → <name>".
   const milestones = deriveTicketMilestones({
     status: task.status,
     clarificationStatus: clar?.status ?? null,
     agentAssigned: !!lastAssign,
     prState: internalPr?.state ?? null,
+    environments: project.deployEnvironments ?? [],
   });
 
   // Resolve the chat conversation that originated this ticket, if any.
@@ -1534,8 +1561,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   // while the system is already handling assignment — an open clarification card
   // (questions pending / duplicate notice) or auto-assign still reviewing — so
   // the manual control doesn't clutter or compete with that flow.
+  // Open work that hasn't shipped yet. `needs_review` was folded into `done`
+  // ("PR up, awaiting review") — still assignable (e.g. reassign for fixes).
+  // `reviewed`/`merged` are intentionally excluded: by then the work is past the
+  // point a manual agent assignment makes sense.
   const ASSIGNABLE_STATUSES: ReadonlySet<typeof task.status> = new Set([
-    'pending', 'planned', 'in_progress', 'needs_review',
+    'pending', 'planned', 'in_progress', 'done',
   ]);
   const clarificationActive = clar?.status === 'asking' || clar?.status === 'duplicate';
   const canAssign =
@@ -1577,6 +1608,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     canPreview: !!permissions?.has('preview') && !!internalPr,
     canAssign,
     processing,
+    environments: project.deployEnvironments ?? [],
   };
 }
 
@@ -1991,17 +2023,19 @@ async function requireSafeForAutoAssignment(
   prepared: PreparedWidgetTicketCreate,
 ): Promise<void> {
   // Human-reviewed projects do not need AI availability at ticket creation.
-  // Auto-assigned projects do: an unreviewed ticket must not reach an agent.
   if (!prepared.project.agentAssignmentEnabled) return;
 
   const verdict = await InjectionGuardService.checkTicket(prepared.reviewTicket);
   if (verdict.safe) return;
 
-  throw new WidgetError(
-    verdict.unavailable ? 'ticket_review_unavailable' : 'ticket_rejected',
-    verdict.unavailable ? 503 : 400,
-    verdict.reasons,
-  );
+  // Guard UNAVAILABLE (screening model down / out of credits): do NOT block the
+  // reporter from filing the ticket. The ticket is created for human review and
+  // the auto-assign orchestrator independently skips assignment when the model
+  // is unavailable, so an unscreened ticket never reaches a coding agent. Only a
+  // concrete "unsafe" verdict (a real injection attempt) blocks creation.
+  if (verdict.unavailable) return;
+
+  throw new WidgetError('ticket_rejected', 400, verdict.reasons);
 }
 
 export async function createTicket(
@@ -2166,19 +2200,18 @@ function toGuardImages(files: Array<WidgetUploadFile & { mimeType: InjectionGuar
 async function requireSafeTicketAndImages(
   ticket: { title: string; description: string | null },
   files: Array<WidgetUploadFile & { mimeType: InjectionGuardImageMime }>,
-  opts: { agentAssignmentEnabled: boolean },
+  _opts: { agentAssignmentEnabled: boolean },
 ): Promise<void> {
   const verdict = await InjectionGuardService.checkTicket(ticket, { images: toGuardImages(files) });
   if (verdict.safe) return;
-  // If no agent can be auto-assigned, a guard outage should not block the
-  // reporter from creating a ticket that a human will review.
-  if (verdict.unavailable && !opts.agentAssignmentEnabled) return;
+  // Guard UNAVAILABLE (screening model down / out of credits): do NOT block the
+  // reporter from filing the ticket + image. The ticket is created for human
+  // review; the auto-assign orchestrator independently skips assignment when the
+  // model is unavailable, so an unscreened ticket never reaches a coding agent.
+  // Only a concrete "unsafe" verdict (a real injection attempt) blocks creation.
+  if (verdict.unavailable) return;
 
-  throw new WidgetError(
-    verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
-    verdict.unavailable ? 503 : 400,
-    verdict.reasons,
-  );
+  throw new WidgetError('attachment_rejected', 400, verdict.reasons);
 }
 
 async function storeTaskAttachment(input: {
@@ -2234,6 +2267,40 @@ async function storeTaskAttachment(input: {
     url,
     storageProvider: stored.storageProvider,
     storageKey: stored.storageKey,
+  };
+}
+
+/**
+ * Links an EXISTING stored object to a task as a workspaceTaskAttachments row.
+ * Unlike storeTaskAttachment, this does NOT upload anything — the object must
+ * already exist in storage (e.g. a widget_chat_images original). Used when
+ * chat images are carried over to the ticket created from a conversation.
+ */
+export async function linkExistingTaskAttachment(input: {
+  serverId: string;
+  taskId: string;
+  storageProvider: 'r2' | 's3';
+  storageKey: string;
+  mimeType: string;
+  originalName?: string | null;
+}): Promise<{ id: string; mimeType: string; originalName: string | null }> {
+  const [attachment] = await db
+    .insert(workspaceTaskAttachments)
+    .values({
+      serverId: input.serverId,
+      taskId: input.taskId,
+      ownerType: 'task',
+      ownerId: input.taskId,
+      storageProvider: input.storageProvider,
+      storageKey: input.storageKey,
+      mimeType: input.mimeType,
+      originalName: input.originalName ?? null,
+    })
+    .returning();
+  return {
+    id: attachment!.id,
+    mimeType: attachment!.mimeType,
+    originalName: attachment!.originalName ?? null,
   };
 }
 
@@ -2510,6 +2577,245 @@ export async function deleteTicketAttachment(
     .where(eq(workspaceTaskAttachments.id, attachmentId));
 }
 
+// ============================================================================
+// Widget chat image upload
+// ============================================================================
+
+/** Maximum images a visitor may attach to a single chat message. */
+export const MAX_CHAT_IMAGES_PER_MESSAGE = 3;
+
+/** Maximum total images across an entire conversation (abuse cap). */
+export const MAX_CHAT_IMAGES_PER_CONVERSATION = 5;
+
+const MAX_CHAT_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+
+// SVG intentionally excluded — XML payload can carry inline <script>.
+const ALLOWED_CHAT_IMAGE_MIME_SET = new Set<string>([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+/**
+ * Returns true when the permission set grants image-attachment capability.
+ * Used by the upload endpoint (defense-in-depth: checked again inside
+ * storeWidgetChatImage to ensure no caller can bypass the gate).
+ */
+export function canAttachImages(_projectId: string, permissions: ReadonlySet<WidgetPermission>): boolean {
+  return permissions.has('attach_image');
+}
+
+/**
+ * Screen a single chat image through the injection guard.
+ * Uses an empty ticket context (no subject/description) because chat images
+ * are uploaded independently of any ticket. The guard evaluates image content.
+ */
+async function requireSafeChatImage(image: InjectionGuardImage): Promise<void> {
+  const verdict = await InjectionGuardService.checkTicket(
+    { title: '', description: null },
+    { images: [image] },
+  );
+  if (verdict.safe) return;
+  throw new WidgetError(
+    verdict.unavailable ? 'attachment_review_unavailable' : 'attachment_rejected',
+    verdict.unavailable ? 503 : 400,
+    verdict.reasons,
+  );
+}
+
+/**
+ * Whether widget-chat image uploads are screened by the injection guard.
+ *
+ * OFF by default: the guard's screening model can be unfunded/unavailable
+ * (fails closed → blocks every upload) and has produced false positives on
+ * ordinary bug screenshots. The screening code (`requireSafeChatImage`) is
+ * fully retained — set `WIDGET_CHAT_IMAGE_SCREENING_ENABLED=true` to re-enable
+ * it once the screening model is reliable.
+ */
+export function chatImageScreeningEnabled(): boolean {
+  return process.env.WIDGET_CHAT_IMAGE_SCREENING_ENABLED === 'true';
+}
+
+/**
+ * Screen, store, and register a widget-chat image upload.
+ *
+ * Flow:
+ *   1. Enforce attach_image RBAC permission (defense-in-depth).
+ *   2. Validate mime-type and size.
+ *   3. Look up project to resolve the serverId storage namespace.
+ *   4. Enforce per-conversation count cap.
+ *   5. Run the injection guard (before ANY storage write).
+ *   6. Store the original upload via attachmentStorage.
+ *   7. Produce a model-sized JPEG derivative via resizeForModel.
+ *   8. Store the derivative.  On failure → delete the original and re-throw.
+ *   9. Insert the widget_chat_images row and return it.
+ *
+ * The row is inserted with messageId null; a later task binds it to a message.
+ */
+export async function storeWidgetChatImage(
+  projectId: string,
+  conversationId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetPermission>,
+  file: WidgetUploadFile,
+): Promise<ChatImageRow> {
+  // 0. Kill-switch checks (same guards as the ticket attachment upload paths).
+  if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
+  if (!attachmentStorage.isConfigured()) throw new WidgetError('attachment_storage_unconfigured', 500);
+
+  // 1. RBAC check (defense-in-depth)
+  if (!canAttachImages(projectId, permissions)) {
+    throw new WidgetError('attach_image_permission_required', 403);
+  }
+
+  // 2. Type check
+  if (!ALLOWED_CHAT_IMAGE_MIME_SET.has(file.mimeType)) {
+    throw new WidgetError('attachment_unsupported_type', 400);
+  }
+
+  // 3. Size check
+  if (file.buffer.length > MAX_CHAT_IMAGE_SIZE) {
+    throw new WidgetError('attachment_too_large', 413);
+  }
+
+  // 4. Look up project → serverId
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
+  // 5. Per-conversation count cap
+  const [convCountRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(widgetChatImages)
+    .where(eq(widgetChatImages.conversationId, conversationId));
+  if (Number(convCountRow?.count ?? 0) >= MAX_CHAT_IMAGES_PER_CONVERSATION) {
+    throw new WidgetError('attachment_count_exceeded', 400);
+  }
+
+  // 6. Injection guard — opt-in via WIDGET_CHAT_IMAGE_SCREENING_ENABLED.
+  //    When enabled it MUST run before any storeUpload call. Disabled by
+  //    default for now (see chatImageScreeningEnabled); the guard code is kept.
+  if (chatImageScreeningEnabled()) {
+    await requireSafeChatImage({
+      mimeType: file.mimeType as InjectionGuardImageMime,
+      dataBase64: file.buffer.toString('base64'),
+      filename: file.originalName ?? file.filename,
+    });
+  }
+
+  // 7. Store original upload
+  const original = await attachmentStorage.storeUpload({
+    serverId: project.serverId,
+    body: file.buffer,
+    mimeType: file.mimeType,
+    filename: file.filename,
+    originalName: file.originalName,
+    ownerType: 'widget_chat_message',
+  });
+
+  // 8. Generate model-sized derivative
+  const derivative = await resizeForModel(file.buffer, file.mimeType);
+
+  // 9. Store derivative — on failure, clean up the original to avoid orphaned objects
+  const modelFilename = file.filename.replace(/\.[^.]+$/, '') + '-model.jpg';
+  let modelStored: { storageProvider: 'r2' | 's3'; storageKey: string };
+  try {
+    modelStored = await attachmentStorage.storeUpload({
+      serverId: project.serverId,
+      body: derivative.buffer,
+      mimeType: derivative.mime,
+      filename: modelFilename,
+      ownerType: 'widget_chat_message',
+    });
+  } catch (err) {
+    await attachmentStorage
+      .deleteStoredObject({ storageProvider: original.storageProvider, storageKey: original.storageKey })
+      .catch((cleanupErr) => {
+        console.warn('[WidgetService] cleanup of original failed after model image store error:', cleanupErr);
+      });
+    throw err;
+  }
+
+  // 10. Insert the row and return it
+  const [row] = await db
+    .insert(widgetChatImages)
+    .values({
+      conversationId,
+      widgetUserId,
+      messageId: null,
+      serverId: project.serverId,
+      mimeType: file.mimeType,
+      originalName: file.originalName ?? null,
+      originalStorageProvider: original.storageProvider,
+      originalStorageKey: original.storageKey,
+      modelStorageProvider: modelStored.storageProvider,
+      modelStorageKey: modelStored.storageKey,
+      width: derivative.width,
+      height: derivative.height,
+    })
+    .returning();
+
+  return row!;
+}
+
+export type { ChatImageRow };
+
+/**
+ * Max "activity" timestamp (ms) per task across comments and activity rows, and
+ * — when includeLiveSession is set — non-`user` live-session chat messages
+ * (a coder's agent_message / a teammate's team_message on the conversation
+ * linked via createdTaskId). The task's own updatedAt is folded in by callers.
+ * Comments, activity, and chat messages do NOT bump workspaceTasks.updatedAt,
+ * so this is what lets a reply light an unread badge. `user` chat rows are
+ * excluded: the viewer's own message is not unread activity for them.
+ */
+async function deriveLastActivity(
+  taskIds: string[],
+  opts: { includeLiveSession: boolean },
+): Promise<Map<string, number>> {
+  const latest = new Map<string, number>();
+  if (taskIds.length === 0) return latest;
+  const bump = (taskId: string | null, raw: string | null) => {
+    if (!taskId || !raw) return;
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) return;
+    if (!(latest.has(taskId) && latest.get(taskId)! >= ms)) latest.set(taskId, ms);
+  };
+
+  const queries: Promise<{ taskId: string | null; max: string | null }[]>[] = [
+    db
+      .select({ taskId: workspaceTaskComments.taskId, max: sql<string>`max(${workspaceTaskComments.createdAt})` })
+      .from(workspaceTaskComments)
+      .where(and(inArray(workspaceTaskComments.taskId, taskIds), isNull(workspaceTaskComments.deletedAt)))
+      .groupBy(workspaceTaskComments.taskId),
+    db
+      .select({ taskId: workspaceTaskActivity.taskId, max: sql<string>`max(${workspaceTaskActivity.createdAt})` })
+      .from(workspaceTaskActivity)
+      .where(inArray(workspaceTaskActivity.taskId, taskIds))
+      .groupBy(workspaceTaskActivity.taskId),
+  ];
+  if (opts.includeLiveSession) {
+    queries.push(
+      db
+        .select({
+          taskId: widgetChatConversations.createdTaskId,
+          max: sql<string>`max(${widgetChatMessages.createdAt})`,
+        })
+        .from(widgetChatMessages)
+        .innerJoin(widgetChatConversations, eq(widgetChatMessages.conversationId, widgetChatConversations.id))
+        .where(and(
+          inArray(widgetChatConversations.createdTaskId, taskIds),
+          ne(widgetChatMessages.role, 'user'),
+        ))
+        .groupBy(widgetChatConversations.createdTaskId),
+    );
+  }
+
+  const results = await Promise.all(queries);
+  for (const rows of results) for (const r of rows) bump(r.taskId, r.max);
+  return latest;
+}
+
 export async function listMyTickets(
   projectId: string,
   widgetUserId: string
@@ -2534,38 +2840,117 @@ export async function listMyTickets(
 
   if (rows.length === 0) return [];
 
-  // Derive lastActivityAt = max(task.updatedAt, latest comment, latest activity)
-  // per ticket. Comments and activity rows do NOT bump workspaceTasks.updatedAt,
-  // so without this a team reply would never light the launcher badge.
+  // Comments and activity do NOT bump workspaceTasks.updatedAt, so derive
+  // lastActivityAt here. Live-session chat messages are intentionally NOT
+  // included for the reporter: a public reporter cannot re-open a live session,
+  // so its unread could never clear. The assigner gets that signal via
+  // listTicketsAssignedByMe.
   const ids = rows.map((r) => r.id);
-  const [commentMax, activityMax] = await Promise.all([
-    db
-      .select({ taskId: workspaceTaskComments.taskId, max: sql<string>`max(${workspaceTaskComments.createdAt})` })
-      .from(workspaceTaskComments)
-      .where(and(inArray(workspaceTaskComments.taskId, ids), isNull(workspaceTaskComments.deletedAt)))
-      .groupBy(workspaceTaskComments.taskId),
-    db
-      .select({ taskId: workspaceTaskActivity.taskId, max: sql<string>`max(${workspaceTaskActivity.createdAt})` })
-      .from(workspaceTaskActivity)
-      .where(inArray(workspaceTaskActivity.taskId, ids))
-      .groupBy(workspaceTaskActivity.taskId),
-  ]);
-
-  const latest = new Map<string, number>();
-  const bump = (taskId: string, raw: string | null) => {
-    if (!raw) return;
-    const ms = new Date(raw).getTime();
-    if (Number.isNaN(ms)) return;
-    if (!(latest.has(taskId) && latest.get(taskId)! >= ms)) latest.set(taskId, ms);
-  };
-  for (const r of commentMax) bump(r.taskId, r.max);
-  for (const r of activityMax) bump(r.taskId, r.max);
+  const latest = await deriveLastActivity(ids, { includeLiveSession: false });
 
   return rows.map((t) => {
     const dto = mapTaskToWidgetResponse(t);
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
     const activityMs = latest.get(t.id) ?? 0;
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    return dto;
+  });
+}
+
+/**
+ * Tickets the given widget user ASSIGNED a coder agent to (the latest
+ * agent_assigned activity's createdById equals their externalUserId), excluding
+ * terminal tickets. lastActivityAt includes non-`user` live-session chat
+ * messages so a coder/teammate reply lights the assigner's widget unread. This
+ * is the assigner-scoped counterpart to listMyTickets (which is reporter-scoped
+ * and deliberately omits live-session messages).
+ */
+export async function listTicketsAssignedByMe(
+  projectId: string,
+  widgetUserId: string,
+): Promise<WidgetTicketResponse[]> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return [];
+  const audit = await getWidgetUserAuditInfo(widgetUserId);
+  if (!audit) return [];
+  const externalUserId = audit.externalUserId;
+
+  // Latest agent_assigned activity per task on this server, with its author.
+  const assignRows = await db
+    .select({
+      taskId: workspaceTaskActivity.taskId,
+      createdById: workspaceTaskActivity.createdById,
+      createdAt: workspaceTaskActivity.createdAt,
+    })
+    .from(workspaceTaskActivity)
+    .where(and(
+      eq(workspaceTaskActivity.serverId, project.serverId),
+      eq(workspaceTaskActivity.type, 'agent_assigned'),
+    ))
+    .orderBy(desc(workspaceTaskActivity.createdAt));
+
+  // Keep only the most-recent assignment per task (assignRows is newest-first),
+  // then keep tasks whose latest assigner is this viewer.
+  const latestAssigner = new Map<string, string | null>();
+  for (const r of assignRows) {
+    if (!latestAssigner.has(r.taskId)) latestAssigner.set(r.taskId, r.createdById);
+  }
+  const mineTaskIds = [...latestAssigner.entries()]
+    .filter(([, by]) => by === externalUserId)
+    .map(([taskId]) => taskId);
+  if (mineTaskIds.length === 0) return [];
+
+  // Load the (non-terminal, non-deleted) tasks themselves.
+  const rows = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.serverId, project.serverId),
+      inArray(workspaceTasks.id, mineTaskIds),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+      isNull(workspaceTasks.deletedAt),
+      ne(workspaceTasks.status, 'cancelled'),
+      ne(workspaceTasks.status, 'deployed'),
+      sql`${workspaceTasks.status} not like 'deployed:%'`,
+    ))
+    .orderBy(desc(workspaceTasks.createdAt))
+    .limit(50);
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((r) => r.id);
+  // lastActivityAt excludes live-session chat — that signal lives on its own
+  // axis (liveSessionLastMessageAt) so viewing the ticket detail (which marks
+  // the ticket seen up to lastActivityAt) cannot clear an unread live-session
+  // reply. Only opening the live session clears the dedicated axis.
+  const [latest, liveSession] = await Promise.all([
+    deriveLastActivity(ids, { includeLiveSession: false }),
+    // Most recent coder/teammate REPLY per task: role IN ('agent','team').
+    // `event` cards (proposals, mirrored status) are not replies and must not
+    // light the live-session indicator.
+    db
+      .select({
+        taskId: widgetChatConversations.createdTaskId,
+        max: sql<string>`max(${widgetChatMessages.createdAt})`,
+      })
+      .from(widgetChatMessages)
+      .innerJoin(widgetChatConversations, eq(widgetChatMessages.conversationId, widgetChatConversations.id))
+      .where(and(
+        inArray(widgetChatConversations.createdTaskId, ids),
+        inArray(widgetChatMessages.role, ['agent', 'team']),
+      ))
+      .groupBy(widgetChatConversations.createdTaskId),
+  ]);
+  const liveSessionByTask = new Map<string, string>();
+  for (const r of liveSession) {
+    if (r.taskId && r.max) liveSessionByTask.set(r.taskId, r.max);
+  }
+  return rows.map((t) => {
+    const dto = mapTaskToWidgetResponse(t);
+    const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
+    const activityMs = latest.get(t.id) ?? 0;
+    dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    const lsMax = liveSessionByTask.get(t.id);
+    dto.liveSessionLastMessageAt = lsMax ? new Date(lsMax).toISOString() : null;
     return dto;
   });
 }
@@ -2587,15 +2972,20 @@ export async function getTicketStats(projectId: string) {
 
   const [result] = await db
     .select({
-      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} not in ('done', 'deployed', 'cancelled'))`,
-      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} in ('done', 'deployed'))`,
+      // Open = not terminal. Terminal = cancelled OR any deployed status
+      // (legacy bare `deployed` OR env-qualified `deployed:<env>`). In the PR
+      // lifecycle done/reviewed/merged are mid-pipeline and count as open.
+      totalOpen: sql<number>`count(*) filter (where ${workspaceTasks.status} <> 'cancelled' and ${workspaceTasks.status} <> 'deployed' and ${workspaceTasks.status} not like 'deployed:%')`,
+      // "Shipped"/completed = deployed only now (NOT done) — a task is finished
+      // when it reaches a deploy environment.
+      totalDone: sql<number>`count(*) filter (where ${workspaceTasks.status} = 'deployed' or ${workspaceTasks.status} like 'deployed:%')`,
     })
     .from(workspaceTasks)
     .where(and(...conditions));
 
   const totalDone = Number(result?.totalDone ?? 0);
 
-  // Calculate average resolution time for done tasks
+  // Calculate average resolution time for shipped (deployed) tasks
   let avgResolutionMs: number | null = null;
   if (totalDone > 0) {
     const [avgResult] = await db
@@ -2605,7 +2995,7 @@ export async function getTicketStats(projectId: string) {
       .from(workspaceTasks)
       .where(and(
         ...conditions,
-        sql`${workspaceTasks.status} in ('done', 'deployed')`,
+        sql`(${workspaceTasks.status} = 'deployed' or ${workspaceTasks.status} like 'deployed:%')`,
         sql`${workspaceTasks.completedAt} is not null`,
       ));
     avgResolutionMs = avgResult?.avg ? Math.round(Number(avgResult.avg)) : null;
@@ -2794,6 +3184,32 @@ export async function regenerateSecret(serverId: string, lookup?: WidgetLookup) 
 
   if (!project) throw new Error('Widget project not found');
   return { apiSecret: newSecret };
+}
+
+/**
+ * Store the workspace's per-project deploy-environment id→name map (synced on
+ * the server heartbeat). Lets the widget resolve `deployed:<envId>` ticket
+ * statuses to a human name. Keyed by workspaceProjectId; only this server's rows
+ * are touched. Best-effort — malformed entries are skipped, never thrown.
+ */
+export async function syncDeployEnvironments(
+  serverId: string,
+  byWorkspaceProjectId: Record<string, unknown>,
+): Promise<void> {
+  for (const [workspaceProjectId, envs] of Object.entries(byWorkspaceProjectId)) {
+    if (!workspaceProjectId || !Array.isArray(envs)) continue;
+    const clean = envs
+      .filter((e): e is { id: string; name: string } =>
+        !!e && typeof (e as { id?: unknown }).id === 'string' && typeof (e as { name?: unknown }).name === 'string')
+      .map((e) => ({ id: e.id, name: e.name }));
+    await db
+      .update(widgetProjects)
+      .set({ deployEnvironments: clean })
+      .where(and(
+        eq(widgetProjects.serverId, serverId),
+        eq(widgetProjects.workspaceProjectId, workspaceProjectId),
+      ));
+  }
 }
 
 /**
@@ -3643,6 +4059,7 @@ export const WIDGET_ERROR_CODES = [
   'voting_period_ended',
   'ticket_rejected',
   'ticket_review_unavailable',
+  'attach_image_permission_required',
   'attachment_unsupported_type',
   'attachment_too_large',
   'attachment_count_exceeded',
@@ -3661,6 +4078,9 @@ export const WIDGET_ERROR_CODES = [
   'invalid_cursor',
   'no_pending_proposal',
   'invalid_proposal_draft',
+  // Chat image attachments
+  'invalid_image_ref',
+  'image_not_found',
   // Agentless [Submit Ticket]
   'ticket_already_created',
   'agent_turns_present',

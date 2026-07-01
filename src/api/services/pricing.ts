@@ -46,6 +46,71 @@ export function pricingForModel(model: string): ModelPrice {
   return PRICING[model] ?? DEFAULT_PRICING;
 }
 
+// ── Model id resolution ──────────────────────────────────────────────────────
+//
+// Every Claude call (chat, audit, and the `runhq say` / `milestone` leak screen)
+// flows through the cloud proxy, which calls resolveModel() before forwarding to
+// Anthropic. This is the one central choke point all workspaces share.
+//
+// Problem it solves: a workspace running a stale image pins a Claude model id
+// that Anthropic has since retired. The proxy used to forward it verbatim, so
+// Anthropic returned 404 not_found_error. For the screen gate — which fails
+// CLOSED on any non-200 — that 404 silently blocked *every* customer message,
+// even a plain "hi", with an opaque "screening failed" reason.
+//
+// Fix: any 4.x id we don't currently serve is routed to the current model of its
+// tier (sonnet / opus / haiku). 4.x minors are the same modern family and price,
+// so this is safe and idempotent. 3.x legacy ids (still routable, different tier
+// and pricing) and non-Claude ids are left untouched.
+
+/** The current, Anthropic-served model for each Claude 4.x tier. */
+const CURRENT_MODEL_BY_TIER = {
+  sonnet: 'claude-sonnet-4-6',
+  opus: 'claude-opus-4-8',
+  haiku: 'claude-haiku-4-5',
+} as const;
+
+type ModelTier = keyof typeof CURRENT_MODEL_BY_TIER;
+
+/**
+ * 4.x ids Anthropic still serves — passed through untouched so an explicitly
+ * pinned, valid minor (e.g. claude-opus-4-7) is honoured. Any other
+ * `claude-<tier>-4…` id is treated as retired and routed to the tier default.
+ * Keep in sync with the "Claude 4.x current" section of PRICING above.
+ */
+const CURRENT_4X_MODELS = new Set<string>([
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'claude-haiku-4-5',
+]);
+
+/**
+ * Normalise an incoming model id to one Anthropic currently serves.
+ *
+ * - current 4.x id            → unchanged
+ * - any other claude-<tier>-4… → that tier's current model (heals retired minors)
+ * - 3.x legacy / non-Claude    → unchanged
+ */
+export function resolveModel(model: string): string {
+  if (CURRENT_4X_MODELS.has(model)) return model;
+
+  const tier = /^claude-(sonnet|opus|haiku)-4\b/.exec(model)?.[1] as ModelTier | undefined;
+  if (tier) {
+    const current = CURRENT_MODEL_BY_TIER[tier];
+    if (current !== model) {
+      console.warn(
+        `[resolveModel] Routing retired/dated model '${model}' → '${current}' (${tier} tier). ` +
+          'A workspace is likely running a stale image — redeploy it to silence this.',
+      );
+    }
+    return current;
+  }
+
+  return model;
+}
+
 /**
  * Calculate the cost of a single API call in cents (with sub-cent precision).
  * Storage columns are numeric(12,4) — do NOT round here.
