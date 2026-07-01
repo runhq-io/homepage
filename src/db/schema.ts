@@ -1439,11 +1439,12 @@ export const widgetUsers = pgTable('widget_users', {
   name: text('name'),
   username: text('username'),
   avatarUrl: text('avatar_url'),
-  // Per-user permission tier. Replaces JWT-role-derived permissions: a user's
-  // effective widget permissions are resolved from this tier, not from a
-  // project role map. 'app_user' = files tickets/chats + attaches images;
-  // 'staff' = full control (assign agents, live session, preview).
-  permissionTier: text('permission_tier').notNull().default('app_user'),
+  // Assigned widget role key (column name retained for stability). A user's
+  // effective widget permissions are resolved from the project role map
+  // (widget_role_permissions) using this key — see resolveWidgetPermissions.
+  // Built-in roles: 'logged_in' (default baseline) and the seeded 'staff'
+  // (elevated). Custom role keys are also valid.
+  permissionTier: text('permission_tier').notNull().default('logged_in'),
   // Captured from the JWT `email` claim (app path) or users.email (runhq path)
   // when available; null when the issuer doesn't provide it.
   email: text('email'),

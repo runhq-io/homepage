@@ -6438,6 +6438,11 @@ export function createHttpApp() {
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Board visibility is a widget permission (`view_tickets`). A role without
+    // it sees an empty board — kept as a 200 empty list (not a 403) so the
+    // widget UI degrades gracefully. Default roles grant it, so this is a no-op
+    // for uncustomized projects.
+    if (!auth.permissions.has('view_tickets')) return c.json([]);
     const result = await WidgetService.listTickets(auth.projectId, auth.widgetUserId);
     return c.json(result);
   });
@@ -6559,6 +6564,7 @@ export function createHttpApp() {
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('ticket_creator')) return c.json({ error: 'ticket_creator_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
     if (limited) return limited;
     try {
@@ -6825,6 +6831,7 @@ export function createHttpApp() {
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('voter')) return c.json({ error: 'voter_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
     if (limited) return limited;
     try {
@@ -6839,6 +6846,7 @@ export function createHttpApp() {
   app.delete('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('voter')) return c.json({ error: 'voter_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
     if (limited) return limited;
     try {
@@ -7357,16 +7365,19 @@ export function createHttpApp() {
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const memberId = c.req.param('memberId');
+    // `permissionTier` is the wire field name (retained for stability); its
+    // value is now a widget role key validated against the project's roles.
     const { serverId, projectId, permissionTier } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const lookup = parseWidgetLookup(projectId);
     if (!lookup) return c.json({ error: 'projectId required' }, 400);
-    if (!WidgetService.isWidgetPermissionTier(permissionTier)) {
-      return c.json({ error: 'invalid permissionTier' }, 400);
+    if (typeof permissionTier !== 'string' || !permissionTier) {
+      return c.json({ error: 'role required' }, 400);
     }
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const result = await WidgetService.updateWidgetMemberTier(serverId, lookup, memberId, permissionTier);
+    const result = await WidgetService.updateWidgetMemberRole(serverId, lookup, memberId, permissionTier);
     if (result === 'no_project') return c.json({ error: 'widget not found' }, 404);
+    if (result === 'invalid_role') return c.json({ error: 'invalid role' }, 400);
     if (result === 'not_found') return c.json({ error: 'member not found' }, 404);
     return c.json({ success: true });
   });
