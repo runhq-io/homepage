@@ -1772,7 +1772,19 @@ export async function ingestTurnEvents(
       // "Assigned to …" (live repro 2026-06-07).
       if (turnDone && current.createdTaskId
         && (current.pendingTurnId === null || current.pendingTurnId === input.turnId)) {
-        updates.status = 'closed';
+        // ...UNLESS the conversation still holds an unresolved proposal. A
+        // multi-ticket intake (visitor asks the agent to file several tickets in
+        // one thread) files ticket #1, then the post-create turn proposes ticket
+        // #2 rather than a plain wrap-up. Closing here would orphan that fresh
+        // proposal: the [Create Ticket] card stays rendered but the conversation
+        // is closed, so acting on it fails — conversation_closed for the visitor,
+        // conversation_not_found for a staff member who opens the Live session
+        // (it reuses this same conversation, which they don't own). Stay open
+        // until every proposal is resolved; the next resolving turn closes it.
+        const pending = computePendingProposal(await loadAllMessages(input.conversationId));
+        if (!pending || !('noAction' in pending.resolution)) {
+          updates.status = 'closed';
+        }
       }
       await db
         .update(widgetChatConversations)
