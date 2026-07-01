@@ -104,225 +104,139 @@ afterAll(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Creates a widget task in 'in_progress' state belonging to WIDGET_USER_ID. */
+/** Creates a widget task belonging to WIDGET_USER_ID (default status 'planned'). */
 async function insertWidgetTask(overrides: {
   status?: string;
   sourceType?: 'widget' | 'workspace';
-  upvoteCount?: number;
 } = {}): Promise<string> {
   const [task] = await db.insert(workspaceTasks).values({
     serverId: SERVER_ID,
     workspaceChannelId: CHANNEL_ID,
     title: `Test Task ${randomBytes(4).toString('hex')}`,
-    status: (overrides.status ?? 'in_progress') as any,
+    status: (overrides.status ?? 'planned') as any,
     sourceType: overrides.sourceType ?? 'widget',
     createdByType: overrides.sourceType === 'workspace' ? 'member' : 'external',
     createdById: overrides.sourceType === 'workspace' ? null : WIDGET_USER_ID,
     createdByName: 'Widget Alice',
     visibility: 'public',
-    upvoteCount: overrides.upvoteCount ?? 0,
   }).returning({ id: workspaceTasks.id });
   return task!.id;
+}
+
+/** Creates an additional widget user in the project (usable as an external voter). */
+async function createWidgetUser(label: string): Promise<string> {
+  const [wu] = await db.insert(widgetUsers).values({
+    projectId: PROJECT_ID,
+    externalUserId: `ext-${label}-${randomBytes(3).toString('hex')}`,
+    name: label,
+  }).returning({ id: widgetUsers.id });
+  return wu!.id;
+}
+
+/** Records an external up-vote by widgetUserId on the task. */
+async function addExternalVote(taskId: string, widgetUserId: string): Promise<void> {
+  await db.insert(workspaceTaskVotes).values({
+    serverId: SERVER_ID,
+    taskId,
+    voterId: widgetUserId,
+    voterType: 'external',
+    value: true,
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('status update triggers community awarding', () => {
-  it('awards points when a widget ticket transitions to done', async () => {
-    const taskId = await insertWidgetTask({ status: 'in_progress' });
+describe('status update triggers community step-coin awarding', () => {
+  it('grants creator + external voter 1 coin per crossed tier', async () => {
+    const taskId = await insertWidgetTask({ status: 'planned' });
+    const voterId = await createWidgetUser('Voter');
+    await addExternalVote(taskId, voterId);
 
-    const updated = await updateTask(SERVER_ID, taskId, { status: 'done' });
-    expect(updated.task).not.toBeNull();
-    expect(updated.task!.status).toBe('done');
+    const updated = await updateTask(SERVER_ID, taskId, { status: 'reviewed' });
+    expect(updated.task!.status).toBe('reviewed');
 
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
+    // 2 crossed tiers (in_progress, reviewed) x 2 recipients (creator, voter) = 4
+    expect(grants).toHaveLength(4);
+    expect(grants.every((g) => g.source === 'step_advance' && g.amount === 1)).toBe(true);
 
-    expect(grants).toHaveLength(1);
-    expect(grants[0]!.amount).toBe(10); // BASE_PAYOUT=10, 0 non-self upvotes
-    expect(grants[0]!.source).toBe('auto_completion');
-    expect(grants[0]!.widgetUserId).toBe(WIDGET_USER_ID);
-    expect(grants[0]!.projectId).toBe(PROJECT_ID);
+    const creatorGrants = grants.filter((g) => g.widgetUserId === WIDGET_USER_ID);
+    const voterGrants = grants.filter((g) => g.widgetUserId === voterId);
+    expect(creatorGrants).toHaveLength(2);
+    expect(voterGrants).toHaveLength(2);
+    expect(creatorGrants.every((g) => g.reasonCode === 'creator_step')).toBe(true);
+    expect(voterGrants.every((g) => g.reasonCode === 'voter_step')).toBe(true);
   });
 
-  it('awards points when a widget ticket transitions to deployed', async () => {
-    const taskId = await insertWidgetTask({ status: 'needs_review' });
-
-    await updateTask(SERVER_ID, taskId, { status: 'deployed' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
-    expect(grants).toHaveLength(1);
-    expect(grants[0]!.source).toBe('auto_completion');
-  });
-
-  it('awards 10 base + non-self upvotes (excludes self-upvote)', async () => {
-    const taskId = await insertWidgetTask({ status: 'in_progress', upvoteCount: 3 });
-
-    // Insert the creator self-vote (voterType='external', voterId=WIDGET_USER_ID)
-    await db.insert(workspaceTaskVotes).values({
-      serverId: SERVER_ID,
-      taskId,
-      voterId: WIDGET_USER_ID,
-      voterType: 'external',
-      value: true,
-    });
-
+  it('treats a jump to done as crossing in_progress + reviewed', async () => {
+    const taskId = await insertWidgetTask({ status: 'planned' });
     await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
-    expect(grants).toHaveLength(1);
-    // 3 upvotes, 1 is self → 2 non-self upvotes → 10 + 2 = 12
-    expect(grants[0]!.amount).toBe(12);
-  });
-
-  it('awards 10 base + all upvotes when no self-upvote', async () => {
-    const taskId = await insertWidgetTask({ status: 'in_progress', upvoteCount: 2 });
-
-    // No self-vote, so all 2 upvotes are non-self
-    await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
-    expect(grants).toHaveLength(1);
-    expect(grants[0]!.amount).toBe(12); // 10 + 2
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
+    expect(grants).toHaveLength(2); // creator only, tiers in_progress + reviewed
   });
 
   it('does NOT award on a native (workspace) ticket', async () => {
-    const taskId = await insertWidgetTask({ status: 'in_progress', sourceType: 'workspace' });
-
-    await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
-    expect(grants).toHaveLength(0);
-  });
-
-  it('does NOT award when transitioning between non-terminal statuses', async () => {
-    const taskId = await insertWidgetTask({ status: 'pending' });
-
-    await updateTask(SERVER_ID, taskId, { status: 'in_progress' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
+    const taskId = await insertWidgetTask({ status: 'planned', sourceType: 'workspace' });
+    await updateTask(SERVER_ID, taskId, { status: 'deployed' });
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
     expect(grants).toHaveLength(0);
   });
 
   it('does NOT award when status does not change (no-op update)', async () => {
     const taskId = await insertWidgetTask({ status: 'in_progress' });
-
-    // Update some other field without changing status
     await updateTask(SERVER_ID, taskId, { title: 'New title' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
     expect(grants).toHaveLength(0);
   });
 
-  it('does NOT re-award when status flaps done → in_progress → done (idempotency)', async () => {
-    const taskId = await insertWidgetTask({ status: 'in_progress' });
-
-    // First completion
-    await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    // Regression back to in_progress
+  it('does NOT award on a backward transition', async () => {
+    const taskId = await insertWidgetTask({ status: 'merged' });
     await updateTask(SERVER_ID, taskId, { status: 'in_progress' });
-
-    // Second completion — should NOT trigger a second award due to idempotency key
-    await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
-    // Exactly one grant: the first completion
-    expect(grants).toHaveLength(1);
-    expect(grants[0]!.amount).toBe(10);
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
+    expect(grants).toHaveLength(0);
   });
 
-  it('does NOT re-award for done → deployed transition (old status already terminal)', async () => {
-    const taskId = await insertWidgetTask({ status: 'in_progress' });
-
-    // Transition to done (first terminal-success)
-    await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    // Transition done → deployed — old status is already terminal, so no second award
-    await updateTask(SERVER_ID, taskId, { status: 'deployed' });
-
-    const grants = await db
-      .select()
-      .from(pointGrants)
-      .where(eq(pointGrants.ticketId, taskId));
-
-    expect(grants).toHaveLength(1);
+  it('does NOT re-award a tier when status flaps (idempotency)', async () => {
+    const taskId = await insertWidgetTask({ status: 'planned' });
+    await updateTask(SERVER_ID, taskId, { status: 'merged' });   // in_progress, reviewed, merged
+    await updateTask(SERVER_ID, taskId, { status: 'planned' });  // backward — nothing
+    await updateTask(SERVER_ID, taskId, { status: 'merged' });   // re-cross — idempotent
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
+    // Exactly the 3 distinct tiers, once each (creator only)
+    expect(grants).toHaveLength(3);
   });
 
-  it('does NOT block the status update when awarding throws', async () => {
-    // Create a widget task that lacks a valid externalUserId resolution:
-    // Use a WIDGET_USER_ID that doesn't resolve through widgetUsers by directly
-    // inserting a task with a non-existent createdById. The awarding service
-    // will find no widgetUser and return { applied: false } — not throw.
-    // To test the catch path, we use a task whose createdById is a valid UUID
-    // but points to a widgetUser in a different project (so the award silently no-ops).
-    // The actual catch-and-swallow path is exercised implicitly by the fact that
-    // the function always returns the updated task regardless.
-    const taskId = await insertWidgetTask({ status: 'in_progress' });
-
-    const result = await updateTask(SERVER_ID, taskId, { status: 'done' });
-
-    // The status update must have succeeded regardless
-    expect(result.task).not.toBeNull();
-    expect(result.task!.status).toBe('done');
+  it('awards each further tier exactly once as the ticket advances step by step', async () => {
+    const taskId = await insertWidgetTask({ status: 'planned' });
+    await updateTask(SERVER_ID, taskId, { status: 'in_progress' }); // +1
+    await updateTask(SERVER_ID, taskId, { status: 'reviewed' });    // +1
+    await updateTask(SERVER_ID, taskId, { status: 'merged' });      // +1
+    await updateTask(SERVER_ID, taskId, { status: 'deployed' });    // +1
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
+    expect(grants).toHaveLength(4); // creator, one per tier, no duplicates
   });
 
-  it('updates workspace_task.status even if awarding finds no widgetUser for the creator', async () => {
-    // Insert a widget task with a non-existent createdById UUID to force
-    // the award to short-circuit (no widget user found).
+  it('updates workspace_task.status even if the creator link is missing (best-effort)', async () => {
     const fakeWidgetUserId = '00000000-dead-4000-beef-000000000000';
     const [task] = await db.insert(workspaceTasks).values({
       serverId: SERVER_ID,
       workspaceChannelId: CHANNEL_ID,
       title: `Orphan Task ${RUN_HEX}`,
-      status: 'in_progress',
+      status: 'planned',
       sourceType: 'widget',
       createdByType: 'external',
       createdById: fakeWidgetUserId, // no matching widgetUsers row
       visibility: 'public',
-      upvoteCount: 0,
     }).returning({ id: workspaceTasks.id });
     const taskId = task!.id;
 
-    // Should not throw; awarding silently no-ops
-    const result = await updateTask(SERVER_ID, taskId, { status: 'done' });
-
+    const result = await updateTask(SERVER_ID, taskId, { status: 'deployed' });
     expect(result.task).not.toBeNull();
-    expect(result.task!.status).toBe('done');
+    expect(result.task!.status).toBe('deployed');
 
-    // No grant inserted because widgetUser resolution failed
+    // No creator recipient and no voters → no grants, but the status write succeeded.
     const grants = await db.select().from(pointGrants).where(eq(pointGrants.ticketId, taskId));
     expect(grants).toHaveLength(0);
   });

@@ -672,94 +672,66 @@ export async function updateTask(
 }
 
 /**
- * Resolves the data needed by CommunityPointsService.awardForCompletion and calls it.
+ * Resolves the data needed by CommunityPointsService.awardForStepAdvance and calls it.
  *
- * sourceType mapping: 'workspace' (DB) → 'native' (policy); 'widget' (DB) → 'widget' (policy).
+ * Community step-coins: the ticket creator and every external up-voter earn coin
+ * for each lifecycle tier this transition crosses. Widget-source tickets only.
  *
- * externalUserId resolution: for widget tasks, workspace_tasks.createdById holds a
- * widgetUsers.id UUID. We JOIN through widgetUsers to get externalUserId (the JWT sub).
+ * sourceType mapping: 'workspace' (DB) → 'native' (policy); 'widget' (DB) → 'widget'.
  *
- * projectId resolution: workspace_tasks has no direct widgetProjectId. We look up
- * widgetProjects by (serverId, channelId) matching the task. If a server has multiple
- * widget projects, we pick the one whose channelId matches the task's workspaceChannelId;
- * if no channelId filter is set on the project, fall back to any project on the server.
+ * creatorWidgetUserId: for widget tasks, workspace_tasks.createdById holds a
+ * widgetUsers.id UUID directly — passed through as the creator recipient.
  *
- * selfUpvoted: true if a workspace_task_vote row exists where voterId = task.createdById
- * and voterType = 'external' (i.e. the widget-user creator voted for their own ticket).
- *
- * upvoteCountAtTransition: taken directly from the post-update row.upvoteCount, which is
- * kept current by recountTaskUpvotes after every vote change.
+ * projectId resolution: workspace_tasks has no direct widgetProjectId. We resolve it
+ * from the creator's widgetUsers.projectId, falling back to widgetProjects by
+ * (serverId, channelId) for legacy tasks whose createdById no longer links a widget user.
  */
 async function triggerCommunityAwarding(
   row: WorkspaceTask,
   oldStatus: string,
   newStatus: string,
 ): Promise<void> {
-  // Map DB sourceType → policy sourceType
   const sourceType: 'native' | 'widget' = row.sourceType === 'widget' ? 'widget' : 'native';
+  if (sourceType !== 'widget') return;
 
-  // Resolve externalUserId and projectId for widget tasks
-  let externalUserId: string | null = null;
   let projectId: string | null = null;
+  let creatorWidgetUserId: string | null = null;
 
-  if (sourceType === 'widget' && row.createdById) {
+  if (row.createdById) {
     // createdById for widget tasks is the widgetUsers.id UUID
     const [widgetUser] = await db
-      .select({
-        externalUserId: widgetUsers.externalUserId,
-        projectId: widgetUsers.projectId,
-      })
+      .select({ id: widgetUsers.id, projectId: widgetUsers.projectId })
       .from(widgetUsers)
       .where(eq(widgetUsers.id, row.createdById))
       .limit(1);
-
     if (widgetUser) {
-      externalUserId = widgetUser.externalUserId;
+      creatorWidgetUserId = widgetUser.id;
       projectId = widgetUser.projectId;
     }
+  }
 
-    // If we couldn't resolve via widgetUsers (e.g. legacy task), fall back to
-    // looking up widgetProjects by serverId + channelId.
-    if (!projectId) {
-      const conditions = [eq(widgetProjects.serverId, row.serverId)];
-      if (row.workspaceChannelId) {
-        conditions.push(eq(widgetProjects.channelId, row.workspaceChannelId));
-      }
-      const [project] = await db
-        .select({ id: widgetProjects.id })
-        .from(widgetProjects)
-        .where(and(...conditions))
-        .limit(1);
-      projectId = project?.id ?? null;
+  // Fallback: derive project from serverId (+ channelId) when the creator link is missing.
+  if (!projectId) {
+    const conditions = [eq(widgetProjects.serverId, row.serverId)];
+    if (row.workspaceChannelId) {
+      conditions.push(eq(widgetProjects.channelId, row.workspaceChannelId));
     }
-  }
-
-  // Determine if the creator self-upvoted (only meaningful for widget tasks)
-  let selfUpvoted = false;
-  if (sourceType === 'widget' && row.createdById) {
-    const [selfVote] = await db
-      .select({ id: workspaceTaskVotes.id })
-      .from(workspaceTaskVotes)
-      .where(and(
-        eq(workspaceTaskVotes.taskId, row.id),
-        eq(workspaceTaskVotes.voterId, row.createdById),
-        eq(workspaceTaskVotes.voterType, 'external'),
-        eq(workspaceTaskVotes.value, true),
-      ))
+    const [project] = await db
+      .select({ id: widgetProjects.id })
+      .from(widgetProjects)
+      .where(and(...conditions))
       .limit(1);
-    selfUpvoted = !!selfVote;
+    projectId = project?.id ?? null;
   }
+  if (!projectId) return;
 
-  await communityPointsService.awardForCompletion({
+  await communityPointsService.awardForStepAdvance({
     ticketId: row.id,
-    projectId: projectId ?? '',
+    projectId,
     sourceType,
-    externalUserId,
-    oldStatus: oldStatus as Parameters<typeof communityPointsService.awardForCompletion>[0]['oldStatus'],
-    newStatus: newStatus as Parameters<typeof communityPointsService.awardForCompletion>[0]['newStatus'],
-    upvoteCountAtTransition: row.upvoteCount,
-    selfUpvoted,
-    occurredAt: new Date().toISOString(),
+    creatorWidgetUserId,
+    oldStatus,
+    newStatus,
   });
 }
 
