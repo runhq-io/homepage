@@ -953,6 +953,12 @@ export async function createTicketFromChat(
   creatorCanAssign = true,
 ): Promise<{ ticketId: string }> {
   const fresh = await requireWritableConversation(conversationId, projectId, widgetUserId);
+  // Hard cap: one ticket per conversation. Mirrors submitTicketFromConversation.
+  // The ingest layer also drops any post-ticket proposal so this card can't even
+  // be offered — this guard is the belt-and-suspenders for a direct API call.
+  if (fresh.createdTaskId) {
+    throw new WidgetService.WidgetError('ticket_already_created', 409);
+  }
   await requirePendingProposal(conversationId);
 
   const title = (draft.title ?? '').trim();
@@ -1631,6 +1637,13 @@ export async function ingestTurnEvents(
   let insertedReply = false; // an agent/team message (a live-session "reply")
   let turnDone = false;
   let turnError = false;
+  // One ticket per conversation: once this conversation has produced a ticket,
+  // any further proposal the agent emits is dropped (the first one is swapped
+  // for a single explanatory notice). Enforced here so the cap never depends on
+  // the model choosing to stop — createdTaskId is set the moment ticket #1 is
+  // filed (createTicketFromChat), before any post-create turn is ingested.
+  const alreadyTicketed = found.conversation.createdTaskId != null;
+  let ticketLimitNoticed = false;
 
   for (const ev of events) {
     if (!Number.isInteger(ev.seq) || ev.seq < 0) continue;
@@ -1668,12 +1681,30 @@ export async function ingestTurnEvents(
         break;
       }
       case 'proposal': {
-        if (typeof ev.title === 'string' && typeof ev.description === 'string' && typeof ev.toolUseId === 'string') {
-          row = {
-            role: 'event', content: '',
-            payload: { kind: 'proposal', title: ev.title, description: ev.description, toolUseId: ev.toolUseId },
-          };
+        if (typeof ev.title !== 'string' || typeof ev.description !== 'string' || typeof ev.toolUseId !== 'string') {
+          break;
         }
+        // One-ticket cap: this conversation already produced a ticket, so this
+        // proposal is refused. Swap the FIRST refused proposal for a single
+        // notice (so the thread explains the dead end instead of the agent's
+        // "now for the next one" dangling), and drop any further ones silently.
+        if (alreadyTicketed) {
+          if (!ticketLimitNoticed) {
+            ticketLimitNoticed = true;
+            row = {
+              role: 'event', content: '',
+              payload: {
+                kind: 'system_notice', code: 'ticket_limit',
+                text: 'You can file one ticket per conversation. Start a new conversation to add another.',
+              },
+            };
+          }
+          break;
+        }
+        row = {
+          role: 'event', content: '',
+          payload: { kind: 'proposal', title: ev.title, description: ev.description, toolUseId: ev.toolUseId },
+        };
         break;
       }
       case 'ticket_link': {
@@ -1801,21 +1832,12 @@ export async function ingestTurnEvents(
       // widget's closed-watch kill the SSE transport before the post-create
       // turn's assigned/wrap-up rows arrived, so the user never saw
       // "Assigned to …" (live repro 2026-06-07).
+      // One ticket per conversation: once it produced a ticket, the wrap-up
+      // turn's turn_done closes it. Any post-ticket proposal is dropped at
+      // ingest (below), so there is never an unresolved proposal to preserve.
       if (turnDone && current.createdTaskId
         && (current.pendingTurnId === null || current.pendingTurnId === input.turnId)) {
-        // ...UNLESS the conversation still holds an unresolved proposal. A
-        // multi-ticket intake (visitor asks the agent to file several tickets in
-        // one thread) files ticket #1, then the post-create turn proposes ticket
-        // #2 rather than a plain wrap-up. Closing here would orphan that fresh
-        // proposal: the [Create Ticket] card stays rendered but the conversation
-        // is closed, so acting on it fails — conversation_closed for the visitor,
-        // conversation_not_found for a staff member who opens the Live session
-        // (it reuses this same conversation, which they don't own). Stay open
-        // until every proposal is resolved; the next resolving turn closes it.
-        const pending = computePendingProposal(await loadAllMessages(input.conversationId));
-        if (!pending || !('noAction' in pending.resolution)) {
-          updates.status = 'closed';
-        }
+        updates.status = 'closed';
       }
       await db
         .update(widgetChatConversations)
