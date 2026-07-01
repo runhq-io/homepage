@@ -869,6 +869,107 @@ function readCookie(req: HonoRequest, name: string): string | null {
  *   2. Raw API key         — Authorization: Bearer rw_xxx (no dot)
  *   3. Signed JWT          — Authorization: Bearer {payload}.{signature}
  */
+/**
+ * Verify a signed widget-user JWT outside a Hono request context (WebSocket auth).
+ *
+ * Mirrors authenticateWidget's Mode-3 (signed app JWT) path: validates the
+ * token against the project's secret, upserts the widget_user under
+ * auth_source='app', and (throttled) refreshes last_active_at. Returns only the
+ * identity the WS layer needs (widgetUserId + projectId), or null for any
+ * invalid/expired token or disabled project. Anonymous / API-key sessions carry
+ * no user identity and cannot authenticate over WS.
+ */
+export async function verifyWidgetUserJwt(
+  token: string,
+): Promise<{ widgetUserId: string; projectId: string } | null> {
+  const decoded = decodeJwtPayload(token);
+  if (!decoded || typeof decoded.fp !== 'string') return null;
+
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      enabled: widgetProjects.enabled,
+      apiSecretHash: widgetProjects.apiSecretHash,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.apiKey, decoded.fp))
+    .limit(1);
+  if (!project || !project.enabled) return null;
+
+  let payload: jose.JWTPayload;
+  try {
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
+      algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
+    });
+    if (verified.type !== 'widget_user') return null;
+    payload = verified;
+  } catch {
+    return null;
+  }
+
+  const sub =
+    typeof payload.sub === 'string' && payload.sub
+      ? payload.sub
+      : typeof payload.sub === 'number' && Number.isFinite(payload.sub)
+        ? String(payload.sub)
+        : undefined;
+  if (!sub) return null;
+
+  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
+  const metadata = extractWidgetMetadata(payload, project.widgetRoleClaimName);
+  const nowMs = Date.now();
+
+  const [existing] = await db
+    .select({
+      id: widgetUsers.id,
+      name: widgetUsers.name,
+      email: widgetUsers.email,
+      lastActiveAt: widgetUsers.lastActiveAt,
+      metadata: widgetUsers.metadata,
+    })
+    .from(widgetUsers)
+    .where(
+      and(
+        eq(widgetUsers.projectId, project.id),
+        eq(widgetUsers.externalUserId, sub),
+        eq(widgetUsers.authSource, 'app'),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    // Only write when something actually changed — keeps the common re-auth read-only.
+    const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+    if (name && name !== existing.name) patch.name = name;
+    if (email && email !== existing.email) patch.email = email;
+    if (metadata && !sameJson(metadata, existing.metadata)) patch.metadata = metadata;
+    if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+    if (Object.keys(patch).length > 0) {
+      await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+    }
+    return { widgetUserId: existing.id, projectId: project.id };
+  }
+
+  const [inserted] = await db
+    .insert(widgetUsers)
+    .values({
+      projectId: project.id,
+      externalUserId: sub,
+      authSource: 'app',
+      name,
+      email,
+      metadata: metadata ?? undefined,
+      lastActiveAt: new Date(nowMs),
+    })
+    .returning({ id: widgetUsers.id });
+  return { widgetUserId: inserted.id, projectId: project.id };
+}
+
 export async function authenticateWidget(
   req: HonoRequest
 ): Promise<WidgetAuthResult | null> {

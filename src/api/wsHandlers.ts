@@ -64,13 +64,17 @@ import type {
   TaskRemoteInputRelayMessage,
   TaskFileRequestRelayMessage,
   TaskFileWriteRelayMessage,
+  SubscribeCommunityMessage,
+  SubscribeCommunityWidgetUserMessage,
+  CommunitySubscribedMessage,
+  CommunityWidgetUserSubscribedMessage,
 } from '@runhq/server-protocol';
 import * as AgentService from './services/AgentService';
 import * as TaskService from './services/TaskService';
 import * as OrganizationService from './services/OrganizationService';
 import * as ServerService from './services/ServerService';
 import { db } from '../db/index';
-import { users, notifications } from '../db/schema';
+import { users, widgetProjects, notifications } from '../db/schema';
 import { eq, and, isNull } from 'drizzle-orm';
 import { broadcastToUser } from '../notifications/wsBroadcast';
 import { wsServer as getWsServer } from '../notifications/wsRegistry';
@@ -1338,5 +1342,100 @@ export function registerWsHandlers(wsServer: RunHQWebSocketServer): void {
     } catch (error) {
       console.error(`[Servers] Failed to get pending invites:`, error);
     }
+  });
+
+  // ============================================================================
+  // Community WebSocket subscribe handlers
+  // ============================================================================
+
+  /**
+   * Subscribe a RunHQ staff user to the full community leaderboard for a
+   * widget project.  The caller must be a server admin (owner or is_admin)
+   * on the server that owns the project — same gate as the REST community
+   * endpoints in HttpServer.ts (`requireProjectAdmin`).
+   *
+   * Topic written to: `community:{projectId}`
+   */
+  wsServer.onMessage('subscribe_community', async (client, message) => {
+    const request = message as SubscribeCommunityMessage;
+    console.log(`[Community] Subscribe community request from ${client.sessionId}:`, request.projectId);
+
+    let success = false;
+    let error: string | undefined;
+
+    try {
+      // Must be a logged-in RunHQ user (not a widget session).
+      if (client.kind !== 'user' || !client.userId) {
+        error = 'forbidden';
+      } else {
+        const [project] = await db
+          .select({ id: widgetProjects.id, serverId: widgetProjects.serverId })
+          .from(widgetProjects)
+          .where(eq(widgetProjects.id, request.projectId))
+          .limit(1);
+
+        if (!project) {
+          error = 'project not found';
+        } else {
+          const isAdmin = await ServerService.checkCloudOpPermission(project.serverId, client.userId);
+          if (!isAdmin) {
+            error = 'forbidden';
+          } else {
+            wsServer.subscribeToTopic(client.sessionId, `community:${request.projectId}`);
+            success = true;
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[Community] Failed to subscribe to community topic:`, err);
+      error = err instanceof Error ? err.message : 'Unknown error';
+    }
+
+    const response: CommunitySubscribedMessage = {
+      type: 'community_subscribed',
+      projectId: request.projectId,
+      success,
+      error,
+      timestamp: Date.now(),
+    };
+    wsServer.send(client, response);
+  });
+
+  /**
+   * Subscribe a widget user to their personal community notification topic.
+   * The WS connection must have been authenticated via `auth_widget` (kind ===
+   * 'widget') and the requested widgetUserId must match the session's own ID —
+   * a widget user may only receive their own notifications.
+   *
+   * Topic written to: `community:widget_user:{widgetUserId}`
+   */
+  wsServer.onMessage('subscribe_community_widget_user', async (client, message) => {
+    const request = message as SubscribeCommunityWidgetUserMessage;
+    console.log(`[Community] Subscribe widget-user topic request from ${client.sessionId}:`, request.widgetUserId);
+
+    let success = false;
+    let error: string | undefined;
+
+    try {
+      // Must be a widget session that owns the requested widgetUserId.
+      if (client.kind !== 'widget' || client.widgetUserId !== request.widgetUserId) {
+        error = 'forbidden';
+      } else {
+        wsServer.subscribeToTopic(client.sessionId, `community:widget_user:${request.widgetUserId}`);
+        success = true;
+      }
+    } catch (err) {
+      console.error(`[Community] Failed to subscribe to widget-user topic:`, err);
+      error = err instanceof Error ? err.message : 'Unknown error';
+    }
+
+    const response: CommunityWidgetUserSubscribedMessage = {
+      type: 'community_widget_user_subscribed',
+      widgetUserId: request.widgetUserId,
+      success,
+      error,
+      timestamp: Date.now(),
+    };
+    wsServer.send(client, response);
   });
 }

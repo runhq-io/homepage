@@ -42,6 +42,10 @@
   var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
   var assignedTicketsCache = null; // /api/widget/tickets/assigned — live sessions the viewer assigned
+  // Community coin: the viewer's running total + per-post earnings, from
+  // /api/widget/me/community. Drives the header coin badge, the per-card "+N 🪙"
+  // chip, and its hover "why" tooltip. Refreshed on every panel open/refresh.
+  var communityStats = { balance: 0, coinByTicket: {} };
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
   // Current authenticated user info, populated after auth via /api/widget/me.
@@ -274,6 +278,7 @@
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
   function loadAssignedTickets()  { return api("/api/widget/tickets/assigned"); }
+  function loadCommunityStats()   { return api("/api/widget/me/community"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
     // Capture the project's deploy-env map from any detail load so status chips
     // resolve "deployed:<envId>" → "Deployed → <name>" even on the public page
@@ -2707,6 +2712,32 @@
       '  flex: 0 0 auto;',
       '}',
 
+      /* Community coin — blatant header total + per-post earned chip + why tooltip. */
+      '.rw-coin-total {',
+      '  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;',
+      '  padding: 4px 10px; border-radius: 999px; white-space: nowrap;',
+      '  background: color-mix(in srgb, var(--rw-accent) 14%, transparent);',
+      '  color: var(--rw-accent); font-weight: 700; font-size: 13px;',
+      '}',
+      '.rw-coin-glyph { font-size: 13px; line-height: 1; }',
+      '.rw-coin-chip {',
+      '  position: relative; align-self: flex-start;',
+      '  display: inline-flex; align-items: center; gap: 4px;',
+      '  margin-top: 8px; padding: 2px 8px; border-radius: 999px;',
+      '  background: color-mix(in srgb, var(--rw-accent) 12%, transparent);',
+      '  color: var(--rw-accent); font-weight: 600; font-size: 12px; cursor: default;',
+      '}',
+      '.rw-coin-tip {',
+      '  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;',
+      '  width: max-content; max-width: 260px; padding: 8px 10px; border-radius: 8px;',
+      '  background: var(--rw-fg); color: var(--rw-bg); text-align: left;',
+      '  font-size: 12px; font-weight: 500; line-height: 1.4;',
+      '  box-shadow: 0 6px 20px rgba(0,0,0,0.25); white-space: normal; pointer-events: none;',
+      '}',
+      '.rw-coin-tip-head { display: block; font-weight: 700; margin-bottom: 4px; }',
+      '.rw-coin-tip ul { margin: 0; padding-left: 16px; }',
+      '.rw-coin-tip li { margin: 2px 0; }',
+
       /* header */
       '.rw-hdr {',
       '  display: flex; align-items: center; justify-content: space-between;',
@@ -4275,6 +4306,55 @@
   // Ticket card
   // ===========================================================================
 
+  // Compact number for the coin total (e.g. 1234 → "1,234"). Coin accrues one
+  // per lifecycle step, so totals stay small — a thousands separator is plenty.
+  function formatCoin(n) {
+    try { return Number(n).toLocaleString(); } catch (e) { return String(n); }
+  }
+
+  // Header coin total — blatantly displayed in the list topbar. Null (hidden)
+  // until the viewer has earned something, so a zero balance stays clean.
+  function renderCoinTotalBadge() {
+    if (!communityStats || !communityStats.balance) return null;
+    var label = "You've earned " + formatCoin(communityStats.balance) + " coin from feedback you submitted or upvoted";
+    return h("span", {
+      className: "rw-coin-total", title: label, "aria-label": label,
+    }, [
+      h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
+      h("span", null, formatCoin(communityStats.balance)),
+    ]);
+  }
+
+  // Per-post "+N 🪙" chip with a hover tooltip explaining why the viewer earned
+  // it (e.g. "you upvoted this and it reached Merged"). `earned` is the
+  // coinByTicket[ticketId] entry: { coin, reasons }.
+  function renderCoinChip(earned) {
+    var reasons = (earned && earned.reasons) || [];
+    var chip = h("span", {
+      className: "rw-coin-chip",
+      "aria-label": "You earned " + earned.coin + " coin from this post. " + reasons.join(". "),
+    }, [
+      h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
+      h("span", null, "+" + earned.coin),
+    ]);
+    var tip = null;
+    function show() {
+      if (tip) return;
+      var items = reasons.length
+        ? reasons.map(function (r) { return h("li", null, r); })
+        : [h("li", null, "You helped this post make progress")];
+      tip = h("span", { className: "rw-coin-tip" }, [
+        h("span", { className: "rw-coin-tip-head" }, "Why you earned coin"),
+        h("ul", null, items),
+      ]);
+      chip.appendChild(tip);
+    }
+    function hide() { if (tip && tip.parentNode) { tip.parentNode.removeChild(tip); } tip = null; }
+    chip.addEventListener("mouseenter", show);
+    chip.addEventListener("mouseleave", hide);
+    return chip;
+  }
+
   function renderTicketCard(ticket, opts) {
     var hideStatus = !!(opts && opts.hideStatus);
     var voted = ticket.userVote === true;
@@ -4335,6 +4415,13 @@
       mainChildren.push(h("div", { className: "rw-dash-row-body" }, renderMarkdownText(ticket.description)));
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
+
+    // Per-post coin the viewer earned from this ticket ("if relevant" — only
+    // when they created/upvoted it and it advanced). Hover explains why.
+    var earned = communityStats.coinByTicket && communityStats.coinByTicket[ticket.id];
+    if (earned && earned.coin) {
+      mainChildren.push(renderCoinChip(earned));
+    }
 
     var row = h("button", {
       className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
@@ -5009,6 +5096,7 @@
         : t("home.greeting");
       scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [
         h("span", { className: "rw-list-title" }, boardTitle),
+        renderCoinTotalBadge(),
       ]));
 
       // Single full-width panel: tab bar (with [+ New post] on its right)
@@ -5067,8 +5155,20 @@
     var assignedP = (config.isIdentified && viewerCanLiveCoder())
       ? loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () { assignedTicketsCache = []; })
       : Promise.resolve().then(function () { assignedTicketsCache = []; });
+    // Community coin — only meaningful for an identified viewer (the endpoint
+    // 401s for anonymous project keys). Chained on topP so config.isIdentified
+    // is known. Best-effort: coin UI is non-critical and must never block the list.
+    var commP = topP.then(function () {
+      if (!config.isIdentified) { communityStats = { balance: 0, coinByTicket: {} }; return; }
+      return loadCommunityStats().then(function (data) {
+        communityStats = {
+          balance: (data && data.balance) || 0,
+          coinByTicket: (data && data.coinByTicket) || {},
+        };
+      });
+    }).catch(function () { communityStats = { balance: 0, coinByTicket: {} }; });
 
-    return Promise.all([topP, updP, mineP, assignedP]).then(function () {
+    return Promise.all([topP, updP, mineP, assignedP, commP]).then(function () {
       renderPanelBody();
       refreshTabLabel();
     }).catch(function (err) {

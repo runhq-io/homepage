@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, primaryKey, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
@@ -1457,8 +1457,15 @@ export const widgetUsers = pgTable('widget_users', {
   // admins can identify who a widget user actually is. Varies per project.
   metadata: jsonb('metadata').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  // Soft-delete tombstone for GDPR erasure (community feature). 'deleted' rows
+  // are excluded from leaderboard/member listings. Note: "last seen" lives in
+  // master's `lastActiveAt` above — the community feature reuses that, it does
+  // not maintain a separate column.
+  status: text('status').$type<'active' | 'deleted'>().notNull().default('active'),
 }, (t) => [
   { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
+  // widget_users_project_active_idx is a partial index (WHERE status = 'active')
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
 ]);
 
 // Mirror of workspace agent_entities rows (ALL agents, not just exposed ones).
@@ -1525,6 +1532,71 @@ export const widgetComments = pgTable('widget_comments', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+// Append-only point ledger — one row per award/reversal event.
+export const pointGrants = pgTable('point_grants', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  idempotencyKey: text('idempotency_key').notNull().unique(),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  amount: integer('amount').notNull(),
+  source: text('source').$type<'auto_completion' | 'admin_grant' | 'reversal' | 'backfill' | 'step_advance'>().notNull(),
+  reason: text('reason'),
+  reasonCode: text('reason_code'),
+  ticketId: uuid('ticket_id'),
+  // Self-reference: a reversal grant points back to the grant it cancels.
+  // The explicit (): AnyPgColumn cast breaks the circular-reference inference loop that TS cannot resolve.
+  reversesGrantId: uuid('reverses_grant_id').references((): AnyPgColumn => pointGrants.id),
+  grantedByUserId: uuid('granted_by_user_id'),
+  metadata: jsonb('metadata').notNull().default({}),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('point_grants_user_idx').on(t.projectId, t.widgetUserId),
+  createdIdx: index('point_grants_created_idx').on(t.createdAt.desc()),
+  // point_grants_ticket_idx is a partial index (WHERE ticket_id IS NOT NULL)
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
+}));
+
+// CQRS balance projection — maintained transactionally alongside point_grants.
+export const widgetUserBalances = pgTable('widget_user_balances', {
+  widgetUserId: uuid('widget_user_id').primaryKey().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  balance: integer('balance').notNull().default(0),
+  payoutsCount: integer('payouts_count').notNull().default(0),
+  lastPayoutAt: timestamp('last_payout_at'),
+  rank: integer('rank'),
+}, (t) => ({
+  rankIdx: index('widget_user_balances_rank_idx').on(t.projectId, t.rank),
+  balanceIdx: index('widget_user_balances_balance_idx').on(t.projectId, t.balance.desc()),
+}));
+
+// Generic notification primitive — used for point awards, rank changes, etc.
+export const widgetUserNotifications = pgTable('widget_user_notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(),
+  payload: jsonb('payload').notNull(),
+  readAt: timestamp('read_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('widget_user_notifications_user_idx').on(t.widgetUserId, t.createdAt.desc()),
+  // widget_user_notifications_unread_idx is a partial index (WHERE read_at IS NULL)
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
+}));
+
+// Community point-system types (WidgetProject / NewWidgetProject / WidgetUser
+// are defined below alongside master's WidgetChannel aliases — not duplicated here).
+export type NewWidgetUser = typeof widgetUsers.$inferInsert;
+
+export type PointGrant = typeof pointGrants.$inferSelect;
+export type NewPointGrant = typeof pointGrants.$inferInsert;
+
+export type WidgetUserBalance = typeof widgetUserBalances.$inferSelect;
+export type NewWidgetUserBalance = typeof widgetUserBalances.$inferInsert;
+
+export type WidgetUserNotification = typeof widgetUserNotifications.$inferSelect;
+export type NewWidgetUserNotification = typeof widgetUserNotifications.$inferInsert;
 
 // Clarification loop: one session per ticket, tracks the back-and-forth
 // between the widget user and the agent before the task is started.
