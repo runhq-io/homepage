@@ -45,7 +45,7 @@
   // Community coin: the viewer's running total + per-post earnings, from
   // /api/widget/me/community. Drives the header coin badge, the per-card "+N 🪙"
   // chip, and its hover "why" tooltip. Refreshed on every panel open/refresh.
-  var communityStats = { balance: 0, coinByTicket: {} };
+  var communityStats = { identified: false, balance: 0, coinByTicket: {} };
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
   // Current authenticated user info, populated after auth via /api/widget/me.
@@ -2719,6 +2719,11 @@
       '  background: color-mix(in srgb, var(--rw-accent) 14%, transparent);',
       '  color: var(--rw-accent); font-weight: 700; font-size: 13px;',
       '}',
+      /* Zero balance: present but quiet — discoverable, not shouty. */
+      '.rw-coin-total--zero {',
+      '  background: color-mix(in srgb, var(--rw-fg) 7%, transparent);',
+      '  color: color-mix(in srgb, var(--rw-fg) 55%, transparent); font-weight: 600;',
+      '}',
       '.rw-coin-glyph { font-size: 13px; line-height: 1; }',
       '.rw-coin-chip {',
       '  position: relative; align-self: flex-start;',
@@ -4312,16 +4317,22 @@
     try { return Number(n).toLocaleString(); } catch (e) { return String(n); }
   }
 
-  // Header coin total — blatantly displayed in the list topbar. Null (hidden)
-  // until the viewer has earned something, so a zero balance stays clean.
+  // Header coin total — ALWAYS shown for an identified viewer (blatant, per spec),
+  // even at zero, so the reward system is discoverable before the first coin. The
+  // tooltip explains how to earn while the balance is still 0. Hidden only for
+  // anonymous viewers, who have no community identity to score.
   function renderCoinTotalBadge() {
-    if (!communityStats || !communityStats.balance) return null;
-    var label = "You've earned " + formatCoin(communityStats.balance) + " coin from feedback you submitted or upvoted";
+    if (!communityStats || !communityStats.identified) return null;
+    var bal = communityStats.balance || 0;
+    var label = bal > 0
+      ? "You've earned " + formatCoin(bal) + " coin from feedback you submitted or upvoted"
+      : "Earn coin when feedback you submit or upvote moves forward";
     return h("span", {
-      className: "rw-coin-total", title: label, "aria-label": label,
+      className: "rw-coin-total" + (bal > 0 ? "" : " rw-coin-total--zero"),
+      title: label, "aria-label": label,
     }, [
       h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
-      h("span", null, formatCoin(communityStats.balance)),
+      h("span", null, formatCoin(bal)),
     ]);
   }
 
@@ -5159,14 +5170,15 @@
     // 401s for anonymous project keys). Chained on topP so config.isIdentified
     // is known. Best-effort: coin UI is non-critical and must never block the list.
     var commP = topP.then(function () {
-      if (!config.isIdentified) { communityStats = { balance: 0, coinByTicket: {} }; return; }
+      if (!config.isIdentified) { communityStats = { identified: false, balance: 0, coinByTicket: {} }; return; }
       return loadCommunityStats().then(function (data) {
         communityStats = {
+          identified: true,
           balance: (data && data.balance) || 0,
           coinByTicket: (data && data.coinByTicket) || {},
         };
-      });
-    }).catch(function () { communityStats = { balance: 0, coinByTicket: {} }; });
+      }).catch(function () { communityStats = { identified: true, balance: 0, coinByTicket: {} }; });
+    }).catch(function () { communityStats = { identified: false, balance: 0, coinByTicket: {} }; });
 
     return Promise.all([topP, updP, mineP, assignedP, commP]).then(function () {
       renderPanelBody();
