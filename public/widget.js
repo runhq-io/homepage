@@ -36,6 +36,13 @@
   var isOpen = false;
   var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
+  var boardSearchQuery = ""; // in-list ticket search (client-side, current tab); reset on tab switch
+  // References to the current board region so the search box + unread toggle can
+  // re-filter the list in place (keeping input focus) instead of rebuilding the
+  // whole panel on every keystroke.
+  var boardListEl = null;
+  var boardTab = null;
+  var boardAllItems = null;
   var theme = "light";
 
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
@@ -895,6 +902,7 @@
     chevRight: function (s) { return icon([{ d: "M9 6l6 6-6 6" }], s, 2); },
     chevLeft:  function (s) { return icon([{ d: "M15 6l-6 6 6 6" }], s, 2); },
     home:      function (s) { return icon([{ d: "M3 11l9-8 9 8" }, { d: "M5 9.5V21h14V9.5" }], s, 2); },
+    search:    function (s) { return icon([{ tag: "circle", cx: 11, cy: 11, r: 7 }, { d: "M21 21l-4.3-4.3" }], s, 2); },
   };
 
   // ===========================================================================
@@ -989,7 +997,7 @@
         back: "Back",
       },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions", approvals: "Pending approval" },
-      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now." },
+      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now.", searchPlaceholder: "Search tickets", clearSearch: "Clear search", noMatches: "No matching tickets", noMatchesHint: "Try a different search term." },
       approve: { approve: "Approve", reject: "Reject", detailNote: "This ticket is awaiting your approval." },
       notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)", markAllRead: "Mark all read" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
@@ -1228,7 +1236,7 @@
         back: "뒤로",
       },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역", approvals: "승인 대기" },
-      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다." },
+      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다.", searchPlaceholder: "티켓 검색", clearSearch: "검색 지우기", noMatches: "일치하는 티켓이 없습니다", noMatchesHint: "다른 검색어를 입력해 보세요." },
       approve: { approve: "승인", reject: "거절", detailNote: "이 티켓은 승인을 기다리고 있습니다." },
       notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건", markAllRead: "모두 읽음 처리" },
       status: {
@@ -2688,9 +2696,22 @@
       // into the button background — give it an alert red + white ring so it
       // reads as an unread indicator regardless of theme.
       '.rw-staff-btn--primary .rw-unseen-dot { background: #ef4444; box-shadow: 0 0 0 1.5px rgba(255,255,255,0.85); }',
+      /* Board toolbar — search field (left, grows) + "Unread only" chip (right).
+         Pinned between the tab row and the scrolling list. Shares the tab/list
+         left padding (22px) so the search box, unread chip, and ticket rows all
+         line up on one vertical edge. */
+      '.rw-board-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 18px 10px 22px; }',
+      '.rw-search { display: inline-flex; align-items: center; gap: 7px; flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 6px 0 11px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: var(--rw-panel-2); transition: border-color 120ms, background 120ms; }',
+      '.rw-search:focus-within { border-color: var(--rw-accent); background: var(--rw-bg); }',
+      '.rw-search-icon { flex: 0 0 auto; display: inline-flex; color: var(--rw-muted); }',
+      '.rw-search:focus-within .rw-search-icon { color: var(--rw-accent); }',
+      '.rw-search-input { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; font-family: inherit; font-size: 12.5px; color: var(--rw-fg); }',
+      '.rw-search-input::placeholder { color: var(--rw-muted); }',
+      '.rw-search-clear { flex: 0 0 auto; display: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--rw-muted); cursor: pointer; transition: background 120ms, color 120ms; }',
+      '.rw-search-clear.rw-show { display: inline-flex; }',
+      '.rw-search-clear:hover { background: var(--rw-line-2); color: var(--rw-fg); }',
       /* "Unread only" filter toggle (My Submissions) */
-      '.rw-unread-filter-row { display: flex; padding: 2px 10px 10px; }',
-      '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
+      '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 32px; padding: 0 12px; white-space: nowrap; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
       '.rw-unread-filter:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); flex: 0 0 auto; }',
@@ -4734,7 +4755,13 @@
         h("span", { className: "rw-dash-tab-count" }, String(counts[def.id] || 0)),
       ]);
       btn.addEventListener("click", function () {
-        if (pendingTab !== def.id) { activeTab = def.id; renderPanelBody(); }
+        if (pendingTab !== def.id) {
+          activeTab = def.id;
+          // Search is a per-tab, client-side filter over that tab's loaded
+          // tickets — reset it when switching tabs so results never carry over.
+          boardSearchQuery = "";
+          renderPanelBody();
+        }
       });
       return btn;
     });
@@ -4755,6 +4782,10 @@
     ]);
   }
 
+  // Builds the board region that sits below the tab row: an optional toolbar
+  // (search + "Unread only") and the scrolling ticket list. Returns an ARRAY of
+  // nodes (the caller appends them into .rw-list-panel) so the toolbar can be a
+  // pinned sibling of the scroll list rather than scrolling away inside it.
   function renderList() {
     // "top" stayed as the cache name even though the tab is now "Hot" — accept either.
     var tab = activeTab === "top" ? "hot" : activeTab;
@@ -4784,7 +4815,8 @@
       }).then(function () {
         if (view === "list") renderPanelBody();
       });
-      return renderLoading();
+      boardListEl = null; boardTab = null; boardAllItems = null;
+      return [renderLoading()];
     }
 
     var allItems =
@@ -4793,37 +4825,68 @@
       tab === "approvals" ? (pendingApprovalCache || []) :
                             (myTicketsCache || []);
 
-    // "Unread only" filter — My Submissions only.
-    var showFilter = tab === "mine" && config.isIdentified && allItems.length > 0;
-    var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
-    var items = (tab === "mine" && mineUnreadOnly) ? allItems.filter(ticketHasUnseenActivity) : allItems;
-
-    // Whole-area empty states (no tickets at all) replace the list outright.
+    // Whole-area empty states (no tickets at all) replace the list outright —
+    // no toolbar, since there is nothing to search or filter.
     if (allItems.length === 0) {
+      boardListEl = null; boardTab = null; boardAllItems = null;
       if (tab === "mine" && !config.isIdentified) {
-        return renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"));
+        return [renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"))];
       }
       if (tab === "mine") {
-        return renderEmpty(t("empty.noMineYet"), t("empty.useComposer"));
+        return [renderEmpty(t("empty.noMineYet"), t("empty.useComposer"))];
       }
       if (tab === "updates") {
-        return renderEmpty(t("empty.nothingShipped"), t("empty.updatesWillShow"));
+        return [renderEmpty(t("empty.nothingShipped"), t("empty.updatesWillShow"))];
       }
       if (tab === "approvals") {
-        return renderEmpty(t("empty.noApprovals"), t("empty.approvalsWillShow"));
+        return [renderEmpty(t("empty.noApprovals"), t("empty.approvalsWillShow"))];
       }
-      return renderEmpty(t("empty.noTickets"), t("empty.beFirst"));
+      return [renderEmpty(t("empty.noTickets"), t("empty.beFirst"))];
     }
 
-    // Return the scroll container DIRECTLY (it owns flex:1 + overflow:auto).
-    // The filter is its first child so it inherits the list's left padding and
-    // aligns with the ticket rows — and scrolling keeps working on every tab.
-    var list = h("div", { className: "rw-dash-list" });
-    if (showFilter) list.appendChild(renderUnreadFilter(unreadCount));
+    // Stash the tab + full item set so the toolbar's search / unread handlers
+    // can re-filter in place (fillBoardList) without a full panel rebuild.
+    boardTab = tab;
+    boardAllItems = allItems;
+    boardListEl = h("div", { className: "rw-dash-list" });
+    // "Unread only" chip — My Submissions only.
+    var showUnread = tab === "mine" && config.isIdentified;
+    var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
+    var toolbar = renderBoardToolbar(showUnread, unreadCount);
+    fillBoardList();
+    return [toolbar, boardListEl];
+  }
 
-    if (items.length === 0 && mineUnreadOnly) {
-      list.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
-      return list;
+  // Case-insensitive substring match over a ticket's title, description, and
+  // short ref id (the #XXXXXXXX shown in detail) — the fields a user would
+  // reasonably search by.
+  function ticketMatchesQuery(tk, q) {
+    if (!tk) return false;
+    var hay = ((tk.title || "") + " " + (tk.description || "")).toLowerCase();
+    if (hay.indexOf(q) !== -1) return true;
+    var refId = String(tk.id || "").slice(0, 8).toLowerCase();
+    return refId.indexOf(q) !== -1;
+  }
+
+  // (Re)populate the current board list from boardAllItems, applying the active
+  // "Unread only" toggle and search query. Rebuilds only the list body so the
+  // search input keeps focus across keystrokes.
+  function fillBoardList() {
+    if (!boardListEl) return;
+    clearChildren(boardListEl);
+    var tab = boardTab;
+    var items = boardAllItems || [];
+    if (tab === "mine" && mineUnreadOnly) items = items.filter(ticketHasUnseenActivity);
+    var q = boardSearchQuery.trim().toLowerCase();
+    if (q) items = items.filter(function (tk) { return ticketMatchesQuery(tk, q); });
+
+    if (items.length === 0) {
+      if (q) {
+        boardListEl.appendChild(renderEmpty(t("filters.noMatches"), t("filters.noMatchesHint")));
+      } else if (tab === "mine" && mineUnreadOnly) {
+        boardListEl.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
+      }
+      return;
     }
 
     var cardOpts =
@@ -4831,24 +4894,59 @@
       tab === "approvals" ? { approvals: true } :
                             null;
     // Use `tk` for the loop variable — `t` is the i18n function.
-    items.forEach(function (tk) { list.appendChild(renderTicketCard(tk, cardOpts)); });
-    return list;
+    items.forEach(function (tk) { boardListEl.appendChild(renderTicketCard(tk, cardOpts)); });
   }
 
-  // "Unread only" toggle for My Submissions. Shows the unread count and flips
-  // mineUnreadOnly, re-rendering the list in place.
-  function renderUnreadFilter(unreadCount) {
-    var on = mineUnreadOnly;
-    var btn = h("button", {
-      className: "rw-unread-filter" + (on ? " rw-on" : ""),
-      type: "button",
-      "aria-pressed": on ? "true" : "false",
-    }, [
-      h("span", { className: "rw-unread-filter-dot" }),
-      document.createTextNode(t("filters.unreadOnly") + (unreadCount > 0 ? " (" + unreadCount + ")" : "")),
+  // Toolbar under the tab row: a search field that filters the current tab's
+  // tickets in place, and (My Submissions only) the "Unread only" toggle. Both
+  // re-filter via fillBoardList so typing never rebuilds the whole panel.
+  function renderBoardToolbar(showUnread, unreadCount) {
+    var input = h("input", {
+      className: "rw-search-input", type: "text", value: boardSearchQuery,
+      placeholder: t("filters.searchPlaceholder"), "aria-label": t("filters.searchPlaceholder"),
+      autocomplete: "off", spellcheck: "false",
+    });
+    var clearBtn = h("button", {
+      className: "rw-search-clear" + (boardSearchQuery ? " rw-show" : ""),
+      type: "button", "aria-label": t("filters.clearSearch"),
+    }, [Icons.close(12)]);
+    var search = h("div", { className: "rw-search" }, [
+      h("span", { className: "rw-search-icon" }, Icons.search(15)),
+      input,
+      clearBtn,
     ]);
-    btn.addEventListener("click", function () { mineUnreadOnly = !mineUnreadOnly; renderPanelBody(); });
-    return h("div", { className: "rw-unread-filter-row" }, [btn]);
+    input.addEventListener("input", function () {
+      boardSearchQuery = input.value;
+      clearBtn.classList.toggle("rw-show", !!boardSearchQuery);
+      fillBoardList();
+    });
+    clearBtn.addEventListener("click", function () {
+      boardSearchQuery = "";
+      input.value = "";
+      clearBtn.classList.remove("rw-show");
+      input.focus();
+      fillBoardList();
+    });
+
+    var children = [search];
+    if (showUnread) {
+      var on = mineUnreadOnly;
+      var unreadBtn = h("button", {
+        className: "rw-unread-filter" + (on ? " rw-on" : ""),
+        type: "button", "aria-pressed": on ? "true" : "false",
+      }, [
+        h("span", { className: "rw-unread-filter-dot" }),
+        document.createTextNode(t("filters.unreadOnly") + (unreadCount > 0 ? " (" + unreadCount + ")" : "")),
+      ]);
+      unreadBtn.addEventListener("click", function () {
+        mineUnreadOnly = !mineUnreadOnly;
+        unreadBtn.classList.toggle("rw-on", mineUnreadOnly);
+        unreadBtn.setAttribute("aria-pressed", mineUnreadOnly ? "true" : "false");
+        fillBoardList();
+      });
+      children.push(unreadBtn);
+    }
+    return h("div", { className: "rw-board-toolbar" }, children);
   }
 
   // -----------------------------------------------------------------------
@@ -5379,10 +5477,9 @@
       // + list. The old left pane (intro copy, inline composer, Recent
       // Submissions) is gone — Home's "Send us a message" card and the
       // [+ New post] button open the compose face instead.
-      scrollEl.appendChild(h("div", { className: "rw-list-panel" }, [
-        renderTabsBar(),
-        renderList(),
-      ]));
+      var listPanel = h("div", { className: "rw-list-panel" }, [renderTabsBar()]);
+      renderList().forEach(function (node) { if (node) listPanel.appendChild(node); });
+      scrollEl.appendChild(listPanel);
     }
   }
 
@@ -8636,6 +8733,8 @@
     view = "list";
     currentDetailTicket = null;
     activeTab = "hot";
+    mineUnreadOnly = false;
+    boardSearchQuery = "";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();
@@ -9035,6 +9134,24 @@
     };
     window._rwTestHooks._setCurrentUser = function (updates) {
       Object.assign(currentUser, updates);
+    };
+    // Board search / toolbar hooks — let a vm test drive the real renderList
+    // (toolbar + list) and in-place search/unread filtering without the full
+    // network bootstrap. _setBoardCaches seeds the four tab caches; renderList
+    // returns the array of region nodes; _setSearchQuery + fillBoardList mirror
+    // typing into the search box.
+    window._rwTestHooks.renderList = renderList;
+    window._rwTestHooks.fillBoardList = fillBoardList;
+    window._rwTestHooks.ticketMatchesQuery = ticketMatchesQuery;
+    window._rwTestHooks._getBoardListEl = function () { return boardListEl; };
+    window._rwTestHooks._setActiveTab = function (tab) { activeTab = tab; };
+    window._rwTestHooks._setSearchQuery = function (q) { boardSearchQuery = q; };
+    window._rwTestHooks._setUnreadOnly = function (on) { mineUnreadOnly = !!on; };
+    window._rwTestHooks._setBoardCaches = function (caches) {
+      if (caches.updates !== undefined) updatesCache = caches.updates;
+      if (caches.hot !== undefined) topTicketsCache = caches.hot;
+      if (caches.mine !== undefined) myTicketsCache = caches.mine;
+      if (caches.approvals !== undefined) pendingApprovalCache = caches.approvals;
     };
   }
 
