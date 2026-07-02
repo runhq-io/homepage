@@ -4702,9 +4702,10 @@
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
-    // On the approver queue, swap the vote control (voting isn't offered on
-    // unapproved tickets) for inline Approve / Reject actions.
-    var rightControl = isApprovals ? renderApprovalActions(ticket) : voteBtn;
+    // On the approver queue there's no right-hand control: voting isn't offered
+    // on unapproved tickets, and Approve / Reject live in the ticket detail
+    // (opened by clicking the card) to avoid duplicating them in the list.
+    var rightControl = isApprovals ? null : voteBtn;
 
     var row = h("button", {
       className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
