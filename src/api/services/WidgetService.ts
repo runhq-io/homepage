@@ -93,8 +93,8 @@ export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 /**
  * The widget permissions surfaced as columns in the Project Settings → Widget →
  * Permissions grid, in display order. `attach_image` sits next to
- * `ticket_creator` (they pair up) but is independently grantable — see the
- * legacy-derivation note in `resolveWidgetPermissions`.
+ * `ticket_creator` (they pair up) but is independently grantable and stored
+ * authoritatively — see `resolveWidgetPermissions`.
  */
 export const WIDGET_PERMISSION_COLUMNS: readonly WidgetPermission[] = [
   'view_tickets',
@@ -178,11 +178,17 @@ export function effectiveWidgetRoleMap(
  *   effective = everyone
  *             ∪ (authenticated ? logged_in ∪ assignedRole : ∅)
  *
- * plus the derived internal capability `live_coder ⇐ assign_agent`, and the
- * legacy `attach_image ⇐ ticket_creator` fallback for maps saved before
- * attach_image became its own grid column (see below). `assignedRole` is the
- * member's role key from the Members tab (stored on widget_users).
- * Unknown/missing keys contribute nothing (fail-closed).
+ * plus the derived internal capability `live_coder ⇐ assign_agent`.
+ * `assignedRole` is the member's role key from the Members tab (stored on
+ * widget_users). Unknown/missing keys contribute nothing (fail-closed).
+ *
+ * The stored map is authoritative for `attach_image` — a role holds it iff its
+ * list contains it. Legacy maps saved before attach_image became its own grid
+ * column are materialized once by the 2026-07-02-widget-attach-image-backfill
+ * migration, so there is no runtime `attach_image ⇐ ticket_creator` derivation:
+ * that inference could never tell a genuinely-legacy map from one where an admin
+ * deliberately unchecked attach_image on every role, which is why unchecking it
+ * everywhere used to silently re-enable on the next load.
  */
 export function resolveWidgetPermissions(
   map: Record<string, string[]> | null | undefined,
@@ -207,42 +213,23 @@ export function resolveWidgetPermissions(
     // the Everyone row.
     for (const p of [...out]) if (!ANON_ALLOWED_PERMISSIONS.has(p)) out.delete(p);
   }
-  // attach_image is now its own grid column. For maps saved BEFORE that column
-  // existed (no role lists attach_image), keep deriving it from ticket_creator
-  // so nobody loses image upload; once any role grants it explicitly the stored
-  // grants are authoritative and this fallback switches off (mirrors the
-  // settings display in `widgetRoleMapForDisplay`). live_coder is still derived.
-  if (!roleMapGrantsAttachImage(m) && out.has('ticket_creator')) out.add('attach_image');
   if (out.has('assign_agent')) out.add('live_coder');
   return out;
 }
 
-/** True if any role in the map explicitly grants `attach_image`. */
-function roleMapGrantsAttachImage(map: Record<string, string[]> | null | undefined): boolean {
-  if (!map) return false;
-  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('attach_image'));
-}
-
 /**
  * The role map as shown in the Project Settings → Widget → Permissions grid.
- * For legacy maps (saved before `attach_image` was a column) it materializes the
- * `attach_image ⇐ ticket_creator` derivation so the grid reflects the real
- * effective state; saving the grid then persists those grants explicitly and the
- * map becomes authoritative. Once any role grants attach_image explicitly the
- * stored map is returned unchanged.
+ * A straight pass-through of the effective stored map (seeded defaults when the
+ * project has never customized the grid). It performs no derivation: the grid
+ * must render exactly what is persisted so that toggles round-trip faithfully —
+ * an admin who unchecks `attach_image` on every role sees it stay unchecked.
+ * Legacy pre-column maps are materialized once by the
+ * 2026-07-02-widget-attach-image-backfill migration, not here.
  */
 export function widgetRoleMapForDisplay(
   map: Record<string, string[]> | null | undefined,
 ): Record<string, string[]> {
-  const eff = effectiveWidgetRoleMap(map);
-  if (roleMapGrantsAttachImage(eff)) return eff;
-  const out: Record<string, string[]> = {};
-  for (const [role, perms] of Object.entries(eff)) {
-    const arr = Array.isArray(perms) ? [...perms] : [];
-    if (arr.includes('ticket_creator') && !arr.includes('attach_image')) arr.push('attach_image');
-    out[role] = arr;
-  }
-  return out;
+  return effectiveWidgetRoleMap(map);
 }
 
 /** The only permission an anonymous (unauthenticated) visitor may ever hold. */

@@ -156,16 +156,27 @@ describe('widget role-based permissions', () => {
     expect(isWidgetPermission(undefined)).toBe(false);
   });
 
-  describe('attach_image is an independent grid column with a legacy fallback', () => {
-    it('legacy map (no attach_image anywhere) derives it from ticket_creator', () => {
-      const legacy = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'voter', 'ticket_creator'] };
-      const p = resolveWidgetPermissions(legacy, WIDGET_ROLE_LOGGED_IN, true);
-      expect(p.has('attach_image')).toBe(true); // preserved for pre-column maps
+  describe('attach_image is an independent, authoritative grid column', () => {
+    // Legacy (pre-column) maps are materialized ONCE by the
+    // 2026-07-02-widget-attach-image-backfill migration, so by the time these
+    // functions run the stored map is always authoritative: attach_image is
+    // present exactly where an admin checked it. There is no runtime derivation
+    // from ticket_creator — otherwise unchecking attach_image on every role
+    // could never persist (its absence would be re-read as "legacy, derive it").
+
+    it('does NOT derive attach_image from ticket_creator (absence is intentional)', () => {
+      // This is the reported bug: attach_image unchecked on every role. The
+      // stored map grants it nowhere, and it must STAY off after a round-trip.
+      const map = {
+        everyone: ['view_tickets'],
+        logged_in: ['view_tickets', 'voter', 'ticket_creator'],
+        hello: ['view_tickets', 'ticket_creator'],
+      };
+      expect(resolveWidgetPermissions(map, WIDGET_ROLE_LOGGED_IN, true).has('attach_image')).toBe(false);
+      expect(resolveWidgetPermissions(map, 'hello', true).has('attach_image')).toBe(false);
     });
 
-    it('once attach_image is granted explicitly anywhere, it is authoritative (no derivation)', () => {
-      // moderator has attach_image explicitly; logged_in has ticket_creator but
-      // NOT attach_image → logged_in must NOT get attach_image derived.
+    it('grants attach_image only where a role lists it explicitly', () => {
       const map = {
         everyone: ['view_tickets'],
         logged_in: ['view_tickets', 'voter', 'ticket_creator'],
@@ -182,24 +193,27 @@ describe('widget role-based permissions', () => {
       expect(p.has('ticket_creator')).toBe(false);
     });
 
-    it('anonymous never gets attach_image, even on a legacy ticket_creator map', () => {
-      const legacy = { everyone: ['view_tickets', 'ticket_creator'] };
-      expect(resolveWidgetPermissions(legacy, null, false).has('attach_image')).toBe(false);
+    it('anonymous never gets attach_image', () => {
+      const map = { everyone: ['view_tickets', 'ticket_creator', 'attach_image'] };
+      expect(resolveWidgetPermissions(map, null, false).has('attach_image')).toBe(false);
     });
   });
 
-  describe('widgetRoleMapForDisplay', () => {
-    it('materializes attach_image on ticket_creator roles for a legacy map', () => {
-      const legacy = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'voter', 'ticket_creator'] };
-      const shown = widgetRoleMapForDisplay(legacy);
-      expect(shown.logged_in).toContain('attach_image'); // grid shows real effective state
-      expect(shown.everyone).not.toContain('attach_image');
+  describe('widgetRoleMapForDisplay is a pass-through of the stored map', () => {
+    it('returns the stored map unchanged when attach_image is absent everywhere', () => {
+      // The grid must reflect exactly what is stored — no re-materialization —
+      // so an admin who unchecks attach_image everywhere sees it stay unchecked.
+      const map = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'voter', 'ticket_creator'], hello: ['view_tickets', 'ticket_creator'] };
+      expect(widgetRoleMapForDisplay(map)).toEqual(map);
     });
 
-    it('returns the stored map unchanged once attach_image is explicit', () => {
+    it('returns the stored map unchanged when attach_image is explicit', () => {
       const map = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'ticket_creator', 'attach_image'], staff: ['view_tickets'] };
-      const shown = widgetRoleMapForDisplay(map);
-      expect(shown).toEqual(map); // authoritative — staff stays without attach_image
+      expect(widgetRoleMapForDisplay(map)).toEqual(map);
+    });
+
+    it('falls back to seeded defaults for an unconfigured (empty) map', () => {
+      expect(widgetRoleMapForDisplay({})).toEqual(defaultWidgetRolePermissions());
     });
   });
 });
