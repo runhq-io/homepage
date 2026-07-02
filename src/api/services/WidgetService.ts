@@ -26,6 +26,7 @@ import {
   widgetChatConversations,
   widgetChatMessages,
   widgetChatImages,
+  widgetTicketReads,
   type ChatImageRow,
 } from '../../db/schema';
 import { resizeForModel } from './widgetChatImage';
@@ -355,6 +356,16 @@ type WidgetTicketResponse = {
    * listTicketsAssignedByMe; absent on other list shapes.
    */
   liveSessionLastMessageAt?: string | null;
+  /**
+   * Server-side READ marks for this (viewer, ticket), if any — the cross-device
+   * counterpart of the client's localStorage seen-maps. `seenAt` = general
+   * activity seen up to; `liveSessionSeenAt` = live-session replies seen up to.
+   * The widget seeds its localStorage from these on load so a fresh browser
+   * inherits the user's read state. Populated by listMyTickets +
+   * listTicketsAssignedByMe.
+   */
+  seenAt?: string | null;
+  liveSessionSeenAt?: string | null;
 };
 
 type PublicAttachmentSummary = {
@@ -3036,13 +3047,19 @@ export async function listMyTickets(
   // so its unread could never clear. The assigner gets that signal via
   // listTicketsAssignedByMe.
   const ids = rows.map((r) => r.id);
-  const latest = await deriveLastActivity(ids, { includeLiveSession: false });
+  const [latest, reads] = await Promise.all([
+    deriveLastActivity(ids, { includeLiveSession: false }),
+    getTicketReads(widgetUserId, ids),
+  ]);
 
   return rows.map((t) => {
     const dto = mapTaskToWidgetResponse(t);
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
     const activityMs = latest.get(t.id) ?? 0;
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    const r = reads.get(t.id);
+    dto.seenAt = r?.seenAt ? r.seenAt.toISOString() : null;
+    dto.liveSessionSeenAt = r?.liveSessionSeenAt ? r.liveSessionSeenAt.toISOString() : null;
     return dto;
   });
 }
@@ -3190,7 +3207,7 @@ export async function listTicketsAssignedByMe(
   // axis (liveSessionLastMessageAt) so viewing the ticket detail (which marks
   // the ticket seen up to lastActivityAt) cannot clear an unread live-session
   // reply. Only opening the live session clears the dedicated axis.
-  const [latest, liveSession] = await Promise.all([
+  const [latest, liveSession, reads] = await Promise.all([
     deriveLastActivity(ids, { includeLiveSession: false }),
     // Most recent coder/teammate REPLY per task: role IN ('agent','team').
     // `event` cards (proposals, mirrored status) are not replies and must not
@@ -3207,6 +3224,7 @@ export async function listTicketsAssignedByMe(
         inArray(widgetChatMessages.role, ['agent', 'team']),
       ))
       .groupBy(widgetChatConversations.createdTaskId),
+    getTicketReads(widgetUserId, ids),
   ]);
   const liveSessionByTask = new Map<string, string>();
   for (const r of liveSession) {
@@ -3217,10 +3235,77 @@ export async function listTicketsAssignedByMe(
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
     const activityMs = latest.get(t.id) ?? 0;
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    const rd = reads.get(t.id);
+    dto.seenAt = rd?.seenAt ? rd.seenAt.toISOString() : null;
+    dto.liveSessionSeenAt = rd?.liveSessionSeenAt ? rd.liveSessionSeenAt.toISOString() : null;
     const lsMax = liveSessionByTask.get(t.id);
     dto.liveSessionLastMessageAt = lsMax ? new Date(lsMax).toISOString() : null;
     return dto;
   });
+}
+
+// ============================================================================
+// Server-side unread read-state (widget_ticket_reads)
+// ============================================================================
+
+export interface TicketReadMark {
+  taskId: string;
+  seenAt?: Date | null;
+  liveSessionSeenAt?: Date | null;
+}
+
+/**
+ * Upsert read marks for a widget user, monotonically per axis: `greatest`
+ * ignores NULLs, so a mark that carries only one axis leaves the other intact,
+ * and an earlier timestamp never moves a later one backwards. Best-effort per
+ * row — a bogus/foreign taskId (FK miss) is skipped, not fatal. Batch-capable:
+ * a single call marks one ticket or the whole "mark all read" set.
+ */
+export async function markTicketReads(widgetUserId: string, marks: TicketReadMark[]): Promise<void> {
+  for (const m of marks) {
+    if (!m || !m.taskId) continue;
+    const seen = m.seenAt ?? null;
+    const live = m.liveSessionSeenAt ?? null;
+    if (!seen && !live) continue;
+    try {
+      await db
+        .insert(widgetTicketReads)
+        .values({ widgetUserId, taskId: m.taskId, seenAt: seen, liveSessionSeenAt: live })
+        .onConflictDoUpdate({
+          target: [widgetTicketReads.widgetUserId, widgetTicketReads.taskId],
+          set: {
+            seenAt: sql`greatest(${widgetTicketReads.seenAt}, excluded.seen_at)`,
+            liveSessionSeenAt: sql`greatest(${widgetTicketReads.liveSessionSeenAt}, excluded.live_session_seen_at)`,
+            updatedAt: new Date(),
+          },
+        });
+    } catch (err) {
+      // Foreign/deleted task (FK violation) or transient error: skip this row.
+      console.warn('[WidgetService] markTicketReads skipped a row:', (err as Error)?.message);
+    }
+  }
+}
+
+/** Read marks for a widget user across the given tasks. */
+export async function getTicketReads(
+  widgetUserId: string,
+  taskIds: string[],
+): Promise<Map<string, { seenAt: Date | null; liveSessionSeenAt: Date | null }>> {
+  const map = new Map<string, { seenAt: Date | null; liveSessionSeenAt: Date | null }>();
+  if (taskIds.length === 0) return map;
+  const rows = await db
+    .select({
+      taskId: widgetTicketReads.taskId,
+      seenAt: widgetTicketReads.seenAt,
+      liveSessionSeenAt: widgetTicketReads.liveSessionSeenAt,
+    })
+    .from(widgetTicketReads)
+    .where(and(
+      eq(widgetTicketReads.widgetUserId, widgetUserId),
+      inArray(widgetTicketReads.taskId, taskIds),
+    ));
+  for (const r of rows) map.set(r.taskId, { seenAt: r.seenAt, liveSessionSeenAt: r.liveSessionSeenAt });
+  return map;
 }
 
 export async function getTicketStats(projectId: string) {
