@@ -966,7 +966,7 @@
       },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
       filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now." },
-      notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)" },
+      notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)", markAllRead: "Mark all read" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
       // labels are locale-overridable here.
@@ -1199,7 +1199,7 @@
       },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
       filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다." },
-      notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건" },
+      notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건", markAllRead: "모두 읽음 처리" },
       status: {
         pending: "대기 중",
         planned: "계획됨",
@@ -1896,6 +1896,21 @@
     }
   }
 
+  // Mark every cached ticket read across BOTH unread axes (general activity +
+  // live-session replies), up to the latest known timestamp for each. Clears
+  // the launcher/bell counts and the per-row dots. localStorage-backed, so this
+  // is per-browser-profile (there is no server-side read state).
+  function markAllTicketsRead() {
+    var all = (myTicketsCache || []).concat(assignedTicketsCache || []);
+    for (var i = 0; i < all.length; i++) {
+      var tk = all[i];
+      if (!tk || !tk.id) continue;
+      if (tk.lastActivityAt) markTicketSeen(tk.id, new Date(tk.lastActivityAt).getTime());
+      if (tk.liveSessionLastMessageAt) markLiveSessionSeen(tk.id, new Date(tk.liveSessionLastMessageAt).getTime());
+    }
+    refreshTabLabel();
+  }
+
   function renderNotifDropdown() {
     if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
     var items = unreadTickets();
@@ -1919,8 +1934,18 @@
         listEl.appendChild(row);
       });
     }
+    var headChildren = [h("span", { className: "rw-notif-head-title" }, t("notif.title"))];
+    if (items.length > 0) {
+      var markAllBtn = h("button", { className: "rw-notif-markread", type: "button" }, t("notif.markAllRead"));
+      markAllBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        markAllTicketsRead();
+        renderNotifDropdown(); // re-render → empty state, count cleared
+      });
+      headChildren.push(markAllBtn);
+    }
     notifDropdownEl = h("div", { className: "rw-notif-dropdown", role: "menu" }, [
-      h("div", { className: "rw-notif-head" }, t("notif.title")),
+      h("div", { className: "rw-notif-head" }, headChildren),
       listEl,
     ]);
     notifWrap.appendChild(notifDropdownEl);
@@ -2794,7 +2819,9 @@
       '  background: var(--rw-panel, var(--rw-bg)); border: 1px solid var(--rw-line-2);',
       '  border-radius: 12px; box-shadow: 0 12px 32px -10px rgba(0,0,0,0.4); overflow: hidden;',
       '}',
-      '.rw-notif-head { padding: 10px 14px; font-size: 12px; font-weight: 600; color: var(--rw-fg-2); border-bottom: 1px solid var(--rw-line); }',
+      '.rw-notif-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; font-size: 12px; font-weight: 600; color: var(--rw-fg-2); border-bottom: 1px solid var(--rw-line); }',
+      '.rw-notif-markread { flex: 0 0 auto; border: none; background: none; padding: 0; margin: 0; font: inherit; font-weight: 600; font-size: 11.5px; color: var(--rw-accent); cursor: pointer; }',
+      '.rw-notif-markread:hover { text-decoration: underline; }',
       '.rw-notif-list { max-height: 320px; overflow-y: auto; }',
       '.rw-notif-empty { padding: 16px 14px; font-size: 12.5px; color: var(--rw-muted); }',
       '.rw-notif-item {',
@@ -8679,6 +8706,7 @@
     window._rwTestHooks.launcherBadgeCount = launcherBadgeCount;
     window._rwTestHooks.markTicketSeen = markTicketSeen;
     window._rwTestHooks.markLiveSessionSeen = markLiveSessionSeen;
+    window._rwTestHooks.markAllTicketsRead = markAllTicketsRead;
     window._rwTestHooks.hasUnreadLiveSession = hasUnreadLiveSession;
     window._rwTestHooks.viewerCanLiveCoder = viewerCanLiveCoder;
     window._rwTestHooks._setCaches = function (mine, assigned) {
