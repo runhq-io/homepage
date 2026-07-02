@@ -124,6 +124,10 @@ interface TestHooks {
   viewerCanLiveCoder?: () => boolean;
   _setChatConversation?: (conv: { id?: string; status?: string } | null) => void;
   _setChatIsLiveSession?: (on: boolean) => void;
+  applyCoderWorking?: (working: boolean) => void;
+  renderLiveStatusBar?: () => void;
+  _setupLiveStatusUi?: () => FakeNode;
+  _getLiveCoderWorking?: () => boolean;
 }
 
 function makeLocalStorageMock() {
@@ -201,13 +205,10 @@ describe('widget.js — Live session opening acknowledgement', () => {
     // Styled like the intake empty state, not a fabricated chat bubble.
     expect(hasClass(intro, 'rw-chat-empty')).toBe(true);
     expect(hasClass(intro, 'rw-chat-intro')).toBe(true);
-    // Signature: a live "working" pill (with a decorative pulse dot) that names
-    // the agent and signals background activity.
-    const status = intro._find((n) => hasClass(n, 'rw-intro-status'));
-    expect(status).not.toBeNull();
-    expect(status!._find((n) => hasClass(n, 'rw-intro-pulse'))).not.toBeNull();
-    expect(allText(status!)).toContain('Suha (Support)');
-    expect(allText(status!).toLowerCase()).toContain('background');
+    // The working/standby state now lives in the pinned status bar (see the
+    // "live-coder working indicator" suite), so the intro no longer carries its
+    // own status pill — just the ticket subject + a one-line orientation.
+    expect(intro._find((n) => hasClass(n, 'rw-intro-status'))).toBeNull();
     // The ticket title is surfaced as the focal subject, with the full text on
     // hover (title=) so the CSS line-clamp can truncate long subjects safely.
     const heading = intro._find((n) => hasClass(n, 'rw-chat-intro-title'));
@@ -230,13 +231,63 @@ describe('widget.js — Live session opening acknowledgement', () => {
     expect(heading!.getAttribute('title')).toBe(long);
   });
 
-  it('still renders the status pill when the ticket has no title', () => {
+  it('still renders a non-blank intro when the ticket has no title', () => {
     const { hooks } = loadWidget();
     hooks._setLiveSessionState!({ id: 't2' }, { enabled: true, agentName: 'Suha (Support)' });
     const intro = hooks.renderLiveSessionIntro!();
+    // No title → no heading, but the orientation body still fills the screen.
     expect(intro._find((n) => hasClass(n, 'rw-chat-intro-title'))).toBeNull();
-    expect(intro._find((n) => hasClass(n, 'rw-intro-status'))).not.toBeNull();
-    expect(allText(intro)).toContain('Suha (Support)');
+    const body = intro._find((n) => hasClass(n, 'rw-intro-body'));
+    expect(body).not.toBeNull();
+    expect(body!.textContent.toLowerCase()).toContain('updates');
+  });
+});
+
+describe('widget.js — live-coder working indicator (pinned status bar)', () => {
+  it('starts in the standing-by state', () => {
+    const { hooks } = loadWidget();
+    const bar = hooks._setupLiveStatusUi!();
+    expect(hasClass(bar, 'rw-live-status')).toBe(true);
+    expect(hasClass(bar, 'is-idle')).toBe(true);
+    expect(hasClass(bar, 'is-working')).toBe(false);
+    expect(allText(bar).toLowerCase()).toContain('standing by');
+    expect(hooks._getLiveCoderWorking!()).toBe(false);
+  });
+
+  it('flips to the working state on a working signal, and back on idle', () => {
+    const { hooks } = loadWidget();
+    const bar = hooks._setupLiveStatusUi!();
+
+    hooks.applyCoderWorking!(true);
+    expect(hasClass(bar, 'is-working')).toBe(true);
+    expect(hasClass(bar, 'is-idle')).toBe(false);
+    expect(allText(bar).toLowerCase()).toContain('working');
+    // The pulse dot is present so the "is anything happening?" question is answered.
+    expect(bar._find((n) => hasClass(n, 'rw-live-status-dot'))).not.toBeNull();
+    expect(hooks._getLiveCoderWorking!()).toBe(true);
+
+    hooks.applyCoderWorking!(false);
+    expect(hasClass(bar, 'is-idle')).toBe(true);
+    expect(hasClass(bar, 'is-working')).toBe(false);
+    expect(allText(bar).toLowerCase()).toContain('standing by');
+    expect(hooks._getLiveCoderWorking!()).toBe(false);
+  });
+
+  it('a stale working signal self-heals to standing-by after the client TTL', () => {
+    vi.useFakeTimers();
+    try {
+      const { hooks } = loadWidget();
+      const bar = hooks._setupLiveStatusUi!();
+      hooks.applyCoderWorking!(true);
+      expect(hasClass(bar, 'is-working')).toBe(true);
+
+      // No further working signal within the client staleness window → standby.
+      vi.advanceTimersByTime(70_000);
+      expect(hasClass(bar, 'is-idle')).toBe(true);
+      expect(hooks._getLiveCoderWorking!()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

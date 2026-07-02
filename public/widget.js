@@ -146,6 +146,15 @@
   // When chatIsLiveSession is true: the ticket the live session was opened from
   // (used to restore the detail view on back-navigation).
   var liveSessionTicket = null;
+  // Live session: whether the coding agent is actively working right now. Fed by
+  // the server's real activity signal (coder_status SSE frame + coderWorking on
+  // the load/poll responses) — drives the pinned working/standby status bar.
+  var liveCoderWorking = false;
+  // Client-side safety net mirroring the server TTL: if no coder_status arrives
+  // within this window, fall back to standby so a dropped "idle" can't wedge the
+  // bar on "working" forever. Re-armed on every working signal.
+  var liveCoderStaleTimerId = null;
+  var LIVE_CODER_STALE_MS = 60000;
 
   // ===========================================================================
   // Console & error capture
@@ -1074,6 +1083,8 @@
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
         liveSessionStatus: "{name} is working in the background",
+        liveWorking: "Coder is working…",
+        liveStandby: "Coder is standing by — send a message to steer",
         liveSessionIntro: "Updates show up here as they happen — message anytime to ask a question or steer the work.",
         agentlessIntro: "Our support agent is currently offline. You can still submit a ticket directly — describe your issue or request with as much detail as possible (what happened, steps to reproduce, what you expected), then tap Submit Ticket below.",
         collectPrompt: "Anything more you'd like to add? When you're ready, tap Submit Ticket below — the more detail, the faster we can help.",
@@ -1304,6 +1315,8 @@
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
         liveSessionStatus: "{name}이(가) 백그라운드에서 작업 중이에요",
+        liveWorking: "코더가 작업 중이에요…",
+        liveStandby: "코더가 대기 중이에요 — 메시지를 보내 방향을 알려 주세요",
         liveSessionIntro: "진행 상황이 여기에 표시돼요 — 궁금한 점이나 방향이 있으면 언제든 메시지를 보내 주세요.",
         agentlessIntro: "지금은 상담원이 오프라인 상태예요. 그래도 바로 티켓을 제출하실 수 있어요 — 무슨 일이 있었는지, 재현 방법, 기대했던 동작 등 가능한 한 자세히 알려주신 뒤 아래 '티켓 제출'을 눌러주세요.",
         collectPrompt: "더 추가하실 내용이 있나요? 준비되셨으면 아래 '티켓 제출'을 눌러주세요 — 자세할수록 빠르게 도와드릴 수 있어요.",
@@ -3675,6 +3688,22 @@
       '  100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }',
       '}',
       '@media (prefers-reduced-motion: reduce) { .rw-intro-pulse { animation: none; } }',
+      // Pinned live-session status bar — sits between the header and the scroll
+      // area (never scrolls away), reflecting the coder's REAL working state.
+      '.rw-live-status {',
+      '  display: flex; align-items: center; gap: 8px; flex: none;',
+      '  padding: 8px 18px; font-size: 12px; font-weight: 600;',
+      '  color: var(--rw-fg-2); background: var(--rw-panel-2);',
+      '  border-bottom: 1px solid var(--rw-line-2);',
+      '}',
+      '.rw-live-status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }',
+      '.rw-live-status.is-working .rw-live-status-dot {',
+      '  background: #16a34a; box-shadow: 0 0 0 0 rgba(22,163,74,0.5);',
+      '  animation: rw-intro-pulse 2s ease-out infinite;',
+      '}',
+      '.rw-live-status.is-idle { color: var(--rw-muted); }',
+      '.rw-live-status.is-idle .rw-live-status-dot { background: var(--rw-muted); opacity: 0.55; }',
+      '@media (prefers-reduced-motion: reduce) { .rw-live-status.is-working .rw-live-status-dot { animation: none; } }',
       '.rw-chat-intro-title {',
       '  font-size: 15px; font-weight: 700; color: var(--rw-fg);',
       '  line-height: 1.35; max-width: 34ch; margin: 0;',
@@ -5435,6 +5464,8 @@
     chatTurnPending = false;
     chatSubmitInFlight = false;
     chatIsLiveSession = true;
+    liveCoderWorking = false;
+    if (liveCoderStaleTimerId !== null) { clearTimeout(liveCoderStaleTimerId); liveCoderStaleTimerId = null; }
     liveSessionTicket = ticket;
     // Return-from-detail bookkeeping.
     detailReturnView = "detail";
@@ -5457,6 +5488,10 @@
     if (chatClosedWatchTimerId !== null) {
       clearInterval(chatClosedWatchTimerId);
       chatClosedWatchTimerId = null;
+    }
+    if (liveCoderStaleTimerId !== null) {
+      clearTimeout(liveCoderStaleTimerId);
+      liveCoderStaleTimerId = null;
     }
   }
 
@@ -5602,6 +5637,14 @@
           try { row = JSON.parse(e.data); } catch (_) { return; }
           chatApplyMessages([row]);
         };
+        // Live-coder activity: a named control frame (not a transcript row) that
+        // toggles the pinned working/standby bar in real time.
+        es.addEventListener("coder_status", function (e) {
+          if (view !== "chat" || chatConversation !== convAtOpen) return;
+          var payload = null;
+          try { payload = JSON.parse(e.data); } catch (_) { return; }
+          if (payload) applyCoderWorking(payload.working);
+        });
         es.onerror = function () {
           try { es.close(); } catch (_) {}
           if (chatEventSourceRef === es) {
@@ -5630,6 +5673,9 @@
     chatLoadMessages(conv.id, chatLastCursor()).then(function (data) {
       if (view !== "chat" || chatConversation !== conv) return;
       chatApplyMessages((data && data.messages) || []);
+      // Poll fallback (no SSE): keep the working indicator current. coderWorking
+      // rides on the live-session messages response.
+      if (chatIsLiveSession && data && "coderWorking" in data) applyCoderWorking(data.coderWorking);
     }).catch(function () {
       // Silent — the next tick retries (matches startDetailPoll's posture).
     }).then(function () {
@@ -6282,14 +6328,9 @@
   // screen with nothing going on, even though a coder job is running.
   function renderLiveSessionIntro() {
     var children = [];
-    // Signature element: a live "working" pill whose pulsing dot signals that
-    // work is actively happening in the background — the direct answer to the
-    // blank-screen "is anything going on?" feeling. The dot is decorative
-    // (aria-hidden); the text carries the meaning.
-    children.push(h("div", { className: "rw-intro-status" }, [
-      h("span", { className: "rw-intro-pulse", "aria-hidden": "true" }),
-      h("span", null, t("chat.liveSessionStatus", { name: chatIdentityName() })),
-    ]));
+    // The live working/standby state now lives in the pinned status bar above
+    // the scroll area (renderLiveStatusBar), so the empty-state intro is just
+    // orientation: the ticket this session is about + a one-liner.
     // The ticket the session is about, clamped to two lines with an ellipsis
     // (full text on hover via title=) so a long subject can't blow out the
     // layout. Reads as "working on → this".
@@ -6299,6 +6340,33 @@
     }
     children.push(h("div", { className: "rw-intro-body" }, t("chat.liveSessionIntro")));
     return h("div", { className: "rw-chat-empty rw-chat-intro" }, children);
+  }
+
+  // Update state + repaint from a coder activity signal. Re-arms the client
+  // staleness fallback on "working" so a dropped idle can't wedge the bar on.
+  function applyCoderWorking(working) {
+    working = !!working;
+    if (liveCoderStaleTimerId !== null) { clearTimeout(liveCoderStaleTimerId); liveCoderStaleTimerId = null; }
+    if (working) {
+      liveCoderStaleTimerId = setTimeout(function () {
+        liveCoderStaleTimerId = null;
+        if (liveCoderWorking) { liveCoderWorking = false; renderLiveStatusBar(); }
+      }, LIVE_CODER_STALE_MS);
+    }
+    if (working === liveCoderWorking) return;
+    liveCoderWorking = working;
+    renderLiveStatusBar();
+  }
+
+  // Paint the pinned live-session status bar (working = pulsing green + "working…",
+  // standing by = steady dim dot + "send a message to steer"). No-op off-live.
+  function renderLiveStatusBar() {
+    if (!chatUi || !chatUi.liveStatusEl) return;
+    var el = chatUi.liveStatusEl;
+    el.setAttribute("class", "rw-live-status " + (liveCoderWorking ? "is-working" : "is-idle"));
+    clearChildren(el);
+    el.appendChild(h("span", { className: "rw-live-status-dot", "aria-hidden": "true" }));
+    el.appendChild(h("span", null, liveCoderWorking ? t("chat.liveWorking") : t("chat.liveStandby")));
   }
 
   function renderChatMessageList() {
@@ -6789,11 +6857,21 @@
       root.appendChild(actionBar);
     }
 
+    // Live session only: a pinned working/standby status bar between the header
+    // and the scroll area, so the coder's real activity is always visible (not
+    // just in the empty state) and never scrolls away.
+    var liveStatusEl = null;
+    if (isLive) {
+      liveStatusEl = h("div", { className: "rw-live-status is-idle", role: "status", "aria-live": "polite" });
+      root.appendChild(liveStatusEl);
+    }
+
     var listEl = h("div", { className: "rw-chat-scroll" });
     var footerEl = h("div", { className: "rw-chat-footer" });
     root.appendChild(listEl);
     root.appendChild(footerEl);
-    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, actionBar: actionBar };
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, actionBar: actionBar, liveStatusEl: liveStatusEl };
+    if (isLive) renderLiveStatusBar();
 
     listEl.appendChild(renderLoading());
 
@@ -6808,6 +6886,7 @@
         chatSubmitInFlight = false;
         renderChatMessageList();
         renderChatFooter();
+        applyCoderWorking(data && data.coderWorking);
         startChatTransport();
       }).catch(function (err) {
         if (view !== "chat" || !chatUi) return;
@@ -8651,6 +8730,22 @@
     window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
     window._rwTestHooks.stagedGallery = stagedGallery;
     window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
+    window._rwTestHooks.applyCoderWorking = applyCoderWorking;
+    window._rwTestHooks.renderLiveStatusBar = renderLiveStatusBar;
+    // Stand up a minimal live-session chat UI (just the pinned status bar) so a
+    // vm test can drive applyCoderWorking and inspect the rendered bar without
+    // bootstrapping the whole chat shell. Returns the status bar node.
+    window._rwTestHooks._setupLiveStatusUi = function () {
+      chatIsLiveSession = true;
+      liveCoderWorking = false;
+      if (liveCoderStaleTimerId !== null) { clearTimeout(liveCoderStaleTimerId); liveCoderStaleTimerId = null; }
+      var el = h("div", { className: "rw-live-status is-idle" });
+      chatUi = { listEl: h("div", null), footerEl: h("div", null), hatchSlot: null, inputEl: null, actionBar: null, liveStatusEl: el };
+      view = "chat";
+      renderLiveStatusBar();
+      return el;
+    };
+    window._rwTestHooks._getLiveCoderWorking = function () { return liveCoderWorking; };
     window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
     window._rwTestHooks.renderChatEventRow = renderChatEventRow;
     window._rwTestHooks.renderChatProposalCard = renderChatProposalCard;
