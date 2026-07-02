@@ -6253,6 +6253,14 @@ export function createHttpApp() {
       }
       imageIds = body.imageIds as string[];
     }
+    // Attach RBAC (defense-in-depth): the upload endpoint already gates on
+    // attach_image, but this is the second door that results in an image being
+    // attached to a message. Guard it too so a user who lost the permission
+    // after uploading (or any non-upload path) can't still attach — mirrors the
+    // ticket-attachment guard. Skipped when no images are sent (plain message).
+    if (imageIds && imageIds.length > 0 && !auth.permissions.has('attach_image')) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
+    }
     try {
       const message = await WidgetChatService.sendUserMessage(
         c.req.param('id'), auth.projectId, auth.widgetUserId, body.content, imageIds,

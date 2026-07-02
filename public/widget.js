@@ -4001,7 +4001,7 @@
       '  overflow: hidden; flex-shrink: 0;',
       '  border: 1px solid var(--rw-line-2); background: var(--rw-bg);',
       '}',
-      '.rw-chat-img-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }',
+      '.rw-chat-img-chip img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }',
       '.rw-chat-img-chip-x {',
       '  position: absolute; top: 2px; right: 2px;',
       '  width: 16px; height: 16px; border-radius: 50%;',
@@ -4448,6 +4448,51 @@
       if (url) items.push({ url: url, name: e.file.name || t("composer.pastedImage") });
     });
     return items;
+  }
+
+  // Ordered [{ url, name }] of every pending chat-composer image (those that
+  // already have a data-URL preview) — the gallery a pending chip pages through.
+  function pendingChatGallery() {
+    var items = [];
+    for (var k = 0; k < pendingChatImages.length; k++) {
+      var p = pendingChatImages[k];
+      if (p && p.dataUrl) items.push({ url: p.dataUrl, name: p.name || "image" });
+    }
+    return items;
+  }
+
+  // A single staged-image chip for the chat composer: an inline <img> preview
+  // that opens the full-screen lightbox on click/Enter/Space (paging the whole
+  // pending set), plus an × that invokes onRemove(entry). Mirrors
+  // renderAttachChip for the ticket composer.
+  function renderPendingChatChip(entry, onRemove) {
+    var chip = h("div", {
+      className: "rw-chat-img-chip" + (entry.uploading ? " rw-uploading" : "") + (entry.failed ? " rw-failed" : ""),
+    });
+    var imgName = entry.name || "image";
+    var img = h("img", {
+      src: entry.dataUrl, alt: imgName,
+      title: imgName, role: "button", tabindex: "0", "aria-label": imgName,
+    });
+    function expand(e) {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      var items = pendingChatGallery();
+      if (!items.length) return;
+      var start = 0;
+      for (var k = 0; k < items.length; k++) { if (items[k].url === entry.dataUrl) { start = k; break; } }
+      openImageLightbox(items, start);
+    }
+    img.addEventListener("click", expand);
+    img.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") expand(e);
+    });
+    chip.appendChild(img);
+    var xBtn = h("button", {
+      className: "rw-chat-img-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+    }, "×");
+    xBtn.addEventListener("click", function () { onRemove(entry); });
+    chip.appendChild(xBtn);
+    return chip;
   }
 
   function shotIsImage(att) {
@@ -6902,21 +6947,11 @@
       clearChildren(pendingChipsRow);
       pendingChipsRow.style.display = pendingChatImages.length > 0 ? "flex" : "none";
       pendingChatImages.forEach(function (entry, idx) {
-        var chip = h("div", {
-          className: "rw-chat-img-chip" + (entry.uploading ? " rw-uploading" : "") + (entry.failed ? " rw-failed" : ""),
-        });
-        var img = h("img", { src: entry.dataUrl, alt: entry.name || "image" });
-        chip.appendChild(img);
-        var xBtn = h("button", {
-          className: "rw-chat-img-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
-        }, "×");
-        xBtn.addEventListener("click", function () {
+        pendingChipsRow.appendChild(renderPendingChatChip(entry, function () {
           pendingChatImages.splice(idx, 1);
           renderPendingChips();
           updateSendState();
-        });
-        chip.appendChild(xBtn);
-        pendingChipsRow.appendChild(chip);
+        }));
       });
     }
 
@@ -9089,6 +9124,12 @@
     window._rwTestHooks.renderAttachChip = renderAttachChip;
     window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
     window._rwTestHooks.stagedGallery = stagedGallery;
+    window._rwTestHooks.renderPendingChatChip = renderPendingChatChip;
+    window._rwTestHooks.pendingChatGallery = pendingChatGallery;
+    window._rwTestHooks._setPendingChatImages = function (imgs) {
+      pendingChatImages = (imgs || []).slice();
+    };
+    window._rwTestHooks._setModalMountEl = function (el) { modalMountEl = el; };
     window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
     window._rwTestHooks.applyCoderWorking = applyCoderWorking;
     window._rwTestHooks.renderLiveStatusBar = renderLiveStatusBar;
