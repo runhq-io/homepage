@@ -42,6 +42,13 @@ export interface MilestoneInput {
    * Empty/omitted ⇒ the deploy step falls back to the bare "Deployed" label.
    */
   environments?: Array<{ id: string; name: string }>;
+  /**
+   * True when the ticket went through the approval queue — currently
+   * `pending_approval`, or born into it and since approved. Inserts a dedicated
+   * approval step (after Clarifying) that reads "Pending approval" while active
+   * and "Approved" once the marker has advanced past it.
+   */
+  requiresApproval?: boolean;
 }
 
 export type MilestoneState = 'done' | 'current' | 'upcoming';
@@ -61,18 +68,26 @@ export interface Milestone {
 const TRACK = {
   received: 0,
   clarifying: 1,
-  in_progress: 2,
-  in_review: 3,
-  reviewed: 4,
-  merged: 5,
-  deployed: 6,
+  approval: 2,
+  in_progress: 3,
+  in_review: 4,
+  reviewed: 5,
+  merged: 6,
+  deployed: 7,
 } as const;
 
 const LABELS: Record<string, string> = {
   received: 'Received',
   clarifying: 'Clarifying',
+  // The approval step's label is resolved dynamically in deriveTicketMilestones
+  // ("Pending approval" while active → "Approved" once passed); this is the
+  // fallback.
+  approval: 'Pending approval',
   in_progress: 'In progress',
-  in_review: 'In review',
+  // The `done` status ("PR up, awaiting review") — labelled "Done" for partners
+  // to match the status chip (TODO_STATUS_DISPLAY.done). The `reviewed` step
+  // that follows covers the review milestone.
+  in_review: 'Done',
   reviewed: 'Reviewed',
   merged: 'Merged',
   deployed: 'Deployed',
@@ -100,6 +115,11 @@ function deployedLabel(status: string, environments: Array<{ id: string; name: s
  * a later signal (e.g. an open PR) always wins over an earlier status.
  */
 function reachedIndex(input: MilestoneInput): number {
+  // Approval gate. A ticket still awaiting approval is pinned at the approval
+  // step regardless of clarifier/agent/PR signals (chat-created tickets carry a
+  // 'skipped' clarification marker that would otherwise read as "In progress").
+  if (input.status === 'pending_approval') return TRACK.approval;
+
   let statusReached: number = TRACK.received;
   if (isDeployedStatus(input.status)) {
     // Any deploy status (legacy bare `deployed` or env-qualified `deployed:<env>`).
@@ -138,7 +158,13 @@ function reachedIndex(input: MilestoneInput): number {
     input.prState ? TRACK.in_review :
     TRACK.received;
 
-  return Math.max(statusReached, clarReached, agentReached, prReached);
+  const reached = Math.max(statusReached, clarReached, agentReached, prReached);
+
+  // An approved ticket that went through the queue (requiresApproval but no
+  // longer pending_approval) sits at least at the work phase, so its approval
+  // step reads "Approved" (done) and the active marker moves past the gate.
+  if (input.requiresApproval) return Math.max(reached, TRACK.in_progress);
+  return reached;
 }
 
 function step(key: keyof typeof TRACK, reached: number, complete: boolean): Milestone {
@@ -166,6 +192,14 @@ export function deriveTicketMilestones(input: MilestoneInput): Milestone[] {
   // The clarifying step appears only when a clarification session exists.
   if (input.clarificationStatus) {
     milestones.push(step('clarifying', reached, complete));
+  }
+  // The approval step appears only for tickets that went through the approval
+  // queue. Its label is state-driven: "Pending approval" while it is the active
+  // (current/upcoming) step, "Approved" once the marker has advanced past it.
+  if (input.requiresApproval) {
+    const approval = step('approval', reached, complete);
+    approval.label = approval.state === 'done' ? 'Approved' : 'Pending approval';
+    milestones.push(approval);
   }
   milestones.push(step('in_progress', reached, complete));
   milestones.push(step('in_review', reached, complete));

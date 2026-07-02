@@ -1728,6 +1728,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     agentAssigned: !!lastAssign,
     prState: internalPr?.state ?? null,
     environments: project.deployEnvironments ?? [],
+    // Show the approval step for tickets that went through the approval queue:
+    // currently awaiting approval, or born into it (persisted flag) and since
+    // approved/advanced.
+    requiresApproval:
+      task.status === 'pending_approval' ||
+      !!(task.metadata as Record<string, unknown> | null)?.approvalRequired,
   });
 
   // Resolve the chat conversation that originated this ticket, if any.
@@ -2206,7 +2212,15 @@ async function prepareWidgetTicketCreate(
     createdByName = wu?.name || undefined;
   }
 
-  const metadata = sanitizeWidgetMetadata(opts.context);
+  const sanitizedMetadata = sanitizeWidgetMetadata(opts.context);
+  // Tag tickets born into the approval queue so the progress stepper can show
+  // the approval step (as "Pending approval" → "Approved") even after the ticket
+  // is approved and its status no longer reads `pending_approval`. Persisted at
+  // birth; auto-assign's `recordOutcome` metadata write merges via jsonb `||`
+  // and preserves it.
+  const metadata = needsApproval
+    ? { ...(sanitizedMetadata ?? {}), approvalRequired: true }
+    : sanitizedMetadata;
 
   return {
     project,
