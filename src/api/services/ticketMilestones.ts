@@ -10,7 +10,7 @@
  * ordered list of milestones.
  */
 
-import { isDeployedStatus, deployedEnvId } from '@runhq/server-protocol';
+import { isDeployedStatus, deployedEnvId, TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 
 export type TicketStatus =
   | 'pending'
@@ -174,6 +174,56 @@ function step(key: keyof typeof TRACK, reached: number, complete: boolean): Mile
   else if (index === reached) state = complete ? 'done' : 'current';
   else state = 'upcoming';
   return { key, label: LABELS[key], state };
+}
+
+/**
+ * Which status-registry entry each milestone step borrows its chip colors from.
+ * The milestone track has steps the raw status vocabulary lacks (received /
+ * clarifying / in_review), so we map them onto the closest canonical status so
+ * the partner-facing chip stays visually consistent with the rest of the UI.
+ * `in_review` borrows `done` ("PR up, under review"); `received`/`clarifying`
+ * borrow the pending/pending_approval palette.
+ */
+const MILESTONE_COLOR_KEY: Record<string, keyof typeof TODO_STATUS_DISPLAY> = {
+  received: 'pending',
+  clarifying: 'pending_approval',
+  approval: 'pending_approval',
+  in_progress: 'in_progress',
+  in_review: 'done',
+  reviewed: 'reviewed',
+  merged: 'merged',
+  deployed: 'deployed',
+  cancelled: 'cancelled',
+};
+
+/** The partner-facing progress chip: a milestone plus the colors it renders in. */
+export interface CurrentMilestone {
+  key: string;
+  label: string;
+  dot: string;
+  bg: string;
+  fg: string;
+}
+
+/**
+ * The single milestone that represents "where the ticket is right now" — the
+ * `current` step, or (for terminal states with no current step, e.g. a fully
+ * `deployed` ticket) the furthest step. This is the ONE progress signal every
+ * partner-facing surface should show, so the list chip, the detail chip, and
+ * the detail stepper can never disagree.
+ */
+export function currentMilestone(input: MilestoneInput): Milestone {
+  const milestones = deriveTicketMilestones(input);
+  const current = milestones.find((m) => m.state === 'current');
+  return current ?? milestones[milestones.length - 1];
+}
+
+/** {@link currentMilestone} plus the chip colors, ready for a customer-facing UI. */
+export function currentMilestoneDisplay(input: MilestoneInput): CurrentMilestone {
+  const m = currentMilestone(input);
+  const colorKey = MILESTONE_COLOR_KEY[m.key] ?? 'pending';
+  const disp = TODO_STATUS_DISPLAY[colorKey];
+  return { key: m.key, label: m.label, dot: disp.dot, bg: disp.bg, fg: disp.fg };
 }
 
 export function deriveTicketMilestones(input: MilestoneInput): Milestone[] {

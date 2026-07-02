@@ -37,6 +37,7 @@
   var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
   var boardSearchQuery = ""; // in-list ticket search (client-side, current tab); reset on tab switch
+  var boardStatusFilter = "all"; // in-list status filter ("all" | a normalized status); reset on tab switch
   // References to the current board region so the search box + unread toggle can
   // re-filter the list in place (keeping input focus) instead of rebuilding the
   // whole panel on every keystroke.
@@ -997,7 +998,7 @@
         back: "Back",
       },
       tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions", approvals: "Pending approval" },
-      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now.", searchPlaceholder: "Search tickets", clearSearch: "Clear search", noMatches: "No matching tickets", noMatchesHint: "Try a different search term." },
+      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now.", searchPlaceholder: "Search tickets", clearSearch: "Clear search", noMatches: "No matching tickets", noMatchesHint: "Try a different search term.", statusGroup: "Filter by status", allStatuses: "All", noStatusMatches: "No tickets with this status", noStatusMatchesHint: "Pick a different status or choose All." },
       approve: { approve: "Approve", reject: "Reject", detailNote: "This ticket is awaiting your approval." },
       notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)", markAllRead: "Mark all read" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
@@ -1236,7 +1237,7 @@
         back: "뒤로",
       },
       tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역", approvals: "승인 대기" },
-      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다.", searchPlaceholder: "티켓 검색", clearSearch: "검색 지우기", noMatches: "일치하는 티켓이 없습니다", noMatchesHint: "다른 검색어를 입력해 보세요." },
+      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다.", searchPlaceholder: "티켓 검색", clearSearch: "검색 지우기", noMatches: "일치하는 티켓이 없습니다", noMatchesHint: "다른 검색어를 입력해 보세요.", statusGroup: "상태로 필터", allStatuses: "전체", noStatusMatches: "이 상태의 티켓이 없습니다", noStatusMatchesHint: "다른 상태를 선택하거나 전체를 선택하세요." },
       approve: { approve: "승인", reject: "거절", detailNote: "이 티켓은 승인을 기다리고 있습니다." },
       notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건", markAllRead: "모두 읽음 처리" },
       status: {
@@ -1513,6 +1514,27 @@
     return h("span", { className: "rw-chip", style: { background: s.bg, color: s.fg } }, [
       h("span", { className: "rw-chip-dot", style: { background: s.dot } }),
       document.createTextNode(s.label),
+    ]);
+  }
+
+  // Partner-facing PROGRESS for a ticket: { key, label, dot, bg, fg }. Prefer the
+  // server-derived `currentMilestone` — the single source of truth built from the
+  // same PR-aware milestone model as the detail stepper — so the list chip, the
+  // detail chip, and the detail stepper can never disagree (an open PR reads
+  // "Done" everywhere, not "In progress" on the card and "Done" in the stepper).
+  // Falls back to the raw status registry for an older server that predates the
+  // field. See BE ticketMilestones.currentMilestoneDisplay.
+  function ticketProgress(ticket) {
+    var cm = ticket && ticket.currentMilestone;
+    if (cm && cm.label) return cm;
+    var s = statusMeta(ticket && ticket.status);
+    return { key: normalizeStatus(ticket && ticket.status), label: s.label, dot: s.dot, bg: s.bg, fg: s.fg };
+  }
+  function renderProgressChip(ticket) {
+    var p = ticketProgress(ticket);
+    return h("span", { className: "rw-chip", style: { background: p.bg, color: p.fg } }, [
+      h("span", { className: "rw-chip-dot", style: { background: p.dot } }),
+      document.createTextNode(p.label),
     ]);
   }
 
@@ -2715,6 +2737,15 @@
       '.rw-unread-filter:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); flex: 0 0 auto; }',
+      /* Status filter — horizontal chip scroller pinned under the search row.
+         Shares the 22px left / 18px right padding so it lines up with the
+         search box, unread chip, and ticket rows. */
+      '.rw-status-filter { display: flex; align-items: center; gap: 6px; padding: 0 18px 10px 22px; overflow-x: auto; scrollbar-width: none; }',
+      '.rw-status-filter::-webkit-scrollbar { display: none; }',
+      '.rw-status-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 26px; padding: 0 10px; white-space: nowrap; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-family: inherit; font-size: 11.5px; font-weight: 500; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
+      '.rw-status-chip:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
+      '.rw-status-chip.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
+      '.rw-status-chip-dot { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; }',
       '.rw-dash-row-main { flex: 1; min-width: 0; }',
       '.rw-dash-row-title {',
       '  font-size: 13.5px; font-weight: 500; line-height: 1.32;',
@@ -4071,6 +4102,17 @@
       '  color: var(--rw-muted); flex: 0 0 auto;',
       '}',
       '.rw-chat-ticket-ref { font-size: 13px; font-weight: 600; color: var(--rw-fg); }',
+      /* Group wrapper for consecutive "similar ticket" deflection cards. A few
+         render at full height; a large set is capped and scrolls internally so
+         it can never push the conversation off-screen. The negative right
+         margin + padding keeps the scrollbar off the cards. */
+      '.rw-chat-ticket-link-group { align-self: stretch; display: flex; flex-direction: column; gap: 8px; }',
+      '.rw-chat-ticket-link-group.rw-scrollable {',
+      '  max-height: 232px; overflow-y: auto; overscroll-behavior: contain;',
+      '  padding: 2px 8px 2px 2px; margin-right: -6px;',
+      '}',
+      '.rw-chat-ticket-link-group.rw-scrollable::-webkit-scrollbar { width: 6px; }',
+      '.rw-chat-ticket-link-group.rw-scrollable::-webkit-scrollbar-thumb { background: var(--rw-line-2); border-radius: 999px; }',
       '.rw-chat-ticket-open {',
       '  flex: 0 0 auto; display: inline-flex; align-items: center; height: 26px; padding: 0 10px;',
       '  border-radius: 999px; border: 1px solid var(--rw-line-2);',
@@ -4714,7 +4756,7 @@
     // is already shipped (done/deployed), so the chip carries no information.
     if (!hideStatus) {
       if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
-      metaChildren.push(renderStatusChip(ticket.status));
+      metaChildren.push(renderProgressChip(ticket));
     }
     if (authorName) {
       if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
@@ -4803,9 +4845,11 @@
       btn.addEventListener("click", function () {
         if (pendingTab !== def.id) {
           activeTab = def.id;
-          // Search is a per-tab, client-side filter over that tab's loaded
-          // tickets — reset it when switching tabs so results never carry over.
+          // Search + status are per-tab, client-side filters over that tab's
+          // loaded tickets — reset them when switching tabs so a filter never
+          // carries over to a tab where it makes no sense.
           boardSearchQuery = "";
+          boardStatusFilter = "all";
           renderPanelBody();
         }
       });
@@ -4899,8 +4943,52 @@
     var showUnread = tab === "mine" && config.isIdentified;
     var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
     var toolbar = renderBoardToolbar(showUnread, unreadCount);
+
+    // Status filter row — the distinct statuses present in this tab, in the
+    // canonical lifecycle order. Only offered where cards actually SHOW status
+    // (the "Latest Updates" feed hides it) and where there's more than one
+    // status to choose between (a single-status tab has nothing to filter).
+    var region = [toolbar];
+    var distinctProgress = tab === "updates" ? [] : distinctBoardProgress(allItems);
+    if (distinctProgress.length > 1) region.push(renderStatusFilterRow(distinctProgress));
+    region.push(boardListEl);
+
     fillBoardList();
-    return [toolbar, boardListEl];
+    return region;
+  }
+
+  // Order the status-filter chips predictably. Milestone keys first (the
+  // server-derived progress vocabulary — same as the detail stepper), then the
+  // raw-status fallback keys for an older server. Unknown keys append.
+  var PROGRESS_ORDER = [
+    "received", "clarifying", "approval",
+    "pending", "pending_approval", "planned",
+    "in_progress", "needs_review", "in_review", "done",
+    "reviewed", "merged", "deployed", "cancelled",
+  ];
+
+  // Normalize a raw ticket status for grouping: every `deployed:<envId>` variant
+  // collapses to the single "deployed" bucket. Only used by the ticketProgress
+  // fallback — currentMilestone keys are already normalized server-side.
+  function normalizeStatus(s) {
+    if (isDeployedStatus(s)) return "deployed";
+    return s == null ? "" : String(s);
+  }
+
+  // Distinct progress steps present across `items` — one entry per milestone
+  // (or fallback status) with its label + dot color, ordered by PROGRESS_ORDER.
+  // Drives the status-filter chips; keyed the SAME way the chips render, so a
+  // filter chip always matches the cards it filters.
+  function distinctBoardProgress(items) {
+    var seen = {};
+    (items || []).forEach(function (tk) {
+      var p = ticketProgress(tk);
+      if (p && p.key && !seen[p.key]) seen[p.key] = { key: p.key, label: p.label, dot: p.dot };
+    });
+    var ordered = [];
+    PROGRESS_ORDER.forEach(function (k) { if (seen[k]) { ordered.push(seen[k]); delete seen[k]; } });
+    Object.keys(seen).forEach(function (k) { ordered.push(seen[k]); });
+    return ordered;
   }
 
   // Case-insensitive substring match over a ticket's title, description, and
@@ -4923,12 +5011,17 @@
     var tab = boardTab;
     var items = boardAllItems || [];
     if (tab === "mine" && mineUnreadOnly) items = items.filter(ticketHasUnseenActivity);
+    if (boardStatusFilter !== "all") {
+      items = items.filter(function (tk) { return ticketProgress(tk).key === boardStatusFilter; });
+    }
     var q = boardSearchQuery.trim().toLowerCase();
     if (q) items = items.filter(function (tk) { return ticketMatchesQuery(tk, q); });
 
     if (items.length === 0) {
       if (q) {
         boardListEl.appendChild(renderEmpty(t("filters.noMatches"), t("filters.noMatchesHint")));
+      } else if (boardStatusFilter !== "all") {
+        boardListEl.appendChild(renderEmpty(t("filters.noStatusMatches"), t("filters.noStatusMatchesHint")));
       } else if (tab === "mine" && mineUnreadOnly) {
         boardListEl.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
       }
@@ -4993,6 +5086,45 @@
       children.push(unreadBtn);
     }
     return h("div", { className: "rw-board-toolbar" }, children);
+  }
+
+  // Status-filter row (pinned under the search toolbar): an "All" chip plus one
+  // chip per distinct progress step present in the tab, each carrying that step's
+  // dot color. Single-select; clicking re-filters the list in place
+  // (fillBoardList) and re-styles the chips without rebuilding the panel. The
+  // row is a horizontal scroller so many steps never wrap in a narrow panel.
+  function renderStatusFilterRow(progress) {
+    var row = h("div", { className: "rw-status-filter", role: "group", "aria-label": t("filters.statusGroup") });
+    var chips = [];
+
+    function makeChip(value, label, dotColor) {
+      var on = boardStatusFilter === value;
+      var kids = [];
+      if (dotColor) kids.push(h("span", { className: "rw-status-chip-dot", style: { background: dotColor } }));
+      kids.push(document.createTextNode(label));
+      var chip = h("button", {
+        className: "rw-status-chip" + (on ? " rw-on" : ""),
+        type: "button", "aria-pressed": on ? "true" : "false",
+      }, kids);
+      chip.addEventListener("click", function () {
+        boardStatusFilter = value;
+        chips.forEach(function (c) {
+          var sel = c._rwValue === value;
+          c.classList.toggle("rw-on", sel);
+          c.setAttribute("aria-pressed", sel ? "true" : "false");
+        });
+        fillBoardList();
+      });
+      chip._rwValue = value;
+      chips.push(chip);
+      return chip;
+    }
+
+    row.appendChild(makeChip("all", t("filters.allStatuses"), null));
+    progress.forEach(function (p) {
+      row.appendChild(makeChip(p.key, p.label, p.dot));
+    });
+    return row;
   }
 
   // -----------------------------------------------------------------------
@@ -6735,6 +6867,14 @@
     el.appendChild(h("span", null, liveCoderWorking ? t("chat.liveWorking") : t("chat.liveStandby")));
   }
 
+  // A "similar ticket" deflection card the agent surfaced (search_tickets).
+  function isTicketLinkRow(row) {
+    return !!(row && row.role === "event" && row.payload && row.payload.kind === "ticket_link");
+  }
+  // Show this many similar-ticket cards at full height; beyond it the group
+  // becomes a fixed-height internal scroller.
+  var TICKET_LINK_SCROLL_AFTER = 4;
+
   function renderChatMessageList() {
     if (!chatUi) return;
     var listEl = chatUi.listEl;
@@ -6779,14 +6919,33 @@
     }
 
     var activeProposal = chatFindActiveProposal();
-    for (var i = 0; i < chatMessages.length; i++) {
+    var i = 0;
+    while (i < chatMessages.length) {
       var row = chatMessages[i];
+      // Group a run of consecutive "similar ticket" deflection cards
+      // (search_tickets → ticket_link events) into ONE container. When the run
+      // is large, the container is height-capped and scrolls internally, so a
+      // big result set can't push the rest of the conversation off-screen.
+      if (isTicketLinkRow(row)) {
+        var group = h("div", { className: "rw-chat-ticket-link-group" });
+        var count = 0;
+        while (i < chatMessages.length && isTicketLinkRow(chatMessages[i])) {
+          group.appendChild(renderChatTicketLinkCard(chatMessages[i].payload));
+          count++;
+          i++;
+        }
+        // A couple render inline; only cap+scroll once they'd overflow.
+        if (count > TICKET_LINK_SCROLL_AFTER) group.classList.add("rw-scrollable");
+        listEl.appendChild(group);
+        continue;
+      }
       var node = null;
       if (row.role === "user") node = renderChatUserRow(row);
       else if (row.role === "agent") node = renderChatAgentRow(row);
       else if (row.role === "team") node = renderChatTeamRow(row);
       else if (row.role === "event") node = renderChatEventRow(row, activeProposal);
       if (node) listEl.appendChild(node);
+      i++;
     }
 
     if (chatTurnPending && chatConversation && chatConversation.status === "active") {
@@ -7688,7 +7847,7 @@
 
     // The #refId chip used to live here too — it was visual noise (most
     // users never reference it). Status chip + visibility chip stay.
-    var headRefChildren = [renderStatusChip(ticket.status)];
+    var headRefChildren = [renderProgressChip(ticket)];
     if (visChip) headRefChildren.push(visChip);
 
     // Manual "Assign agent" button removed — assignment is automatic and
@@ -8785,6 +8944,7 @@
     activeTab = "hot";
     mineUnreadOnly = false;
     boardSearchQuery = "";
+    boardStatusFilter = "all";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();
@@ -9202,7 +9362,25 @@
     window._rwTestHooks._getBoardListEl = function () { return boardListEl; };
     window._rwTestHooks._setActiveTab = function (tab) { activeTab = tab; };
     window._rwTestHooks._setSearchQuery = function (q) { boardSearchQuery = q; };
+    window._rwTestHooks._setStatusFilter = function (s) { boardStatusFilter = s; };
+    window._rwTestHooks.distinctBoardProgress = distinctBoardProgress;
+    window._rwTestHooks.ticketProgress = ticketProgress;
+    window._rwTestHooks.normalizeStatus = normalizeStatus;
     window._rwTestHooks._setUnreadOnly = function (on) { mineUnreadOnly = !!on; };
+    // Chat "similar ticket" grouping hooks — drive the real renderChatMessageList
+    // with canned ticket_link runs to assert the height-capped scroll grouping.
+    window._rwTestHooks.renderChatMessageList = renderChatMessageList;
+    window._rwTestHooks.isTicketLinkRow = isTicketLinkRow;
+    window._rwTestHooks.TICKET_LINK_SCROLL_AFTER = TICKET_LINK_SCROLL_AFTER;
+    window._rwTestHooks._setupChatUi = function () {
+      chatIsLiveSession = false;
+      view = "chat";
+      chatConversation = { id: "c1", status: "active" };
+      var listEl = h("div", { className: "rw-chat-scroll" });
+      chatUi = { listEl: listEl, footerEl: h("div", null), hatchSlot: h("div", null), inputEl: null, actionBar: h("div", null), liveStatusEl: null };
+      return listEl;
+    };
+    window._rwTestHooks._setChatMessages = function (msgs) { chatMessages = (msgs || []).slice(); };
     window._rwTestHooks._setBoardCaches = function (caches) {
       if (caches.updates !== undefined) updatesCache = caches.updates;
       if (caches.hot !== undefined) topTicketsCache = caches.hot;

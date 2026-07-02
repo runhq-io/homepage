@@ -126,17 +126,31 @@ function makeDomMock() {
   };
 }
 
-interface Ticket { id: string; title?: string; description?: string; createdAt?: string; lastActivityAt?: string }
+interface Milestone { key: string; label: string; dot: string; bg: string; fg: string }
+interface Ticket { id: string; title?: string; description?: string; status?: string; currentMilestone?: Milestone | null; createdAt?: string; lastActivityAt?: string }
 interface Hooks {
   renderList?: () => FakeNode[];
   fillBoardList?: () => void;
   ticketMatchesQuery?: (tk: Ticket, q: string) => boolean;
+  distinctBoardProgress?: (items: Ticket[]) => Array<{ key: string; label: string; dot: string }>;
+  ticketProgress?: (tk: Ticket) => { key: string; label: string; dot: string; bg: string; fg: string };
+  normalizeStatus?: (s: string) => string;
   _getBoardListEl?: () => FakeNode | null;
   _setActiveTab?: (t: string) => void;
   _setSearchQuery?: (q: string) => void;
+  _setStatusFilter?: (s: string) => void;
   _setUnreadOnly?: (on: boolean) => void;
   _setBoardCaches?: (c: Partial<Record<'updates' | 'hot' | 'mine' | 'approvals', Ticket[]>>) => void;
   _setConfig?: (u: Record<string, unknown>) => void;
+  renderChatMessageList?: () => void;
+  TICKET_LINK_SCROLL_AFTER?: number;
+  _setupChatUi?: () => FakeNode;
+  _setChatMessages?: (msgs: unknown[]) => void;
+}
+
+interface ChatMsg { id: string; role: string; content?: string | null; payload?: Record<string, unknown>; createdAt?: string }
+function ticketLinkMsg(i: number): ChatMsg {
+  return { id: `tl${i}`, role: 'event', payload: { kind: 'ticket_link', ticketId: `id${i}`, title: `Similar ticket ${i}`, status: 'done' }, createdAt: '2026-07-02T10:00:00Z' };
 }
 
 function loadWidget() {
@@ -180,6 +194,13 @@ function cards(listEl: FakeNode): FakeNode[] {
 function findByClass(root: FakeNode, cls: string): FakeNode | null {
   return root._find((n) => hasClass(n, cls));
 }
+// Aggregate visible text across a node's subtree (button labels are child text
+// nodes, so a node's own textContent is empty).
+function textOf(n: FakeNode): string {
+  let s = typeof n.textContent === 'string' ? n.textContent : '';
+  for (const c of n.children) s += textOf(c);
+  return s;
+}
 
 const TICKETS: Ticket[] = [
   { id: 'aaaa1111bbbb', title: 'Button hover state missing visual feedback', description: 'Several action buttons lack a hover state.' },
@@ -187,16 +208,34 @@ const TICKETS: Ticket[] = [
   { id: 'ffff3333gggg', title: 'Export CSV from reports', description: 'Let users download report data as CSV.' },
 ];
 
+function regionParts(region: FakeNode[]): { toolbar: FakeNode; statusRow: FakeNode | null; listEl: FakeNode } {
+  const toolbar = region.find((n) => hasClass(n, 'rw-board-toolbar'))!;
+  const statusRow = region.find((n) => hasClass(n, 'rw-status-filter')) ?? null;
+  const listEl = region.find((n) => hasClass(n, 'rw-dash-list'))!;
+  return { toolbar, statusRow, listEl };
+}
+
 function renderMineBoard(hooks: Hooks): { toolbar: FakeNode; listEl: FakeNode } {
   hooks._setConfig!({ isIdentified: true });
   hooks._setActiveTab!('hot'); // any populated tab; use hot to avoid identity gating nuances
   hooks._setBoardCaches!({ hot: TICKETS });
   hooks._setSearchQuery!('');
+  hooks._setStatusFilter!('all');
   hooks._setUnreadOnly!(false);
   const region = hooks.renderList!();
-  expect(region.length).toBe(2);
-  return { toolbar: region[0], listEl: region[1] };
+  const { toolbar, statusRow, listEl } = regionParts(region);
+  // TICKETS carry no status, so the status-filter row must NOT appear.
+  expect(statusRow).toBeNull();
+  return { toolbar, listEl };
 }
+
+const STATUS_TICKETS: Ticket[] = [
+  { id: 's1', title: 'Alpha', status: 'in_progress' },
+  { id: 's2', title: 'Bravo', status: 'planned' },
+  { id: 's3', title: 'Charlie', status: 'in_progress' },
+  { id: 's4', title: 'Delta', status: 'done' },
+  { id: 's5', title: 'Echo', status: 'deployed:env-123' },
+];
 
 describe('widget.js — board search + unread toolbar', () => {
   it('renders a search box in the toolbar and all tickets in the list', () => {
@@ -291,6 +330,99 @@ describe('widget.js — board search + unread toolbar', () => {
     expect(shown[0]._find((n) => n.textContent.includes('Unseen activity'))).not.toBeNull();
   });
 
+  it('distinctBoardProgress orders by lifecycle and collapses deployed:<env> to one bucket', () => {
+    const { hooks } = loadWidget();
+    const got = hooks.distinctBoardProgress!(STATUS_TICKETS).map((p) => p.key);
+    // in_progress before done before deployed; deployed:env-123 → "deployed".
+    expect(got).toEqual(['planned', 'in_progress', 'done', 'deployed']);
+    expect(hooks.normalizeStatus!('deployed:env-123')).toBe('deployed');
+  });
+
+  it('ticketProgress/chip use the server currentMilestone over the raw status (the reported bug)', () => {
+    const { hooks } = loadWidget();
+    // The bug ticket: status still 'in_progress', but an open PR advanced the
+    // server milestone to "Done"/in_review. The chip + filter must follow the
+    // milestone, not the stale status.
+    const tk: Ticket = {
+      id: 'bug1', title: 'Add Dark Mode', status: 'in_progress',
+      currentMilestone: { key: 'in_review', label: 'Done', dot: '#6b8a6a', bg: 'rgba(107,138,106,0.14)', fg: '#556e54' },
+    };
+    const p = hooks.ticketProgress!(tk);
+    expect(p.key).toBe('in_review');
+    expect(p.label).toBe('Done');
+
+    // The status-filter groups it under the milestone, labelled from the milestone.
+    const groups = hooks.distinctBoardProgress!([tk]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe('in_review');
+    expect(groups[0].label).toBe('Done');
+  });
+
+  it('renders a status-filter row (All + each present status) only when >1 status exists', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setActiveTab!('hot');
+    hooks._setBoardCaches!({ hot: STATUS_TICKETS });
+    hooks._setSearchQuery!(''); hooks._setStatusFilter!('all'); hooks._setUnreadOnly!(false);
+    const { statusRow, listEl } = regionParts(hooks.renderList!());
+
+    expect(statusRow).not.toBeNull();
+    const chips = statusRow!._findAll((n) => hasClass(n, 'rw-status-chip'));
+    // Order = All + lifecycle order (planned, in_progress, done, deployed).
+    expect(chips.length).toBe(5);
+    expect(textOf(chips[0])).toContain('All');
+    expect(hasClass(chips[0], 'rw-on')).toBe(true); // "All" selected by default
+    expect(cards(listEl).length).toBe(5);
+  });
+
+  it('does NOT render the status row when every ticket shares one status', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setActiveTab!('hot');
+    hooks._setBoardCaches!({ hot: [ { id: 'x1', title: 'A', status: 'done' }, { id: 'x2', title: 'B', status: 'done' } ] });
+    hooks._setSearchQuery!(''); hooks._setStatusFilter!('all'); hooks._setUnreadOnly!(false);
+    const { statusRow } = regionParts(hooks.renderList!());
+    expect(statusRow).toBeNull();
+  });
+
+  it('filtering by a status chip shows only that status, in the same list node', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setActiveTab!('hot');
+    hooks._setBoardCaches!({ hot: STATUS_TICKETS });
+    hooks._setSearchQuery!(''); hooks._setStatusFilter!('all'); hooks._setUnreadOnly!(false);
+    const { statusRow, listEl } = regionParts(hooks.renderList!());
+
+    const chips = statusRow!._findAll((n) => hasClass(n, 'rw-status-chip'));
+    const inProgress = chips[2]; // [All, planned, in_progress, done, deployed]
+    inProgress.dispatchEvent({ type: 'click' });
+
+    // Same list node reused; only the 2 in_progress tickets remain; chip is active.
+    expect(hooks._getBoardListEl!()).toBe(listEl);
+    expect(cards(listEl).length).toBe(2);
+    expect(hasClass(inProgress, 'rw-on')).toBe(true);
+    expect(hasClass(chips[0], 'rw-on')).toBe(false); // "All" no longer selected
+  });
+
+  it('status filter composes with search (AND)', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setActiveTab!('hot');
+    hooks._setBoardCaches!({ hot: STATUS_TICKETS });
+    hooks._setSearchQuery!(''); hooks._setStatusFilter!('all'); hooks._setUnreadOnly!(false);
+    const { toolbar, statusRow, listEl } = regionParts(hooks.renderList!());
+
+    // Filter to in_progress (2 tickets: Alpha, Charlie), then search "alpha".
+    const chips = statusRow!._findAll((n) => hasClass(n, 'rw-status-chip'));
+    chips[2].dispatchEvent({ type: 'click' }); // [All, planned, in_progress, done, deployed]
+    const input = findByClass(toolbar, 'rw-search-input')!;
+    input.value = 'alpha';
+    input.dispatchEvent({ type: 'input' });
+
+    expect(cards(listEl).length).toBe(1);
+    expect(listEl._find((n) => n.textContent.includes('Alpha'))).not.toBeNull();
+  });
+
   it('ticketMatchesQuery matches title, description, and short ref id', () => {
     const { hooks } = loadWidget();
     const tk = TICKETS[0]; // id aaaa1111bbbb → ref "AAAA1111"
@@ -298,5 +430,61 @@ describe('widget.js — board search + unread toolbar', () => {
     expect(hooks.ticketMatchesQuery!(tk, 'action buttons')).toBe(true); // description
     expect(hooks.ticketMatchesQuery!(tk, 'aaaa1111')).toBe(true);   // ref id
     expect(hooks.ticketMatchesQuery!(tk, 'nomatch')).toBe(false);
+  });
+});
+
+describe('widget.js — chat "similar tickets" grouping', () => {
+  function renderChat(hooks: Hooks, ticketLinkCount: number): FakeNode {
+    hooks._setConfig!({ chat: { enabled: true, agentName: 'Suha' }, projectName: 'Acme' });
+    const listEl = hooks._setupChatUi!();
+    const msgs: ChatMsg[] = [
+      { id: 'u1', role: 'user', content: 'just create dont ask questions' },
+      { id: 'a1', role: 'agent', content: 'Let me search for any existing similar tickets first!' },
+    ];
+    for (let i = 1; i <= ticketLinkCount; i++) msgs.push(ticketLinkMsg(i));
+    hooks._setChatMessages!(msgs);
+    hooks.renderChatMessageList!();
+    return listEl;
+  }
+  function groups(listEl: FakeNode): FakeNode[] {
+    return listEl.children.filter((c) => hasClass(c, 'rw-chat-ticket-link-group'));
+  }
+
+  it('collapses consecutive ticket_link cards into a single group container', () => {
+    const { hooks } = loadWidget();
+    const listEl = renderChat(hooks, 7);
+    const g = groups(listEl);
+    expect(g.length).toBe(1); // exactly one group, not 7 loose rows
+    const linkCards = g[0]._findAll((n) => hasClass(n, 'rw-chat-ticket-card'));
+    expect(linkCards.length).toBe(7);
+  });
+
+  it('caps + scrolls the group once it exceeds the inline threshold', () => {
+    const { hooks } = loadWidget();
+    const threshold = hooks.TICKET_LINK_SCROLL_AFTER!;
+    const g = groups(renderChat(hooks, threshold + 3));
+    expect(hasClass(g[0], 'rw-scrollable')).toBe(true);
+  });
+
+  it('leaves a small group at full height (no internal scroll)', () => {
+    const { hooks } = loadWidget();
+    const threshold = hooks.TICKET_LINK_SCROLL_AFTER!;
+    const g = groups(renderChat(hooks, threshold)); // exactly at threshold → not scrollable
+    expect(g.length).toBe(1);
+    expect(hasClass(g[0], 'rw-scrollable')).toBe(false);
+  });
+
+  it('does not group ticket_link cards separated by other messages', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ chat: { enabled: true, agentName: 'Suha' }, projectName: 'Acme' });
+    const listEl = hooks._setupChatUi!();
+    hooks._setChatMessages!([
+      ticketLinkMsg(1),
+      { id: 'a2', role: 'agent', content: 'and one more' },
+      ticketLinkMsg(2),
+    ]);
+    hooks.renderChatMessageList!();
+    // Two separate single-card groups (each run of length 1), not one merged box.
+    expect(groups(listEl).length).toBe(2);
   });
 });

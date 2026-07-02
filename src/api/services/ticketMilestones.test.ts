@@ -13,7 +13,8 @@
  * with pending/planned sharing "Received".
  */
 import { describe, it, expect } from 'vitest';
-import { deriveTicketMilestones, type MilestoneInput } from './ticketMilestones';
+import { deriveTicketMilestones, currentMilestone, currentMilestoneDisplay, type MilestoneInput } from './ticketMilestones';
+import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 
 function keysWithState(input: MilestoneInput) {
   return deriveTicketMilestones(input).map((m) => `${m.key}:${m.state}`);
@@ -266,6 +267,58 @@ describe('deriveTicketMilestones', () => {
     for (const status of statuses) {
       expect(() => deriveTicketMilestones({ status })).not.toThrow();
       expect(deriveTicketMilestones({ status }).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('currentMilestone / currentMilestoneDisplay — single source of truth for the chip', () => {
+  it('an open PR on an in_progress ticket reports the PR-aware step (the reported bug)', () => {
+    // The exact discrepancy: status is still in_progress, but the linked PR is
+    // open. The stepper advances to the review step, and the chip MUST follow it
+    // — not report the stale "In progress".
+    const cur = currentMilestone({ status: 'in_progress', prState: 'open' });
+    expect(cur.key).toBe('in_review');
+    // The chip label matches the stepper's, and borrows the `done` palette.
+    const disp = currentMilestoneDisplay({ status: 'in_progress', prState: 'open' });
+    expect(disp.key).toBe('in_review');
+    expect(disp.label).toBe(cur.label);
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.done.dot);
+  });
+
+  it('without a PR, an in_progress ticket reads in_progress', () => {
+    const disp = currentMilestoneDisplay({ status: 'in_progress' });
+    expect(disp.key).toBe('in_progress');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.in_progress.dot);
+  });
+
+  it('a pending_approval ticket reports the approval step', () => {
+    const disp = currentMilestoneDisplay({ status: 'pending_approval', requiresApproval: true });
+    expect(disp.key).toBe('approval');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.pending_approval.dot);
+  });
+
+  it('a deployed ticket reports the (terminal) deploy step with the env label + color', () => {
+    const disp = currentMilestoneDisplay({ status: 'deployed:prod', environments: [{ id: 'prod', name: 'Production' }] });
+    expect(disp.key).toBe('deployed');
+    expect(disp.label).toBe('Deployed → Production');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.deployed.dot);
+  });
+
+  it('a cancelled ticket reports the cancelled step', () => {
+    const disp = currentMilestoneDisplay({ status: 'cancelled' });
+    expect(disp.key).toBe('cancelled');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.cancelled.dot);
+  });
+
+  it('is total: returns a labelled, colored step for every status', () => {
+    const statuses: MilestoneInput['status'][] = [
+      'pending', 'pending_approval', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
+      'deployed', 'deployed:prod-env-id',
+    ];
+    for (const status of statuses) {
+      const disp = currentMilestoneDisplay({ status });
+      expect(disp.label.length).toBeGreaterThan(0);
+      expect(disp.dot).toMatch(/^#/);
     }
   });
 });

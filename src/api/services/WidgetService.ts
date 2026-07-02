@@ -27,17 +27,18 @@ import {
   widgetChatMessages,
   widgetChatImages,
   widgetTicketReads,
+  widgetClarifications,
   type ChatImageRow,
 } from '../../db/schema';
 import { resizeForModel } from './widgetChatImage';
-import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
+import { eq, and, ne, asc, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment, TodoStatus } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
 import * as ClarifierService from './ClarifierService';
 import type { ClarificationQuestion } from './ClarifierService';
-import { deriveTicketMilestones, type Milestone, type PrState } from './ticketMilestones';
+import { deriveTicketMilestones, currentMilestoneDisplay, type Milestone, type CurrentMilestone, type PrState, type ClarificationStatus } from './ticketMilestones';
 import * as InjectionGuardService from './InjectionGuardService';
 import type { InjectionGuardImage, InjectionGuardImageMime } from './injectionGuardCore';
 import {
@@ -373,6 +374,14 @@ type WidgetTicketResponse = {
   userVote: boolean | null;
   canVote: boolean;
   /**
+   * Partner-facing progress step + chip colors, derived from the SAME PR-aware
+   * milestone model as the detail stepper (ticketMilestones). This is the single
+   * source of truth for "what step is the ticket on", so the list chip, the
+   * detail chip, and the detail stepper always agree. Absent only on the loading
+   * skeleton or an older bundle; the widget then falls back to the raw status.
+   */
+  currentMilestone?: CurrentMilestone | null;
+  /**
    * Timestamp of the most recent activity on the ticket — the max of the task's
    * own updatedAt, its latest comment, and its latest activity row. Unlike
    * updatedAt (which only bumps on field/status changes), this reflects new
@@ -638,6 +647,99 @@ function deriveLinkedPr(
     return { number, url, state, repoBranch };
   }
   return null;
+}
+
+/** The milestone-derivation signals for one ticket, beyond its status. */
+interface MilestoneSignals {
+  prState: PrState | null;
+  agentAssigned: boolean;
+  clarificationStatus: ClarificationStatus | null;
+}
+
+/**
+ * Batch-load the milestone signals (linked-PR state, agent-assigned, latest
+ * clarification status) for a page of tickets in TWO queries, so a list can
+ * derive the same PR-aware progress the detail view shows without an N+1. The
+ * detail view (getPublicTicketDetail) already has the full activity/clarification
+ * loaded and derives these inline; this is the list-side equivalent.
+ */
+async function loadMilestoneSignals(taskIds: string[]): Promise<Map<string, MilestoneSignals>> {
+  const out = new Map<string, MilestoneSignals>();
+  if (taskIds.length === 0) return out;
+  const ensure = (id: string): MilestoneSignals => {
+    let e = out.get(id);
+    if (!e) { e = { prState: null, agentAssigned: false, clarificationStatus: null }; out.set(id, e); }
+    return e;
+  };
+
+  // pr_linked + agent_assigned activity, oldest→newest so the LAST pr_linked
+  // seen per task (the most recent) wins for prState.
+  const acts = await db
+    .select({
+      taskId: workspaceTaskActivity.taskId,
+      type: workspaceTaskActivity.type,
+      metadata: workspaceTaskActivity.metadata,
+    })
+    .from(workspaceTaskActivity)
+    .where(and(
+      inArray(workspaceTaskActivity.taskId, taskIds),
+      inArray(workspaceTaskActivity.type, ['pr_linked', 'agent_assigned']),
+    ))
+    .orderBy(asc(workspaceTaskActivity.createdAt));
+  for (const a of acts) {
+    const e = ensure(a.taskId);
+    if (a.type === 'agent_assigned') {
+      e.agentAssigned = true;
+    } else if (a.type === 'pr_linked' && a.metadata) {
+      const m = a.metadata as Record<string, unknown>;
+      // Mirror deriveLinkedPr's validation — a pr_linked row without a real
+      // number+url is malformed and must not count as a linked PR.
+      if (typeof m.number === 'number' && typeof m.url === 'string') {
+        e.prState = coercePrState(m.state);
+      }
+    }
+  }
+
+  // Latest clarification status per task (oldest→newest so the last wins). The
+  // milestone only distinguishes 'asking' (→ clarifying) from any resolved
+  // status (→ work started), so newest-by-createdAt is sufficient here.
+  const clars = await db
+    .select({ taskId: widgetClarifications.taskId, status: widgetClarifications.status })
+    .from(widgetClarifications)
+    .where(inArray(widgetClarifications.taskId, taskIds))
+    .orderBy(asc(widgetClarifications.createdAt));
+  for (const c of clars) {
+    ensure(c.taskId).clarificationStatus = c.status as ClarificationStatus;
+  }
+
+  return out;
+}
+
+/** Resolve one ticket's partner-facing progress chip from its status + signals. */
+function resolveCurrentMilestone(
+  task: { status: TodoStatus },
+  signals: MilestoneSignals | undefined,
+  environments: Array<{ id: string; name: string }>,
+): CurrentMilestone {
+  return currentMilestoneDisplay({
+    status: task.status,
+    clarificationStatus: signals?.clarificationStatus ?? null,
+    agentAssigned: signals?.agentAssigned ?? false,
+    prState: signals?.prState ?? null,
+    environments,
+  });
+}
+
+/**
+ * Map a page of ticket DTOs, attaching each one's server-derived
+ * `currentMilestone`. Loads the milestone signals for the whole page in one shot.
+ */
+async function withCurrentMilestones<T extends { id: string; status: TodoStatus }>(
+  dtos: T[],
+  environments: Array<{ id: string; name: string }>,
+): Promise<Array<T & { currentMilestone: CurrentMilestone }>> {
+  const signals = await loadMilestoneSignals(dtos.map((d) => d.id));
+  return dtos.map((d) => ({ ...d, currentMilestone: resolveCurrentMilestone(d, signals.get(d.id), environments) }));
 }
 
 // ============================================================================
@@ -1497,8 +1599,9 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     }
   }
 
-  const tickets: WidgetTicketResponse[] = rows.map((t) =>
-    mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)
+  const tickets: WidgetTicketResponse[] = await withCurrentMilestones(
+    rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)),
+    project?.deployEnvironments ?? [],
   );
 
   return {
@@ -1558,7 +1661,10 @@ export async function listPublishedTickets(projectId: string, widgetUserId?: str
     for (const v of votes) userVoteMap.set(v.taskId, v.value);
   }
 
-  const tickets = rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true));
+  const tickets = await withCurrentMilestones(
+    rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)),
+    project?.deployEnvironments ?? [],
+  );
 
   return {
     projectName: project?.name ?? '',
