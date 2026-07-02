@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveWidgetPermissions,
   effectiveWidgetRoleMap,
+  widgetRoleMapForDisplay,
   defaultWidgetRolePermissions,
   defaultRoleForAuthSource,
   isAssignableWidgetRole,
@@ -22,12 +23,12 @@ describe('widget role-based permissions', () => {
       expect(p.has('preview')).toBe(false);
     });
 
-    it('a logged-in user gets read + vote + create (attach derives)', () => {
+    it('a logged-in user gets read + vote + create + attach images', () => {
       const p = resolveWidgetPermissions({}, WIDGET_ROLE_LOGGED_IN, true);
       expect(p.has('view_tickets')).toBe(true);
       expect(p.has('voter')).toBe(true);
       expect(p.has('ticket_creator')).toBe(true);
-      // attach_image is derived from ticket_creator
+      // attach_image is a seeded default grant for logged_in
       expect(p.has('attach_image')).toBe(true);
       // but no elevated powers
       expect(p.has('assign_agent')).toBe(false);
@@ -148,10 +149,57 @@ describe('widget role-based permissions', () => {
   });
 
   it('isWidgetPermission validates the vocabulary', () => {
-    for (const p of ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview', 'approve_tickets', 'live_coder', 'attach_image']) {
+    for (const p of ['view_tickets', 'voter', 'ticket_creator', 'attach_image', 'assign_agent', 'preview', 'approve_tickets', 'live_coder']) {
       expect(isWidgetPermission(p)).toBe(true);
     }
     expect(isWidgetPermission('manage_project')).toBe(false);
     expect(isWidgetPermission(undefined)).toBe(false);
+  });
+
+  describe('attach_image is an independent grid column with a legacy fallback', () => {
+    it('legacy map (no attach_image anywhere) derives it from ticket_creator', () => {
+      const legacy = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'voter', 'ticket_creator'] };
+      const p = resolveWidgetPermissions(legacy, WIDGET_ROLE_LOGGED_IN, true);
+      expect(p.has('attach_image')).toBe(true); // preserved for pre-column maps
+    });
+
+    it('once attach_image is granted explicitly anywhere, it is authoritative (no derivation)', () => {
+      // moderator has attach_image explicitly; logged_in has ticket_creator but
+      // NOT attach_image → logged_in must NOT get attach_image derived.
+      const map = {
+        everyone: ['view_tickets'],
+        logged_in: ['view_tickets', 'voter', 'ticket_creator'],
+        moderator: ['view_tickets', 'attach_image'],
+      };
+      expect(resolveWidgetPermissions(map, WIDGET_ROLE_LOGGED_IN, true).has('attach_image')).toBe(false);
+      expect(resolveWidgetPermissions(map, 'moderator', true).has('attach_image')).toBe(true);
+    });
+
+    it('can be granted to a role WITHOUT ticket_creator (decoupled)', () => {
+      const map = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'attach_image'] };
+      const p = resolveWidgetPermissions(map, WIDGET_ROLE_LOGGED_IN, true);
+      expect(p.has('attach_image')).toBe(true);
+      expect(p.has('ticket_creator')).toBe(false);
+    });
+
+    it('anonymous never gets attach_image, even on a legacy ticket_creator map', () => {
+      const legacy = { everyone: ['view_tickets', 'ticket_creator'] };
+      expect(resolveWidgetPermissions(legacy, null, false).has('attach_image')).toBe(false);
+    });
+  });
+
+  describe('widgetRoleMapForDisplay', () => {
+    it('materializes attach_image on ticket_creator roles for a legacy map', () => {
+      const legacy = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'voter', 'ticket_creator'] };
+      const shown = widgetRoleMapForDisplay(legacy);
+      expect(shown.logged_in).toContain('attach_image'); // grid shows real effective state
+      expect(shown.everyone).not.toContain('attach_image');
+    });
+
+    it('returns the stored map unchanged once attach_image is explicit', () => {
+      const map = { everyone: ['view_tickets'], logged_in: ['view_tickets', 'ticket_creator', 'attach_image'], staff: ['view_tickets'] };
+      const shown = widgetRoleMapForDisplay(map);
+      expect(shown).toEqual(map); // authoritative — staff stays without attach_image
+    });
   });
 });

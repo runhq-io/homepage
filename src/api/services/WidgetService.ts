@@ -80,25 +80,26 @@ export type WidgetPermission =
   | 'view_tickets'
   | 'voter'
   | 'ticket_creator'
+  | 'attach_image'
   | 'assign_agent'
   | 'preview'
   | 'approve_tickets'
-  // Internal capabilities, not shown as grid columns — derived at resolution
-  // time from the visible permissions (see resolveWidgetPermissions):
-  //   attach_image ⇐ ticket_creator   (if you can file tickets you can attach)
-  //   live_coder   ⇐ assign_agent     (live session is a staff action)
-  | 'live_coder'
-  | 'attach_image';
+  // Internal capability, not a grid column — derived at resolution time:
+  //   live_coder ⇐ assign_agent   (live session is a staff action)
+  | 'live_coder';
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 /**
- * The six widget permissions surfaced as columns in the Project Settings →
- * Widget → Permissions grid, in display order.
+ * The widget permissions surfaced as columns in the Project Settings → Widget →
+ * Permissions grid, in display order. `attach_image` sits next to
+ * `ticket_creator` (they pair up) but is independently grantable — see the
+ * legacy-derivation note in `resolveWidgetPermissions`.
  */
 export const WIDGET_PERMISSION_COLUMNS: readonly WidgetPermission[] = [
   'view_tickets',
   'voter',
   'ticket_creator',
+  'attach_image',
   'assign_agent',
   'preview',
   'approve_tickets',
@@ -107,7 +108,6 @@ export const WIDGET_PERMISSION_COLUMNS: readonly WidgetPermission[] = [
 const ALL_WIDGET_PERMISSIONS: readonly WidgetPermission[] = [
   ...WIDGET_PERMISSION_COLUMNS,
   'live_coder',
-  'attach_image',
 ];
 
 export function isWidgetPermission(v: unknown): v is WidgetPermission {
@@ -134,7 +134,7 @@ export const WIDGET_BUILTIN_ROLES: readonly string[] = [WIDGET_ROLE_EVERYONE, WI
  * so a fresh project behaves sensibly and existing projects are unchanged after
  * the tier→role migration:
  *   - everyone   : read-only board access (anonymous can browse when public).
- *   - logged_in  : read + vote + create (any identified user) — attach derives.
+ *   - logged_in  : read + vote + create + attach images (any identified user).
  *   - staff      : everything — assign agents + preview (live derives) + approve
  *                  tickets awaiting approval. Seeded but editable/deletable;
  *                  it's what RunHQ teammates default to.
@@ -143,8 +143,8 @@ export const WIDGET_BUILTIN_ROLES: readonly string[] = [WIDGET_ROLE_EVERYONE, WI
 export function defaultWidgetRolePermissions(): Record<string, WidgetPermission[]> {
   return {
     [WIDGET_ROLE_EVERYONE]: ['view_tickets'],
-    [WIDGET_ROLE_LOGGED_IN]: ['view_tickets', 'voter', 'ticket_creator'],
-    [WIDGET_ROLE_STAFF]: ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview', 'approve_tickets'],
+    [WIDGET_ROLE_LOGGED_IN]: ['view_tickets', 'voter', 'ticket_creator', 'attach_image'],
+    [WIDGET_ROLE_STAFF]: ['view_tickets', 'voter', 'ticket_creator', 'attach_image', 'assign_agent', 'preview', 'approve_tickets'],
   };
 }
 
@@ -177,10 +177,11 @@ export function effectiveWidgetRoleMap(
  *   effective = everyone
  *             ∪ (authenticated ? logged_in ∪ assignedRole : ∅)
  *
- * plus derived internal capabilities (attach_image ⇐ ticket_creator,
- * live_coder ⇐ assign_agent). `assignedRole` is the member's role key from the
- * Members tab (stored on widget_users). Unknown/missing keys contribute nothing
- * (fail-closed).
+ * plus the derived internal capability `live_coder ⇐ assign_agent`, and the
+ * legacy `attach_image ⇐ ticket_creator` fallback for maps saved before
+ * attach_image became its own grid column (see below). `assignedRole` is the
+ * member's role key from the Members tab (stored on widget_users).
+ * Unknown/missing keys contribute nothing (fail-closed).
  */
 export function resolveWidgetPermissions(
   map: Record<string, string[]> | null | undefined,
@@ -205,9 +206,41 @@ export function resolveWidgetPermissions(
     // the Everyone row.
     for (const p of [...out]) if (!ANON_ALLOWED_PERMISSIONS.has(p)) out.delete(p);
   }
-  // Derive internal capabilities from the visible grid permissions.
-  if (out.has('ticket_creator')) out.add('attach_image');
+  // attach_image is now its own grid column. For maps saved BEFORE that column
+  // existed (no role lists attach_image), keep deriving it from ticket_creator
+  // so nobody loses image upload; once any role grants it explicitly the stored
+  // grants are authoritative and this fallback switches off (mirrors the
+  // settings display in `widgetRoleMapForDisplay`). live_coder is still derived.
+  if (!roleMapGrantsAttachImage(m) && out.has('ticket_creator')) out.add('attach_image');
   if (out.has('assign_agent')) out.add('live_coder');
+  return out;
+}
+
+/** True if any role in the map explicitly grants `attach_image`. */
+function roleMapGrantsAttachImage(map: Record<string, string[]> | null | undefined): boolean {
+  if (!map) return false;
+  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('attach_image'));
+}
+
+/**
+ * The role map as shown in the Project Settings → Widget → Permissions grid.
+ * For legacy maps (saved before `attach_image` was a column) it materializes the
+ * `attach_image ⇐ ticket_creator` derivation so the grid reflects the real
+ * effective state; saving the grid then persists those grants explicitly and the
+ * map becomes authoritative. Once any role grants attach_image explicitly the
+ * stored map is returned unchanged.
+ */
+export function widgetRoleMapForDisplay(
+  map: Record<string, string[]> | null | undefined,
+): Record<string, string[]> {
+  const eff = effectiveWidgetRoleMap(map);
+  if (roleMapGrantsAttachImage(eff)) return eff;
+  const out: Record<string, string[]> = {};
+  for (const [role, perms] of Object.entries(eff)) {
+    const arr = Array.isArray(perms) ? [...perms] : [];
+    if (arr.includes('ticket_creator') && !arr.includes('attach_image')) arr.push('attach_image');
+    out[role] = arr;
+  }
   return out;
 }
 
@@ -3951,10 +3984,11 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     widget_role_claim_name: project.widgetRoleClaimName,
     widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
     widgetChatAgentEntityId: project.widgetChatAgentEntityId,
-    // Surface the effective map (seeded defaults when the grid was never
-    // customized) so the Widget → Permissions grid always renders the two
-    // built-in roles plus the seeded `staff` role.
-    widgetRolePermissions: effectiveWidgetRoleMap(project.widgetRolePermissions),
+    // Surface the display map (seeded defaults when never customized, with the
+    // legacy attach_image⇐ticket_creator derivation materialized) so the Widget
+    // → Permissions grid always renders the built-in roles and reflects the real
+    // effective state of every permission — including attach_image.
+    widgetRolePermissions: widgetRoleMapForDisplay(project.widgetRolePermissions),
     widgetLiveCoderEnabled: project.widgetLiveCoderEnabled,
   };
 }
