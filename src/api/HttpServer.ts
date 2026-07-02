@@ -3995,6 +3995,41 @@ export function createHttpApp() {
     }
   });
 
+  /**
+   * Workspace → BE ephemeral live-coder activity signal for widget live sessions.
+   * Auth mirrors the events route (X-Server-Token + serverId match + per-conversation
+   * cross-tenant guard). Holds `working` as in-memory presence with a heartbeat TTL
+   * and streams a `coder_status` SSE frame to connected widgets — no message row.
+   */
+  app.post('/api/internal/widget-chat/coder-status', async (c) => {
+    try {
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+      const body = await c.req.json().catch(() => null) as {
+        serverId?: unknown; conversationId?: unknown; working?: unknown;
+      } | null;
+      if (
+        !body ||
+        typeof body.serverId !== 'string' ||
+        typeof body.conversationId !== 'string' ||
+        typeof body.working !== 'boolean'
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+      if (body.serverId !== server.id) return c.json({ error: 'serverId mismatch' }, 403);
+
+      await WidgetChatService.setCoderStatus(server.id, body.conversationId, body.working);
+      return c.json({ ok: true });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetError) return c.json({ error: err.code }, err.status as any);
+      console.error('[HttpServer] widget-chat coder-status error:', err);
+      return c.json({ error: 'coder-status failed' }, 500);
+    }
+  });
+
   // Resolve (find-or-create) the Live-session conversation for a canonical task.
   // Called by the workspace `runhq post-to-widget` path so a coder's outbound
   // messages reach + persist in the ticket's conversation even when no staff
@@ -6092,6 +6127,10 @@ export function createHttpApp() {
       // has touched the conversation (pending or persisted). The widget shows
       // the collect-prompt/[Submit Ticket] UI only while this is false.
       hasAgentTurns,
+      // Ephemeral live-coder presence: true while the coding agent is actively
+      // working in this live session. Lets a widget opening mid-work show the
+      // working indicator immediately, before the next SSE transition frame.
+      coderWorking: WidgetChatService.getCoderWorking(conv.id),
       createdAt: conv.createdAt.toISOString(),
       updatedAt: conv.updatedAt.toISOString(),
     };
@@ -6167,7 +6206,12 @@ export function createHttpApp() {
       const messages = await WidgetChatService.listMessages(
         c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, after,
       );
-      return c.json({ messages: await chatMessageDtos(messages) });
+      // coderWorking rides along so the poll fallback (no SSE) keeps the live
+      // session's working indicator current without a second request.
+      return c.json({
+        messages: await chatMessageDtos(messages),
+        coderWorking: WidgetChatService.getCoderWorking(c.req.param('id')),
+      });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6186,7 +6230,7 @@ export function createHttpApp() {
       const status = await WidgetChatService.getConversationStatus(
         c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions,
       );
-      return c.json({ status });
+      return c.json({ status, coderWorking: WidgetChatService.getCoderWorking(c.req.param('id')) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6503,9 +6547,16 @@ export function createHttpApp() {
           await stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row, imagesByMessage.get(row.id))) });
         })();
       });
+      // Ephemeral live-coder presence on its own control channel — emitted as a
+      // named `coder_status` event so the widget's `message` handler (the
+      // transcript) is untouched.
+      const unsubscribeCoderStatus = WidgetChatService.subscribeToCoderStatus(conversationId, (working) => {
+        void stream.writeSSE({ event: 'coder_status', data: JSON.stringify({ working }) });
+      });
       stream.onAbort(() => {
         open = false;
         unsubscribe();
+        unsubscribeCoderStatus();
       });
       if (after) {
         try {
@@ -6517,6 +6568,11 @@ export function createHttpApp() {
         } catch {
           // invalid cursor → client falls back to a full refetch via the messages endpoint
         }
+      }
+      // Seed the working indicator on connect so a widget that subscribes mid-work
+      // reflects it immediately, before the next transition frame.
+      if (WidgetChatService.getCoderWorking(conversationId)) {
+        await stream.writeSSE({ event: 'coder_status', data: JSON.stringify({ working: true }) });
       }
       while (open) {
         await stream.sleep(25_000);

@@ -145,6 +145,103 @@ function publish(row: ChatMessageRow): void {
   }
 }
 
+// Separate control channel for ephemeral live-coder presence, kept distinct
+// from the message stream so a `coder_status` toggle never looks like a
+// transcript row to existing message subscribers.
+type CoderStatusSubscriber = (working: boolean) => void;
+const coderStatusSubscribers = new Map<string, Set<CoderStatusSubscriber>>();
+
+export function subscribeToCoderStatus(conversationId: string, cb: CoderStatusSubscriber): () => void {
+  let set = coderStatusSubscribers.get(conversationId);
+  if (!set) {
+    set = new Set();
+    coderStatusSubscribers.set(conversationId, set);
+  }
+  set.add(cb);
+  return () => {
+    set!.delete(cb);
+    if (set!.size === 0) coderStatusSubscribers.delete(conversationId);
+  };
+}
+
+function publishCoderStatus(conversationId: string, working: boolean): void {
+  const set = coderStatusSubscribers.get(conversationId);
+  if (!set) return;
+  for (const cb of set) {
+    try {
+      cb(working);
+    } catch (err) {
+      console.warn('[WidgetChatService] coder-status subscriber threw:', err);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live-coder activity ("is the coding agent working right now?")
+//
+// Ephemeral per-conversation presence for widget LIVE SESSIONS, fed by the
+// workspace (POST /api/internal/widget-chat/coder-status) and streamed to the
+// widget as a `coder_status` SSE frame + surfaced on the conversation/status
+// DTOs so a widget that opens mid-work learns the state immediately. Held in
+// memory (single-pod stickiness, like `subscribers`), never persisted — it is
+// presence, not transcript. A heartbeat TTL flips a stuck `working` back to
+// standing-by if the workspace stops reporting (e.g. it died mid-turn).
+// ---------------------------------------------------------------------------
+
+/** Must exceed the workspace heartbeat cadence (15s) with margin. */
+const CODER_STATUS_TTL_MS = 45_000;
+const coderStatus = new Map<string, { working: boolean; timer: ReturnType<typeof setTimeout> }>();
+
+/** Current working state for a conversation (false when unknown/expired). */
+export function getCoderWorking(conversationId: string): boolean {
+  return coderStatus.get(conversationId)?.working ?? false;
+}
+
+/**
+ * Apply a coder-status transition to in-memory state + notify subscribers.
+ * Pure (no IO): publishes a `coder_status` frame only on a genuine transition
+ * (heartbeats re-arm the TTL without re-publishing) and arms a TTL that flips a
+ * stale `working` back to standing-by. `setCoderStatus` is the authenticated
+ * entry point that guards tenancy before calling this; exported for unit tests.
+ */
+export function applyCoderStatusInMemory(conversationId: string, working: boolean): void {
+  const existing = coderStatus.get(conversationId);
+  const wasWorking = existing?.working ?? false;
+  if (existing) clearTimeout(existing.timer);
+
+  if (!working) {
+    coderStatus.delete(conversationId);
+    if (wasWorking) publishCoderStatus(conversationId, false);
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    coderStatus.delete(conversationId);
+    publishCoderStatus(conversationId, false);
+  }, CODER_STATUS_TTL_MS);
+  timer.unref?.();
+  coderStatus.set(conversationId, { working: true, timer });
+  if (!wasWorking) publishCoderStatus(conversationId, true);
+}
+
+/**
+ * Record the coder's working state for a live-session conversation. `serverId`
+ * must own the conversation's project (cross-tenant guard, same shape as
+ * ingestTurnEvents); then delegates to applyCoderStatusInMemory.
+ */
+export async function setCoderStatus(serverId: string, conversationId: string, working: boolean): Promise<void> {
+  const [found] = await db
+    .select({ projectServerId: widgetProjects.serverId })
+    .from(widgetChatConversations)
+    .innerJoin(widgetProjects, eq(widgetChatConversations.widgetProjectId, widgetProjects.id))
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!found || found.projectServerId !== serverId) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  applyCoderStatusInMemory(conversationId, working);
+}
+
 // ---------------------------------------------------------------------------
 // Project + conversation accessors
 // ---------------------------------------------------------------------------
