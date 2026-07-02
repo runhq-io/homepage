@@ -7269,6 +7269,13 @@
     currentDetailTicket = ticketSummary;
     renderPanelBody();
     if (scrollEl) scrollEl.scrollTop = 0;
+    // Refresh the viewer's permissions from /api/widget/me on every detail open
+    // so staff affordances (the Live-session button, assign/preview) reflect the
+    // CURRENT role — a role changed out-of-band (e.g. in the Members tab) takes
+    // effect here without a full widget reload. fetchAndApplyMe re-renders when
+    // the fresh permissions land. Server-side gating is the real boundary; this
+    // just keeps the UI honest.
+    fetchAndApplyMe();
   }
 
   // ===========================================================================

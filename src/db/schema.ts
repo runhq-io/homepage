@@ -1721,6 +1721,13 @@ export const widgetChatMessages = pgTable('widget_chat_messages', {
   payload: jsonb('payload').$type<WidgetChatMessagePayload | null>(),
   turnId: text('turn_id'),
   seq: integer('seq'),
+  // True for messages that belong to a ticket's Live session (the staff↔coder
+  // relay + mirrored coder activity) rather than the reporter's intake chat.
+  // Set at write time on any row inserted once the conversation already has a
+  // ticket (createdTaskId). The reporter (a non-`live_coder` viewer) never
+  // receives these — only `live_coder` staff do. See resolveWidgetPermissions /
+  // getConversationForViewer + listMessages filtering.
+  liveSession: boolean('live_session').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [
   index('widget_chat_messages_conversation_idx').on(t.conversationId, t.createdAt),

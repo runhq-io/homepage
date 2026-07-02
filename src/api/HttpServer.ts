@@ -6541,7 +6541,11 @@ export function createHttpApp() {
 
     return streamSSE(c, async (stream) => {
       let open = true;
+      const canSeeLiveSession = permissions.has('live_coder');
       const unsubscribe = WidgetChatService.subscribeToConversation(conversationId, (row) => {
+        // Never stream Live-session relay rows to a non-live_coder reader (the
+        // reporter) — mirrors the listMessages read filter for the live feed.
+        if (row.liveSession && !canSeeLiveSession) return;
         void (async () => {
           const imagesByMessage = await WidgetChatService.loadChatImagesForMessages([row.id]);
           await stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row, imagesByMessage.get(row.id))) });

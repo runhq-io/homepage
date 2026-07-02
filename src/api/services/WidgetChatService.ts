@@ -337,12 +337,22 @@ async function requireWritableConversation(
   return conv;
 }
 
-/** Full transcript, canonical order (created_at, id). */
-async function loadAllMessages(conversationId: string): Promise<ChatMessageRow[]> {
+/**
+ * Full transcript, canonical order (created_at, id). When `includeLiveSession`
+ * is false (a non-`live_coder` reader), Live-session relay rows are excluded so
+ * the reporter only ever sees their own intake.
+ */
+async function loadAllMessages(
+  conversationId: string,
+  includeLiveSession: boolean,
+): Promise<ChatMessageRow[]> {
   return db
     .select()
     .from(widgetChatMessages)
-    .where(eq(widgetChatMessages.conversationId, conversationId))
+    .where(and(
+      eq(widgetChatMessages.conversationId, conversationId),
+      ...(includeLiveSession ? [] : [eq(widgetChatMessages.liveSession, false)]),
+    ))
     .orderBy(widgetChatMessages.createdAt, widgetChatMessages.id);
 }
 
@@ -521,7 +531,11 @@ export async function listMessages(
   // Read access: the owner (reporter) OR a live_coder staff member viewing a
   // ticket-linked Live session.
   await getConversationForViewer(conversationId, projectId, widgetUserId, permissions);
-  if (!after) return loadAllMessages(conversationId);
+  // Only `live_coder` staff receive the Live-session relay rows; the reporter
+  // sees their intake only. This is the server-side enforcement — the client
+  // hiding the "Live session" button is convenience, not the boundary.
+  const includeLiveSession = permissions.has('live_coder');
+  if (!after) return loadAllMessages(conversationId, includeLiveSession);
   if (!UUID_RE.test(after)) throw new WidgetService.WidgetError('invalid_cursor', 400);
   const [anchor] = await db
     .select({ id: widgetChatMessages.id })
@@ -537,6 +551,7 @@ export async function listMessages(
     .from(widgetChatMessages)
     .where(and(
       eq(widgetChatMessages.conversationId, conversationId),
+      ...(includeLiveSession ? [] : [eq(widgetChatMessages.liveSession, false)]),
       sql`(${widgetChatMessages.createdAt}, ${widgetChatMessages.id}) > (
         SELECT m.created_at, m.id FROM widget_chat_messages m
         WHERE m.id = ${after} AND m.conversation_id = ${conversationId}
@@ -788,7 +803,7 @@ async function dispatchTurn(
     .set({ pendingTurnId: turnId, updatedAt: new Date() })
     .where(eq(widgetChatConversations.id, conversation.id));
 
-  const rows = await loadAllMessages(conversation.id);
+  const rows = await loadAllMessages(conversation.id, true);
   const pending = computePendingProposal(rows);
 
   const [server] = await db.select().from(servers).where(eq(servers.id, project.serverId)).limit(1);
@@ -1021,7 +1036,7 @@ async function carryConversationImagesToTask(
 
 /** The latest proposal, iff still unresolved. Throws no_pending_proposal otherwise. */
 async function requirePendingProposal(conversationId: string): Promise<PendingProposal> {
-  const rows = await loadAllMessages(conversationId);
+  const rows = await loadAllMessages(conversationId, true);
   const pending = computePendingProposal(rows);
   if (!pending || !('noAction' in pending.resolution)) {
     throw new WidgetService.WidgetError('no_pending_proposal', 409);
@@ -1172,7 +1187,7 @@ export async function submitTicketFromConversation(
     throw new WidgetService.WidgetError('agent_turns_present', 409);
   }
 
-  const rows = await loadAllMessages(conversationId);
+  const rows = await loadAllMessages(conversationId, true);
   const userMessages = rows
     .filter((r) => r.role === 'user' && r.content.trim().length > 0)
     .map((r) => r.content);
@@ -1420,7 +1435,7 @@ export async function getTeamConversation(
   if (!row) throw new WidgetService.WidgetError('conversation_not_found', 404);
   return {
     conversation: toTeamSummary(row),
-    messages: await loadAllMessages(conversationId),
+    messages: await loadAllMessages(conversationId, true), // team inbox: staff see the full Live session
   };
 }
 
@@ -1525,7 +1540,10 @@ export async function sendLiveCoderMessage(
 
   const [message] = await db
     .insert(widgetChatMessages)
-    .values({ conversationId, role: 'user', content: text })
+    // Live-session content: a staff member steering the coder AFTER a ticket
+    // exists. Stored role='user' (it's input to the coder job) but must never
+    // be shown to the reporter — only `live_coder` viewers see it.
+    .values({ conversationId, role: 'user', content: text, liveSession: true })
     .returning();
   publish(message!);
 
@@ -1601,7 +1619,9 @@ async function insertActivityEvent(
   };
   const [row] = await db
     .insert(widgetChatMessages)
-    .values({ conversationId, role: 'event', content: '', payload, turnId: `act:${conversationId}:${activity.id}`, seq: 0 })
+    // Mirrored ticket/coder activity — only exists after a ticket, so it is
+    // always Live-session content (hidden from the reporter).
+    .values({ conversationId, role: 'event', content: '', payload, turnId: `act:${conversationId}:${activity.id}`, seq: 0, liveSession: true })
     .onConflictDoNothing()
     .returning();
   if (row) { publish(row); return true; }
@@ -1880,6 +1900,9 @@ export async function ingestTurnEvents(
         payload: row.payload,
         turnId: input.turnId,
         seq: ev.seq,
+        // Turns ingested once the conversation is already ticketed are the
+        // coder's Live-session relay (not intake); hide them from the reporter.
+        liveSession: alreadyTicketed,
       })
       .onConflictDoNothing()
       .returning();
