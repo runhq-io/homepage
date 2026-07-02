@@ -117,6 +117,7 @@ interface TestHooks {
   launcherBadgeCount?: () => number;
   markTicketSeen?: (id: string, whenMs: number) => void;
   markLiveSessionSeen?: (id: string, whenMs: number) => void;
+  markAllTicketsRead?: () => void;
   hasUnreadLiveSession?: (ticket: unknown) => boolean;
   _setCaches?: (mine: unknown[], assigned: unknown[]) => void;
   _setConfig?: (updates: Record<string, unknown>) => void;
@@ -424,5 +425,31 @@ describe('live-session unread badge (assigner)', () => {
     // live_coder — can open the session, badge should light.
     hooks._setCurrentUser!({ permissions: ['live_coder'] });
     expect(hooks.viewerCanLiveCoder!()).toBe(true);
+  });
+
+  it('markAllTicketsRead clears both unread axes across reported + assigned tickets', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setCurrentUser!({ permissions: ['live_coder'] });
+
+    const now = Date.now();
+    // A reported ticket with unseen general activity...
+    const reported = {
+      id: 'rep-1', title: 'Reported',
+      createdAt: new Date(now - 10000).toISOString(),
+      lastActivityAt: new Date(now).toISOString(),
+    };
+    // ...and an assigned session with an unread coder reply.
+    const assigned = {
+      id: 'asn-1', title: 'Assigned',
+      createdAt: new Date(now - 10000).toISOString(),
+      lastActivityAt: new Date(now - 8000).toISOString(),
+      liveSessionLastMessageAt: new Date(now).toISOString(),
+    };
+    hooks._setCaches!([reported], [assigned]);
+    expect(hooks.launcherBadgeCount!()).toBe(2);
+
+    hooks.markAllTicketsRead!();
+    expect(hooks.launcherBadgeCount!()).toBe(0);
   });
 });
