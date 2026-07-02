@@ -7912,18 +7912,25 @@
     // Approve / Reject affordance — approver-only (server sets data.canApprove
     // true only when the viewer holds `approve_tickets` and the ticket is still
     // `pending_approval`). Approving releases it onto the board (→ planned);
-    // rejecting closes it (→ cancelled). On success the ticket leaves the queue,
-    // so we return to the approver list rather than re-fetch a detail the viewer
-    // may no longer be permitted to see.
+    // rejecting closes it (→ cancelled). On success we re-fetch and re-render the
+    // detail in place so the approver STAYS on the ticket and sees its new status
+    // (the Approve/Reject buttons drop away as canApprove flips false). Only if
+    // the ticket is no longer viewable to them — an approver without view_tickets,
+    // once it leaves pending_approval — do we fall back to the approver queue.
     if (!loading && data.canApprove) {
       var approveNote = h("div", {
         className: "rw-staff-assign-note",
         style: { fontSize: "12.5px", lineHeight: "1.4", color: "var(--rw-muted, #6b7280)" },
       }, t("approve.detailNote"));
       var approveActions = renderApprovalActions(ticket, function () {
-        activeTab = "approvals";
-        view = "list";
-        renderPanelBody();
+        loadTicketDetail(ticket.id).then(function (freshData) {
+          if (view !== "detail") return;
+          renderDetailInto(card, freshData, false);
+        }).catch(function () {
+          activeTab = "approvals";
+          view = "list";
+          renderPanelBody();
+        });
       });
       var approveGroup = h("div", {
         style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
