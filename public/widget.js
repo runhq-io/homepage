@@ -2599,20 +2599,28 @@
          consequence of the toggle to first-time users. */
       '.rw-priv-hint { font-size: 10.5px; color: var(--rw-muted); margin-left: 8px; letter-spacing: 0; }',
 
-      /* dashboard tab row — underline-active tabs left, [+ New post] right */
+      /* dashboard tab row — underline-active tabs left, [+ New post] right.
+         The tab row is a flex:1 horizontal scroller so any number of tabs
+         (Latest/Hot/Mine + the approver-only Pending approval) never wrap or
+         push [+ New post] off-screen: the tabs scroll under a pinned button
+         when they can't all fit (narrow panels / long i18n labels). */
       '.rw-dash-tabs {',
-      '  display: flex; align-items: center; gap: 0;',
+      '  display: flex; align-items: center; gap: 8px;',
       '  padding: 0 22px 10px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '}',
-      '.rw-dash-tabs-row { display: flex; align-items: center; gap: 0; }',
+      '.rw-dash-tabs-row {',
+      '  display: flex; align-items: center; gap: 0;',
+      '  flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none;',
+      '}',
+      '.rw-dash-tabs-row::-webkit-scrollbar { display: none; }',
       '.rw-new-post-btn {',
-      '  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;',
+      '  display: inline-flex; align-items: center; gap: 6px;',
       '  padding: 6px 12px 6px 10px;',
       '  background: var(--rw-accent); border: 1px solid var(--rw-accent);',
       '  border-radius: 999px;',
       '  color: var(--rw-accent-ink); font: inherit; font-size: 12px; font-weight: 500;',
-      '  cursor: pointer; flex: 0 0 auto;',
+      '  cursor: pointer; flex: 0 0 auto; white-space: nowrap;',
       '  transition: filter .12s, transform .12s;',
       '}',
       '.rw-new-post-btn:hover { filter: brightness(1.06); }',
@@ -2620,18 +2628,23 @@
       '.rw-dash-tab {',
       '  position: relative; display: inline-flex; align-items: center; gap: 7px;',
       /* Top/bottom padding tuned so the tab text center is at y = 37
-         from the card top, matching the left-pane eyebrow center. */
-      '  padding: 6px 14px 10px; margin-right: 4px;',
+         from the card top, matching the left-pane eyebrow center.
+         flex:0 0 auto so tabs keep their natural width and scroll rather
+         than shrink+wrap when the row overflows. */
+      '  padding: 6px 12px 10px; flex: 0 0 auto;',
       '  background: transparent; border: 0; cursor: pointer;',
       '  font-family: inherit; font-size: 13.5px; font-weight: 500;',
       '  color: var(--rw-muted); letter-spacing: -0.005em;',
       '  transition: color .12s ease;',
       '}',
+      '.rw-dash-tab-label { white-space: nowrap; }',
       '.rw-dash-tab:hover { color: var(--rw-fg-2); }',
       '.rw-dash-tab.rw-on { color: var(--rw-fg); }',
+      /* Underline sits at the tab\'s bottom edge (bottom:0), inside the row\'s
+         box, so the overflow-x scroller never clips it. */
       '.rw-dash-tab.rw-on::after {',
       '  content: ""; position: absolute;',
-      '  left: 14px; right: 14px; bottom: -11px; height: 2px;',
+      '  left: 12px; right: 12px; bottom: 0; height: 2px;',
       '  background: var(--rw-accent); border-radius: 1px;',
       '}',
       '.rw-dash-tab-count {',
