@@ -6545,6 +6545,19 @@ export function createHttpApp() {
     return c.json({ tickets });
   });
 
+  // Approver queue: tickets awaiting approval (`pending_approval`), which the
+  // public board excludes. Gated on `approve_tickets` — a viewer without it
+  // gets an empty list (200, not 403) so the widget degrades gracefully, mirror-
+  // ing the `view_tickets` board gate. Registered before `/:id` so the literal
+  // segment is not captured as a ticket id.
+  app.get('/api/widget/tickets/pending-approval', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('approve_tickets')) return c.json({ tickets: [] });
+    const tickets = await WidgetService.listPendingApprovalTickets(auth.projectId);
+    return c.json({ tickets });
+  });
+
   // Tickets the viewer assigned a coder to, with live-session activity folded
   // into lastActivityAt — drives the widget's live-session unread indicators.
   app.get('/api/widget/tickets/assigned', async (c) => {
@@ -6764,6 +6777,9 @@ export function createHttpApp() {
             context: parseContext(),
           },
           files,
+          // A reporter without `assign_agent` files into the approval queue
+          // (`pending_approval`) when the project has an approver role.
+          auth.permissions.has('assign_agent'),
         );
         // WidgetService reviewed text + images before insert when project
         // auto-assignment is enabled, so avoid a duplicate guard call here.
@@ -6777,7 +6793,12 @@ export function createHttpApp() {
       }
 
       const body = await c.req.json();
-      const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
+      const ticket = await WidgetService.createTicket(
+        auth.projectId, auth.widgetUserId, body,
+        // A reporter without `assign_agent` files into the approval queue
+        // (`pending_approval`) when the project has an approver role.
+        auth.permissions.has('assign_agent'),
+      );
       // Fire-and-forget auto-assign: WidgetService already ran the creation-time
       // injection guard when project auto-assignment is enabled, so the
       // orchestrator can skip its duplicate guard call here. Only creators who
@@ -6946,6 +6967,50 @@ export function createHttpApp() {
       return c.json({ outcome: { status: 'failed' as const } }, 502);
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/approve  ·  POST /api/widget/tickets/:id/reject
+  //
+  // Ticket moderation. A ticket filed by a reporter who lacks `assign_agent` is
+  // born `pending_approval` (hidden from the board). A teammate who holds
+  // `approve_tickets` reviews it and either approves it (→ `planned`, releasing
+  // it onto the board when public) or rejects it (→ `cancelled`). Both enforce
+  // the `approve_tickets` permission and that the ticket is still awaiting
+  // approval (409 otherwise); the visibility check that the ticket exists and is
+  // reviewable by this viewer is `getPublicTicketDetail` + its `canApprove` flag.
+  // ---------------------------------------------------------------------------
+  for (const action of ['approve', 'reject'] as const) {
+    app.post(`/api/widget/tickets/:id/${action}`, async (c) => {
+      const auth = await WidgetService.authenticateWidget(c.req);
+      if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+      if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+      if (!auth.permissions.has('approve_tickets')) {
+        return c.json({ error: 'approve_tickets_permission_required' }, 403);
+      }
+      const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'triager_assign');
+      if (limited) return limited;
+
+      const ticketId = c.req.param('id');
+      // Reuse the visibility-checked detail: confirms the ticket exists, is in
+      // scope, is visible to this approver, and is still awaiting approval.
+      const detail = await WidgetService.getPublicTicketDetail(
+        auth.projectId, ticketId, auth.widgetUserId, auth.permissions,
+      );
+      if (!detail) return c.json({ error: 'ticket_not_found' }, 404);
+      if (!detail.canApprove) return c.json({ error: 'ticket_not_pending_approval' }, 409);
+
+      try {
+        if (action === 'approve') {
+          await WidgetService.approvePendingTicket(auth.projectId, ticketId);
+        } else {
+          await WidgetService.rejectPendingTicket(auth.projectId, ticketId);
+        }
+        return c.json({ ok: true });
+      } catch (err) {
+        return widgetErrorResponse(c, err);
+      }
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // POST /api/widget/tickets/:id/live-session

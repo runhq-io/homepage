@@ -144,7 +144,7 @@ export interface ServiceCredentialWithContent extends ServiceCredential {
 // --- Todos (project todo list items) ---
 
 export type TodoStatusBase =
-  | 'pending' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled';
+  | 'pending' | 'pending_approval' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled';
 /** Env-qualified deploy status: `deployed:<DeployEnvironment.id>`. */
 export type DeployedStatus = `deployed:${string}`;
 /** Concrete status value. `'deployed'` (bare) is retained only for legacy rows. */
@@ -160,7 +160,12 @@ export const DEPLOYED_PREFIX = 'deployed:';
  * {@link todoStatusRank}.
  */
 export const TODO_STATUS_BASE_ORDER: Record<TodoStatusBase, number> = {
+  // `pending_approval` is a pre-triage holding state (a widget ticket filed by a
+  // reporter who lacks `assign_agent`, awaiting an approver). It sits at the same
+  // rank as `pending` — not yet started — so any advance to `planned`+ is
+  // monotonic. `cancelled` (reject) is terminal/orthogonal at -1.
   pending: 0,
+  pending_approval: 0,
   planned: 1,
   in_progress: 2,
   done: 3,
@@ -214,7 +219,7 @@ export function todoStatusLabel(status: string, environments: { id: string; name
     return env ? `Deployed → ${env.name}` : 'Deployed';
   }
   const labels: Record<TodoStatusBase, string> = {
-    pending: 'Pending', planned: 'Planned', in_progress: 'In Progress',
+    pending: 'Pending', pending_approval: 'Pending approval', planned: 'Planned', in_progress: 'In Progress',
     done: 'Done', reviewed: 'Reviewed', merged: 'Merged', cancelled: 'Cancelled',
   };
   return labels[status as TodoStatusBase] ?? status;
@@ -246,8 +251,9 @@ export interface TodoStatusDisplay {
  * synonyms (no "Open" for pending, no "Shipped" for done).
  */
 export const TODO_STATUS_DISPLAY: Record<TodoStatusBase | 'deployed', TodoStatusDisplay> = {
-  pending:      { label: 'Pending',      dot: '#8a857d', bg: 'rgba(85,80,74,0.08)',    fg: '#55504a' },
-  planned:      { label: 'Planned',      dot: '#7a8aa3', bg: 'rgba(122,138,163,0.10)', fg: '#4f5a70' },
+  pending:          { label: 'Pending',          dot: '#8a857d', bg: 'rgba(85,80,74,0.08)',    fg: '#55504a' },
+  pending_approval: { label: 'Pending approval', dot: '#bf8f3a', bg: 'rgba(191,143,58,0.12)',  fg: '#7d5f24' },
+  planned:          { label: 'Planned',          dot: '#7a8aa3', bg: 'rgba(122,138,163,0.10)', fg: '#4f5a70' },
   in_progress:  { label: 'In progress',  dot: '#a97432', bg: 'rgba(169,116,50,0.12)',  fg: '#a97432' },
   done:         { label: 'Done',         dot: '#6b8a6a', bg: 'rgba(107,138,106,0.14)', fg: '#556e54' },
   reviewed:     { label: 'Reviewed',     dot: '#8a7bb0', bg: 'rgba(138,123,176,0.12)', fg: '#5f5288' },

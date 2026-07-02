@@ -972,7 +972,7 @@ export async function createTicketFromChat(
 
   const task = await WidgetService.createTicket(projectId, widgetUserId, {
     title, description, isPrivate: draft.isPrivate === true,
-  });
+  }, creatorCanAssign);
 
   // Carry all images from the conversation onto the new ticket as task attachments.
   // Best-effort: a failing insert must not abort the already-created ticket.
@@ -1087,7 +1087,7 @@ export async function submitTicketFromConversation(
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
   const { title, description } = deriveTicketDraft(userMessages);
-  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description }, creatorCanAssign);
 
   // Carry all images from the conversation onto the new ticket as task attachments.
   // Best-effort: a failing insert must not abort the already-created ticket.

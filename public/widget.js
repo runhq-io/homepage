@@ -41,6 +41,7 @@
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
   var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
+  var pendingApprovalCache = null; // /api/widget/tickets/pending-approval — drives the approver-only "Pending approval" tab
   var assignedTicketsCache = null; // /api/widget/tickets/assigned — live sessions the viewer assigned
   // Community coin: the viewer's running total + per-post earnings, from
   // /api/widget/me/community. Drives the header coin badge, the per-card "+N 🪙"
@@ -283,6 +284,7 @@
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
+  function loadPendingApprovals() { return api("/api/widget/tickets/pending-approval"); }
   function loadAssignedTickets()  { return api("/api/widget/tickets/assigned"); }
   function loadCommunityStats()   { return api("/api/widget/me/community"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
@@ -293,6 +295,8 @@
     return data;
   }); }
   function assignTicketAgent(id)  { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/assign", { method: "POST" }); }
+  function approveTicket(id)      { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/approve", { method: "POST" }); }
+  function rejectTicket(id)       { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/reject", { method: "POST" }); }
   function ensureTicketLiveSession(id) { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/live-session", { method: "POST" }); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
   function createTicketWithAttachments(data, files) {
@@ -637,6 +641,17 @@
           .then(function (d) { assignedTicketsCache = d.tickets || []; refreshTabLabel(); })
           .catch(function () {});
       }
+      // Preload the approver queue so the "Pending approval" tab + its count
+      // badge appear immediately for approvers (mirrors the live_coder preload).
+      if (viewerCanApprove()) {
+        loadPendingApprovals()
+          .then(function (d) {
+            pendingApprovalCache = d.tickets || [];
+            // Re-render the in-panel tabs so the count badge reflects the queue.
+            if (view === "list" && scrollEl) renderPanelBody();
+          })
+          .catch(function () {});
+      }
       // Idempotent: ensures the real-time stream is up once identity is
       // confirmed (covers identity resolving after the initial bootstrap).
       if (config.isIdentified) startNotificationsStream();
@@ -964,14 +979,16 @@
         title: "Send us a message",
         back: "Back",
       },
-      tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
+      tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions", approvals: "Pending approval" },
       filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now." },
+      approve: { approve: "Approve", reject: "Reject", detailNote: "This ticket is awaiting your approval." },
       notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)", markAllRead: "Mark all read" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
       // labels are locale-overridable here.
       status: {
         pending: "Pending",
+        pending_approval: "Pending approval",
         planned: "Planned",
         in_progress: "In progress",
         needs_review: "Needs review",
@@ -996,6 +1013,8 @@
         useComposer: "Tap “New post” to file one.",
         nothingShipped: "No updates yet",
         updatesWillShow: "Updates will show up here once an admin publishes them.",
+        noApprovals: "Nothing awaiting approval",
+        approvalsWillShow: "Tickets filed by people who can't assign an agent show up here for you to approve.",
       },
       list: { loadFailed: "Could not load tickets: {msg}" },
       detail: {
@@ -1197,11 +1216,13 @@
         title: "메시지 보내기",
         back: "뒤로",
       },
-      tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
+      tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역", approvals: "승인 대기" },
       filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다." },
+      approve: { approve: "승인", reject: "거절", detailNote: "이 티켓은 승인을 기다리고 있습니다." },
       notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건", markAllRead: "모두 읽음 처리" },
       status: {
         pending: "대기 중",
+        pending_approval: "승인 대기",
         planned: "계획됨",
         in_progress: "진행 중",
         needs_review: "검토 필요",
@@ -1226,6 +1247,8 @@
         useComposer: "“새 글 쓰기” 버튼으로 첫 티켓을 작성해 보세요.",
         nothingShipped: "아직 업데이트가 없습니다",
         updatesWillShow: "관리자가 게시하면 여기에 표시됩니다.",
+        noApprovals: "승인 대기 중인 티켓이 없습니다",
+        approvalsWillShow: "에이전트를 배정할 수 없는 사용자가 등록한 티켓이 여기에서 승인을 기다립니다.",
       },
       list: { loadFailed: "티켓을 불러올 수 없습니다: {msg}" },
       detail: {
@@ -1593,6 +1616,15 @@
   function viewerCanLiveCoder() {
     var p = currentUser.permissions || [];
     return p.indexOf("live_coder") !== -1;
+  }
+
+  // True when the viewer holds `approve_tickets` — gates the approver-only
+  // "Pending approval" tab and its Approve/Reject actions. The server enforces
+  // the same permission on the queue + approve/reject endpoints; this is purely
+  // for showing/hiding UI.
+  function viewerCanApprove() {
+    var p = currentUser.permissions || [];
+    return p.indexOf("approve_tickets") !== -1;
   }
 
   // Deduped list of the viewer's tickets that warrant attention, by TWO distinct
@@ -3400,6 +3432,39 @@
       '}',
       '.rw-assign-btn:hover { background: #1e55c0; }',
       '.rw-assign-btn:disabled { opacity: 0.5; cursor: default; }',
+      /* Approve / Reject actions — the approver-only moderation controls. They
+         appear inline on each "Pending approval" queue card and in the ticket
+         detail head when the viewer holds approve_tickets and the ticket is
+         still awaiting approval. */
+      '.rw-approve-actions {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 6px;',
+      '  flex-shrink: 0;',
+      '}',
+      '.rw-approve-actions[aria-busy="true"] { opacity: 0.6; pointer-events: none; }',
+      '.rw-approve-btn {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  padding: 4px 10px;',
+      '  border-radius: 6px;',
+      '  background: #1f9d55;',
+      '  color: #fff;',
+      '  font-size: 12px;',
+      '  font-weight: 600;',
+      '  border: none;',
+      '  cursor: pointer;',
+      '  letter-spacing: 0.02em;',
+      '  white-space: nowrap;',
+      '}',
+      '.rw-approve-btn:hover { background: #188446; }',
+      '.rw-approve-btn.rw-reject-btn {',
+      '  background: transparent;',
+      '  color: #c0392b;',
+      '  border: 1px solid #e6c3bd;',
+      '}',
+      '.rw-approve-btn.rw-reject-btn:hover { background: #fbeae7; }',
+      '.rw-approve-btn:disabled { opacity: 0.5; cursor: default; }',
 
       /* Agent attribution line — shown below the title when an agent is
          assigned and the assignment was initiated by an external triager. */
@@ -4404,8 +4469,47 @@
     return chip;
   }
 
+  // Approve / Reject controls for a ticket awaiting approval. Used both on the
+  // "Pending approval" queue cards and (via renderDetail) the detail head. On
+  // success the ticket leaves the queue (approve → planned, reject → cancelled);
+  // we drop it from the approver cache and null the board cache so the released
+  // ticket re-fetches fresh, then re-render. `onDone` lets the detail view leave
+  // the now-resolved ticket. Errors surface inline on the pressed button.
+  function renderApprovalActions(ticket, onDone) {
+    var wrap = h("div", { className: "rw-approve-actions" });
+    var busy = false;
+    function run(fn) {
+      return function (e) {
+        if (e) e.stopPropagation();
+        if (busy) return;
+        busy = true;
+        wrap.setAttribute("aria-busy", "true");
+        fn(ticket.id).then(function () {
+          // The ticket has left the queue (approve → planned, reject → cancelled).
+          // Null the caches so the queue and board both re-fetch fresh rather than
+          // risk a stale [] when the queue was never loaded in this session.
+          pendingApprovalCache = null;
+          topTicketsCache = null; // a released ticket may now belong on the board
+          if (typeof onDone === "function") { onDone(); return; }
+          if (view === "list") renderPanelBody();
+        }).catch(function () {
+          busy = false;
+          wrap.removeAttribute("aria-busy");
+        });
+      };
+    }
+    var approveBtn = h("button", { className: "rw-approve-btn", type: "button" }, t("approve.approve"));
+    var rejectBtn = h("button", { className: "rw-approve-btn rw-reject-btn", type: "button" }, t("approve.reject"));
+    approveBtn.addEventListener("click", run(approveTicket));
+    rejectBtn.addEventListener("click", run(rejectTicket));
+    wrap.appendChild(approveBtn);
+    wrap.appendChild(rejectBtn);
+    return wrap;
+  }
+
   function renderTicketCard(ticket, opts) {
     var hideStatus = !!(opts && opts.hideStatus);
+    var isApprovals = !!(opts && opts.approvals);
     var voted = ticket.userVote === true;
     var countSpan = h("span", null, String(ticket.yesVotes || 0));
     var voteBtn = h("button", {
@@ -4474,12 +4578,16 @@
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
+    // On the approver queue, swap the vote control (voting isn't offered on
+    // unapproved tickets) for inline Approve / Reject actions.
+    var rightControl = isApprovals ? renderApprovalActions(ticket) : voteBtn;
+
     var row = h("button", {
       className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
       "aria-label": (unseen ? "New activity — " : "") + t("aria.openTicket", { title: ticket.title }),
     }, [
       h("div", { className: "rw-dash-row-main" }, mainChildren),
-      voteBtn,
+      rightControl,
     ]);
 
     row.addEventListener("click", function () { openDetailModal(ticket); });
@@ -4496,9 +4604,10 @@
     // here so old persisted state still routes to the same list.
     var pendingTab = activeTab === "top" ? "hot" : activeTab;
     var counts = {
-      updates: (updatesCache || []).length,
-      hot:     (topTicketsCache || []).length,
-      mine:    (myTicketsCache || []).length,
+      updates:   (updatesCache || []).length,
+      hot:       (topTicketsCache || []).length,
+      mine:      (myTicketsCache || []).length,
+      approvals: (pendingApprovalCache || []).length,
     };
 
     var defs = [
@@ -4506,6 +4615,9 @@
       { id: "hot",     label: t("tabs.hot") },
       { id: "mine",    label: t("tabs.mine") },
     ];
+    // Approver-only queue of tickets awaiting approval. Only shown to holders of
+    // approve_tickets; the server likewise gates the queue endpoint.
+    if (viewerCanApprove()) defs.push({ id: "approvals", label: t("tabs.approvals") });
 
     // Use `def` (not `t`) for the loop variable — `t` is the i18n function.
     var tabButtons = defs.map(function (def) {
@@ -4551,17 +4663,20 @@
     // Submissions. null = not loaded yet; [] = loaded and genuinely empty. Only
     // My Submissions is gated on identity (anon users can't load it).
     var cacheIsNull =
-      tab === "updates" ? updatesCache === null :
-      tab === "hot"     ? topTicketsCache === null :
-                          (myTicketsCache === null && config.isIdentified);
+      tab === "updates"   ? updatesCache === null :
+      tab === "hot"       ? topTicketsCache === null :
+      tab === "approvals" ? pendingApprovalCache === null :
+                            (myTicketsCache === null && config.isIdentified);
     if (cacheIsNull) {
       var reload =
-        tab === "updates" ? loadUpdates().then(function (d) { updatesCache = d.tickets || []; }) :
-        tab === "hot"     ? loadTopTickets().then(function (d) { topTicketsCache = d.tickets || []; }) :
-                            loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; });
+        tab === "updates"   ? loadUpdates().then(function (d) { updatesCache = d.tickets || []; }) :
+        tab === "hot"       ? loadTopTickets().then(function (d) { topTicketsCache = d.tickets || []; }) :
+        tab === "approvals" ? loadPendingApprovals().then(function (d) { pendingApprovalCache = d.tickets || []; }) :
+                              loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; });
       reload.catch(function () {
         if (tab === "updates") updatesCache = [];
         else if (tab === "hot") topTicketsCache = [];
+        else if (tab === "approvals") pendingApprovalCache = [];
         else myTicketsCache = [];
       }).then(function () {
         if (view === "list") renderPanelBody();
@@ -4570,9 +4685,10 @@
     }
 
     var allItems =
-      tab === "updates" ? (updatesCache || []) :
-      tab === "hot"     ? (topTicketsCache || []) :
-                          (myTicketsCache || []);
+      tab === "updates"   ? (updatesCache || []) :
+      tab === "hot"       ? (topTicketsCache || []) :
+      tab === "approvals" ? (pendingApprovalCache || []) :
+                            (myTicketsCache || []);
 
     // "Unread only" filter — My Submissions only.
     var showFilter = tab === "mine" && config.isIdentified && allItems.length > 0;
@@ -4590,6 +4706,9 @@
       if (tab === "updates") {
         return renderEmpty(t("empty.nothingShipped"), t("empty.updatesWillShow"));
       }
+      if (tab === "approvals") {
+        return renderEmpty(t("empty.noApprovals"), t("empty.approvalsWillShow"));
+      }
       return renderEmpty(t("empty.noTickets"), t("empty.beFirst"));
     }
 
@@ -4604,7 +4723,10 @@
       return list;
     }
 
-    var cardOpts = tab === "updates" ? { hideStatus: true } : null;
+    var cardOpts =
+      tab === "updates"   ? { hideStatus: true } :
+      tab === "approvals" ? { approvals: true } :
+                            null;
     // Use `tk` for the loop variable — `t` is the i18n function.
     items.forEach(function (tk) { list.appendChild(renderTicketCard(tk, cardOpts)); });
     return list;
@@ -4847,7 +4969,7 @@
         refreshPrivateBtn();
         privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
-        topTicketsCache = null; updatesCache = null; myTicketsCache = null; assignedTicketsCache = null;
+        topTicketsCache = null; updatesCache = null; myTicketsCache = null; assignedTicketsCache = null; pendingApprovalCache = null;
         composeReturnView = "home";
         activeTab = "mine";
 
@@ -7526,6 +7648,28 @@
         style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
       }, [assignNote, assignBtn, assignMsgEl]);
       staffActionEls.push(assignGroup);
+    }
+
+    // Approve / Reject affordance — approver-only (server sets data.canApprove
+    // true only when the viewer holds `approve_tickets` and the ticket is still
+    // `pending_approval`). Approving releases it onto the board (→ planned);
+    // rejecting closes it (→ cancelled). On success the ticket leaves the queue,
+    // so we return to the approver list rather than re-fetch a detail the viewer
+    // may no longer be permitted to see.
+    if (!loading && data.canApprove) {
+      var approveNote = h("div", {
+        className: "rw-staff-assign-note",
+        style: { fontSize: "12.5px", lineHeight: "1.4", color: "var(--rw-muted, #6b7280)" },
+      }, t("approve.detailNote"));
+      var approveActions = renderApprovalActions(ticket, function () {
+        activeTab = "approvals";
+        view = "list";
+        renderPanelBody();
+      });
+      var approveGroup = h("div", {
+        style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
+      }, [approveNote, approveActions]);
+      staffActionEls.push(approveGroup);
     }
 
     // Live session affordance — staff-only (requires the `live_coder`
