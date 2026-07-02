@@ -197,6 +197,60 @@ describe('deriveTicketMilestones', () => {
     ]);
   });
 
+  it('the done step is labelled "Done" (matches the status chip)', () => {
+    expect(labelFor({ status: 'done' }, 'in_review')).toBe('Done');
+  });
+
+  describe('approval step (requiresApproval)', () => {
+    it('is absent for tickets that did not go through the queue', () => {
+      expect(keysWithState({ status: 'pending' })).not.toContain('approval:current');
+      expect(deriveTicketMilestones({ status: 'in_progress' }).some((m) => m.key === 'approval')).toBe(false);
+    });
+
+    it('pending_approval: approval is the current step, labelled "Pending approval"', () => {
+      const input: MilestoneInput = { status: 'pending_approval', requiresApproval: true, clarificationStatus: 'skipped' };
+      expect(keysWithState(input)).toEqual([
+        'received:done',
+        'clarifying:done',
+        'approval:current',
+        'in_progress:upcoming',
+        'in_review:upcoming',
+        'reviewed:upcoming',
+        'merged:upcoming',
+        'deployed:upcoming',
+      ]);
+      expect(labelFor(input, 'approval')).toBe('Pending approval');
+    });
+
+    it('pending_approval pins at the gate even with a skipped clarifier (not In progress)', () => {
+      // Regression: the chat "skipped" clarifier used to pull the marker to In progress.
+      const input: MilestoneInput = { status: 'pending_approval', requiresApproval: true, clarificationStatus: 'skipped' };
+      const current = deriveTicketMilestones(input).find((m) => m.state === 'current');
+      expect(current?.key).toBe('approval');
+    });
+
+    it('approved (planned) with no work yet: approval done+"Approved", In progress current', () => {
+      const input: MilestoneInput = { status: 'planned', requiresApproval: true };
+      expect(keysWithState(input)).toEqual([
+        'received:done',
+        'approval:done',
+        'in_progress:current',
+        'in_review:upcoming',
+        'reviewed:upcoming',
+        'merged:upcoming',
+        'deployed:upcoming',
+      ]);
+      expect(labelFor(input, 'approval')).toBe('Approved');
+    });
+
+    it('approved + further advanced keeps approval "Approved" (done)', () => {
+      const input: MilestoneInput = { status: 'done', requiresApproval: true, clarificationStatus: 'skipped' };
+      expect(labelFor(input, 'approval')).toBe('Approved');
+      expect(keysWithState(input)).toContain('approval:done');
+      expect(keysWithState(input)).toContain('in_review:current'); // "Done" step is current
+    });
+  });
+
   it('every milestone carries a non-empty human label', () => {
     for (const m of deriveTicketMilestones({ status: 'in_progress', clarificationStatus: 'asking', prState: 'open' })) {
       expect(typeof m.label).toBe('string');
@@ -206,7 +260,7 @@ describe('deriveTicketMilestones', () => {
 
   it('is total: never throws for any status value', () => {
     const statuses: MilestoneInput['status'][] = [
-      'pending', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
+      'pending', 'pending_approval', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
       'deployed', 'deployed:prod-env-id',
     ];
     for (const status of statuses) {
