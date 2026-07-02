@@ -1738,6 +1738,27 @@ export type NewWidgetChatConversation = typeof widgetChatConversations.$inferIns
 export type WidgetChatMessage = typeof widgetChatMessages.$inferSelect;
 export type NewWidgetChatMessage = typeof widgetChatMessages.$inferInsert;
 
+// Server-side "read" state for the widget unread badge, per (widget user,
+// ticket). Two axes, mirroring the client's two localStorage seen-maps:
+//   seenAt              — general ticket activity (comments/status) seen up to
+//   liveSessionSeenAt   — live-session coder/teammate replies seen up to
+// Both are monotonic (a mark never moves them backwards). This makes the unread
+// state follow the user across devices/browsers instead of living only in one
+// browser's localStorage. The client still keeps localStorage as a fast local
+// cache, seeded from here on load and synced here on every mark.
+export const widgetTicketReads = pgTable('widget_ticket_reads', {
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  seenAt: timestamp('seen_at'),
+  liveSessionSeenAt: timestamp('live_session_seen_at'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.widgetUserId, t.taskId] }),
+]);
+
+export type WidgetTicketRead = typeof widgetTicketReads.$inferSelect;
+export type NewWidgetTicketRead = typeof widgetTicketReads.$inferInsert;
+
 // Server-owned image references for widget chat. The client only ever sees the
 // opaque `id`; all storage keys are kept server-side.
 // Both the original upload and the model-sized JPEG derivative are stored so the
