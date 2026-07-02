@@ -118,6 +118,7 @@ interface TestHooks {
   markTicketSeen?: (id: string, whenMs: number) => void;
   markLiveSessionSeen?: (id: string, whenMs: number) => void;
   markAllTicketsRead?: () => void;
+  seedSeenFromServer?: (tickets: unknown[]) => void;
   hasUnreadLiveSession?: (ticket: unknown) => boolean;
   _setCaches?: (mine: unknown[], assigned: unknown[]) => void;
   _setConfig?: (updates: Record<string, unknown>) => void;
@@ -476,6 +477,37 @@ describe('live-session unread badge (assigner)', () => {
     // live_coder — can open the session, badge should light.
     hooks._setCurrentUser!({ permissions: ['live_coder'] });
     expect(hooks.viewerCanLiveCoder!()).toBe(true);
+  });
+
+  it('seedSeenFromServer applies the server read-state so a fresh browser inherits it', () => {
+    const { hooks } = loadWidget();
+    hooks._setConfig!({ isIdentified: true });
+    hooks._setCurrentUser!({ permissions: ['live_coder'] });
+
+    const now = Date.now();
+    // Fresh browser (empty localStorage): an assigned session with an unread
+    // reply AND a reported ticket with unseen activity would both light up...
+    const reported = {
+      id: 'rep-1', title: 'Reported',
+      createdAt: new Date(now - 10000).toISOString(),
+      lastActivityAt: new Date(now).toISOString(),
+    };
+    const assigned = {
+      id: 'asn-1', title: 'Assigned',
+      createdAt: new Date(now - 10000).toISOString(),
+      lastActivityAt: new Date(now - 8000).toISOString(),
+      liveSessionLastMessageAt: new Date(now).toISOString(),
+    };
+    hooks._setCaches!([reported], [assigned]);
+    expect(hooks.launcherBadgeCount!()).toBe(2);
+
+    // ...but the SERVER says the user already read both (on another device).
+    hooks.seedSeenFromServer!([
+      { id: 'rep-1', createdAt: reported.createdAt, seenAt: new Date(now).toISOString() },
+      { id: 'asn-1', createdAt: assigned.createdAt, liveSessionSeenAt: new Date(now).toISOString() },
+    ]);
+    // Seeding localStorage from the server clears them without any local view.
+    expect(hooks.launcherBadgeCount!()).toBe(0);
   });
 
   it('markAllTicketsRead clears both unread axes across reported + assigned tickets', () => {

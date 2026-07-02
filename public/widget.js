@@ -647,7 +647,7 @@
       currentUser.isTriager = !!(me && me.isTriager);
       if (config.isIdentified && viewerCanLiveCoder()) {
         loadAssignedTickets()
-          .then(function (d) { assignedTicketsCache = d.tickets || []; refreshTabLabel(); })
+          .then(function (d) { applyAssignedResp(d); refreshTabLabel(); })
           .catch(function () {});
       }
       // Preload the approver queue so the "Pending approval" tab + its count
@@ -1600,6 +1600,64 @@
     return msg > base;
   }
 
+  // ---------------------------------------------------------------------------
+  // Cross-device read-state sync. The two localStorage seen-maps above are a
+  // fast local cache; the server (widget_ticket_reads) is the durable, shared
+  // copy. We SEED localStorage from the server on load (so a fresh browser
+  // inherits the user's read state) and SYNC local marks back to the server,
+  // debounced + batched. Server reads are monotonic (max per axis), so order
+  // and dedup don't matter.
+  // ---------------------------------------------------------------------------
+  var pendingReadSync = {};   // taskId -> { seenMs?, liveSessionMs? }
+  var readSyncTimer = null;
+
+  // Merge the server's read marks (tk.seenAt / tk.liveSessionSeenAt) into the
+  // local seen-maps. Monotonic marks → never regresses local state; no POST.
+  function seedSeenFromServer(tickets) {
+    for (var i = 0; i < (tickets || []).length; i++) {
+      var tk = tickets[i];
+      if (!tk || !tk.id) continue;
+      if (tk.seenAt) markTicketSeen(tk.id, new Date(tk.seenAt).getTime());
+      if (tk.liveSessionSeenAt) markLiveSessionSeen(tk.id, new Date(tk.liveSessionSeenAt).getTime());
+    }
+  }
+
+  // Cache setters that also seed from the server copy on every load.
+  function applyMyTicketsResp(d) {
+    myTicketsCache = (d && d.tickets) || [];
+    seedSeenFromServer(myTicketsCache);
+    return myTicketsCache;
+  }
+  function applyAssignedResp(d) {
+    assignedTicketsCache = (d && d.tickets) || [];
+    seedSeenFromServer(assignedTicketsCache);
+    return assignedTicketsCache;
+  }
+
+  // Queue a local mark for background persistence, then debounce-flush a batch.
+  function queueReadSync(taskId, marks) {
+    if (!taskId || !config.isIdentified) return;
+    var e = pendingReadSync[taskId] || (pendingReadSync[taskId] = {});
+    if (marks.seenMs && (!e.seenMs || marks.seenMs > e.seenMs)) e.seenMs = marks.seenMs;
+    if (marks.liveSessionMs && (!e.liveSessionMs || marks.liveSessionMs > e.liveSessionMs)) e.liveSessionMs = marks.liveSessionMs;
+    if (readSyncTimer === null) readSyncTimer = setTimeout(flushReadSync, 800);
+  }
+  function flushReadSync() {
+    readSyncTimer = null;
+    var reads = [];
+    for (var id in pendingReadSync) {
+      if (!Object.prototype.hasOwnProperty.call(pendingReadSync, id)) continue;
+      var e = pendingReadSync[id];
+      var r = { taskId: id };
+      if (e.seenMs) r.seenAt = new Date(e.seenMs).toISOString();
+      if (e.liveSessionMs) r.liveSessionSeenAt = new Date(e.liveSessionMs).toISOString();
+      reads.push(r);
+    }
+    pendingReadSync = {};
+    if (reads.length === 0) return;
+    api("/api/widget/tickets/seen", { method: "POST", body: { reads: reads } }).catch(function () {});
+  }
+
   // True when one of the viewer's OWN tickets has activity/comments they
   // haven't viewed yet (a team reply or status change). The single source of
   // truth for both the launcher count and the per-row "needs attention" dot.
@@ -1950,8 +2008,11 @@
     for (var i = 0; i < all.length; i++) {
       var tk = all[i];
       if (!tk || !tk.id) continue;
-      if (tk.lastActivityAt) markTicketSeen(tk.id, new Date(tk.lastActivityAt).getTime());
-      if (tk.liveSessionLastMessageAt) markLiveSessionSeen(tk.id, new Date(tk.liveSessionLastMessageAt).getTime());
+      var seenMs = tk.lastActivityAt ? new Date(tk.lastActivityAt).getTime() : 0;
+      var liveMs = tk.liveSessionLastMessageAt ? new Date(tk.liveSessionLastMessageAt).getTime() : 0;
+      if (seenMs) markTicketSeen(tk.id, seenMs);
+      if (liveMs) markLiveSessionSeen(tk.id, liveMs);
+      if (seenMs || liveMs) queueReadSync(tk.id, { seenMs: seenMs || undefined, liveSessionMs: liveMs || undefined });
     }
     refreshTabLabel();
   }
@@ -4701,7 +4762,7 @@
         tab === "updates"   ? loadUpdates().then(function (d) { updatesCache = d.tickets || []; }) :
         tab === "hot"       ? loadTopTickets().then(function (d) { topTicketsCache = d.tickets || []; }) :
         tab === "approvals" ? loadPendingApprovals().then(function (d) { pendingApprovalCache = d.tickets || []; }) :
-                              loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; });
+                              loadMyTickets().then(function (d) { applyMyTicketsResp(d); });
       reload.catch(function () {
         if (tab === "updates") updatesCache = [];
         else if (tab === "hot") topTicketsCache = [];
@@ -5352,10 +5413,10 @@
     // keeps their "My Submissions" list populated on every refresh; gating
     // on config.token alone would silently empty it on panel re-open.
     var mineP = config.isIdentified
-      ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
+      ? loadMyTickets().then(function (d) { applyMyTicketsResp(d); }).catch(function () { myTicketsCache = []; })
       : Promise.resolve().then(function () { myTicketsCache = []; });
     var assignedP = (config.isIdentified && viewerCanLiveCoder())
-      ? loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () { assignedTicketsCache = []; })
+      ? loadAssignedTickets().then(function (d) { applyAssignedResp(d); }).catch(function () { assignedTicketsCache = []; })
       : Promise.resolve().then(function () { assignedTicketsCache = []; });
     // Community coin — only meaningful for an identified viewer (the endpoint
     // 401s for anonymous project keys). Chained on topP so config.isIdentified
@@ -5387,10 +5448,10 @@
   function refreshBadgeCaches() {
     if (!config.isIdentified) return Promise.resolve();
     var jobs = [
-      loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () {}),
+      loadMyTickets().then(function (d) { applyMyTicketsResp(d); }).catch(function () {}),
     ];
     if (viewerCanLiveCoder()) {
-      jobs.push(loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () {}));
+      jobs.push(loadAssignedTickets().then(function (d) { applyAssignedResp(d); }).catch(function () {}));
     }
     return Promise.all(jobs).then(function () { refreshTabLabel(); });
   }
@@ -6542,7 +6603,7 @@
         for (var si = 0; si < chatMessages.length; si++) {
           seenMs = Math.max(seenMs, new Date(chatMessages[si].createdAt || 0).getTime() || 0);
         }
-        if (seenMs > 0) { markLiveSessionSeen(liveTaskId, seenMs); refreshTabLabel(); }
+        if (seenMs > 0) { markLiveSessionSeen(liveTaskId, seenMs); queueReadSync(liveTaskId, { liveSessionMs: seenMs }); refreshTabLabel(); }
       }
     } else {
       // Agentless threads open with a scripted offline notice that doubles as
@@ -7425,6 +7486,7 @@
         seenMs = Math.max(seenMs, new Date(activity[ai].createdAt || 0).getTime() || 0);
       }
       markTicketSeen(ticket.id, seenMs);
+      queueReadSync(ticket.id, { seenMs: seenMs });
       refreshTabLabel();
     }
 
@@ -8845,7 +8907,7 @@
         // Authenticated viewers (app token OR runhq cookie) get their own
         // ticket list. Pure-anon viewers only get the public update feed.
         if (config.isIdentified) {
-          loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
+          loadMyTickets().then(function (d) { applyMyTicketsResp(d); refreshTabLabel(); }).catch(function () {});
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
           // Open the real-time unread stream for the page lifetime so the
           // launcher pill lights up even while the widget is closed.
@@ -8946,6 +9008,7 @@
     window._rwTestHooks.markTicketSeen = markTicketSeen;
     window._rwTestHooks.markLiveSessionSeen = markLiveSessionSeen;
     window._rwTestHooks.markAllTicketsRead = markAllTicketsRead;
+    window._rwTestHooks.seedSeenFromServer = seedSeenFromServer;
     window._rwTestHooks.hasUnreadLiveSession = hasUnreadLiveSession;
     window._rwTestHooks.viewerCanLiveCoder = viewerCanLiveCoder;
     window._rwTestHooks._setCaches = function (mine, assigned) {
