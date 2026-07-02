@@ -6624,6 +6624,31 @@ export function createHttpApp() {
     return c.json({ tickets });
   });
 
+  // Persist the viewer's unread read-state (cross-device). Batch-capable: one
+  // read marks a single ticket seen; the whole cache marks "all read". Each read
+  // upserts monotonically (max per axis). Identified users only.
+  app.post('/api/widget/tickets/seen', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    let body: any = {};
+    try { body = await c.req.json(); } catch { body = {}; }
+    const rawReads = Array.isArray(body?.reads) ? body.reads : [];
+    const marks: WidgetService.TicketReadMark[] = [];
+    for (const r of rawReads) {
+      if (!r || typeof r.taskId !== 'string') continue;
+      const seenAt = typeof r.seenAt === 'string' ? new Date(r.seenAt) : null;
+      const liveSessionSeenAt = typeof r.liveSessionSeenAt === 'string' ? new Date(r.liveSessionSeenAt) : null;
+      marks.push({
+        taskId: r.taskId,
+        seenAt: seenAt && !isNaN(seenAt.getTime()) ? seenAt : null,
+        liveSessionSeenAt: liveSessionSeenAt && !isNaN(liveSessionSeenAt.getTime()) ? liveSessionSeenAt : null,
+      });
+    }
+    if (marks.length > 0) await WidgetService.markTicketReads(auth.widgetUserId, marks);
+    return c.json({ ok: true });
+  });
+
   app.get('/api/widget/tickets/stats', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
