@@ -14,6 +14,7 @@ import { isDeployedStatus, deployedEnvId } from '@runhq/server-protocol';
 
 export type TicketStatus =
   | 'pending'
+  | 'pending_approval'
   | 'planned'
   | 'in_progress'
   | 'done'
@@ -117,7 +118,7 @@ function reachedIndex(input: MilestoneInput): number {
       case 'merged':     // landed in base, pre-ship
         statusReached = TRACK.merged;
         break;
-      // pending / planned → received
+      // pending / pending_approval / planned → received
     }
   }
 

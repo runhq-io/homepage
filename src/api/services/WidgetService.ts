@@ -81,6 +81,7 @@ export type WidgetPermission =
   | 'ticket_creator'
   | 'assign_agent'
   | 'preview'
+  | 'approve_tickets'
   // Internal capabilities, not shown as grid columns — derived at resolution
   // time from the visible permissions (see resolveWidgetPermissions):
   //   attach_image ⇐ ticket_creator   (if you can file tickets you can attach)
@@ -90,7 +91,7 @@ export type WidgetPermission =
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 /**
- * The five widget permissions surfaced as columns in the Project Settings →
+ * The six widget permissions surfaced as columns in the Project Settings →
  * Widget → Permissions grid, in display order.
  */
 export const WIDGET_PERMISSION_COLUMNS: readonly WidgetPermission[] = [
@@ -99,6 +100,7 @@ export const WIDGET_PERMISSION_COLUMNS: readonly WidgetPermission[] = [
   'ticket_creator',
   'assign_agent',
   'preview',
+  'approve_tickets',
 ];
 
 const ALL_WIDGET_PERMISSIONS: readonly WidgetPermission[] = [
@@ -132,15 +134,16 @@ export const WIDGET_BUILTIN_ROLES: readonly string[] = [WIDGET_ROLE_EVERYONE, WI
  * the tier→role migration:
  *   - everyone   : read-only board access (anonymous can browse when public).
  *   - logged_in  : read + vote + create (any identified user) — attach derives.
- *   - staff      : everything — assign agents + preview (live derives). Seeded
- *                  but editable/deletable; it's what RunHQ teammates default to.
+ *   - staff      : everything — assign agents + preview (live derives) + approve
+ *                  tickets awaiting approval. Seeded but editable/deletable;
+ *                  it's what RunHQ teammates default to.
  * Returns a fresh, mutable copy on every call.
  */
 export function defaultWidgetRolePermissions(): Record<string, WidgetPermission[]> {
   return {
     [WIDGET_ROLE_EVERYONE]: ['view_tickets'],
     [WIDGET_ROLE_LOGGED_IN]: ['view_tickets', 'voter', 'ticket_creator'],
-    [WIDGET_ROLE_STAFF]: ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview'],
+    [WIDGET_ROLE_STAFF]: ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview', 'approve_tickets'],
   };
 }
 
@@ -243,6 +246,21 @@ export function roleMapGrantsAssignAgent(
 ): boolean {
   if (!map) return false;
   return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('assign_agent'));
+}
+
+/**
+ * Does a widget role→permissions map grant `approve_tickets` to ANY role? This
+ * is the project-level "ticket approval is on" signal: only when at least one
+ * role can approve does an unauthorized reporter's ticket enter the hidden
+ * `pending_approval` state (otherwise it would strand with no one able to
+ * release it). Projects that never grant the permission keep the legacy
+ * behaviour — every ticket is born `pending` and immediately on the board.
+ */
+export function roleMapGrantsApproval(
+  map: Record<string, string[]> | null | undefined,
+): boolean {
+  if (!map) return false;
+  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('approve_tickets'));
 }
 
 export interface WidgetAuthResult {
@@ -444,6 +462,13 @@ export type PublicTicketDetail = {
    * the same authorization server-side — this flag is purely for showing/hiding UI.
    */
   canAssign: boolean;
+  /**
+   * True when the viewer holds `approve_tickets` and the ticket is still
+   * `pending_approval` — drives the Approve / Reject affordance in the widget
+   * detail view. The POST approve/reject endpoints enforce the same
+   * authorization server-side; this flag is purely for showing/hiding UI.
+   */
+  canApprove: boolean;
   /**
    * True while the freshly-filed ticket is still being reviewed by auto-assign
    * (the clarifier/agent picker runs server-side for a few seconds after
@@ -1568,13 +1593,22 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   if (!task) return null;
 
   const isCreator = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
+  const isApprover = !!permissions?.has('approve_tickets');
 
-  // Board visibility is a widget permission (`view_tickets`). A caller without
-  // it can still open a ticket they created, but not browse into others.
-  if (!isCreator && !permissions?.has('view_tickets')) return null;
+  if (task.status === 'pending_approval') {
+    // Awaiting approval: hidden from the public board and from regular
+    // `view_tickets` holders (including by direct ID). Only the creator and
+    // approvers (`approve_tickets`) may open it — the approver reviews it here
+    // before promoting it to `planned` (or rejecting it).
+    if (!isCreator && !isApprover) return null;
+  } else {
+    // Board visibility is a widget permission (`view_tickets`). A caller without
+    // it can still open a ticket they created, but not browse into others.
+    if (!isCreator && !permissions?.has('view_tickets')) return null;
 
-  // Private tasks are only visible to their creator
-  if (task.visibility === 'private' && !isCreator) return null;
+    // Private tasks are only visible to their creator
+    if (task.visibility === 'private' && !isCreator) return null;
+  }
 
   // Get comments
   const comments = await WorkspaceTaskService.listComments(task.id);
@@ -1585,9 +1619,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
 
   const isOwner = isCreator;
   const isEditable = isOwner
-    && task.status === 'pending'
+    && (task.status === 'pending' || task.status === 'pending_approval')
     && comments.length === 0
     && activity.length === 0;
+  // Resolved approve affordance (mirrors `canAssign`): the viewer holds
+  // `approve_tickets` and the ticket is still awaiting approval.
+  const canApprove = isApprover && task.status === 'pending_approval';
 
   // Look up the most recent agent_assigned activity for this ticket
   const lastAssignment = await db
@@ -1729,6 +1766,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     milestones,
     canPreview: !!permissions?.has('preview') && !!internalPr,
     canAssign,
+    canApprove,
     processing,
     environments: project.deployEnvironments ?? [],
   };
@@ -2062,6 +2100,14 @@ async function prepareWidgetTicketCreate(
   projectId: string,
   widgetUserId: string | undefined,
   opts: CreateWidgetTicketInput,
+  /**
+   * Whether the reporter holds `assign_agent`. When explicitly `false` AND the
+   * project has an approver role (`approve_tickets` granted somewhere), the
+   * ticket is born `pending_approval` — hidden from the public board until an
+   * approver promotes it to `planned`. `undefined`/`true` preserve the legacy
+   * `pending` born state.
+   */
+  creatorCanAssign?: boolean,
 ): Promise<PreparedWidgetTicketCreate> {
   const [project] = await db
     .select({
@@ -2069,12 +2115,23 @@ async function prepareWidgetTicketCreate(
       channelId: widgetProjects.channelId,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       agentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
     .limit(1);
 
   if (!project) throw new WidgetError('project_not_found', 404);
+
+  // Approval gate: a reporter who cannot assign agents files into a hidden
+  // `pending_approval` state — but only when the project actually has an
+  // approver (some role grants `approve_tickets`); otherwise the ticket would
+  // strand with no one able to release it, so it stays on the legacy `pending`
+  // path. Authorized reporters (and internal callers that don't pass the flag)
+  // are never gated.
+  const needsApproval =
+    creatorCanAssign === false && roleMapGrantsApproval(project.widgetRolePermissions);
+  const status = needsApproval ? 'pending_approval' : undefined;
 
   let title = opts.title?.trim() || '';
   if (!title && opts.description) {
@@ -2115,6 +2172,9 @@ async function prepareWidgetTicketCreate(
       workspaceChannelId: project.channelId,
       title,
       description: opts.description,
+      // Omit when undefined so the column default ('pending') applies; set
+      // explicitly only for the approval-gated path.
+      ...(status ? { status } : {}),
       visibility: opts.isPrivate ? 'private' : 'public',
       // Published by default (single source of truth: resolveCreateIsPublished).
       // The published "Latest Updates" feed also gates on visibility='public',
@@ -2164,8 +2224,10 @@ export async function createTicket(
   projectId: string,
   widgetUserId: string | undefined,
   opts: CreateWidgetTicketInput,
+  /** See `prepareWidgetTicketCreate`: gates the `pending_approval` born state. */
+  creatorCanAssign?: boolean,
 ) {
-  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts, creatorCanAssign);
   await requireSafeForAutoAssignment(prepared);
   return insertPreparedWidgetTicket(prepared);
 }
@@ -2199,7 +2261,11 @@ async function requireEditableTask(
   // retain regardless of triage state or comment count.
   if (opts.skipPostActivityChecks) return;
 
-  if (task.status !== 'pending') throw new WidgetError('ticket_no_longer_editable', 409);
+  // Editable while still untriaged: `pending` or awaiting approval. Once an
+  // approver promotes it (planned+) or work starts, the owner can no longer edit.
+  if (task.status !== 'pending' && task.status !== 'pending_approval') {
+    throw new WidgetError('ticket_no_longer_editable', 409);
+  }
 
   const [commentCount] = await db
     .select({ count: sql<number>`count(*)` })
@@ -2431,9 +2497,11 @@ export async function createTicketWithAttachments(
   widgetUserId: string,
   opts: CreateWidgetTicketInput,
   files: WidgetUploadFile[],
+  /** See `prepareWidgetTicketCreate`: gates the `pending_approval` born state. */
+  creatorCanAssign?: boolean,
 ) {
   if (files.length === 0) {
-    const ticket = await createTicket(projectId, widgetUserId, opts);
+    const ticket = await createTicket(projectId, widgetUserId, opts, creatorCanAssign);
     return { ticket, attachments: [] as PublicAttachmentSummary[] };
   }
   if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
@@ -2441,7 +2509,7 @@ export async function createTicketWithAttachments(
 
   assertWidgetImageFiles(files, MAX_ATTACHMENTS_PER_TICKET);
 
-  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts, creatorCanAssign);
   await requireSafeTicketAndImages(prepared.reviewTicket, files, {
     agentAssignmentEnabled: prepared.project.agentAssignmentEnabled,
   });
@@ -2977,6 +3045,84 @@ export async function listMyTickets(
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
     return dto;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Ticket approval — the moderation queue for tickets filed by reporters who
+// lack `assign_agent`. Such tickets are born `pending_approval` (hidden from
+// the public board); a holder of `approve_tickets` reviews them here and either
+// promotes them to `planned` (releasing them onto the board when public) or
+// rejects them (`cancelled`). See `roleMapGrantsApproval` /
+// `prepareWidgetTicketCreate` for the born-state gate.
+// ---------------------------------------------------------------------------
+
+/**
+ * The approver queue: tickets awaiting approval for a project. Same server/
+ * channel scoping as the public board, filtered to `pending_approval` (which
+ * the board itself excludes). Voting is not offered on unapproved tickets, so
+ * `canVote` is false. Only surfaced to callers holding `approve_tickets`; the
+ * route enforces that.
+ */
+export async function listPendingApprovalTickets(
+  projectId: string,
+): Promise<WidgetTicketResponse[]> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return [];
+
+  const rows = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      buildWidgetVisibleFilter(project),
+      eq(workspaceTasks.status, 'pending_approval'),
+    ))
+    .orderBy(desc(workspaceTasks.createdAt))
+    .limit(50);
+
+  return rows.map((t) => mapTaskToWidgetResponse(t, null, false));
+}
+
+/**
+ * Transition a `pending_approval` ticket to `target` (`planned` on approve,
+ * `cancelled` on reject) through the canonical status writer. Validates the
+ * ticket is in the project's scope and still awaiting approval. Authorization
+ * (`approve_tickets`) is enforced by the caller (the route).
+ */
+async function transitionPendingApproval(
+  projectId: string,
+  ticketId: string,
+  target: 'planned' | 'cancelled',
+): Promise<void> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
+  const [task] = await db
+    .select({ id: workspaceTasks.id, status: workspaceTasks.status })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+
+  if (!task) throw new WidgetError('ticket_not_found', 404);
+  if (task.status !== 'pending_approval') {
+    throw new WidgetError('ticket_not_pending_approval', 409);
+  }
+
+  await WorkspaceTaskService.updateTask(project.serverId, ticketId, { status: target });
+}
+
+/** Approve a pending ticket → `planned`, releasing it onto the board (if public). */
+export async function approvePendingTicket(projectId: string, ticketId: string): Promise<void> {
+  await transitionPendingApproval(projectId, ticketId, 'planned');
+}
+
+/** Reject a pending ticket → `cancelled`, removing it from the approver queue. */
+export async function rejectPendingTicket(projectId: string, ticketId: string): Promise<void> {
+  await transitionPendingApproval(projectId, ticketId, 'cancelled');
 }
 
 /**
@@ -4190,6 +4336,7 @@ export const WIDGET_ERROR_CODES = [
   'comment_author_only',
   'comments_disabled',
   'ticket_no_longer_editable',
+  'ticket_not_pending_approval',
   'ticket_has_comments',
   'ticket_has_activity',
   'invalid_visibility',

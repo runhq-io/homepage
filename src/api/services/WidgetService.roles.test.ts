@@ -35,11 +35,25 @@ describe('widget role-based permissions', () => {
       expect(p.has('live_coder')).toBe(false);
     });
 
-    it('a staff member gets everything (live derives from assign)', () => {
+    it('a staff member gets everything (live derives from assign) incl. approve_tickets', () => {
       const p = resolveWidgetPermissions({}, WIDGET_ROLE_STAFF, true);
       expect([...p].sort()).toEqual(
-        ['assign_agent', 'attach_image', 'live_coder', 'preview', 'ticket_creator', 'view_tickets', 'voter'].sort(),
+        ['approve_tickets', 'assign_agent', 'attach_image', 'live_coder', 'preview', 'ticket_creator', 'view_tickets', 'voter'].sort(),
       );
+    });
+
+    it('approve_tickets is a staff-only default — not everyone or logged_in', () => {
+      const anon = resolveWidgetPermissions({}, null, false);
+      const loggedIn = resolveWidgetPermissions({}, WIDGET_ROLE_LOGGED_IN, true);
+      const staff = resolveWidgetPermissions({}, WIDGET_ROLE_STAFF, true);
+      expect(anon.has('approve_tickets')).toBe(false);
+      expect(loggedIn.has('approve_tickets')).toBe(false);
+      expect(staff.has('approve_tickets')).toBe(true);
+    });
+
+    it('anonymous is clamped even if the everyone role grants approve_tickets', () => {
+      const map = { everyone: ['view_tickets', 'approve_tickets'] };
+      expect([...resolveWidgetPermissions(map, null, false)]).toEqual(['view_tickets']);
     });
   });
 
@@ -134,7 +148,7 @@ describe('widget role-based permissions', () => {
   });
 
   it('isWidgetPermission validates the vocabulary', () => {
-    for (const p of ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview', 'live_coder', 'attach_image']) {
+    for (const p of ['view_tickets', 'voter', 'ticket_creator', 'assign_agent', 'preview', 'approve_tickets', 'live_coder', 'attach_image']) {
       expect(isWidgetPermission(p)).toBe(true);
     }
     expect(isWidgetPermission('manage_project')).toBe(false);

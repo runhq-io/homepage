@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { roleMapGrantsAssignAgent } from './WidgetService';
+import { roleMapGrantsAssignAgent, roleMapGrantsApproval } from './WidgetService';
 
 /**
  * The legacy `widget_agent_assignment_enabled` column must stay equal to this
@@ -31,5 +31,31 @@ describe('roleMapGrantsAssignAgent', () => {
 
   it('tolerates malformed (non-array) values', () => {
     expect(roleMapGrantsAssignAgent({ '*': 'assign_agent' as unknown as string[] })).toBe(false);
+  });
+});
+
+/**
+ * Gate for the `pending_approval` born state: an unauthorized reporter's ticket
+ * only enters the approval queue when the project actually has an approver role.
+ * Projects that never grant `approve_tickets` keep the legacy `pending` path.
+ */
+describe('roleMapGrantsApproval', () => {
+  it('true when granted to any role', () => {
+    expect(roleMapGrantsApproval({ staff: ['view_tickets', 'approve_tickets'] })).toBe(true);
+    expect(roleMapGrantsApproval({ moderator: ['approve_tickets'] })).toBe(true);
+  });
+
+  it('false when no role grants approve_tickets', () => {
+    expect(roleMapGrantsApproval({ everyone: ['view_tickets'], staff: ['assign_agent', 'preview'] })).toBe(false);
+  });
+
+  it('false for empty / null / undefined', () => {
+    expect(roleMapGrantsApproval({})).toBe(false);
+    expect(roleMapGrantsApproval(null)).toBe(false);
+    expect(roleMapGrantsApproval(undefined)).toBe(false);
+  });
+
+  it('tolerates malformed (non-array) values', () => {
+    expect(roleMapGrantsApproval({ staff: 'approve_tickets' as unknown as string[] })).toBe(false);
   });
 });

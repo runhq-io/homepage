@@ -78,3 +78,17 @@ describe('display resolver (BE customer-facing)', () => {
     expect(todoStatusDisplay('bogus')).toBe(TODO_STATUS_DISPLAY.pending);
   });
 });
+
+describe('pending_approval (widget approval queue)', () => {
+  it('is an open, pre-planned holding state', () => {
+    expect(isTerminalStatus('pending_approval')).toBe(false);
+    expect(isOpenStatus('pending_approval')).toBe(true);
+    // Ranks below planned so approving (→ planned) is a forward move.
+    expect(todoStatusRank('pending_approval', envs)).toBeLessThan(todoStatusRank('planned', envs));
+  });
+  it('has its own label + display chip (not the pending fallback)', () => {
+    expect(todoStatusLabel('pending_approval', envs)).toBe('Pending approval');
+    expect(todoStatusDisplay('pending_approval')).toBe(TODO_STATUS_DISPLAY.pending_approval);
+    expect(todoStatusDisplay('pending_approval').label).toBe('Pending approval');
+  });
+});
