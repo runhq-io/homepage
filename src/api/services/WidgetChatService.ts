@@ -33,6 +33,7 @@ import {
 import * as ServerService from './ServerService';
 import * as WidgetService from './WidgetService';
 import { autoAssignTicket as autoAssignTicketDefault } from './WidgetAutoAssign';
+import { notifyTaskAudience } from './WidgetNotifications';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 
 /**
@@ -144,6 +145,103 @@ function publish(row: ChatMessageRow): void {
   }
 }
 
+// Separate control channel for ephemeral live-coder presence, kept distinct
+// from the message stream so a `coder_status` toggle never looks like a
+// transcript row to existing message subscribers.
+type CoderStatusSubscriber = (working: boolean) => void;
+const coderStatusSubscribers = new Map<string, Set<CoderStatusSubscriber>>();
+
+export function subscribeToCoderStatus(conversationId: string, cb: CoderStatusSubscriber): () => void {
+  let set = coderStatusSubscribers.get(conversationId);
+  if (!set) {
+    set = new Set();
+    coderStatusSubscribers.set(conversationId, set);
+  }
+  set.add(cb);
+  return () => {
+    set!.delete(cb);
+    if (set!.size === 0) coderStatusSubscribers.delete(conversationId);
+  };
+}
+
+function publishCoderStatus(conversationId: string, working: boolean): void {
+  const set = coderStatusSubscribers.get(conversationId);
+  if (!set) return;
+  for (const cb of set) {
+    try {
+      cb(working);
+    } catch (err) {
+      console.warn('[WidgetChatService] coder-status subscriber threw:', err);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live-coder activity ("is the coding agent working right now?")
+//
+// Ephemeral per-conversation presence for widget LIVE SESSIONS, fed by the
+// workspace (POST /api/internal/widget-chat/coder-status) and streamed to the
+// widget as a `coder_status` SSE frame + surfaced on the conversation/status
+// DTOs so a widget that opens mid-work learns the state immediately. Held in
+// memory (single-pod stickiness, like `subscribers`), never persisted — it is
+// presence, not transcript. A heartbeat TTL flips a stuck `working` back to
+// standing-by if the workspace stops reporting (e.g. it died mid-turn).
+// ---------------------------------------------------------------------------
+
+/** Must exceed the workspace heartbeat cadence (15s) with margin. */
+const CODER_STATUS_TTL_MS = 45_000;
+const coderStatus = new Map<string, { working: boolean; timer: ReturnType<typeof setTimeout> }>();
+
+/** Current working state for a conversation (false when unknown/expired). */
+export function getCoderWorking(conversationId: string): boolean {
+  return coderStatus.get(conversationId)?.working ?? false;
+}
+
+/**
+ * Apply a coder-status transition to in-memory state + notify subscribers.
+ * Pure (no IO): publishes a `coder_status` frame only on a genuine transition
+ * (heartbeats re-arm the TTL without re-publishing) and arms a TTL that flips a
+ * stale `working` back to standing-by. `setCoderStatus` is the authenticated
+ * entry point that guards tenancy before calling this; exported for unit tests.
+ */
+export function applyCoderStatusInMemory(conversationId: string, working: boolean): void {
+  const existing = coderStatus.get(conversationId);
+  const wasWorking = existing?.working ?? false;
+  if (existing) clearTimeout(existing.timer);
+
+  if (!working) {
+    coderStatus.delete(conversationId);
+    if (wasWorking) publishCoderStatus(conversationId, false);
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    coderStatus.delete(conversationId);
+    publishCoderStatus(conversationId, false);
+  }, CODER_STATUS_TTL_MS);
+  timer.unref?.();
+  coderStatus.set(conversationId, { working: true, timer });
+  if (!wasWorking) publishCoderStatus(conversationId, true);
+}
+
+/**
+ * Record the coder's working state for a live-session conversation. `serverId`
+ * must own the conversation's project (cross-tenant guard, same shape as
+ * ingestTurnEvents); then delegates to applyCoderStatusInMemory.
+ */
+export async function setCoderStatus(serverId: string, conversationId: string, working: boolean): Promise<void> {
+  const [found] = await db
+    .select({ projectServerId: widgetProjects.serverId })
+    .from(widgetChatConversations)
+    .innerJoin(widgetProjects, eq(widgetChatConversations.widgetProjectId, widgetProjects.id))
+    .where(eq(widgetChatConversations.id, conversationId))
+    .limit(1);
+  if (!found || found.projectServerId !== serverId) {
+    throw new WidgetService.WidgetError('conversation_not_found', 404);
+  }
+  applyCoderStatusInMemory(conversationId, working);
+}
+
 // ---------------------------------------------------------------------------
 // Project + conversation accessors
 // ---------------------------------------------------------------------------
@@ -239,12 +337,22 @@ async function requireWritableConversation(
   return conv;
 }
 
-/** Full transcript, canonical order (created_at, id). */
-async function loadAllMessages(conversationId: string): Promise<ChatMessageRow[]> {
+/**
+ * Full transcript, canonical order (created_at, id). When `includeLiveSession`
+ * is false (a non-`live_coder` reader), Live-session relay rows are excluded so
+ * the reporter only ever sees their own intake.
+ */
+async function loadAllMessages(
+  conversationId: string,
+  includeLiveSession: boolean,
+): Promise<ChatMessageRow[]> {
   return db
     .select()
     .from(widgetChatMessages)
-    .where(eq(widgetChatMessages.conversationId, conversationId))
+    .where(and(
+      eq(widgetChatMessages.conversationId, conversationId),
+      ...(includeLiveSession ? [] : [eq(widgetChatMessages.liveSession, false)]),
+    ))
     .orderBy(widgetChatMessages.createdAt, widgetChatMessages.id);
 }
 
@@ -386,6 +494,27 @@ export async function getActiveConversation(
 }
 
 /**
+ * Authoritative close-state for ONE conversation, addressed by id. The widget's
+ * post-ticket "closed watch" needs this because getActiveConversation
+ * intentionally hides ticket-linked conversations (createdTaskId set), so it
+ * cannot answer "is THIS conversation still open?" — a ticketed conversation
+ * that the BE keeps open (e.g. it still holds an unresolved proposal from a
+ * multi-ticket intake) must not read as closed just because it stopped being
+ * the active intake thread. Scoped like the read paths: owner, or a live_coder
+ * viewer of a ticket-linked Live session. 404s (conversation_not_found) for
+ * anyone else — which the watch also treats as closed.
+ */
+export async function getConversationStatus(
+  conversationId: string,
+  projectId: string,
+  widgetUserId: string,
+  permissions: ReadonlySet<WidgetService.WidgetPermission>,
+): Promise<'active' | 'closed'> {
+  const conv = await getConversationForViewer(conversationId, projectId, widgetUserId, permissions);
+  return conv.status;
+}
+
+/**
  * Owner-scoped message listing. `after` = a message id cursor; only rows
  * strictly newer (by the canonical (created_at, id) order) are returned.
  * The comparison stays entirely in SQL: created_at has microsecond precision
@@ -402,7 +531,11 @@ export async function listMessages(
   // Read access: the owner (reporter) OR a live_coder staff member viewing a
   // ticket-linked Live session.
   await getConversationForViewer(conversationId, projectId, widgetUserId, permissions);
-  if (!after) return loadAllMessages(conversationId);
+  // Only `live_coder` staff receive the Live-session relay rows; the reporter
+  // sees their intake only. This is the server-side enforcement — the client
+  // hiding the "Live session" button is convenience, not the boundary.
+  const includeLiveSession = permissions.has('live_coder');
+  if (!after) return loadAllMessages(conversationId, includeLiveSession);
   if (!UUID_RE.test(after)) throw new WidgetService.WidgetError('invalid_cursor', 400);
   const [anchor] = await db
     .select({ id: widgetChatMessages.id })
@@ -418,6 +551,7 @@ export async function listMessages(
     .from(widgetChatMessages)
     .where(and(
       eq(widgetChatMessages.conversationId, conversationId),
+      ...(includeLiveSession ? [] : [eq(widgetChatMessages.liveSession, false)]),
       sql`(${widgetChatMessages.createdAt}, ${widgetChatMessages.id}) > (
         SELECT m.created_at, m.id FROM widget_chat_messages m
         WHERE m.id = ${after} AND m.conversation_id = ${conversationId}
@@ -669,7 +803,7 @@ async function dispatchTurn(
     .set({ pendingTurnId: turnId, updatedAt: new Date() })
     .where(eq(widgetChatConversations.id, conversation.id));
 
-  const rows = await loadAllMessages(conversation.id);
+  const rows = await loadAllMessages(conversation.id, true);
   const pending = computePendingProposal(rows);
 
   const [server] = await db.select().from(servers).where(eq(servers.id, project.serverId)).limit(1);
@@ -902,7 +1036,7 @@ async function carryConversationImagesToTask(
 
 /** The latest proposal, iff still unresolved. Throws no_pending_proposal otherwise. */
 async function requirePendingProposal(conversationId: string): Promise<PendingProposal> {
-  const rows = await loadAllMessages(conversationId);
+  const rows = await loadAllMessages(conversationId, true);
   const pending = computePendingProposal(rows);
   if (!pending || !('noAction' in pending.resolution)) {
     throw new WidgetService.WidgetError('no_pending_proposal', 409);
@@ -931,6 +1065,12 @@ export async function createTicketFromChat(
   creatorCanAssign = true,
 ): Promise<{ ticketId: string }> {
   const fresh = await requireWritableConversation(conversationId, projectId, widgetUserId);
+  // Hard cap: one ticket per conversation. Mirrors submitTicketFromConversation.
+  // The ingest layer also drops any post-ticket proposal so this card can't even
+  // be offered — this guard is the belt-and-suspenders for a direct API call.
+  if (fresh.createdTaskId) {
+    throw new WidgetService.WidgetError('ticket_already_created', 409);
+  }
   await requirePendingProposal(conversationId);
 
   const title = (draft.title ?? '').trim();
@@ -944,7 +1084,7 @@ export async function createTicketFromChat(
 
   const task = await WidgetService.createTicket(projectId, widgetUserId, {
     title, description, isPrivate: draft.isPrivate === true,
-  });
+  }, creatorCanAssign);
 
   // Carry all images from the conversation onto the new ticket as task attachments.
   // Best-effort: a failing insert must not abort the already-created ticket.
@@ -1047,7 +1187,7 @@ export async function submitTicketFromConversation(
     throw new WidgetService.WidgetError('agent_turns_present', 409);
   }
 
-  const rows = await loadAllMessages(conversationId);
+  const rows = await loadAllMessages(conversationId, true);
   const userMessages = rows
     .filter((r) => r.role === 'user' && r.content.trim().length > 0)
     .map((r) => r.content);
@@ -1059,7 +1199,7 @@ export async function submitTicketFromConversation(
   if (!project) throw new WidgetService.WidgetError('project_not_found', 404);
 
   const { title, description } = deriveTicketDraft(userMessages);
-  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description });
+  const task = await WidgetService.createTicket(projectId, widgetUserId, { title, description }, creatorCanAssign);
 
   // Carry all images from the conversation onto the new ticket as task attachments.
   // Best-effort: a failing insert must not abort the already-created ticket.
@@ -1295,7 +1435,7 @@ export async function getTeamConversation(
   if (!row) throw new WidgetService.WidgetError('conversation_not_found', 404);
   return {
     conversation: toTeamSummary(row),
-    messages: await loadAllMessages(conversationId),
+    messages: await loadAllMessages(conversationId, true), // team inbox: staff see the full Live session
   };
 }
 
@@ -1400,7 +1540,10 @@ export async function sendLiveCoderMessage(
 
   const [message] = await db
     .insert(widgetChatMessages)
-    .values({ conversationId, role: 'user', content: text })
+    // Live-session content: a staff member steering the coder AFTER a ticket
+    // exists. Stored role='user' (it's input to the coder job) but must never
+    // be shown to the reporter — only `live_coder` viewers see it.
+    .values({ conversationId, role: 'user', content: text, liveSession: true })
     .returning();
   publish(message!);
 
@@ -1476,7 +1619,9 @@ async function insertActivityEvent(
   };
   const [row] = await db
     .insert(widgetChatMessages)
-    .values({ conversationId, role: 'event', content: '', payload, turnId: `act:${conversationId}:${activity.id}`, seq: 0 })
+    // Mirrored ticket/coder activity — only exists after a ticket, so it is
+    // always Live-session content (hidden from the reporter).
+    .values({ conversationId, role: 'event', content: '', payload, turnId: `act:${conversationId}:${activity.id}`, seq: 0, liveSession: true })
     .onConflictDoNothing()
     .returning();
   if (row) { publish(row); return true; }
@@ -1606,8 +1751,16 @@ export async function ingestTurnEvents(
 
   const events = [...input.events].sort((a, b) => a.seq - b.seq);
   let inserted = 0;
+  let insertedReply = false; // an agent/team message (a live-session "reply")
   let turnDone = false;
   let turnError = false;
+  // One ticket per conversation: once this conversation has produced a ticket,
+  // any further proposal the agent emits is dropped (the first one is swapped
+  // for a single explanatory notice). Enforced here so the cap never depends on
+  // the model choosing to stop — createdTaskId is set the moment ticket #1 is
+  // filed (createTicketFromChat), before any post-create turn is ingested.
+  const alreadyTicketed = found.conversation.createdTaskId != null;
+  let ticketLimitNoticed = false;
 
   for (const ev of events) {
     if (!Number.isInteger(ev.seq) || ev.seq < 0) continue;
@@ -1645,12 +1798,30 @@ export async function ingestTurnEvents(
         break;
       }
       case 'proposal': {
-        if (typeof ev.title === 'string' && typeof ev.description === 'string' && typeof ev.toolUseId === 'string') {
-          row = {
-            role: 'event', content: '',
-            payload: { kind: 'proposal', title: ev.title, description: ev.description, toolUseId: ev.toolUseId },
-          };
+        if (typeof ev.title !== 'string' || typeof ev.description !== 'string' || typeof ev.toolUseId !== 'string') {
+          break;
         }
+        // One-ticket cap: this conversation already produced a ticket, so this
+        // proposal is refused. Swap the FIRST refused proposal for a single
+        // notice (so the thread explains the dead end instead of the agent's
+        // "now for the next one" dangling), and drop any further ones silently.
+        if (alreadyTicketed) {
+          if (!ticketLimitNoticed) {
+            ticketLimitNoticed = true;
+            row = {
+              role: 'event', content: '',
+              payload: {
+                kind: 'system_notice', code: 'ticket_limit',
+                text: 'You can file one ticket per conversation. Start a new conversation to add another.',
+              },
+            };
+          }
+          break;
+        }
+        row = {
+          role: 'event', content: '',
+          payload: { kind: 'proposal', title: ev.title, description: ev.description, toolUseId: ev.toolUseId },
+        };
         break;
       }
       case 'ticket_link': {
@@ -1729,13 +1900,24 @@ export async function ingestTurnEvents(
         payload: row.payload,
         turnId: input.turnId,
         seq: ev.seq,
+        // Turns ingested once the conversation is already ticketed are the
+        // coder's Live-session relay (not intake); hide them from the reporter.
+        liveSession: alreadyTicketed,
       })
       .onConflictDoNothing()
       .returning();
     if (ins[0]) {
       inserted++;
+      if (row.role === 'agent' || row.role === 'team') insertedReply = true;
       publish(ins[0]);
     }
+  }
+
+  // A coder/teammate reply in a live session drives the assigner's (and
+  // reporter's) unread badge, but does NOT flow through publishTicketUpdate.
+  // Ping their notification channels directly so the badge updates in real time.
+  if (insertedReply && found.conversation.createdTaskId) {
+    void notifyTaskAudience(found.conversation.createdTaskId);
   }
 
   if (turnError || turnDone) {
@@ -1770,6 +1952,9 @@ export async function ingestTurnEvents(
       // widget's closed-watch kill the SSE transport before the post-create
       // turn's assigned/wrap-up rows arrived, so the user never saw
       // "Assigned to …" (live repro 2026-06-07).
+      // One ticket per conversation: once it produced a ticket, the wrap-up
+      // turn's turn_done closes it. Any post-ticket proposal is dropped at
+      // ingest (below), so there is never an unresolved proposal to preserve.
       if (turnDone && current.createdTaskId
         && (current.pendingTurnId === null || current.pendingTurnId === input.turnId)) {
         updates.status = 'closed';

@@ -49,6 +49,7 @@ vi.mock('./services/WidgetChatService', () => ({
   ingestTurnEvents: vi.fn(),
   subscribeToConversation: vi.fn(() => () => {}),
   attachConversationImage: vi.fn(),
+  loadChatImagesForMessages: vi.fn(() => new Map()),
 }));
 vi.mock('./services/WidgetService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./services/WidgetService')>();
@@ -212,5 +213,77 @@ describe('POST /api/widget/chat/conversations/:id/images', () => {
     const res = await createHttpApp().request(URL, makeFormRequest());
     expect(res.status).toBe(429);
     expect(WidgetChatService.attachConversationImage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The second door that attaches images to a message: POST .../messages with an
+// imageIds array. The upload endpoint above already gates on attach_image, but
+// this path must ALSO enforce it (defense-in-depth) so a user who lost the
+// permission after uploading — or reaches this endpoint any other way — cannot
+// still attach. Plain (imageless) messages must remain ungated.
+// ---------------------------------------------------------------------------
+describe('POST /api/widget/chat/conversations/:id/messages — attach_image gating', () => {
+  const MESSAGES_URL = `/api/widget/chat/conversations/${CONV_ID}/messages`;
+
+  function jsonPost(payload: unknown) {
+    return {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    };
+  }
+
+  const STUB_MESSAGE = {
+    id: 'msg-1',
+    conversationId: CONV_ID,
+    role: 'user' as const,
+    content: 'hi',
+    payload: null,
+    turnId: null,
+    seq: 1,
+    createdAt: new Date('2020-01-01T00:00:00.000Z'),
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(widgetRateLimiter.check).mockReturnValue({ allowed: true, retryAfterSec: 0 });
+    vi.mocked(widgetRateLimiter.checkDefault).mockReturnValue({ allowed: true, retryAfterSec: 0 });
+    vi.mocked(WidgetChatService.loadChatImagesForMessages).mockResolvedValue(new Map());
+    vi.mocked(WidgetChatService.sendUserMessage).mockResolvedValue(STUB_MESSAGE as any);
+  });
+
+  it('403 when imageIds are present but the caller lacks attach_image', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED_NO_ATTACH as any);
+    const res = await createHttpApp().request(MESSAGES_URL, jsonPost({ content: 'look', imageIds: ['img-1'] }));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'attach_image_permission_required' });
+    // Blocked before the service runs — no message row, no image link.
+    expect(WidgetChatService.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('allows a plain (imageless) message without attach_image', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED_NO_ATTACH as any);
+    const res = await createHttpApp().request(MESSAGES_URL, jsonPost({ content: 'just text' }));
+    expect(res.status).toBe(200);
+    // Passed the guard and reached the service without imageIds.
+    expect(WidgetChatService.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(WidgetChatService.sendUserMessage).mock.calls[0]![4]).toBeUndefined();
+  });
+
+  it('treats an empty imageIds array as no attachment (not gated)', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED_NO_ATTACH as any);
+    const res = await createHttpApp().request(MESSAGES_URL, jsonPost({ content: 'hi', imageIds: [] }));
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows imageIds through when the caller holds attach_image', async () => {
+    vi.mocked(WidgetService.authenticateWidget).mockResolvedValue(IDENTIFIED_WITH_ATTACH as any);
+    const res = await createHttpApp().request(MESSAGES_URL, jsonPost({ content: 'look', imageIds: ['img-1', 'img-2'] }));
+    expect(res.status).toBe(200);
+    expect(WidgetChatService.sendUserMessage).toHaveBeenCalledTimes(1);
+    // imageIds forwarded to the service (5th arg).
+    expect(vi.mocked(WidgetChatService.sendUserMessage).mock.calls[0]![4]).toEqual(['img-1', 'img-2']);
   });
 });

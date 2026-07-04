@@ -42,6 +42,7 @@ import * as ClarifierService from './services/ClarifierService';
 import { widgetRateLimiter, type WidgetAction } from './services/WidgetRateLimiter';
 import * as WidgetChatService from './services/WidgetChatService';
 import { subscribeToTicket } from './services/WidgetTicketEvents';
+import { subscribeToUser } from './services/WidgetNotifications';
 import { streamSSE } from 'hono/streaming';
 import { getCookie, setCookie } from 'hono/cookie';
 import { RW_SESSION_COOKIE, rwSessionCookieOptions, rwSessionMatchesUser } from './services/WidgetCookieAuth';
@@ -61,7 +62,7 @@ import type { Screenshot, TokenUsage } from '@runhq/server-protocol';
 import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 import type { PlanId } from '../db/schema';
 import { db } from '../db/index';
-import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions, widgetProjects } from '../db/schema';
+import { users, deviceCodes, servers, serverTemplates, agentTemplates, systemSettings, serverMembers, subscriptions, widgetProjects, widgetUsers, widgetUserBalances, widgetUserNotifications, pointGrants, harnessCases, notifications, notificationDeliveries, userNotificationPreferences, notificationMutes, pushSubscriptions } from '../db/schema';
 import { eq, lt, sql, and, isNotNull, like, asc, desc, isNull } from 'drizzle-orm';
 import { serializeNotification } from '../notifications/serialize';
 import { getOrCreatePreferences } from '../notifications/gates';
@@ -69,6 +70,13 @@ import { insertNotificationWithDeliveries, deriveServerTokenActor } from '../not
 import { dispatchNotification } from '../notifications/dispatch';
 import { broadcastToUser } from '../notifications/wsBroadcast';
 import { wsServer as getWsServer } from '../notifications/wsRegistry';
+import { CommunityPointsError } from './services/CommunityPointsService';
+import { type SortKey } from './services/CommunityLeaderboardService';
+import {
+  communityPointsService,
+  communityNotificationService,
+  communityLeaderboardService,
+} from './services/communityServices';
 import { getUserByUsername } from '../db/services';
 export { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
 import { DEV_LOCAL_USER_ID } from '../db/seed-dev-local-user';
@@ -3987,6 +3995,41 @@ export function createHttpApp() {
     }
   });
 
+  /**
+   * Workspace → BE ephemeral live-coder activity signal for widget live sessions.
+   * Auth mirrors the events route (X-Server-Token + serverId match + per-conversation
+   * cross-tenant guard). Holds `working` as in-memory presence with a heartbeat TTL
+   * and streams a `coder_status` SSE frame to connected widgets — no message row.
+   */
+  app.post('/api/internal/widget-chat/coder-status', async (c) => {
+    try {
+      const serverToken = c.req.header('X-Server-Token');
+      if (!serverToken) return c.json({ error: 'X-Server-Token required' }, 401);
+      const server = await ServerService.getServerByToken(serverToken);
+      if (!server) return c.json({ error: 'Invalid server token' }, 401);
+
+      const body = await c.req.json().catch(() => null) as {
+        serverId?: unknown; conversationId?: unknown; working?: unknown;
+      } | null;
+      if (
+        !body ||
+        typeof body.serverId !== 'string' ||
+        typeof body.conversationId !== 'string' ||
+        typeof body.working !== 'boolean'
+      ) {
+        return c.json({ error: 'Malformed body' }, 400);
+      }
+      if (body.serverId !== server.id) return c.json({ error: 'serverId mismatch' }, 403);
+
+      await WidgetChatService.setCoderStatus(server.id, body.conversationId, body.working);
+      return c.json({ ok: true });
+    } catch (err) {
+      if (err instanceof WidgetService.WidgetError) return c.json({ error: err.code }, err.status as any);
+      console.error('[HttpServer] widget-chat coder-status error:', err);
+      return c.json({ error: 'coder-status failed' }, 500);
+    }
+  });
+
   // Resolve (find-or-create) the Live-session conversation for a canonical task.
   // Called by the workspace `runhq post-to-widget` path so a coder's outbound
   // messages reach + persist in the ticket's conversation even when no staff
@@ -5018,6 +5061,70 @@ export function createHttpApp() {
 
   const taskAttachmentStorage = new TaskAttachmentStorageService();
 
+  // ============================================================================
+  // Community Channel Points
+  // ============================================================================
+  //
+  // Service instances are shared singletons (see ./services/communityServices),
+  // wired to real WS topic delivery via communityBroadcaster. The same instances
+  // back the canonical awarding path in WorkspaceTaskService.
+
+  // ============================================================================
+  // Community helpers
+  // ============================================================================
+
+  /**
+   * Thrown by community route helpers when auth fails.
+   * Caught by callers via `try/catch` to produce the correct HTTP response.
+   */
+  class CommunityAuthError extends Error {
+    constructor(
+      public readonly status: 401 | 403 | 404,
+      message: string,
+    ) {
+      super(message);
+      this.name = 'CommunityAuthError';
+    }
+  }
+
+  /**
+   * Authenticate a signed community / widget session.
+   * Returns the session when widgetUserId is present; throws CommunityAuthError(401) otherwise.
+   */
+  async function requireWidgetSession(c: any): Promise<{ widgetUserId: string; projectId: string; projectSlug: string; authenticated: boolean }> {
+    const session = await WidgetService.authenticateWidget(c.req);
+    if (!session?.widgetUserId) {
+      throw new CommunityAuthError(401, 'unauthenticated');
+    }
+    return session as { widgetUserId: string; projectId: string; projectSlug: string; authenticated: boolean };
+  }
+
+  /**
+   * Verify that the calling cloud user is an admin for the widget project in the URL.
+   * Returns { userId, project } on success; throws CommunityAuthError otherwise.
+   */
+  async function requireProjectAdmin(c: any): Promise<{ userId: string; project: typeof widgetProjects.$inferSelect }> {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      throw new CommunityAuthError(401, 'unauthorized');
+    }
+    const userId = await extractUserIdFromToken(authHeader.substring(7));
+    if (!userId) {
+      throw new CommunityAuthError(401, 'unauthorized');
+    }
+    const projectId = c.req.param('projectId');
+    const [project] = await db.select().from(widgetProjects).where(eq(widgetProjects.id, projectId)).limit(1);
+    if (!project) {
+      throw new CommunityAuthError(404, 'project not found');
+    }
+    // Cloud-op check: owner or is_admin mirror (local BE check, survives workspace outage).
+    const isAdmin = await ServerService.checkCloudOpPermission(project.serverId, userId);
+    if (!isAdmin) {
+      throw new CommunityAuthError(403, 'forbidden');
+    }
+    return { userId, project };
+  }
+
   async function requireAuthenticatedUser(c: any): Promise<string | null> {
     const authHeader = c.req.header('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return null;
@@ -6020,6 +6127,10 @@ export function createHttpApp() {
       // has touched the conversation (pending or persisted). The widget shows
       // the collect-prompt/[Submit Ticket] UI only while this is false.
       hasAgentTurns,
+      // Ephemeral live-coder presence: true while the coding agent is actively
+      // working in this live session. Lets a widget opening mid-work show the
+      // working indicator immediately, before the next SSE transition frame.
+      coderWorking: WidgetChatService.getCoderWorking(conv.id),
       createdAt: conv.createdAt.toISOString(),
       updatedAt: conv.updatedAt.toISOString(),
     };
@@ -6095,7 +6206,31 @@ export function createHttpApp() {
       const messages = await WidgetChatService.listMessages(
         c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions, after,
       );
-      return c.json({ messages: await chatMessageDtos(messages) });
+      // coderWorking rides along so the poll fallback (no SSE) keeps the live
+      // session's working indicator current without a second request.
+      return c.json({
+        messages: await chatMessageDtos(messages),
+        coderWorking: WidgetChatService.getCoderWorking(c.req.param('id')),
+      });
+    } catch (err) {
+      return widgetErrorResponse(c, err);
+    }
+  });
+
+  // Authoritative close-state for ONE conversation (addressed by id). The
+  // widget's post-ticket closed-watch polls this instead of /conversations/active
+  // (which hides ticket-linked conversations) so a conversation the BE keeps
+  // open — e.g. it still holds an unresolved proposal from a multi-ticket
+  // intake — is not mistaken for closed.
+  app.get('/api/widget/chat/conversations/:id/status', async (c) => {
+    const gate = await requireChatUser(c);
+    if ('response' in gate) return gate.response;
+    const { auth } = gate;
+    try {
+      const status = await WidgetChatService.getConversationStatus(
+        c.req.param('id'), auth.projectId, auth.widgetUserId, auth.permissions,
+      );
+      return c.json({ status, coderWorking: WidgetChatService.getCoderWorking(c.req.param('id')) });
     } catch (err) {
       return widgetErrorResponse(c, err);
     }
@@ -6117,6 +6252,14 @@ export function createHttpApp() {
         return c.json({ error: 'imageIds must be an array of strings' }, 400);
       }
       imageIds = body.imageIds as string[];
+    }
+    // Attach RBAC (defense-in-depth): the upload endpoint already gates on
+    // attach_image, but this is the second door that results in an image being
+    // attached to a message. Guard it too so a user who lost the permission
+    // after uploading (or any non-upload path) can't still attach — mirrors the
+    // ticket-attachment guard. Skipped when no images are sent (plain message).
+    if (imageIds && imageIds.length > 0 && !auth.permissions.has('attach_image')) {
+      return c.json({ error: 'attach_image_permission_required' }, 403);
     }
     try {
       const message = await WidgetChatService.sendUserMessage(
@@ -6406,15 +6549,26 @@ export function createHttpApp() {
 
     return streamSSE(c, async (stream) => {
       let open = true;
+      const canSeeLiveSession = permissions.has('live_coder');
       const unsubscribe = WidgetChatService.subscribeToConversation(conversationId, (row) => {
+        // Never stream Live-session relay rows to a non-live_coder reader (the
+        // reporter) — mirrors the listMessages read filter for the live feed.
+        if (row.liveSession && !canSeeLiveSession) return;
         void (async () => {
           const imagesByMessage = await WidgetChatService.loadChatImagesForMessages([row.id]);
           await stream.writeSSE({ event: 'message', id: row.id, data: JSON.stringify(chatMessageDto(row, imagesByMessage.get(row.id))) });
         })();
       });
+      // Ephemeral live-coder presence on its own control channel — emitted as a
+      // named `coder_status` event so the widget's `message` handler (the
+      // transcript) is untouched.
+      const unsubscribeCoderStatus = WidgetChatService.subscribeToCoderStatus(conversationId, (working) => {
+        void stream.writeSSE({ event: 'coder_status', data: JSON.stringify({ working }) });
+      });
       stream.onAbort(() => {
         open = false;
         unsubscribe();
+        unsubscribeCoderStatus();
       });
       if (after) {
         try {
@@ -6427,6 +6581,11 @@ export function createHttpApp() {
           // invalid cursor → client falls back to a full refetch via the messages endpoint
         }
       }
+      // Seed the working indicator on connect so a widget that subscribes mid-work
+      // reflects it immediately, before the next transition frame.
+      if (WidgetChatService.getCoderWorking(conversationId)) {
+        await stream.writeSSE({ event: 'coder_status', data: JSON.stringify({ working: true }) });
+      }
       while (open) {
         await stream.sleep(25_000);
         if (!open) break;
@@ -6438,6 +6597,11 @@ export function createHttpApp() {
   app.get('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    // Board visibility is a widget permission (`view_tickets`). A role without
+    // it sees an empty board — kept as a 200 empty list (not a 403) so the
+    // widget UI degrades gracefully. Default roles grant it, so this is a no-op
+    // for uncustomized projects.
+    if (!auth.permissions.has('view_tickets')) return c.json([]);
     const result = await WidgetService.listTickets(auth.projectId, auth.widgetUserId);
     return c.json(result);
   });
@@ -6449,6 +6613,19 @@ export function createHttpApp() {
     return c.json({ tickets });
   });
 
+  // Approver queue: tickets awaiting approval (`pending_approval`), which the
+  // public board excludes. Gated on `approve_tickets` — a viewer without it
+  // gets an empty list (200, not 403) so the widget degrades gracefully, mirror-
+  // ing the `view_tickets` board gate. Registered before `/:id` so the literal
+  // segment is not captured as a ticket id.
+  app.get('/api/widget/tickets/pending-approval', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.permissions.has('approve_tickets')) return c.json({ tickets: [] });
+    const tickets = await WidgetService.listPendingApprovalTickets(auth.projectId);
+    return c.json({ tickets });
+  });
+
   // Tickets the viewer assigned a coder to, with live-session activity folded
   // into lastActivityAt — drives the widget's live-session unread indicators.
   app.get('/api/widget/tickets/assigned', async (c) => {
@@ -6457,6 +6634,31 @@ export function createHttpApp() {
     if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
     const tickets = await WidgetService.listTicketsAssignedByMe(auth.projectId, auth.widgetUserId);
     return c.json({ tickets });
+  });
+
+  // Persist the viewer's unread read-state (cross-device). Batch-capable: one
+  // read marks a single ticket seen; the whole cache marks "all read". Each read
+  // upserts monotonically (max per axis). Identified users only.
+  app.post('/api/widget/tickets/seen', async (c) => {
+    const auth = await WidgetService.authenticateWidget(c.req);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+    let body: any = {};
+    try { body = await c.req.json(); } catch { body = {}; }
+    const rawReads = Array.isArray(body?.reads) ? body.reads : [];
+    const marks: WidgetService.TicketReadMark[] = [];
+    for (const r of rawReads) {
+      if (!r || typeof r.taskId !== 'string') continue;
+      const seenAt = typeof r.seenAt === 'string' ? new Date(r.seenAt) : null;
+      const liveSessionSeenAt = typeof r.liveSessionSeenAt === 'string' ? new Date(r.liveSessionSeenAt) : null;
+      marks.push({
+        taskId: r.taskId,
+        seenAt: seenAt && !isNaN(seenAt.getTime()) ? seenAt : null,
+        liveSessionSeenAt: liveSessionSeenAt && !isNaN(liveSessionSeenAt.getTime()) ? liveSessionSeenAt : null,
+      });
+    }
+    if (marks.length > 0) await WidgetService.markTicketReads(auth.widgetUserId, marks);
+    return c.json({ ok: true });
   });
 
   app.get('/api/widget/tickets/stats', async (c) => {
@@ -6556,9 +6758,66 @@ export function createHttpApp() {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // GET /api/widget/notifications/events
+  //
+  // One per-user SSE stream that drives the whole launcher/bell unread badge in
+  // real time (instead of polling). Emits a payload-free 'ping' whenever a
+  // ticket the viewer reported or assigned changes — including a coder/teammate
+  // live-session reply — and the client re-fetches its counts. Identified users
+  // only; app-JWT embeds pass ?token= (shimmed to Authorization), runhq cookie
+  // auth is native (withCredentials).
+  // ---------------------------------------------------------------------------
+  app.get('/api/widget/notifications/events', async (c) => {
+    const tokenQ = c.req.query('token');
+    const projectQ = c.req.query('project');
+    // EventSource can't set headers: accept the app-JWT via ?token= (shimmed to
+    // Authorization) and the project via ?project= (shimmed to X-RW-Project).
+    // The project shim is what lets runhq-COOKIE members authenticate here — the
+    // cookie doesn't carry the project, and the header can't be set on an
+    // EventSource. Origin + cookie still gate the cookie path (unchanged).
+    const reqForAuth = (tokenQ || projectQ)
+      ? {
+          header: (name: string) => {
+            const lower = name.toLowerCase();
+            if (lower === 'authorization' && tokenQ && !c.req.header('Authorization')) return `Bearer ${tokenQ}`;
+            if (lower === 'x-rw-project' && projectQ && !c.req.header('X-RW-Project')) return projectQ;
+            return c.req.header(name);
+          },
+          method: 'GET',
+          raw: c.req.raw,
+        }
+      : c.req;
+    const auth = await WidgetService.authenticateWidget(reqForAuth as any);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+    if (!auth.authenticated || !auth.widgetUserId) {
+      return c.json({ error: 'identified_user_required' }, 403);
+    }
+    const widgetUserId = auth.widgetUserId;
+
+    return streamSSE(c, async (stream) => {
+      let open = true;
+      const unsubscribe = subscribeToUser(widgetUserId, () => {
+        void stream.writeSSE({ event: 'ping', data: '1' }).catch(() => {});
+      });
+      stream.onAbort(() => {
+        open = false;
+        unsubscribe();
+      });
+      // Announce readiness so the client knows the stream is live before pings.
+      await stream.writeSSE({ event: 'ready', data: '1' });
+      while (open) {
+        await stream.sleep(25_000);
+        if (!open) break;
+        await stream.write(': hb\n\n');
+      }
+    });
+  });
+
   app.post('/api/widget/tickets', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.authenticated || !auth.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('ticket_creator')) return c.json({ error: 'ticket_creator_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'ticket_create');
     if (limited) return limited;
     try {
@@ -6611,6 +6870,9 @@ export function createHttpApp() {
             context: parseContext(),
           },
           files,
+          // A reporter without `assign_agent` files into the approval queue
+          // (`pending_approval`) when the project has an approver role.
+          auth.permissions.has('assign_agent'),
         );
         // WidgetService reviewed text + images before insert when project
         // auto-assignment is enabled, so avoid a duplicate guard call here.
@@ -6624,7 +6886,12 @@ export function createHttpApp() {
       }
 
       const body = await c.req.json();
-      const ticket = await WidgetService.createTicket(auth.projectId, auth.widgetUserId, body);
+      const ticket = await WidgetService.createTicket(
+        auth.projectId, auth.widgetUserId, body,
+        // A reporter without `assign_agent` files into the approval queue
+        // (`pending_approval`) when the project has an approver role.
+        auth.permissions.has('assign_agent'),
+      );
       // Fire-and-forget auto-assign: WidgetService already ran the creation-time
       // injection guard when project auto-assignment is enabled, so the
       // orchestrator can skip its duplicate guard call here. Only creators who
@@ -6795,6 +7062,50 @@ export function createHttpApp() {
   });
 
   // ---------------------------------------------------------------------------
+  // POST /api/widget/tickets/:id/approve  ·  POST /api/widget/tickets/:id/reject
+  //
+  // Ticket moderation. A ticket filed by a reporter who lacks `assign_agent` is
+  // born `pending_approval` (hidden from the board). A teammate who holds
+  // `approve_tickets` reviews it and either approves it (→ `planned`, releasing
+  // it onto the board when public) or rejects it (→ `cancelled`). Both enforce
+  // the `approve_tickets` permission and that the ticket is still awaiting
+  // approval (409 otherwise); the visibility check that the ticket exists and is
+  // reviewable by this viewer is `getPublicTicketDetail` + its `canApprove` flag.
+  // ---------------------------------------------------------------------------
+  for (const action of ['approve', 'reject'] as const) {
+    app.post(`/api/widget/tickets/:id/${action}`, async (c) => {
+      const auth = await WidgetService.authenticateWidget(c.req);
+      if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+      if (!auth.widgetUserId) return c.json({ error: 'Identified user required' }, 401);
+      if (!auth.permissions.has('approve_tickets')) {
+        return c.json({ error: 'approve_tickets_permission_required' }, 403);
+      }
+      const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'triager_assign');
+      if (limited) return limited;
+
+      const ticketId = c.req.param('id');
+      // Reuse the visibility-checked detail: confirms the ticket exists, is in
+      // scope, is visible to this approver, and is still awaiting approval.
+      const detail = await WidgetService.getPublicTicketDetail(
+        auth.projectId, ticketId, auth.widgetUserId, auth.permissions,
+      );
+      if (!detail) return c.json({ error: 'ticket_not_found' }, 404);
+      if (!detail.canApprove) return c.json({ error: 'ticket_not_pending_approval' }, 409);
+
+      try {
+        if (action === 'approve') {
+          await WidgetService.approvePendingTicket(auth.projectId, ticketId);
+        } else {
+          await WidgetService.rejectPendingTicket(auth.projectId, ticketId);
+        }
+        return c.json({ ok: true });
+      } catch (err) {
+        return widgetErrorResponse(c, err);
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // POST /api/widget/tickets/:id/live-session
   //
   // Open (find-or-create) the Live-session conversation for a ticket. Lets staff
@@ -6825,6 +7136,7 @@ export function createHttpApp() {
   app.post('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('voter')) return c.json({ error: 'voter_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
     if (limited) return limited;
     try {
@@ -6839,6 +7151,7 @@ export function createHttpApp() {
   app.delete('/api/widget/tickets/:id/vote', async (c) => {
     const auth = await WidgetService.authenticateWidget(c.req);
     if (!auth?.widgetUserId) return c.json({ error: 'unauthorized' }, 401);
+    if (!auth.permissions.has('voter')) return c.json({ error: 'voter_permission_required' }, 403);
     const limited = widgetRateLimit(c, auth.projectId, auth.widgetUserId, 'vote');
     if (limited) return limited;
     try {
@@ -7357,16 +7670,19 @@ export function createHttpApp() {
     const userId = await extractUserIdFromToken(authHeader.substring(7));
     if (!userId) return c.json({ error: 'Invalid token' }, 401);
     const memberId = c.req.param('memberId');
+    // `permissionTier` is the wire field name (retained for stability); its
+    // value is now a widget role key validated against the project's roles.
     const { serverId, projectId, permissionTier } = await c.req.json();
     if (!serverId) return c.json({ error: 'serverId required' }, 400);
     const lookup = parseWidgetLookup(projectId);
     if (!lookup) return c.json({ error: 'projectId required' }, 400);
-    if (!WidgetService.isWidgetPermissionTier(permissionTier)) {
-      return c.json({ error: 'invalid permissionTier' }, 400);
+    if (typeof permissionTier !== 'string' || !permissionTier) {
+      return c.json({ error: 'role required' }, 400);
     }
     if (!await requireWidgetAdmin(c, userId, serverId)) return c.json({ error: 'Forbidden' }, 403);
-    const result = await WidgetService.updateWidgetMemberTier(serverId, lookup, memberId, permissionTier);
+    const result = await WidgetService.updateWidgetMemberRole(serverId, lookup, memberId, permissionTier);
     if (result === 'no_project') return c.json({ error: 'widget not found' }, 404);
+    if (result === 'invalid_role') return c.json({ error: 'invalid role' }, 400);
     if (result === 'not_found') return c.json({ error: 'member not found' }, 404);
     return c.json({ success: true });
   });
@@ -7463,6 +7779,270 @@ export function createHttpApp() {
 
   // Legacy sync endpoints (unsynced, mark-synced, status) removed —
   // workspace_tasks is now the single source of truth.
+
+  // ============================================================================
+  // Task 8: Staff / project-admin routes
+  // ============================================================================
+
+  // GET /api/community/:projectId/members — paginated leaderboard
+  app.get('/api/community/:projectId/members', async (c) => {
+    try { await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const projectId = c.req.param('projectId');
+    const sort = (c.req.query('sort') ?? 'rank') as SortKey;
+    const limit = Math.min(Number(c.req.query('limit') ?? 50), 100);
+    const cursor = c.req.query('cursor');
+    const result = await communityLeaderboardService.listMembers({ projectId, sort, limit, cursor });
+    return c.json(result);
+  });
+
+  // GET /api/community/:projectId/members/:widgetUserId — member detail
+  app.get('/api/community/:projectId/members/:widgetUserId', async (c) => {
+    try { await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const projectId = c.req.param('projectId');
+    const widgetUserId = c.req.param('widgetUserId');
+    try {
+      const result = await communityLeaderboardService.getMember({ projectId, widgetUserId });
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Member not found') {
+        return c.json({ error: 'member not found' }, 404);
+      }
+      throw err;
+    }
+  });
+
+  // POST /api/community/:projectId/members/:widgetUserId/grants — award bonus points
+  app.post('/api/community/:projectId/members/:widgetUserId/grants', async (c) => {
+    let adminCtx: { userId: string; project: typeof widgetProjects.$inferSelect };
+    try { adminCtx = await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const { userId } = adminCtx;
+    const projectId = c.req.param('projectId');
+    const widgetUserId = c.req.param('widgetUserId');
+    const body = await c.req.json<{ amount: number; reason: string; reasonCode?: string; idempotencyKey: string }>();
+
+    if (typeof body.amount !== 'number' || !Number.isInteger(body.amount) || body.amount === 0 || Math.abs(body.amount) > 10000) {
+      return c.json({ error: 'amount must be a non-zero integer with |amount| <= 10000' }, 400);
+    }
+    if (!body.reason?.trim()) return c.json({ error: 'reason is required' }, 400);
+    if (!body.idempotencyKey) return c.json({ error: 'idempotencyKey is required' }, 400);
+
+    try {
+      const result = await communityPointsService.grantBonus({
+        projectId,
+        widgetUserId,
+        amount: body.amount,
+        reason: body.reason.trim(),
+        reasonCode: body.reasonCode,
+        grantedByUserId: userId,
+        clientRequestId: body.idempotencyKey,
+      });
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof CommunityPointsError && err.code === 'cross_tenant_user') {
+        return c.json({ error: 'widget user does not belong to this project' }, 400);
+      }
+      throw err;
+    }
+  });
+
+  // POST /api/community/:projectId/grants/:grantId/reversals — reverse a prior grant
+  app.post('/api/community/:projectId/grants/:grantId/reversals', async (c) => {
+    let adminCtx: { userId: string; project: typeof widgetProjects.$inferSelect };
+    try { adminCtx = await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const { userId } = adminCtx;
+    const projectId = c.req.param('projectId');
+    const grantId = c.req.param('grantId');
+    const body = await c.req.json<{ reason: string; idempotencyKey: string }>();
+    if (!body.reason?.trim()) return c.json({ error: 'reason is required' }, 400);
+    if (!body.idempotencyKey) return c.json({ error: 'idempotencyKey is required' }, 400);
+
+    try {
+      const result = await communityPointsService.reverseGrant({
+        projectId,
+        grantId,
+        reason: body.reason.trim(),
+        grantedByUserId: userId,
+        clientRequestId: body.idempotencyKey,
+      });
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof CommunityPointsError) {
+        switch (err.code) {
+          case 'grant_not_found':
+            return c.json({ error: 'grant not found' }, 404);
+          case 'cannot_reverse_reversal':
+            return c.json({ error: 'cannot reverse a reversal' }, 400);
+          case 'cross_tenant_grant':
+            return c.json({ error: 'grant does not belong to this project' }, 400);
+        }
+      }
+      throw err;
+    }
+  });
+
+  // DELETE /api/community/:projectId/members/:widgetUserId — soft-erase a member (GDPR)
+  app.delete('/api/community/:projectId/members/:widgetUserId', async (c) => {
+    try { await requireProjectAdmin(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const widgetUserId = c.req.param('widgetUserId');
+    await db
+      .update(widgetUsers)
+      .set({ status: 'deleted', name: '[deleted user]', username: null, avatarUrl: null })
+      .where(eq(widgetUsers.id, widgetUserId));
+    return c.json({ ok: true });
+  });
+
+  // GET /api/community/:projectId/members/:widgetUserId/export — data export (admin OR self)
+  app.get('/api/community/:projectId/members/:widgetUserId/export', async (c) => {
+    const projectId = c.req.param('projectId');
+    const widgetUserId = c.req.param('widgetUserId');
+
+    let authorized = false;
+    try {
+      await requireProjectAdmin(c);
+      authorized = true;
+    } catch (e) {
+      if (!(e instanceof CommunityAuthError)) throw e;
+      // Not an admin — check if the calling widget user is the subject.
+      try {
+        const session = await WidgetService.authenticateWidget(c.req);
+        if (session?.widgetUserId === widgetUserId) authorized = true;
+      } catch { /* fall through */ }
+    }
+    if (!authorized) return c.json({ error: 'forbidden' }, 403);
+
+    const [member] = await db.select().from(widgetUsers).where(eq(widgetUsers.id, widgetUserId));
+    if (!member || member.projectId !== projectId) return c.json({ error: 'member not found' }, 404);
+    const grants = await db.select().from(pointGrants).where(eq(pointGrants.widgetUserId, widgetUserId));
+    const notifications = await db.select().from(widgetUserNotifications).where(eq(widgetUserNotifications.widgetUserId, widgetUserId));
+    return c.json({ member, grants, notifications });
+  });
+
+  // ============================================================================
+  // Task 9: Widget user community routes
+  // ============================================================================
+
+  // GET /api/widget/me/community — calling widget user's rank, balance, and unread count
+  app.get('/api/widget/me/community', async (c) => {
+    let session: { widgetUserId: string; projectId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const { widgetUserId, projectId } = session;
+    const [bal] = await db
+      .select()
+      .from(widgetUserBalances)
+      .where(eq(widgetUserBalances.widgetUserId, widgetUserId));
+    const [countRow] = await db
+      .select({ totalMembers: sql<number>`count(*)::int` })
+      .from(widgetUsers)
+      .where(and(eq(widgetUsers.projectId, projectId), eq(widgetUsers.status, 'active')));
+    const unreadNotificationCount = await communityNotificationService.unreadCount(widgetUserId);
+
+    // Per-ticket earned coin for the calling user — drives the widget's per-post
+    // "+N 🪙" chip and its hover "why" tooltip. Grouped from this user's own
+    // step-advance grants; reasons ordered by lifecycle tier.
+    const grantRows = await db
+      .select({
+        ticketId: pointGrants.ticketId,
+        amount: pointGrants.amount,
+        reason: pointGrants.reason,
+        metadata: pointGrants.metadata,
+      })
+      .from(pointGrants)
+      .where(and(
+        eq(pointGrants.widgetUserId, widgetUserId),
+        eq(pointGrants.source, 'step_advance'),
+        isNotNull(pointGrants.ticketId),
+      ));
+
+    const TIER_ORD: Record<string, number> = { in_progress: 1, reviewed: 2, merged: 3, deployed: 4 };
+    const coinByTicket: Record<string, { coin: number; reasons: string[] }> = {};
+    for (const g of grantRows) {
+      const tid = g.ticketId;
+      if (!tid) continue;
+      const entry = coinByTicket[tid] ?? (coinByTicket[tid] = { coin: 0, reasons: [] });
+      entry.coin += g.amount;
+      const tier = (g.metadata as { tier?: string } | null)?.tier ?? '';
+      // Stash ordinal alongside the reason so we can order reasons by tier below.
+      entry.reasons.push(JSON.stringify({ o: TIER_ORD[tier] ?? 99, r: g.reason ?? '' }));
+    }
+    for (const tid of Object.keys(coinByTicket)) {
+      coinByTicket[tid]!.reasons = coinByTicket[tid]!.reasons
+        .map((s) => JSON.parse(s) as { o: number; r: string })
+        .sort((a, b) => a.o - b.o)
+        .map((x) => x.r);
+    }
+
+    return c.json({
+      widgetUserId,
+      rank: bal?.rank ?? null,
+      totalMembers: countRow?.totalMembers ?? 0,
+      balance: bal?.balance ?? 0,
+      payoutsCount: bal?.payoutsCount ?? 0,
+      unreadNotificationCount,
+      coinByTicket,
+    });
+  });
+
+  // GET /api/widget/notifications — paginated notification list for calling widget user
+  app.get('/api/widget/notifications', async (c) => {
+    let session: { widgetUserId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const limit = Math.min(Number(c.req.query('limit') ?? 25), 100);
+    const cursor = c.req.query('cursor');
+    const result = await communityNotificationService.list({ widgetUserId: session.widgetUserId, limit, cursor });
+    return c.json(result);
+  });
+
+  // POST /api/widget/notifications/:id/read — mark a single notification as read
+  app.post('/api/widget/notifications/:id/read', async (c) => {
+    let session: { widgetUserId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const notificationId = c.req.param('id');
+    try {
+      await communityNotificationService.markRead({ widgetUserId: session.widgetUserId, notificationId });
+      return c.json({ ok: true });
+    } catch (err) {
+      if (err instanceof Error) {
+        if (err.message === 'Notification not found') return c.json({ error: 'not found' }, 404);
+        if (err.message === 'Forbidden') return c.json({ error: 'forbidden' }, 403);
+      }
+      throw err;
+    }
+  });
+
+  // POST /api/widget/notifications/read-all — mark all of the calling user's notifications as read
+  app.post('/api/widget/notifications/read-all', async (c) => {
+    let session: { widgetUserId: string };
+    try { session = await requireWidgetSession(c); } catch (e) {
+      if (e instanceof CommunityAuthError) return c.json({ error: e.message }, e.status);
+      throw e;
+    }
+    const result = await communityNotificationService.markAllRead({ widgetUserId: session.widgetUserId });
+    return c.json(result);
+  });
 
   // ============================================================================
   // Notification REST endpoints
@@ -7818,6 +8398,15 @@ export function createHttpApp() {
         getTask: async (serverId, taskId) => {
           const task = await WorkspaceTaskService.getTaskById(serverId, taskId);
           return task ? { status: task.status } : null;
+        },
+        // Webhook-path notifications are built once at registration (no request
+        // `server` in scope), so resolve it per-call from the serverId threaded
+        // through — mirrors the pushHandling wiring below.
+        notifyPrLinked: async (serverId, input) => {
+          const target = await ServerService.getServer(serverId);
+          if (target) {
+            await ServerService.serverTokenFetch(target, '/api/internal/pr-linked', input);
+          }
         },
       },
       pushHandling: {

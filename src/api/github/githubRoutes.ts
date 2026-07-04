@@ -38,6 +38,15 @@ export interface PrLinkedDeps {
    * version skew; when absent the guard is skipped (write proceeds).
    */
   getTask?: (serverId: string, taskId: string) => Promise<{ status: CanonicalTaskStatus } | null>;
+  /**
+   * Optional — push a live `pr:linked` notification to the workspace server on a
+   * webhook-driven PR/status transition (opened→done, merged→merged, approved→
+   * reviewed). The workspace uses it to re-read the canonical task and refresh
+   * its live status pill in lockstep with the PR chip, instead of the pill going
+   * stale until an unrelated resync (e.g. the next deploy). Best-effort; failures
+   * must never break webhook handling. Absent on older wiring (guard is skipped).
+   */
+  notifyPrLinked?: (serverId: string, input: { branch: string; number: number; url: string; state: 'open' | 'closed' | 'merged' }) => Promise<void>;
 }
 
 export interface GithubRoutesDeps {
@@ -173,6 +182,29 @@ async function maybeAdvanceTaskStatus(
 }
 
 /**
+ * Best-effort push of a `pr:linked` notification to the workspace server so it
+ * re-reads the canonical task and refreshes its live status pill (see the
+ * `notifyPrLinked` doc on {@link PrLinkedDeps}). A workspace-notify failure must
+ * never surface as a webhook error — GitHub would retry a delivery that already
+ * succeeded on the DB side — so all failures are swallowed with a warning.
+ */
+async function notifyWorkspacePrLinked(
+  deps: PrLinkedDeps,
+  serverId: string,
+  branch: string,
+  number: number,
+  url: string,
+  state: 'open' | 'closed' | 'merged',
+): Promise<void> {
+  if (!deps.notifyPrLinked) return;
+  try {
+    await deps.notifyPrLinked(serverId, { branch, number, url, state });
+  } catch (err) {
+    console.warn('[github/pr_linked] workspace notify failed', { branch, state, err: (err as Error)?.message });
+  }
+}
+
+/**
  * Handle a GitHub `pull_request` webhook event.
  *
  * Returns `'linked'` when a pr_linked activity was written, `'updated'` when
@@ -232,6 +264,12 @@ export async function handlePullRequestEvent(
 
     await maybeAdvanceTaskStatus(serverId, taskId, 'done', deps);
 
+    // Refresh the workspace's live task-status pill (now `done`) in lockstep with
+    // the PR chip. Only reached for externally-opened PRs — a PR the BE itself
+    // opens already notified via the ready path and re-enters here as a duplicate
+    // `opened` that short-circuits at the `alreadyLinked` guard above.
+    await notifyWorkspacePrLinked(deps, serverId, branch, pr.number, pr.html_url, 'open');
+
     console.info('[github/pr_linked] linked PR to task', { serverId, taskId, pr: pr.number, branch });
     return 'linked';
   }
@@ -262,6 +300,12 @@ export async function handlePullRequestEvent(
     if (pr.merged) {
       await maybeAdvanceTaskStatus(resolved.serverId, taskId, 'merged', deps);
     }
+
+    // Push the merge/close down so the workspace re-reads the canonical task and
+    // its live status pill flips to `merged` in lockstep with the PR chip —
+    // rather than staying stale until an unrelated resync (e.g. the next deploy),
+    // which was the whole reason a merged task could keep reading "In Progress".
+    await notifyWorkspacePrLinked(deps, resolved.serverId, resolved.branch, pr.number, pr.html_url, newState);
 
     console.info('[github/pr_linked] updated PR state on task activity', {
       taskId,
@@ -334,6 +378,11 @@ export async function handlePullRequestReviewEvent(
     createdByType: 'system',
   });
   await deps.updateTask(serverId, taskId, { status: 'reviewed' });
+
+  // Refresh the workspace's live status pill to `reviewed`. The PR is still open
+  // on approval, so the chip's own state is unchanged — the push exists purely to
+  // trigger the workspace's canonical-task re-read (same mechanism as merge).
+  await notifyWorkspacePrLinked(deps, serverId, resolved.branch, payload.pull_request.number, payload.pull_request.html_url, 'open');
 
   console.info('[github/pr_reviewed] approved PR advanced task → reviewed', {
     serverId, taskId, pr: payload.pull_request.number,

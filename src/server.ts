@@ -25,6 +25,7 @@ import { runSeeds } from './db/seed';
 import { createHttpApp } from './api/HttpServer';
 import { RunHQWebSocketServer } from './api/WebSocketServer';
 import { registerWsHandlers } from './api/wsHandlers';
+import { setCommunityBroadcastSink } from './api/services/communityBroadcaster';
 import { initProviders } from './api/services/providers/registry';
 import * as MachineUsageService from './api/services/MachineUsageService';
 import * as ServerService from './api/services/ServerService';
@@ -116,6 +117,11 @@ async function main() {
 
   // Register WS server in the notification registry so channel workers can push.
   setWsServer(wsServer);
+
+  // Wire community-points events to WS topic delivery. The community services
+  // are constructed at module-load time (before this server exists), so they
+  // publish through communityBroadcaster, whose sink we register here.
+  setCommunityBroadcastSink((topic, message) => wsServer.broadcastToTopic(topic, message));
 
   // ── HTTP server with routing ─────────────────────────────────────────
   const server = http.createServer(async (req, res) => {

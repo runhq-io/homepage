@@ -318,4 +318,50 @@ describe('ingestTurnEvents', () => {
     const [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
     expect(conv).toMatchObject({ status: 'closed', pendingTurnId: null });
   });
+
+  it('caps at one ticket: drops a post-ticket proposal, swaps the first for a notice, and closes', async () => {
+    // Hard single-ticket rule (2026-07-01): the visitor asked for two tickets.
+    // createTicketFromChat files ticket #1, sets createdTaskId, and dispatches a
+    // post-create turn that proposes ticket #2. The ingest layer must REFUSE the
+    // proposal (no dead card), surface one explanatory notice, and let the
+    // wrap-up turn_done close the conversation as normal. Enforced in code, not
+    // by the model choosing to stop.
+    await db.update(widgetChatConversations)
+      .set({ createdTaskId: TASK_ID, pendingTurnId: TURN_ID })
+      .where(eq(widgetChatConversations.id, CONV_ID));
+
+    const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [
+        { seq: 0, kind: 'agent_message', text: 'First ticket filed! Now for the second one:' },
+        { seq: 1, kind: 'proposal', title: 'Second ticket', description: 'Should be refused.', toolUseId: 'tu_2' },
+        { seq: 2, kind: 'proposal', title: 'Third ticket', description: 'Also refused.', toolUseId: 'tu_3' },
+        { seq: 3, kind: 'turn_done' },
+      ],
+    });
+    // agent_message + ONE notice (both proposals refused; only the first notices).
+    expect(res).toEqual({ inserted: 2, turnDone: true });
+
+    const rows = await messages();
+    const kinds = rows.map((r) => (r.payload as { kind?: string } | null)?.kind ?? r.role);
+    expect(kinds).not.toContain('proposal');            // no proposal card survives
+    const notices = rows.filter((r) => (r.payload as { code?: string } | null)?.code === 'ticket_limit');
+    expect(notices).toHaveLength(1);                     // exactly one notice, not one per proposal
+    expect((notices[0]!.payload as { text: string }).text).toMatch(/one ticket per conversation/i);
+
+    // Wrap-up turn closes it normally — no unresolved proposal is preserved.
+    const [conv] = await db.select().from(widgetChatConversations).where(eq(widgetChatConversations.id, CONV_ID));
+    expect(conv).toMatchObject({ status: 'closed', pendingTurnId: null });
+  });
+
+  it('persists a proposal normally when the conversation has not produced a ticket yet', async () => {
+    // The cap only bites AFTER ticket #1 — the first proposal must flow through.
+    const res = await WidgetChatService.ingestTurnEvents(SERVER_ID, {
+      conversationId: CONV_ID, turnId: TURN_ID,
+      events: [{ seq: 0, kind: 'proposal', title: 'First ticket', description: 'Real one.', toolUseId: 'tu_1' }],
+    });
+    expect(res).toEqual({ inserted: 1, turnDone: false });
+    const rows = await messages();
+    expect(rows[0]!.payload).toMatchObject({ kind: 'proposal', title: 'First ticket' });
+  });
 });

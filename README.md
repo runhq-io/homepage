@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **This repo has MOVED (2026-07-02).** It was merged — with full history — into the
+> [`runhq-io/runhq-cloud`](https://github.com/runhq-io/runhq-cloud) monorepo at **`be/`**.
+> Digital Ocean staging + production now build from `runhq-cloud` (`source_dir: /be`);
+> **pushes here deploy NOTHING and will silently diverge.** Make all changes in the
+> monorepo. Cutover runbook: `docs/monorepo-migration.md` in runhq-cloud.
+
 # RunHQ Backend
 
 Unified API + admin dashboard for RunHQ — a platform for managing remote servers, AI agents, and team collaboration.

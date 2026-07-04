@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb, integer, bigint, numeric, unique, index, uniqueIndex, primaryKey, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
 // ============================================================================
@@ -1198,7 +1198,7 @@ export const workspaceTasks = pgTable('workspace_tasks', {
   workspaceChannelId: text('workspace_channel_id'),
   title: text('title').notNull(),
   description: text('description'),
-  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled' | 'deployed' | `deployed:${string}`>().default('pending'),
+  status: text('status').notNull().$type<'pending' | 'pending_approval' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled' | 'deployed' | `deployed:${string}`>().default('pending'),
   visibility: text('visibility').notNull().$type<'public' | 'private'>().default('private'),
   isPublished: boolean('is_published').notNull().default(false),
   sourceType: text('source_type').notNull().$type<'workspace' | 'widget'>().default('workspace'),
@@ -1439,11 +1439,12 @@ export const widgetUsers = pgTable('widget_users', {
   name: text('name'),
   username: text('username'),
   avatarUrl: text('avatar_url'),
-  // Per-user permission tier. Replaces JWT-role-derived permissions: a user's
-  // effective widget permissions are resolved from this tier, not from a
-  // project role map. 'app_user' = files tickets/chats + attaches images;
-  // 'staff' = full control (assign agents, live session, preview).
-  permissionTier: text('permission_tier').notNull().default('app_user'),
+  // Assigned widget role key (column name retained for stability). A user's
+  // effective widget permissions are resolved from the project role map
+  // (widget_role_permissions) using this key — see resolveWidgetPermissions.
+  // Built-in roles: 'logged_in' (default baseline) and the seeded 'staff'
+  // (elevated). Custom role keys are also valid.
+  permissionTier: text('permission_tier').notNull().default('logged_in'),
   // Captured from the JWT `email` claim (app path) or users.email (runhq path)
   // when available; null when the issuer doesn't provide it.
   email: text('email'),
@@ -1456,8 +1457,15 @@ export const widgetUsers = pgTable('widget_users', {
   // admins can identify who a widget user actually is. Varies per project.
   metadata: jsonb('metadata').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  // Soft-delete tombstone for GDPR erasure (community feature). 'deleted' rows
+  // are excluded from leaderboard/member listings. Note: "last seen" lives in
+  // master's `lastActiveAt` above — the community feature reuses that, it does
+  // not maintain a separate column.
+  status: text('status').$type<'active' | 'deleted'>().notNull().default('active'),
 }, (t) => [
   { name: 'widget_users_project_external_source_unique', columns: [t.projectId, t.externalUserId, t.authSource], unique: true },
+  // widget_users_project_active_idx is a partial index (WHERE status = 'active')
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
 ]);
 
 // Mirror of workspace agent_entities rows (ALL agents, not just exposed ones).
@@ -1492,7 +1500,7 @@ export const widgetTickets = pgTable('widget_tickets', {
   projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   description: text('description'),
-  status: text('status').notNull().$type<'pending' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled' | 'deployed' | `deployed:${string}`>().default('pending'),
+  status: text('status').notNull().$type<'pending' | 'pending_approval' | 'planned' | 'in_progress' | 'done' | 'reviewed' | 'merged' | 'cancelled' | 'deployed' | `deployed:${string}`>().default('pending'),
   moderationStatus: text('moderation_status').notNull().$type<'pending' | 'approved' | 'rejected'>().default('pending'),
   isPrivate: boolean('is_private').default(false).notNull(),
   source: text('source').default('widget').notNull(),
@@ -1524,6 +1532,71 @@ export const widgetComments = pgTable('widget_comments', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+// Append-only point ledger — one row per award/reversal event.
+export const pointGrants = pgTable('point_grants', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  idempotencyKey: text('idempotency_key').notNull().unique(),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  amount: integer('amount').notNull(),
+  source: text('source').$type<'auto_completion' | 'admin_grant' | 'reversal' | 'backfill' | 'step_advance'>().notNull(),
+  reason: text('reason'),
+  reasonCode: text('reason_code'),
+  ticketId: uuid('ticket_id'),
+  // Self-reference: a reversal grant points back to the grant it cancels.
+  // The explicit (): AnyPgColumn cast breaks the circular-reference inference loop that TS cannot resolve.
+  reversesGrantId: uuid('reverses_grant_id').references((): AnyPgColumn => pointGrants.id),
+  grantedByUserId: uuid('granted_by_user_id'),
+  metadata: jsonb('metadata').notNull().default({}),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('point_grants_user_idx').on(t.projectId, t.widgetUserId),
+  createdIdx: index('point_grants_created_idx').on(t.createdAt.desc()),
+  // point_grants_ticket_idx is a partial index (WHERE ticket_id IS NOT NULL)
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
+}));
+
+// CQRS balance projection — maintained transactionally alongside point_grants.
+export const widgetUserBalances = pgTable('widget_user_balances', {
+  widgetUserId: uuid('widget_user_id').primaryKey().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  balance: integer('balance').notNull().default(0),
+  payoutsCount: integer('payouts_count').notNull().default(0),
+  lastPayoutAt: timestamp('last_payout_at'),
+  rank: integer('rank'),
+}, (t) => ({
+  rankIdx: index('widget_user_balances_rank_idx').on(t.projectId, t.rank),
+  balanceIdx: index('widget_user_balances_balance_idx').on(t.projectId, t.balance.desc()),
+}));
+
+// Generic notification primitive — used for point awards, rank changes, etc.
+export const widgetUserNotifications = pgTable('widget_user_notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  projectId: uuid('project_id').notNull().references(() => widgetProjects.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(),
+  payload: jsonb('payload').notNull(),
+  readAt: timestamp('read_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('widget_user_notifications_user_idx').on(t.widgetUserId, t.createdAt.desc()),
+  // widget_user_notifications_unread_idx is a partial index (WHERE read_at IS NULL)
+  // and lives in the SQL migration only — Drizzle 0.38 cannot emit partial indexes.
+}));
+
+// Community point-system types (WidgetProject / NewWidgetProject / WidgetUser
+// are defined below alongside master's WidgetChannel aliases — not duplicated here).
+export type NewWidgetUser = typeof widgetUsers.$inferInsert;
+
+export type PointGrant = typeof pointGrants.$inferSelect;
+export type NewPointGrant = typeof pointGrants.$inferInsert;
+
+export type WidgetUserBalance = typeof widgetUserBalances.$inferSelect;
+export type NewWidgetUserBalance = typeof widgetUserBalances.$inferInsert;
+
+export type WidgetUserNotification = typeof widgetUserNotifications.$inferSelect;
+export type NewWidgetUserNotification = typeof widgetUserNotifications.$inferInsert;
 
 // Clarification loop: one session per ticket, tracks the back-and-forth
 // between the widget user and the agent before the task is started.
@@ -1648,6 +1721,13 @@ export const widgetChatMessages = pgTable('widget_chat_messages', {
   payload: jsonb('payload').$type<WidgetChatMessagePayload | null>(),
   turnId: text('turn_id'),
   seq: integer('seq'),
+  // True for messages that belong to a ticket's Live session (the staff↔coder
+  // relay + mirrored coder activity) rather than the reporter's intake chat.
+  // Set at write time on any row inserted once the conversation already has a
+  // ticket (createdTaskId). The reporter (a non-`live_coder` viewer) never
+  // receives these — only `live_coder` staff do. See resolveWidgetPermissions /
+  // getConversationForViewer + listMessages filtering.
+  liveSession: boolean('live_session').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => [
   index('widget_chat_messages_conversation_idx').on(t.conversationId, t.createdAt),
@@ -1664,6 +1744,27 @@ export type WidgetChatConversation = typeof widgetChatConversations.$inferSelect
 export type NewWidgetChatConversation = typeof widgetChatConversations.$inferInsert;
 export type WidgetChatMessage = typeof widgetChatMessages.$inferSelect;
 export type NewWidgetChatMessage = typeof widgetChatMessages.$inferInsert;
+
+// Server-side "read" state for the widget unread badge, per (widget user,
+// ticket). Two axes, mirroring the client's two localStorage seen-maps:
+//   seenAt              — general ticket activity (comments/status) seen up to
+//   liveSessionSeenAt   — live-session coder/teammate replies seen up to
+// Both are monotonic (a mark never moves them backwards). This makes the unread
+// state follow the user across devices/browsers instead of living only in one
+// browser's localStorage. The client still keeps localStorage as a fast local
+// cache, seeded from here on load and synced here on every mark.
+export const widgetTicketReads = pgTable('widget_ticket_reads', {
+  widgetUserId: uuid('widget_user_id').notNull().references(() => widgetUsers.id, { onDelete: 'cascade' }),
+  taskId: uuid('task_id').notNull().references(() => workspaceTasks.id, { onDelete: 'cascade' }),
+  seenAt: timestamp('seen_at'),
+  liveSessionSeenAt: timestamp('live_session_seen_at'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.widgetUserId, t.taskId] }),
+]);
+
+export type WidgetTicketRead = typeof widgetTicketReads.$inferSelect;
+export type NewWidgetTicketRead = typeof widgetTicketReads.$inferInsert;
 
 // Server-owned image references for widget chat. The client only ever sees the
 // opaque `id`; all storage keys are kept server-side.

@@ -26,17 +26,19 @@ import {
   widgetChatConversations,
   widgetChatMessages,
   widgetChatImages,
+  widgetTicketReads,
+  widgetClarifications,
   type ChatImageRow,
 } from '../../db/schema';
 import { resizeForModel } from './widgetChatImage';
-import { eq, and, ne, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
+import { eq, and, ne, asc, desc, sql, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import type { CanonicalTaskActorType, CanonicalTaskComment, TodoStatus } from '@runhq/server-protocol';
 import * as WorkspaceTaskService from './WorkspaceTaskService';
 import { TaskAttachmentStorageService } from './TaskAttachmentStorageService';
 import * as ServerService from './ServerService';
 import * as ClarifierService from './ClarifierService';
 import type { ClarificationQuestion } from './ClarifierService';
-import { deriveTicketMilestones, type Milestone, type PrState } from './ticketMilestones';
+import { deriveTicketMilestones, currentMilestoneDisplay, type Milestone, type CurrentMilestone, type PrState, type ClarificationStatus } from './ticketMilestones';
 import * as InjectionGuardService from './InjectionGuardService';
 import type { InjectionGuardImage, InjectionGuardImageMime } from './injectionGuardCore';
 import {
@@ -75,40 +77,177 @@ export const WIDGET_JWT_MAX_TOKEN_AGE = '24h';
 // Types
 // ============================================================================
 
-export type WidgetPermission = 'assign_agent' | 'live_coder' | 'attach_image' | 'preview';
+export type WidgetPermission =
+  | 'view_tickets'
+  | 'voter'
+  | 'ticket_creator'
+  | 'attach_image'
+  | 'assign_agent'
+  | 'preview'
+  | 'approve_tickets'
+  // Internal capability, not a grid column — derived at resolution time:
+  //   live_coder ⇐ assign_agent   (live session is a staff action)
+  | 'live_coder';
 export type WidgetAuthSource = 'app' | 'runhq' | 'anon';
 
 /**
- * Per-user permission tier. The single axis along which a widget user's
- * capabilities are managed (in the RunHQ "Members" tab). Replaces the former
- * JWT-role-derived permission resolution.
+ * The widget permissions surfaced as columns in the Project Settings → Widget →
+ * Permissions grid, in display order. `attach_image` sits next to
+ * `ticket_creator` (they pair up) but is independently grantable and stored
+ * authoritatively — see `resolveWidgetPermissions`.
  */
-export type WidgetPermissionTier = 'app_user' | 'staff';
+export const WIDGET_PERMISSION_COLUMNS: readonly WidgetPermission[] = [
+  'view_tickets',
+  'voter',
+  'ticket_creator',
+  'attach_image',
+  'assign_agent',
+  'preview',
+  'approve_tickets',
+];
 
-export const WIDGET_PERMISSION_TIERS: readonly WidgetPermissionTier[] = ['app_user', 'staff'];
+const ALL_WIDGET_PERMISSIONS: readonly WidgetPermission[] = [
+  ...WIDGET_PERMISSION_COLUMNS,
+  'live_coder',
+];
 
-/**
- * Single source of truth mapping each tier to the permissions it grants.
- * `attach_image` is intentionally granted to BOTH tiers — every reporter can
- * attach screenshots. Adding a tier later is a one-line change here.
- */
-const TIER_PERMISSIONS: Record<WidgetPermissionTier, readonly WidgetPermission[]> = {
-  app_user: ['attach_image'],
-  staff: ['assign_agent', 'live_coder', 'preview', 'attach_image'],
-};
-
-export function isWidgetPermissionTier(v: unknown): v is WidgetPermissionTier {
-  return v === 'app_user' || v === 'staff';
+export function isWidgetPermission(v: unknown): v is WidgetPermission {
+  return typeof v === 'string' && (ALL_WIDGET_PERMISSIONS as readonly string[]).includes(v);
 }
 
 /**
- * Resolve a stored tier value to its permission set. Unknown/legacy values
- * (e.g. a tier removed in a future migration) fall back to `app_user` so a
- * stale row never silently grants elevated access.
+ * Widget permissions are organized as a role→permissions map
+ * (`widget_projects.widget_role_permissions`). Two role keys are built-in and
+ * always present:
+ *   - `everyone`   applies to every visitor (anonymous + authenticated).
+ *   - `logged_in`  applies to every authenticated widget user.
+ * Projects may define additional custom roles (e.g. the seeded `staff`) that an
+ * admin assigns to individual people in the "Members" tab.
  */
-export function permissionsForTier(tier: string | null | undefined): ReadonlySet<WidgetPermission> {
-  const key: WidgetPermissionTier = isWidgetPermissionTier(tier) ? tier : 'app_user';
-  return new Set(TIER_PERMISSIONS[key]);
+export const WIDGET_ROLE_EVERYONE = 'everyone';
+export const WIDGET_ROLE_LOGGED_IN = 'logged_in';
+export const WIDGET_ROLE_STAFF = 'staff';
+export const WIDGET_BUILTIN_ROLES: readonly string[] = [WIDGET_ROLE_EVERYONE, WIDGET_ROLE_LOGGED_IN];
+
+/**
+ * Default role→permissions map. Used for any project that hasn't customized its
+ * grid yet (empty stored map), both for display and for permission resolution,
+ * so a fresh project behaves sensibly and existing projects are unchanged after
+ * the tier→role migration:
+ *   - everyone   : read-only board access (anonymous can browse when public).
+ *   - logged_in  : read + vote + create + attach images (any identified user).
+ *   - staff      : everything — assign agents + preview (live derives) + approve
+ *                  tickets awaiting approval. Seeded but editable/deletable;
+ *                  it's what RunHQ teammates default to.
+ * Returns a fresh, mutable copy on every call.
+ */
+export function defaultWidgetRolePermissions(): Record<string, WidgetPermission[]> {
+  return {
+    [WIDGET_ROLE_EVERYONE]: ['view_tickets'],
+    [WIDGET_ROLE_LOGGED_IN]: ['view_tickets', 'voter', 'ticket_creator', 'attach_image'],
+    [WIDGET_ROLE_STAFF]: ['view_tickets', 'voter', 'ticket_creator', 'attach_image', 'assign_agent', 'preview', 'approve_tickets'],
+  };
+}
+
+/** Role a newly-seen widget member defaults to, by identity source. */
+export function defaultRoleForAuthSource(source: 'app' | 'runhq'): string {
+  return source === 'runhq' ? WIDGET_ROLE_STAFF : WIDGET_ROLE_LOGGED_IN;
+}
+
+/**
+ * The role map in effect for a project: the stored map, or the seeded defaults.
+ * A map counts as "customized via the new grid" only when it carries at least
+ * one built-in role key (`everyone`/`logged_in`) — the client always saves both.
+ * This deliberately falls back to defaults for:
+ *   - empty/absent maps (never configured), and
+ *   - legacy pre-tier maps (keyed by JWT role names / `*`, now vestigial),
+ * so `logged_in`/`everyone` always resolve and no project loses read/vote/create
+ * after the tier→role migration. Single source of truth for both the settings
+ * UI and auth resolution.
+ */
+export function effectiveWidgetRoleMap(
+  map: Record<string, string[]> | null | undefined,
+): Record<string, string[]> {
+  if (map && (WIDGET_ROLE_EVERYONE in map || WIDGET_ROLE_LOGGED_IN in map)) return map;
+  return defaultWidgetRolePermissions();
+}
+
+/**
+ * Resolve a caller's effective widget permissions from the project role map:
+ *
+ *   effective = everyone
+ *             ∪ (authenticated ? logged_in ∪ assignedRole : ∅)
+ *
+ * plus the derived internal capability `live_coder ⇐ assign_agent`.
+ * `assignedRole` is the member's role key from the Members tab (stored on
+ * widget_users). Unknown/missing keys contribute nothing (fail-closed).
+ *
+ * The stored map is authoritative for `attach_image` — a role holds it iff its
+ * list contains it. Legacy maps saved before attach_image became its own grid
+ * column are materialized once by the 2026-07-02-widget-attach-image-backfill
+ * migration, so there is no runtime `attach_image ⇐ ticket_creator` derivation:
+ * that inference could never tell a genuinely-legacy map from one where an admin
+ * deliberately unchecked attach_image on every role, which is why unchecking it
+ * everywhere used to silently re-enable on the next load.
+ */
+export function resolveWidgetPermissions(
+  map: Record<string, string[]> | null | undefined,
+  assignedRole: string | null | undefined,
+  authenticated: boolean,
+): ReadonlySet<WidgetPermission> {
+  const m = effectiveWidgetRoleMap(map);
+  const out = new Set<WidgetPermission>();
+  const add = (perms: string[] | undefined) => {
+    if (!Array.isArray(perms)) return;
+    for (const p of perms) if (isWidgetPermission(p)) out.add(p);
+  };
+  add(m[WIDGET_ROLE_EVERYONE]);
+  if (authenticated) {
+    add(m[WIDGET_ROLE_LOGGED_IN]);
+    if (assignedRole && assignedRole !== WIDGET_ROLE_EVERYONE) add(m[assignedRole]);
+  } else {
+    // Anonymous visitors can never do more than view the board, regardless of
+    // what the `everyone` role grants in the stored map — voting, creating,
+    // assigning and previewing all require an identified user. This clamp is
+    // the server-side enforcement behind the grid disabling those cells for
+    // the Everyone row.
+    for (const p of [...out]) if (!ANON_ALLOWED_PERMISSIONS.has(p)) out.delete(p);
+  }
+  if (out.has('assign_agent')) out.add('live_coder');
+  return out;
+}
+
+/**
+ * The role map as shown in the Project Settings → Widget → Permissions grid.
+ * A straight pass-through of the effective stored map (seeded defaults when the
+ * project has never customized the grid). It performs no derivation: the grid
+ * must render exactly what is persisted so that toggles round-trip faithfully —
+ * an admin who unchecks `attach_image` on every role sees it stay unchecked.
+ * Legacy pre-column maps are materialized once by the
+ * 2026-07-02-widget-attach-image-backfill migration, not here.
+ */
+export function widgetRoleMapForDisplay(
+  map: Record<string, string[]> | null | undefined,
+): Record<string, string[]> {
+  return effectiveWidgetRoleMap(map);
+}
+
+/** The only permission an anonymous (unauthenticated) visitor may ever hold. */
+const ANON_ALLOWED_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set(['view_tickets']);
+
+/**
+ * Is `role` a valid per-member assignable role for `map`? Assignable = any
+ * defined role key except `everyone` (which is universal, not per-member).
+ * `logged_in` is always assignable (the default baseline for identified users).
+ */
+export function isAssignableWidgetRole(
+  map: Record<string, string[]> | null | undefined,
+  role: unknown,
+): role is string {
+  if (typeof role !== 'string' || !role) return false;
+  if (role === WIDGET_ROLE_EVERYONE) return false;
+  if (role === WIDGET_ROLE_LOGGED_IN) return true;
+  return Object.prototype.hasOwnProperty.call(effectiveWidgetRoleMap(map), role);
 }
 
 /**
@@ -129,6 +268,21 @@ export function roleMapGrantsAssignAgent(
 ): boolean {
   if (!map) return false;
   return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('assign_agent'));
+}
+
+/**
+ * Does a widget role→permissions map grant `approve_tickets` to ANY role? This
+ * is the project-level "ticket approval is on" signal: only when at least one
+ * role can approve does an unauthorized reporter's ticket enter the hidden
+ * `pending_approval` state (otherwise it would strand with no one able to
+ * release it). Projects that never grant the permission keep the legacy
+ * behaviour — every ticket is born `pending` and immediately on the board.
+ */
+export function roleMapGrantsApproval(
+  map: Record<string, string[]> | null | undefined,
+): boolean {
+  if (!map) return false;
+  return Object.values(map).some((perms) => Array.isArray(perms) && perms.includes('approve_tickets'));
 }
 
 export interface WidgetAuthResult {
@@ -207,6 +361,14 @@ type WidgetTicketResponse = {
   userVote: boolean | null;
   canVote: boolean;
   /**
+   * Partner-facing progress step + chip colors, derived from the SAME PR-aware
+   * milestone model as the detail stepper (ticketMilestones). This is the single
+   * source of truth for "what step is the ticket on", so the list chip, the
+   * detail chip, and the detail stepper always agree. Absent only on the loading
+   * skeleton or an older bundle; the widget then falls back to the raw status.
+   */
+  currentMilestone?: CurrentMilestone | null;
+  /**
    * Timestamp of the most recent activity on the ticket — the max of the task's
    * own updatedAt, its latest comment, and its latest activity row. Unlike
    * updatedAt (which only bumps on field/status changes), this reflects new
@@ -223,6 +385,16 @@ type WidgetTicketResponse = {
    * listTicketsAssignedByMe; absent on other list shapes.
    */
   liveSessionLastMessageAt?: string | null;
+  /**
+   * Server-side READ marks for this (viewer, ticket), if any — the cross-device
+   * counterpart of the client's localStorage seen-maps. `seenAt` = general
+   * activity seen up to; `liveSessionSeenAt` = live-session replies seen up to.
+   * The widget seeds its localStorage from these on load so a fresh browser
+   * inherits the user's read state. Populated by listMyTickets +
+   * listTicketsAssignedByMe.
+   */
+  seenAt?: string | null;
+  liveSessionSeenAt?: string | null;
 };
 
 type PublicAttachmentSummary = {
@@ -330,6 +502,13 @@ export type PublicTicketDetail = {
    * the same authorization server-side — this flag is purely for showing/hiding UI.
    */
   canAssign: boolean;
+  /**
+   * True when the viewer holds `approve_tickets` and the ticket is still
+   * `pending_approval` — drives the Approve / Reject affordance in the widget
+   * detail view. The POST approve/reject endpoints enforce the same
+   * authorization server-side; this flag is purely for showing/hiding UI.
+   */
+  canApprove: boolean;
   /**
    * True while the freshly-filed ticket is still being reviewed by auto-assign
    * (the clarifier/agent picker runs server-side for a few seconds after
@@ -455,6 +634,99 @@ function deriveLinkedPr(
     return { number, url, state, repoBranch };
   }
   return null;
+}
+
+/** The milestone-derivation signals for one ticket, beyond its status. */
+interface MilestoneSignals {
+  prState: PrState | null;
+  agentAssigned: boolean;
+  clarificationStatus: ClarificationStatus | null;
+}
+
+/**
+ * Batch-load the milestone signals (linked-PR state, agent-assigned, latest
+ * clarification status) for a page of tickets in TWO queries, so a list can
+ * derive the same PR-aware progress the detail view shows without an N+1. The
+ * detail view (getPublicTicketDetail) already has the full activity/clarification
+ * loaded and derives these inline; this is the list-side equivalent.
+ */
+async function loadMilestoneSignals(taskIds: string[]): Promise<Map<string, MilestoneSignals>> {
+  const out = new Map<string, MilestoneSignals>();
+  if (taskIds.length === 0) return out;
+  const ensure = (id: string): MilestoneSignals => {
+    let e = out.get(id);
+    if (!e) { e = { prState: null, agentAssigned: false, clarificationStatus: null }; out.set(id, e); }
+    return e;
+  };
+
+  // pr_linked + agent_assigned activity, oldest→newest so the LAST pr_linked
+  // seen per task (the most recent) wins for prState.
+  const acts = await db
+    .select({
+      taskId: workspaceTaskActivity.taskId,
+      type: workspaceTaskActivity.type,
+      metadata: workspaceTaskActivity.metadata,
+    })
+    .from(workspaceTaskActivity)
+    .where(and(
+      inArray(workspaceTaskActivity.taskId, taskIds),
+      inArray(workspaceTaskActivity.type, ['pr_linked', 'agent_assigned']),
+    ))
+    .orderBy(asc(workspaceTaskActivity.createdAt));
+  for (const a of acts) {
+    const e = ensure(a.taskId);
+    if (a.type === 'agent_assigned') {
+      e.agentAssigned = true;
+    } else if (a.type === 'pr_linked' && a.metadata) {
+      const m = a.metadata as Record<string, unknown>;
+      // Mirror deriveLinkedPr's validation — a pr_linked row without a real
+      // number+url is malformed and must not count as a linked PR.
+      if (typeof m.number === 'number' && typeof m.url === 'string') {
+        e.prState = coercePrState(m.state);
+      }
+    }
+  }
+
+  // Latest clarification status per task (oldest→newest so the last wins). The
+  // milestone only distinguishes 'asking' (→ clarifying) from any resolved
+  // status (→ work started), so newest-by-createdAt is sufficient here.
+  const clars = await db
+    .select({ taskId: widgetClarifications.taskId, status: widgetClarifications.status })
+    .from(widgetClarifications)
+    .where(inArray(widgetClarifications.taskId, taskIds))
+    .orderBy(asc(widgetClarifications.createdAt));
+  for (const c of clars) {
+    ensure(c.taskId).clarificationStatus = c.status as ClarificationStatus;
+  }
+
+  return out;
+}
+
+/** Resolve one ticket's partner-facing progress chip from its status + signals. */
+function resolveCurrentMilestone(
+  task: { status: TodoStatus },
+  signals: MilestoneSignals | undefined,
+  environments: Array<{ id: string; name: string }>,
+): CurrentMilestone {
+  return currentMilestoneDisplay({
+    status: task.status,
+    clarificationStatus: signals?.clarificationStatus ?? null,
+    agentAssigned: signals?.agentAssigned ?? false,
+    prState: signals?.prState ?? null,
+    environments,
+  });
+}
+
+/**
+ * Map a page of ticket DTOs, attaching each one's server-derived
+ * `currentMilestone`. Loads the milestone signals for the whole page in one shot.
+ */
+async function withCurrentMilestones<T extends { id: string; status: TodoStatus }>(
+  dtos: T[],
+  environments: Array<{ id: string; name: string }>,
+): Promise<Array<T & { currentMilestone: CurrentMilestone }>> {
+  const signals = await loadMilestoneSignals(dtos.map((d) => d.id));
+  return dtos.map((d) => ({ ...d, currentMilestone: resolveCurrentMilestone(d, signals.get(d.id), environments) }));
 }
 
 // ============================================================================
@@ -675,8 +947,6 @@ async function recountVotes(taskId: string, serverId: string): Promise<void> {
 // Auth
 // ============================================================================
 
-const EMPTY_PERMISSIONS: ReadonlySet<WidgetPermission> = new Set();
-
 // Refresh widget_users.last_active_at at most this often, to avoid hot-row
 // write amplification under widget polling (every authenticated request would
 // otherwise issue an UPDATE).
@@ -767,6 +1037,107 @@ function readCookie(req: HonoRequest, name: string): string | null {
  *   2. Raw API key         — Authorization: Bearer rw_xxx (no dot)
  *   3. Signed JWT          — Authorization: Bearer {payload}.{signature}
  */
+/**
+ * Verify a signed widget-user JWT outside a Hono request context (WebSocket auth).
+ *
+ * Mirrors authenticateWidget's Mode-3 (signed app JWT) path: validates the
+ * token against the project's secret, upserts the widget_user under
+ * auth_source='app', and (throttled) refreshes last_active_at. Returns only the
+ * identity the WS layer needs (widgetUserId + projectId), or null for any
+ * invalid/expired token or disabled project. Anonymous / API-key sessions carry
+ * no user identity and cannot authenticate over WS.
+ */
+export async function verifyWidgetUserJwt(
+  token: string,
+): Promise<{ widgetUserId: string; projectId: string } | null> {
+  const decoded = decodeJwtPayload(token);
+  if (!decoded || typeof decoded.fp !== 'string') return null;
+
+  const [project] = await db
+    .select({
+      id: widgetProjects.id,
+      enabled: widgetProjects.enabled,
+      apiSecretHash: widgetProjects.apiSecretHash,
+      widgetRoleClaimName: widgetProjects.widgetRoleClaimName,
+    })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.apiKey, decoded.fp))
+    .limit(1);
+  if (!project || !project.enabled) return null;
+
+  let payload: jose.JWTPayload;
+  try {
+    const signingKey = new TextEncoder().encode(project.apiSecretHash);
+    const { payload: verified } = await jose.jwtVerify(token, signingKey, {
+      algorithms: ['HS256'],
+      requiredClaims: ['exp'],
+      maxTokenAge: WIDGET_JWT_MAX_TOKEN_AGE,
+    });
+    if (verified.type !== 'widget_user') return null;
+    payload = verified;
+  } catch {
+    return null;
+  }
+
+  const sub =
+    typeof payload.sub === 'string' && payload.sub
+      ? payload.sub
+      : typeof payload.sub === 'number' && Number.isFinite(payload.sub)
+        ? String(payload.sub)
+        : undefined;
+  if (!sub) return null;
+
+  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
+  const metadata = extractWidgetMetadata(payload, project.widgetRoleClaimName);
+  const nowMs = Date.now();
+
+  const [existing] = await db
+    .select({
+      id: widgetUsers.id,
+      name: widgetUsers.name,
+      email: widgetUsers.email,
+      lastActiveAt: widgetUsers.lastActiveAt,
+      metadata: widgetUsers.metadata,
+    })
+    .from(widgetUsers)
+    .where(
+      and(
+        eq(widgetUsers.projectId, project.id),
+        eq(widgetUsers.externalUserId, sub),
+        eq(widgetUsers.authSource, 'app'),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    // Only write when something actually changed — keeps the common re-auth read-only.
+    const patch: Partial<typeof widgetUsers.$inferInsert> = {};
+    if (name && name !== existing.name) patch.name = name;
+    if (email && email !== existing.email) patch.email = email;
+    if (metadata && !sameJson(metadata, existing.metadata)) patch.metadata = metadata;
+    if (shouldRefreshLastActive(existing.lastActiveAt, nowMs)) patch.lastActiveAt = new Date(nowMs);
+    if (Object.keys(patch).length > 0) {
+      await db.update(widgetUsers).set(patch).where(eq(widgetUsers.id, existing.id));
+    }
+    return { widgetUserId: existing.id, projectId: project.id };
+  }
+
+  const [inserted] = await db
+    .insert(widgetUsers)
+    .values({
+      projectId: project.id,
+      externalUserId: sub,
+      authSource: 'app',
+      name,
+      email,
+      metadata: metadata ?? undefined,
+      lastActiveAt: new Date(nowMs),
+    })
+    .returning({ id: widgetUsers.id });
+  return { widgetUserId: inserted.id, projectId: project.id };
+}
+
 export async function authenticateWidget(
   req: HonoRequest
 ): Promise<WidgetAuthResult | null> {
@@ -806,10 +1177,10 @@ export async function authenticateWidget(
           const externalUserId = `runhq:${verified.userId}`;
           const nowMs = Date.now();
           let widgetUserId: string;
-          // New RunHQ teammates default to 'staff' — they're internal staff.
-          // The admin can downgrade an individual in the Members tab; existing
-          // rows keep whatever tier was set.
-          let resolvedTier = 'staff';
+          // New RunHQ teammates default to the 'staff' role — they're internal
+          // staff. The admin can reassign an individual in the Members tab;
+          // existing rows keep whatever role was set.
+          let resolvedRole = WIDGET_ROLE_STAFF;
           const [existing] = await db
             .select({
               id: widgetUsers.id,
@@ -840,7 +1211,7 @@ export async function authenticateWidget(
 
           if (existing) {
             widgetUserId = existing.id;
-            resolvedTier = existing.permissionTier;
+            resolvedRole = existing.permissionTier;
             const patch: Partial<typeof widgetUsers.$inferInsert> = {};
             if (displayName !== existing.name) patch.name = displayName;
             if (userEmail && userEmail !== existing.email) patch.email = userEmail;
@@ -857,16 +1228,17 @@ export async function authenticateWidget(
                 authSource: 'runhq',
                 name: displayName,
                 email: userEmail,
-                permissionTier: 'staff',
+                permissionTier: WIDGET_ROLE_STAFF,
                 lastActiveAt: new Date(nowMs),
               })
               .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
             widgetUserId = inserted.id;
-            resolvedTier = inserted.permissionTier;
+            resolvedRole = inserted.permissionTier;
           }
 
-          // Effective permissions resolve from the stored per-user tier.
-          const permissions = permissionsForTier(resolvedTier);
+          // Effective permissions resolve from the project role map + the
+          // member's assigned role (see resolveWidgetPermissions).
+          const permissions = resolveWidgetPermissions(project.widgetRolePermissions, resolvedRole, true);
 
           return {
             projectId: project.id,
@@ -892,7 +1264,7 @@ export async function authenticateWidget(
   // ---- Mode 1: Public slug (no auth header) ----
   if (!authHeader && projectSlugHeader) {
     const [project] = await db
-      .select({ id: widgetProjects.id, slug: widgetProjects.slug, enabled: widgetProjects.enabled, isPublic: widgetProjects.isPublic })
+      .select({ id: widgetProjects.id, slug: widgetProjects.slug, enabled: widgetProjects.enabled, isPublic: widgetProjects.isPublic, widgetRolePermissions: widgetProjects.widgetRolePermissions })
       .from(widgetProjects)
       .where(eq(widgetProjects.slug, projectSlugHeader))
       .limit(1);
@@ -902,7 +1274,10 @@ export async function authenticateWidget(
       projectId: project.id,
       projectSlug: project.slug,
       authenticated: false,
-      permissions: EMPTY_PERMISSIONS,
+      // Anonymous visitors get the `everyone` role's permissions (see
+      // resolveWidgetPermissions). `is_public` remains the outer gate: an anon
+      // identity only exists here when the project is public.
+      permissions: resolveWidgetPermissions(project.widgetRolePermissions, null, false),
       matchedRoles: [],
       authSource: 'anon',
     };
@@ -916,7 +1291,7 @@ export async function authenticateWidget(
   // ---- Mode 2: Raw API key (no dot in token) ----
   if (dotIndex === -1) {
     const [project] = await db
-      .select({ id: widgetProjects.id, slug: widgetProjects.slug, enabled: widgetProjects.enabled })
+      .select({ id: widgetProjects.id, slug: widgetProjects.slug, enabled: widgetProjects.enabled, widgetRolePermissions: widgetProjects.widgetRolePermissions })
       .from(widgetProjects)
       .where(eq(widgetProjects.apiKey, token))
       .limit(1);
@@ -926,7 +1301,7 @@ export async function authenticateWidget(
       projectId: project.id,
       projectSlug: project.slug,
       authenticated: false,
-      permissions: EMPTY_PERMISSIONS,
+      permissions: resolveWidgetPermissions(project.widgetRolePermissions, null, false),
       matchedRoles: [],
       authSource: 'anon',
     };
@@ -990,9 +1365,10 @@ export async function authenticateWidget(
   const name = typeof payload.name === 'string' ? payload.name : undefined;
   const email = typeof payload.email === 'string' && payload.email ? payload.email : undefined;
   const metadata = extractWidgetMetadata(payload, project.widgetRoleClaimName);
-  // Default tier for a brand-new app user. Effective permissions are resolved
-  // from the stored tier, not from JWT roles (see permissionsForTier).
-  let resolvedTier = 'app_user';
+  // Default role for a brand-new app user. Effective permissions are resolved
+  // from the project role map + this role, not from JWT roles
+  // (see resolveWidgetPermissions).
+  let resolvedRole: string = WIDGET_ROLE_LOGGED_IN;
   if (sub) {
     const nowMs = Date.now();
     const [existing] = await db
@@ -1016,7 +1392,7 @@ export async function authenticateWidget(
 
     if (existing) {
       widgetUserId = existing.id;
-      resolvedTier = existing.permissionTier;
+      resolvedRole = existing.permissionTier;
       // Only write when something actually changed — keeps the common
       // already-fresh request read-only.
       const patch: Partial<typeof widgetUsers.$inferInsert> = {};
@@ -1039,16 +1415,17 @@ export async function authenticateWidget(
           authSource: 'app',
           name,
           email,
+          permissionTier: WIDGET_ROLE_LOGGED_IN,
           metadata: metadata ?? undefined,
           lastActiveAt: new Date(nowMs),
         })
         .returning({ id: widgetUsers.id, permissionTier: widgetUsers.permissionTier });
       widgetUserId = inserted.id;
-      resolvedTier = inserted.permissionTier;
+      resolvedRole = inserted.permissionTier;
     }
   }
 
-  const permissions = permissionsForTier(resolvedTier);
+  const permissions = resolveWidgetPermissions(project.widgetRolePermissions, resolvedRole, true);
   return {
     projectId: project.id,
     projectSlug: project.slug,
@@ -1209,8 +1586,9 @@ export async function listTickets(projectId: string, widgetUserId?: string) {
     }
   }
 
-  const tickets: WidgetTicketResponse[] = rows.map((t) =>
-    mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)
+  const tickets: WidgetTicketResponse[] = await withCurrentMilestones(
+    rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)),
+    project?.deployEnvironments ?? [],
   );
 
   return {
@@ -1270,7 +1648,10 @@ export async function listPublishedTickets(projectId: string, widgetUserId?: str
     for (const v of votes) userVoteMap.set(v.taskId, v.value);
   }
 
-  const tickets = rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true));
+  const tickets = await withCurrentMilestones(
+    rows.map((t) => mapTaskToWidgetResponse(t, userVoteMap.get(t.id) ?? null, true)),
+    project?.deployEnvironments ?? [],
+  );
 
   return {
     projectName: project?.name ?? '',
@@ -1349,9 +1730,22 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
   if (!task) return null;
 
   const isCreator = !!widgetUserId && task.createdByType === 'external' && task.createdById === widgetUserId;
+  const isApprover = !!permissions?.has('approve_tickets');
 
-  // Private tasks are only visible to their creator
-  if (task.visibility === 'private' && !isCreator) return null;
+  if (task.status === 'pending_approval') {
+    // Awaiting approval: hidden from the public board and from regular
+    // `view_tickets` holders (including by direct ID). Only the creator and
+    // approvers (`approve_tickets`) may open it — the approver reviews it here
+    // before promoting it to `planned` (or rejecting it).
+    if (!isCreator && !isApprover) return null;
+  } else {
+    // Board visibility is a widget permission (`view_tickets`). A caller without
+    // it can still open a ticket they created, but not browse into others.
+    if (!isCreator && !permissions?.has('view_tickets')) return null;
+
+    // Private tasks are only visible to their creator
+    if (task.visibility === 'private' && !isCreator) return null;
+  }
 
   // Get comments
   const comments = await WorkspaceTaskService.listComments(task.id);
@@ -1362,9 +1756,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
 
   const isOwner = isCreator;
   const isEditable = isOwner
-    && task.status === 'pending'
+    && (task.status === 'pending' || task.status === 'pending_approval')
     && comments.length === 0
     && activity.length === 0;
+  // Resolved approve affordance (mirrors `canAssign`): the viewer holds
+  // `approve_tickets` and the ticket is still awaiting approval.
+  const canApprove = isApprover && task.status === 'pending_approval';
 
   // Look up the most recent agent_assigned activity for this ticket
   const lastAssignment = await db
@@ -1424,6 +1821,12 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     agentAssigned: !!lastAssign,
     prState: internalPr?.state ?? null,
     environments: project.deployEnvironments ?? [],
+    // Show the approval step for tickets that went through the approval queue:
+    // currently awaiting approval, or born into it (persisted flag) and since
+    // approved/advanced.
+    requiresApproval:
+      task.status === 'pending_approval' ||
+      !!(task.metadata as Record<string, unknown> | null)?.approvalRequired,
   });
 
   // Resolve the chat conversation that originated this ticket, if any.
@@ -1506,6 +1909,7 @@ export async function getPublicTicketDetail(projectId: string, ticketId: string,
     milestones,
     canPreview: !!permissions?.has('preview') && !!internalPr,
     canAssign,
+    canApprove,
     processing,
     environments: project.deployEnvironments ?? [],
   };
@@ -1839,6 +2243,14 @@ async function prepareWidgetTicketCreate(
   projectId: string,
   widgetUserId: string | undefined,
   opts: CreateWidgetTicketInput,
+  /**
+   * Whether the reporter holds `assign_agent`. When explicitly `false` AND the
+   * project has an approver role (`approve_tickets` granted somewhere), the
+   * ticket is born `pending_approval` — hidden from the public board until an
+   * approver promotes it to `planned`. `undefined`/`true` preserve the legacy
+   * `pending` born state.
+   */
+  creatorCanAssign?: boolean,
 ): Promise<PreparedWidgetTicketCreate> {
   const [project] = await db
     .select({
@@ -1846,12 +2258,23 @@ async function prepareWidgetTicketCreate(
       channelId: widgetProjects.channelId,
       votingPeriodHours: widgetProjects.votingPeriodHours,
       agentAssignmentEnabled: widgetProjects.widgetAgentAssignmentEnabled,
+      widgetRolePermissions: widgetProjects.widgetRolePermissions,
     })
     .from(widgetProjects)
     .where(eq(widgetProjects.id, projectId))
     .limit(1);
 
   if (!project) throw new WidgetError('project_not_found', 404);
+
+  // Approval gate: a reporter who cannot assign agents files into a hidden
+  // `pending_approval` state — but only when the project actually has an
+  // approver (some role grants `approve_tickets`); otherwise the ticket would
+  // strand with no one able to release it, so it stays on the legacy `pending`
+  // path. Authorized reporters (and internal callers that don't pass the flag)
+  // are never gated.
+  const needsApproval =
+    creatorCanAssign === false && roleMapGrantsApproval(project.widgetRolePermissions);
+  const status = needsApproval ? 'pending_approval' : undefined;
 
   let title = opts.title?.trim() || '';
   if (!title && opts.description) {
@@ -1882,7 +2305,15 @@ async function prepareWidgetTicketCreate(
     createdByName = wu?.name || undefined;
   }
 
-  const metadata = sanitizeWidgetMetadata(opts.context);
+  const sanitizedMetadata = sanitizeWidgetMetadata(opts.context);
+  // Tag tickets born into the approval queue so the progress stepper can show
+  // the approval step (as "Pending approval" → "Approved") even after the ticket
+  // is approved and its status no longer reads `pending_approval`. Persisted at
+  // birth; auto-assign's `recordOutcome` metadata write merges via jsonb `||`
+  // and preserves it.
+  const metadata = needsApproval
+    ? { ...(sanitizedMetadata ?? {}), approvalRequired: true }
+    : sanitizedMetadata;
 
   return {
     project,
@@ -1892,6 +2323,9 @@ async function prepareWidgetTicketCreate(
       workspaceChannelId: project.channelId,
       title,
       description: opts.description,
+      // Omit when undefined so the column default ('pending') applies; set
+      // explicitly only for the approval-gated path.
+      ...(status ? { status } : {}),
       visibility: opts.isPrivate ? 'private' : 'public',
       // Published by default (single source of truth: resolveCreateIsPublished).
       // The published "Latest Updates" feed also gates on visibility='public',
@@ -1941,8 +2375,10 @@ export async function createTicket(
   projectId: string,
   widgetUserId: string | undefined,
   opts: CreateWidgetTicketInput,
+  /** See `prepareWidgetTicketCreate`: gates the `pending_approval` born state. */
+  creatorCanAssign?: boolean,
 ) {
-  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts, creatorCanAssign);
   await requireSafeForAutoAssignment(prepared);
   return insertPreparedWidgetTicket(prepared);
 }
@@ -1976,7 +2412,11 @@ async function requireEditableTask(
   // retain regardless of triage state or comment count.
   if (opts.skipPostActivityChecks) return;
 
-  if (task.status !== 'pending') throw new WidgetError('ticket_no_longer_editable', 409);
+  // Editable while still untriaged: `pending` or awaiting approval. Once an
+  // approver promotes it (planned+) or work starts, the owner can no longer edit.
+  if (task.status !== 'pending' && task.status !== 'pending_approval') {
+    throw new WidgetError('ticket_no_longer_editable', 409);
+  }
 
   const [commentCount] = await db
     .select({ count: sql<number>`count(*)` })
@@ -2208,9 +2648,11 @@ export async function createTicketWithAttachments(
   widgetUserId: string,
   opts: CreateWidgetTicketInput,
   files: WidgetUploadFile[],
+  /** See `prepareWidgetTicketCreate`: gates the `pending_approval` born state. */
+  creatorCanAssign?: boolean,
 ) {
   if (files.length === 0) {
-    const ticket = await createTicket(projectId, widgetUserId, opts);
+    const ticket = await createTicket(projectId, widgetUserId, opts, creatorCanAssign);
     return { ticket, attachments: [] as PublicAttachmentSummary[] };
   }
   if (!attachmentsEnabled()) throw new WidgetError('attachments_disabled', 403);
@@ -2218,7 +2660,7 @@ export async function createTicketWithAttachments(
 
   assertWidgetImageFiles(files, MAX_ATTACHMENTS_PER_TICKET);
 
-  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts);
+  const prepared = await prepareWidgetTicketCreate(projectId, widgetUserId, opts, creatorCanAssign);
   await requireSafeTicketAndImages(prepared.reviewTicket, files, {
     agentAssignmentEnabled: prepared.project.agentAssignmentEnabled,
   });
@@ -2745,15 +3187,99 @@ export async function listMyTickets(
   // so its unread could never clear. The assigner gets that signal via
   // listTicketsAssignedByMe.
   const ids = rows.map((r) => r.id);
-  const latest = await deriveLastActivity(ids, { includeLiveSession: false });
+  const [latest, reads] = await Promise.all([
+    deriveLastActivity(ids, { includeLiveSession: false }),
+    getTicketReads(widgetUserId, ids),
+  ]);
 
   return rows.map((t) => {
     const dto = mapTaskToWidgetResponse(t);
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
     const activityMs = latest.get(t.id) ?? 0;
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    const r = reads.get(t.id);
+    dto.seenAt = r?.seenAt ? r.seenAt.toISOString() : null;
+    dto.liveSessionSeenAt = r?.liveSessionSeenAt ? r.liveSessionSeenAt.toISOString() : null;
     return dto;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Ticket approval — the moderation queue for tickets filed by reporters who
+// lack `assign_agent`. Such tickets are born `pending_approval` (hidden from
+// the public board); a holder of `approve_tickets` reviews them here and either
+// promotes them to `planned` (releasing them onto the board when public) or
+// rejects them (`cancelled`). See `roleMapGrantsApproval` /
+// `prepareWidgetTicketCreate` for the born-state gate.
+// ---------------------------------------------------------------------------
+
+/**
+ * The approver queue: tickets awaiting approval for a project. Same server/
+ * channel scoping as the public board, filtered to `pending_approval` (which
+ * the board itself excludes). Voting is not offered on unapproved tickets, so
+ * `canVote` is false. Only surfaced to callers holding `approve_tickets`; the
+ * route enforces that.
+ */
+export async function listPendingApprovalTickets(
+  projectId: string,
+): Promise<WidgetTicketResponse[]> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) return [];
+
+  const rows = await db
+    .select()
+    .from(workspaceTasks)
+    .where(and(
+      buildWidgetVisibleFilter(project),
+      eq(workspaceTasks.status, 'pending_approval'),
+    ))
+    .orderBy(desc(workspaceTasks.createdAt))
+    .limit(50);
+
+  return rows.map((t) => mapTaskToWidgetResponse(t, null, false));
+}
+
+/**
+ * Transition a `pending_approval` ticket to `target` (`planned` on approve,
+ * `cancelled` on reject) through the canonical status writer. Validates the
+ * ticket is in the project's scope and still awaiting approval. Authorization
+ * (`approve_tickets`) is enforced by the caller (the route).
+ */
+async function transitionPendingApproval(
+  projectId: string,
+  ticketId: string,
+  target: 'planned' | 'cancelled',
+): Promise<void> {
+  const project = await getWidgetProjectContext(projectId);
+  if (!project) throw new WidgetError('project_not_found', 404);
+
+  const [task] = await db
+    .select({ id: workspaceTasks.id, status: workspaceTasks.status })
+    .from(workspaceTasks)
+    .where(and(
+      eq(workspaceTasks.id, ticketId),
+      eq(workspaceTasks.serverId, project.serverId),
+      isNull(workspaceTasks.deletedAt),
+      ...(project.channelId ? [eq(workspaceTasks.workspaceChannelId, project.channelId)] : []),
+    ))
+    .limit(1);
+
+  if (!task) throw new WidgetError('ticket_not_found', 404);
+  if (task.status !== 'pending_approval') {
+    throw new WidgetError('ticket_not_pending_approval', 409);
+  }
+
+  await WorkspaceTaskService.updateTask(project.serverId, ticketId, { status: target });
+}
+
+/** Approve a pending ticket → `planned`, releasing it onto the board (if public). */
+export async function approvePendingTicket(projectId: string, ticketId: string): Promise<void> {
+  await transitionPendingApproval(projectId, ticketId, 'planned');
+}
+
+/** Reject a pending ticket → `cancelled`, removing it from the approver queue. */
+export async function rejectPendingTicket(projectId: string, ticketId: string): Promise<void> {
+  await transitionPendingApproval(projectId, ticketId, 'cancelled');
 }
 
 /**
@@ -2821,7 +3347,7 @@ export async function listTicketsAssignedByMe(
   // axis (liveSessionLastMessageAt) so viewing the ticket detail (which marks
   // the ticket seen up to lastActivityAt) cannot clear an unread live-session
   // reply. Only opening the live session clears the dedicated axis.
-  const [latest, liveSession] = await Promise.all([
+  const [latest, liveSession, reads] = await Promise.all([
     deriveLastActivity(ids, { includeLiveSession: false }),
     // Most recent coder/teammate REPLY per task: role IN ('agent','team').
     // `event` cards (proposals, mirrored status) are not replies and must not
@@ -2838,6 +3364,7 @@ export async function listTicketsAssignedByMe(
         inArray(widgetChatMessages.role, ['agent', 'team']),
       ))
       .groupBy(widgetChatConversations.createdTaskId),
+    getTicketReads(widgetUserId, ids),
   ]);
   const liveSessionByTask = new Map<string, string>();
   for (const r of liveSession) {
@@ -2848,10 +3375,77 @@ export async function listTicketsAssignedByMe(
     const updatedMs = t.updatedAt ? new Date(t.updatedAt).getTime() : 0;
     const activityMs = latest.get(t.id) ?? 0;
     dto.lastActivityAt = new Date(Math.max(updatedMs, activityMs));
+    const rd = reads.get(t.id);
+    dto.seenAt = rd?.seenAt ? rd.seenAt.toISOString() : null;
+    dto.liveSessionSeenAt = rd?.liveSessionSeenAt ? rd.liveSessionSeenAt.toISOString() : null;
     const lsMax = liveSessionByTask.get(t.id);
     dto.liveSessionLastMessageAt = lsMax ? new Date(lsMax).toISOString() : null;
     return dto;
   });
+}
+
+// ============================================================================
+// Server-side unread read-state (widget_ticket_reads)
+// ============================================================================
+
+export interface TicketReadMark {
+  taskId: string;
+  seenAt?: Date | null;
+  liveSessionSeenAt?: Date | null;
+}
+
+/**
+ * Upsert read marks for a widget user, monotonically per axis: `greatest`
+ * ignores NULLs, so a mark that carries only one axis leaves the other intact,
+ * and an earlier timestamp never moves a later one backwards. Best-effort per
+ * row — a bogus/foreign taskId (FK miss) is skipped, not fatal. Batch-capable:
+ * a single call marks one ticket or the whole "mark all read" set.
+ */
+export async function markTicketReads(widgetUserId: string, marks: TicketReadMark[]): Promise<void> {
+  for (const m of marks) {
+    if (!m || !m.taskId) continue;
+    const seen = m.seenAt ?? null;
+    const live = m.liveSessionSeenAt ?? null;
+    if (!seen && !live) continue;
+    try {
+      await db
+        .insert(widgetTicketReads)
+        .values({ widgetUserId, taskId: m.taskId, seenAt: seen, liveSessionSeenAt: live })
+        .onConflictDoUpdate({
+          target: [widgetTicketReads.widgetUserId, widgetTicketReads.taskId],
+          set: {
+            seenAt: sql`greatest(${widgetTicketReads.seenAt}, excluded.seen_at)`,
+            liveSessionSeenAt: sql`greatest(${widgetTicketReads.liveSessionSeenAt}, excluded.live_session_seen_at)`,
+            updatedAt: new Date(),
+          },
+        });
+    } catch (err) {
+      // Foreign/deleted task (FK violation) or transient error: skip this row.
+      console.warn('[WidgetService] markTicketReads skipped a row:', (err as Error)?.message);
+    }
+  }
+}
+
+/** Read marks for a widget user across the given tasks. */
+export async function getTicketReads(
+  widgetUserId: string,
+  taskIds: string[],
+): Promise<Map<string, { seenAt: Date | null; liveSessionSeenAt: Date | null }>> {
+  const map = new Map<string, { seenAt: Date | null; liveSessionSeenAt: Date | null }>();
+  if (taskIds.length === 0) return map;
+  const rows = await db
+    .select({
+      taskId: widgetTicketReads.taskId,
+      seenAt: widgetTicketReads.seenAt,
+      liveSessionSeenAt: widgetTicketReads.liveSessionSeenAt,
+    })
+    .from(widgetTicketReads)
+    .where(and(
+      eq(widgetTicketReads.widgetUserId, widgetUserId),
+      inArray(widgetTicketReads.taskId, taskIds),
+    ));
+  for (const r of rows) map.set(r.taskId, { seenAt: r.seenAt, liveSessionSeenAt: r.liveSessionSeenAt });
+  return map;
 }
 
 export async function getTicketStats(projectId: string) {
@@ -3346,8 +3940,10 @@ export async function getPreviewWidgetFlag(
 }
 
 // ============================================================================
-// Members — per-user widget participants and their permission tiers.
+// Members — per-user widget participants and their assigned widget role.
 // Backs the project-level "Members" tab. Admin-gated at the route layer.
+// The `permissionTier` field/column name is retained for wire/schema stability
+// but now holds a widget role key (see resolveWidgetPermissions).
 // ============================================================================
 
 export interface WidgetMember {
@@ -3356,7 +3952,8 @@ export interface WidgetMember {
   authSource: 'app' | 'runhq';
   name: string | null;
   email: string | null;
-  permissionTier: WidgetPermissionTier;
+  /** Assigned widget role key (e.g. 'logged_in', 'staff', or a custom role). */
+  permissionTier: string;
   createdAt: string;
   lastActiveAt: string | null;
   // Non-reserved JWT claims captured for identification (company, plan, …).
@@ -3409,7 +4006,7 @@ export async function listWidgetMembers(
     authSource: r.authSource === 'runhq' ? 'runhq' : 'app',
     name: r.name,
     email: r.email,
-    permissionTier: isWidgetPermissionTier(r.permissionTier) ? r.permissionTier : 'app_user',
+    permissionTier: r.permissionTier || WIDGET_ROLE_LOGGED_IN,
     createdAt: r.createdAt.toISOString(),
     lastActiveAt: r.lastActiveAt ? r.lastActiveAt.toISOString() : null,
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
@@ -3417,21 +4014,30 @@ export async function listWidgetMembers(
 }
 
 /**
- * Set one widget user's permission tier. Scoped to the resolved project so a
- * cross-tenant member id can't be edited. Returns 'no_project' when the widget
- * is missing and 'not_found' when the member isn't in this project.
+ * Assign one widget user's role. Scoped to the resolved project so a
+ * cross-tenant member id can't be edited. Validates `role` against the
+ * project's defined roles (any role key except the universal `everyone`).
+ * Returns 'no_project' when the widget is missing, 'invalid_role' when the role
+ * isn't assignable for this project, and 'not_found' when the member isn't in
+ * this project.
  */
-export async function updateWidgetMemberTier(
+export async function updateWidgetMemberRole(
   serverId: string,
   lookup: WidgetLookup,
   memberId: string,
-  tier: WidgetPermissionTier,
-): Promise<'ok' | 'no_project' | 'not_found'> {
+  role: string,
+): Promise<'ok' | 'no_project' | 'not_found' | 'invalid_role'> {
   const projectId = await resolveWidgetProjectId(serverId, lookup);
   if (!projectId) return 'no_project';
+  const [project] = await db
+    .select({ widgetRolePermissions: widgetProjects.widgetRolePermissions })
+    .from(widgetProjects)
+    .where(eq(widgetProjects.id, projectId))
+    .limit(1);
+  if (!isAssignableWidgetRole(project?.widgetRolePermissions, role)) return 'invalid_role';
   const updated = await db
     .update(widgetUsers)
-    .set({ permissionTier: tier })
+    .set({ permissionTier: role })
     .where(and(eq(widgetUsers.id, memberId), eq(widgetUsers.projectId, projectId)))
     .returning({ id: widgetUsers.id });
   return updated.length > 0 ? 'ok' : 'not_found';
@@ -3485,7 +4091,11 @@ export async function getWidgetSettings(serverId: string, lookup?: WidgetLookup)
     widget_role_claim_name: project.widgetRoleClaimName,
     widget_assign_rate_limit_per_hour: project.widgetAssignRateLimitPerHour,
     widgetChatAgentEntityId: project.widgetChatAgentEntityId,
-    widgetRolePermissions: project.widgetRolePermissions,
+    // Surface the display map (seeded defaults when never customized, with the
+    // legacy attach_image⇐ticket_creator derivation materialized) so the Widget
+    // → Permissions grid always renders the built-in roles and reflects the real
+    // effective state of every permission — including attach_image.
+    widgetRolePermissions: widgetRoleMapForDisplay(project.widgetRolePermissions),
     widgetLiveCoderEnabled: project.widgetLiveCoderEnabled,
   };
 }
@@ -3952,6 +4562,7 @@ export const WIDGET_ERROR_CODES = [
   'comment_author_only',
   'comments_disabled',
   'ticket_no_longer_editable',
+  'ticket_not_pending_approval',
   'ticket_has_comments',
   'ticket_has_activity',
   'invalid_visibility',

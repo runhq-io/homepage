@@ -90,6 +90,18 @@ describe('createTicketFromChat', () => {
     })).rejects.toMatchObject({ code: 'no_pending_proposal', status: 409 });
   });
 
+  it('409s with ticket_already_created once the conversation produced a ticket (one-ticket cap)', async () => {
+    // Even with a fresh pending proposal, a conversation that already filed a
+    // ticket refuses a second — the code-level cap, independent of the agent.
+    await seedProposal('tu_second');
+    await db.update(widgetChatConversations)
+      .set({ createdTaskId: '11111111-1111-4111-8111-111111111111' })
+      .where(eq(widgetChatConversations.id, CONV_ID));
+    await expect(WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {
+      title: 'Second', description: 'Should be refused',
+    })).rejects.toMatchObject({ code: 'ticket_already_created', status: 409 });
+  });
+
   it('creates the ticket born-ready, links it, resolves the proposal, and dispatches the result turn', async () => {
     await seedProposal();
     const { ticketId } = await WidgetChatService.createTicketFromChat(CONV_ID, PROJECT_ID, WIDGET_USER_ID, {

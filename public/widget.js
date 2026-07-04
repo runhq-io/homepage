@@ -36,12 +36,25 @@
   var isOpen = false;
   var activeTab = "hot"; // "hot" | "updates" | "mine"  — every open lands on the discussion (Hot) tab (see closePanel reset)
   var mineUnreadOnly = false; // My Submissions "Unread only" filter toggle
+  var boardSearchQuery = ""; // in-list ticket search (client-side, current tab); reset on tab switch
+  var boardStatusFilter = "all"; // in-list status filter ("all" | a normalized status); reset on tab switch
+  // References to the current board region so the search box + unread toggle can
+  // re-filter the list in place (keeping input focus) instead of rebuilding the
+  // whole panel on every keystroke.
+  var boardListEl = null;
+  var boardTab = null;
+  var boardAllItems = null;
   var theme = "light";
 
   var topTicketsCache = null;   // /api/widget/tickets        — drives "Hot" tab + recent-others list
   var updatesCache = null;      // /api/widget/tickets/updates — drives "Updates" tab + tab-label badge
   var myTicketsCache = null;    // /api/widget/tickets/mine    — drives "My Tickets" tab
+  var pendingApprovalCache = null; // /api/widget/tickets/pending-approval — drives the approver-only "Pending approval" tab
   var assignedTicketsCache = null; // /api/widget/tickets/assigned — live sessions the viewer assigned
+  // Community coin: the viewer's running total + per-post earnings, from
+  // /api/widget/me/community. Drives the header coin badge, the per-card "+N 🪙"
+  // chip, and its hover "why" tooltip. Refreshed on every panel open/refresh.
+  var communityStats = { identified: false, balance: 0, coinByTicket: {} };
   var activeModal = null;       // for the image lightbox only (inline composer + detail replace the old new-ticket / detail modals)
 
   // Current authenticated user info, populated after auth via /api/widget/me.
@@ -68,6 +81,19 @@
   // on back-navigation, view switches, and panel close.
   var detailPollIntervalId = null;
   var DETAIL_POLL_INTERVAL_MS = 5000;
+  // Background refresh of the launcher/bell unread counts while the panel is
+  // open, so a team reply or a coder/teammate live-session message bumps the
+  // badge without the user reopening the widget. Only the badge caches are
+  // reloaded + the label/bell re-rendered (never the list body) so it never
+  // disrupts scroll or an in-progress interaction.
+  var badgePollTimerId = null;
+  var BADGE_POLL_INTERVAL_MS = 20000;
+  // Real-time unread: one per-user SSE stream drives the launcher/bell badge.
+  // Runs for the page lifetime (open or closed). The poll above is its fallback.
+  var notifEventSourceRef = null;
+  var notifReconnectTimerId = null;
+  var notifStreamConnected = false;
+  var NOTIF_RECONNECT_MS = 30000;
   // Live ticket-status stream (SSE). Preferred over polling; at most one of
   // detailEventSourceRef / detailPollIntervalId is armed at a time.
   var detailEventSourceRef = null;
@@ -129,6 +155,15 @@
   // When chatIsLiveSession is true: the ticket the live session was opened from
   // (used to restore the detail view on back-navigation).
   var liveSessionTicket = null;
+  // Live session: whether the coding agent is actively working right now. Fed by
+  // the server's real activity signal (coder_status SSE frame + coderWorking on
+  // the load/poll responses) — drives the pinned working/standby status bar.
+  var liveCoderWorking = false;
+  // Client-side safety net mirroring the server TTL: if no coder_status arrives
+  // within this window, fall back to standby so a dropped "idle" can't wedge the
+  // bar on "working" forever. Re-armed on every working signal.
+  var liveCoderStaleTimerId = null;
+  var LIVE_CODER_STALE_MS = 60000;
 
   // ===========================================================================
   // Console & error capture
@@ -266,7 +301,9 @@
   function loadTopTickets()       { return api("/api/widget/tickets"); }
   function loadUpdates()          { return api("/api/widget/tickets/updates"); }
   function loadMyTickets()        { return api("/api/widget/tickets/mine"); }
+  function loadPendingApprovals() { return api("/api/widget/tickets/pending-approval"); }
   function loadAssignedTickets()  { return api("/api/widget/tickets/assigned"); }
+  function loadCommunityStats()   { return api("/api/widget/me/community"); }
   function loadTicketDetail(id)   { return api("/api/widget/tickets/" + encodeURIComponent(id)).then(function (data) {
     // Capture the project's deploy-env map from any detail load so status chips
     // resolve "deployed:<envId>" → "Deployed → <name>" even on the public page
@@ -275,6 +312,8 @@
     return data;
   }); }
   function assignTicketAgent(id)  { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/assign", { method: "POST" }); }
+  function approveTicket(id)      { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/approve", { method: "POST" }); }
+  function rejectTicket(id)       { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/reject", { method: "POST" }); }
   function ensureTicketLiveSession(id) { return api("/api/widget/tickets/" + encodeURIComponent(id) + "/live-session", { method: "POST" }); }
   function createTicket(data)     { return api("/api/widget/tickets", { method: "POST", body: data }); }
   function createTicketWithAttachments(data, files) {
@@ -331,6 +370,12 @@
   }
   function chatLoadActive() {
     return api("/api/widget/chat/conversations/active");
+  }
+  // Authoritative close-state for a SPECIFIC conversation by id. Unlike
+  // /conversations/active (intake-only — hides ticket-linked threads), this
+  // answers "is THIS conversation still open?" even after it produced a ticket.
+  function chatLoadStatus(conversationId) {
+    return api("/api/widget/chat/conversations/" + encodeURIComponent(conversationId) + "/status");
   }
   function chatLoadMessages(conversationId, afterCursor) {
     var qs = afterCursor ? "?after=" + encodeURIComponent(afterCursor) : "";
@@ -610,9 +655,23 @@
       currentUser.isTriager = !!(me && me.isTriager);
       if (config.isIdentified && viewerCanLiveCoder()) {
         loadAssignedTickets()
-          .then(function (d) { assignedTicketsCache = d.tickets || []; refreshTabLabel(); })
+          .then(function (d) { applyAssignedResp(d); refreshTabLabel(); })
           .catch(function () {});
       }
+      // Preload the approver queue so the "Pending approval" tab + its count
+      // badge appear immediately for approvers (mirrors the live_coder preload).
+      if (viewerCanApprove()) {
+        loadPendingApprovals()
+          .then(function (d) {
+            pendingApprovalCache = d.tickets || [];
+            // Re-render the in-panel tabs so the count badge reflects the queue.
+            if (view === "list" && scrollEl) renderPanelBody();
+          })
+          .catch(function () {});
+      }
+      // Idempotent: ensures the real-time stream is up once identity is
+      // confirmed (covers identity resolving after the initial bootstrap).
+      if (config.isIdentified) startNotificationsStream();
       // Re-render so the badge appears/disappears in the eyebrow row.
       if (scrollEl) renderPanelBody();
     }).catch(function () {
@@ -844,6 +903,7 @@
     chevRight: function (s) { return icon([{ d: "M9 6l6 6-6 6" }], s, 2); },
     chevLeft:  function (s) { return icon([{ d: "M15 6l-6 6 6 6" }], s, 2); },
     home:      function (s) { return icon([{ d: "M3 11l9-8 9 8" }, { d: "M5 9.5V21h14V9.5" }], s, 2); },
+    search:    function (s) { return icon([{ tag: "circle", cx: 11, cy: 11, r: 7 }, { d: "M21 21l-4.3-4.3" }], s, 2); },
   };
 
   // ===========================================================================
@@ -937,14 +997,16 @@
         title: "Send us a message",
         back: "Back",
       },
-      tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions" },
-      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now." },
-      notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)" },
+      tabs: { updates: "Latest Updates", hot: "Hot", mine: "My Submissions", approvals: "Pending approval" },
+      filters: { unreadOnly: "Unread only", allCaughtUp: "You're all caught up", noUnread: "None of your tickets have new activity right now.", searchPlaceholder: "Search tickets", clearSearch: "Clear search", noMatches: "No matching tickets", noMatchesHint: "Try a different search term.", statusGroup: "Filter by status", allStatuses: "All", noStatusMatches: "No tickets with this status", noStatusMatchesHint: "Pick a different status or choose All." },
+      approve: { approve: "Approve", reject: "Reject", detailNote: "This ticket is awaiting your approval." },
+      notif: { title: "Updates on your tickets", titleN: "{n} ticket update(s)", markAllRead: "Mark all read" },
       // Mirrors the canonical TodoStatus vocabulary in @runhq/server-protocol.
       // Colors come from the registry (window.__RW_CONSTANTS__.status); only
       // labels are locale-overridable here.
       status: {
         pending: "Pending",
+        pending_approval: "Pending approval",
         planned: "Planned",
         in_progress: "In progress",
         needs_review: "Needs review",
@@ -969,6 +1031,8 @@
         useComposer: "Tap “New post” to file one.",
         nothingShipped: "No updates yet",
         updatesWillShow: "Updates will show up here once an admin publishes them.",
+        noApprovals: "Nothing awaiting approval",
+        approvalsWillShow: "Tickets filed by people who can't assign an agent show up here for you to approve.",
       },
       list: { loadFailed: "Could not load tickets: {msg}" },
       detail: {
@@ -1047,6 +1111,8 @@
         empty: "Start the conversation — describe your issue or idea and {name} will help you file it.",
         emptyAgentless: "Send us a message — tell us about your issue or idea and we'll get back to you.",
         liveSessionStatus: "{name} is working in the background",
+        liveWorking: "Coder is working…",
+        liveStandby: "Coder is standing by — send a message to steer",
         liveSessionIntro: "Updates show up here as they happen — message anytime to ask a question or steer the work.",
         agentlessIntro: "Our support agent is currently offline. You can still submit a ticket directly — describe your issue or request with as much detail as possible (what happened, steps to reproduce, what you expected), then tap Submit Ticket below.",
         collectPrompt: "Anything more you'd like to add? When you're ready, tap Submit Ticket below — the more detail, the faster we can help.",
@@ -1170,11 +1236,13 @@
         title: "메시지 보내기",
         back: "뒤로",
       },
-      tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역" },
-      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다." },
-      notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건" },
+      tabs: { updates: "최신 업데이트", hot: "인기", mine: "내 제출 내역", approvals: "승인 대기" },
+      filters: { unreadOnly: "읽지 않음만", allCaughtUp: "모두 확인했습니다", noUnread: "현재 새로운 활동이 있는 티켓이 없습니다.", searchPlaceholder: "티켓 검색", clearSearch: "검색 지우기", noMatches: "일치하는 티켓이 없습니다", noMatchesHint: "다른 검색어를 입력해 보세요.", statusGroup: "상태로 필터", allStatuses: "전체", noStatusMatches: "이 상태의 티켓이 없습니다", noStatusMatchesHint: "다른 상태를 선택하거나 전체를 선택하세요." },
+      approve: { approve: "승인", reject: "거절", detailNote: "이 티켓은 승인을 기다리고 있습니다." },
+      notif: { title: "내 티켓 업데이트", titleN: "티켓 업데이트 {n}건", markAllRead: "모두 읽음 처리" },
       status: {
         pending: "대기 중",
+        pending_approval: "승인 대기",
         planned: "계획됨",
         in_progress: "진행 중",
         needs_review: "검토 필요",
@@ -1199,6 +1267,8 @@
         useComposer: "“새 글 쓰기” 버튼으로 첫 티켓을 작성해 보세요.",
         nothingShipped: "아직 업데이트가 없습니다",
         updatesWillShow: "관리자가 게시하면 여기에 표시됩니다.",
+        noApprovals: "승인 대기 중인 티켓이 없습니다",
+        approvalsWillShow: "에이전트를 배정할 수 없는 사용자가 등록한 티켓이 여기에서 승인을 기다립니다.",
       },
       list: { loadFailed: "티켓을 불러올 수 없습니다: {msg}" },
       detail: {
@@ -1277,6 +1347,8 @@
         empty: "대화를 시작하세요 — 문제나 아이디어를 설명하면 {name}이(가) 티켓 작성을 도와드립니다.",
         emptyAgentless: "메시지를 보내 주세요 — 문제나 아이디어를 알려 주시면 답변드릴게요.",
         liveSessionStatus: "{name}이(가) 백그라운드에서 작업 중이에요",
+        liveWorking: "코더가 작업 중이에요…",
+        liveStandby: "코더가 대기 중이에요 — 메시지를 보내 방향을 알려 주세요",
         liveSessionIntro: "진행 상황이 여기에 표시돼요 — 궁금한 점이나 방향이 있으면 언제든 메시지를 보내 주세요.",
         agentlessIntro: "지금은 상담원이 오프라인 상태예요. 그래도 바로 티켓을 제출하실 수 있어요 — 무슨 일이 있었는지, 재현 방법, 기대했던 동작 등 가능한 한 자세히 알려주신 뒤 아래 '티켓 제출'을 눌러주세요.",
         collectPrompt: "더 추가하실 내용이 있나요? 준비되셨으면 아래 '티켓 제출'을 눌러주세요 — 자세할수록 빠르게 도와드릴 수 있어요.",
@@ -1445,6 +1517,27 @@
     ]);
   }
 
+  // Partner-facing PROGRESS for a ticket: { key, label, dot, bg, fg }. Prefer the
+  // server-derived `currentMilestone` — the single source of truth built from the
+  // same PR-aware milestone model as the detail stepper — so the list chip, the
+  // detail chip, and the detail stepper can never disagree (an open PR reads
+  // "Done" everywhere, not "In progress" on the card and "Done" in the stepper).
+  // Falls back to the raw status registry for an older server that predates the
+  // field. See BE ticketMilestones.currentMilestoneDisplay.
+  function ticketProgress(ticket) {
+    var cm = ticket && ticket.currentMilestone;
+    if (cm && cm.label) return cm;
+    var s = statusMeta(ticket && ticket.status);
+    return { key: normalizeStatus(ticket && ticket.status), label: s.label, dot: s.dot, bg: s.bg, fg: s.fg };
+  }
+  function renderProgressChip(ticket) {
+    var p = ticketProgress(ticket);
+    return h("span", { className: "rw-chip", style: { background: p.bg, color: p.fg } }, [
+      h("span", { className: "rw-chip-dot", style: { background: p.dot } }),
+      document.createTextNode(p.label),
+    ]);
+  }
+
   // ===========================================================================
   // Theme
   // ===========================================================================
@@ -1537,6 +1630,64 @@
     return msg > base;
   }
 
+  // ---------------------------------------------------------------------------
+  // Cross-device read-state sync. The two localStorage seen-maps above are a
+  // fast local cache; the server (widget_ticket_reads) is the durable, shared
+  // copy. We SEED localStorage from the server on load (so a fresh browser
+  // inherits the user's read state) and SYNC local marks back to the server,
+  // debounced + batched. Server reads are monotonic (max per axis), so order
+  // and dedup don't matter.
+  // ---------------------------------------------------------------------------
+  var pendingReadSync = {};   // taskId -> { seenMs?, liveSessionMs? }
+  var readSyncTimer = null;
+
+  // Merge the server's read marks (tk.seenAt / tk.liveSessionSeenAt) into the
+  // local seen-maps. Monotonic marks → never regresses local state; no POST.
+  function seedSeenFromServer(tickets) {
+    for (var i = 0; i < (tickets || []).length; i++) {
+      var tk = tickets[i];
+      if (!tk || !tk.id) continue;
+      if (tk.seenAt) markTicketSeen(tk.id, new Date(tk.seenAt).getTime());
+      if (tk.liveSessionSeenAt) markLiveSessionSeen(tk.id, new Date(tk.liveSessionSeenAt).getTime());
+    }
+  }
+
+  // Cache setters that also seed from the server copy on every load.
+  function applyMyTicketsResp(d) {
+    myTicketsCache = (d && d.tickets) || [];
+    seedSeenFromServer(myTicketsCache);
+    return myTicketsCache;
+  }
+  function applyAssignedResp(d) {
+    assignedTicketsCache = (d && d.tickets) || [];
+    seedSeenFromServer(assignedTicketsCache);
+    return assignedTicketsCache;
+  }
+
+  // Queue a local mark for background persistence, then debounce-flush a batch.
+  function queueReadSync(taskId, marks) {
+    if (!taskId || !config.isIdentified) return;
+    var e = pendingReadSync[taskId] || (pendingReadSync[taskId] = {});
+    if (marks.seenMs && (!e.seenMs || marks.seenMs > e.seenMs)) e.seenMs = marks.seenMs;
+    if (marks.liveSessionMs && (!e.liveSessionMs || marks.liveSessionMs > e.liveSessionMs)) e.liveSessionMs = marks.liveSessionMs;
+    if (readSyncTimer === null) readSyncTimer = setTimeout(flushReadSync, 800);
+  }
+  function flushReadSync() {
+    readSyncTimer = null;
+    var reads = [];
+    for (var id in pendingReadSync) {
+      if (!Object.prototype.hasOwnProperty.call(pendingReadSync, id)) continue;
+      var e = pendingReadSync[id];
+      var r = { taskId: id };
+      if (e.seenMs) r.seenAt = new Date(e.seenMs).toISOString();
+      if (e.liveSessionMs) r.liveSessionSeenAt = new Date(e.liveSessionMs).toISOString();
+      reads.push(r);
+    }
+    pendingReadSync = {};
+    if (reads.length === 0) return;
+    api("/api/widget/tickets/seen", { method: "POST", body: { reads: reads } }).catch(function () {});
+  }
+
   // True when one of the viewer's OWN tickets has activity/comments they
   // haven't viewed yet (a team reply or status change). The single source of
   // truth for both the launcher count and the per-row "needs attention" dot.
@@ -1566,6 +1717,15 @@
   function viewerCanLiveCoder() {
     var p = currentUser.permissions || [];
     return p.indexOf("live_coder") !== -1;
+  }
+
+  // True when the viewer holds `approve_tickets` — gates the approver-only
+  // "Pending approval" tab and its Approve/Reject actions. The server enforces
+  // the same permission on the queue + approve/reject endpoints; this is purely
+  // for showing/hiding UI.
+  function viewerCanApprove() {
+    var p = currentUser.permissions || [];
+    return p.indexOf("approve_tickets") !== -1;
   }
 
   // Deduped list of the viewer's tickets that warrant attention, by TWO distinct
@@ -1869,6 +2029,24 @@
     }
   }
 
+  // Mark every cached ticket read across BOTH unread axes (general activity +
+  // live-session replies), up to the latest known timestamp for each. Clears
+  // the launcher/bell counts and the per-row dots. localStorage-backed, so this
+  // is per-browser-profile (there is no server-side read state).
+  function markAllTicketsRead() {
+    var all = (myTicketsCache || []).concat(assignedTicketsCache || []);
+    for (var i = 0; i < all.length; i++) {
+      var tk = all[i];
+      if (!tk || !tk.id) continue;
+      var seenMs = tk.lastActivityAt ? new Date(tk.lastActivityAt).getTime() : 0;
+      var liveMs = tk.liveSessionLastMessageAt ? new Date(tk.liveSessionLastMessageAt).getTime() : 0;
+      if (seenMs) markTicketSeen(tk.id, seenMs);
+      if (liveMs) markLiveSessionSeen(tk.id, liveMs);
+      if (seenMs || liveMs) queueReadSync(tk.id, { seenMs: seenMs || undefined, liveSessionMs: liveMs || undefined });
+    }
+    refreshTabLabel();
+  }
+
   function renderNotifDropdown() {
     if (notifDropdownEl && notifDropdownEl.parentNode) notifDropdownEl.parentNode.removeChild(notifDropdownEl);
     var items = unreadTickets();
@@ -1892,8 +2070,18 @@
         listEl.appendChild(row);
       });
     }
+    var headChildren = [h("span", { className: "rw-notif-head-title" }, t("notif.title"))];
+    if (items.length > 0) {
+      var markAllBtn = h("button", { className: "rw-notif-markread", type: "button" }, t("notif.markAllRead"));
+      markAllBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        markAllTicketsRead();
+        renderNotifDropdown(); // re-render → empty state, count cleared
+      });
+      headChildren.push(markAllBtn);
+    }
     notifDropdownEl = h("div", { className: "rw-notif-dropdown", role: "menu" }, [
-      h("div", { className: "rw-notif-head" }, t("notif.title")),
+      h("div", { className: "rw-notif-head" }, headChildren),
       listEl,
     ]);
     notifWrap.appendChild(notifDropdownEl);
@@ -1976,6 +2164,7 @@
       '  --rw-line: rgba(0,0,0,0.07); --rw-line-2: rgba(0,0,0,0.13);',
       '  --rw-fg: #0a0a0a; --rw-fg-2: #3f3f46; --rw-muted: #71717a; --rw-muted-2: #a1a1aa;',
       '  --rw-accent: #6366f1; --rw-accent-ink: #ffffff;',
+      '  --rw-warn: #b45309; --rw-warn-line: #f59e0b;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
       /* Warm charcoal dark — matches dashboard.css. */
@@ -1984,6 +2173,7 @@
       '  --rw-line: rgba(255,243,219,0.08); --rw-line-2: rgba(255,243,219,0.14);',
       '  --rw-fg: #f0e9d9; --rw-fg-2: #c8c0ad; --rw-muted: #8e8676; --rw-muted-2: #6e6759;',
       '  --rw-accent: #818cf8; --rw-accent-ink: #1f1a14;',
+      '  --rw-warn: #fbbf24; --rw-warn-line: #d97706;',
       '  --rw-serif: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;',
       '}',
 
@@ -2439,20 +2629,28 @@
          consequence of the toggle to first-time users. */
       '.rw-priv-hint { font-size: 10.5px; color: var(--rw-muted); margin-left: 8px; letter-spacing: 0; }',
 
-      /* dashboard tab row — underline-active tabs left, [+ New post] right */
+      /* dashboard tab row — underline-active tabs left, [+ New post] right.
+         The tab row is a flex:1 horizontal scroller so any number of tabs
+         (Latest/Hot/Mine + the approver-only Pending approval) never wrap or
+         push [+ New post] off-screen: the tabs scroll under a pinned button
+         when they can't all fit (narrow panels / long i18n labels). */
       '.rw-dash-tabs {',
-      '  display: flex; align-items: center; gap: 0;',
+      '  display: flex; align-items: center; gap: 8px;',
       '  padding: 0 22px 10px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '}',
-      '.rw-dash-tabs-row { display: flex; align-items: center; gap: 0; }',
+      '.rw-dash-tabs-row {',
+      '  display: flex; align-items: center; gap: 0;',
+      '  flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none;',
+      '}',
+      '.rw-dash-tabs-row::-webkit-scrollbar { display: none; }',
       '.rw-new-post-btn {',
-      '  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;',
+      '  display: inline-flex; align-items: center; gap: 6px;',
       '  padding: 6px 12px 6px 10px;',
       '  background: var(--rw-accent); border: 1px solid var(--rw-accent);',
       '  border-radius: 999px;',
       '  color: var(--rw-accent-ink); font: inherit; font-size: 12px; font-weight: 500;',
-      '  cursor: pointer; flex: 0 0 auto;',
+      '  cursor: pointer; flex: 0 0 auto; white-space: nowrap;',
       '  transition: filter .12s, transform .12s;',
       '}',
       '.rw-new-post-btn:hover { filter: brightness(1.06); }',
@@ -2460,18 +2658,23 @@
       '.rw-dash-tab {',
       '  position: relative; display: inline-flex; align-items: center; gap: 7px;',
       /* Top/bottom padding tuned so the tab text center is at y = 37
-         from the card top, matching the left-pane eyebrow center. */
-      '  padding: 6px 14px 10px; margin-right: 4px;',
+         from the card top, matching the left-pane eyebrow center.
+         flex:0 0 auto so tabs keep their natural width and scroll rather
+         than shrink+wrap when the row overflows. */
+      '  padding: 6px 12px 10px; flex: 0 0 auto;',
       '  background: transparent; border: 0; cursor: pointer;',
       '  font-family: inherit; font-size: 13.5px; font-weight: 500;',
       '  color: var(--rw-muted); letter-spacing: -0.005em;',
       '  transition: color .12s ease;',
       '}',
+      '.rw-dash-tab-label { white-space: nowrap; }',
       '.rw-dash-tab:hover { color: var(--rw-fg-2); }',
       '.rw-dash-tab.rw-on { color: var(--rw-fg); }',
+      /* Underline sits at the tab\'s bottom edge (bottom:0), inside the row\'s
+         box, so the overflow-x scroller never clips it. */
       '.rw-dash-tab.rw-on::after {',
       '  content: ""; position: absolute;',
-      '  left: 14px; right: 14px; bottom: -11px; height: 2px;',
+      '  left: 12px; right: 12px; bottom: 0; height: 2px;',
       '  background: var(--rw-accent); border-radius: 1px;',
       '}',
       '.rw-dash-tab-count {',
@@ -2515,12 +2718,34 @@
       // into the button background — give it an alert red + white ring so it
       // reads as an unread indicator regardless of theme.
       '.rw-staff-btn--primary .rw-unseen-dot { background: #ef4444; box-shadow: 0 0 0 1.5px rgba(255,255,255,0.85); }',
+      /* Board toolbar — search field (left, grows) + "Unread only" chip (right).
+         Pinned between the tab row and the scrolling list. Shares the tab/list
+         left padding (22px) so the search box, unread chip, and ticket rows all
+         line up on one vertical edge. */
+      '.rw-board-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 18px 10px 22px; }',
+      '.rw-search { display: inline-flex; align-items: center; gap: 7px; flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 6px 0 11px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: var(--rw-panel-2); transition: border-color 120ms, background 120ms; }',
+      '.rw-search:focus-within { border-color: var(--rw-accent); background: var(--rw-bg); }',
+      '.rw-search-icon { flex: 0 0 auto; display: inline-flex; color: var(--rw-muted); }',
+      '.rw-search:focus-within .rw-search-icon { color: var(--rw-accent); }',
+      '.rw-search-input { flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; padding: 0; font-family: inherit; font-size: 12.5px; color: var(--rw-fg); }',
+      '.rw-search-input::placeholder { color: var(--rw-muted); }',
+      '.rw-search-clear { flex: 0 0 auto; display: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--rw-muted); cursor: pointer; transition: background 120ms, color 120ms; }',
+      '.rw-search-clear.rw-show { display: inline-flex; }',
+      '.rw-search-clear:hover { background: var(--rw-line-2); color: var(--rw-fg); }',
       /* "Unread only" filter toggle (My Submissions) */
-      '.rw-unread-filter-row { display: flex; padding: 2px 10px 10px; }',
-      '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
+      '.rw-unread-filter { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 32px; padding: 0 12px; white-space: nowrap; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
       '.rw-unread-filter:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
       '.rw-unread-filter-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--rw-accent, #2563eb); flex: 0 0 auto; }',
+      /* Status filter — horizontal chip scroller pinned under the search row.
+         Shares the 22px left / 18px right padding so it lines up with the
+         search box, unread chip, and ticket rows. */
+      '.rw-status-filter { display: flex; align-items: center; gap: 6px; padding: 0 18px 10px 22px; overflow-x: auto; scrollbar-width: none; }',
+      '.rw-status-filter::-webkit-scrollbar { display: none; }',
+      '.rw-status-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 26px; padding: 0 10px; white-space: nowrap; border-radius: 999px; border: 1px solid var(--rw-line-2); background: transparent; color: var(--rw-fg-2); font-family: inherit; font-size: 11.5px; font-weight: 500; cursor: pointer; transition: background 120ms, border-color 120ms, color 120ms; }',
+      '.rw-status-chip:hover { border-color: var(--rw-accent); color: var(--rw-fg); }',
+      '.rw-status-chip.rw-on { background: color-mix(in oklab, var(--rw-accent) 14%, transparent); border-color: var(--rw-accent); color: var(--rw-fg); }',
+      '.rw-status-chip-dot { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; }',
       '.rw-dash-row-main { flex: 1; min-width: 0; }',
       '.rw-dash-row-title {',
       '  font-size: 13.5px; font-weight: 500; line-height: 1.32;',
@@ -2687,10 +2912,43 @@
       '}',
       '.rw-list-topbar {',
       '  display: flex; align-items: center;',
-      '  padding: 14px 80px 10px 22px;',
+      /* Right padding clears the absolute shell actions (bell/theme/close reach',
+      '     ~110px from the edge) so the right-aligned coin total never overlaps them. */
+      '  padding: 14px 120px 10px 22px;',
       '  border-bottom: 1px solid var(--rw-line);',
       '  flex: 0 0 auto;',
       '}',
+
+      /* Community coin — blatant header total + per-post earned chip + why tooltip. */
+      '.rw-coin-total {',
+      '  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;',
+      '  padding: 4px 10px; border-radius: 999px; white-space: nowrap;',
+      '  background: color-mix(in srgb, var(--rw-accent) 14%, transparent);',
+      '  color: var(--rw-accent); font-weight: 700; font-size: 13px;',
+      '}',
+      /* Zero balance: present but quiet — discoverable, not shouty. */
+      '.rw-coin-total--zero {',
+      '  background: color-mix(in srgb, var(--rw-fg) 7%, transparent);',
+      '  color: color-mix(in srgb, var(--rw-fg) 55%, transparent); font-weight: 600;',
+      '}',
+      '.rw-coin-glyph { font-size: 1em; line-height: 1; }',
+      '.rw-coin-chip {',
+      '  position: relative;',
+      '  display: inline-flex; align-items: center; gap: 3px;',
+      '  padding: 1px 7px; border-radius: 999px;',
+      '  background: color-mix(in srgb, var(--rw-accent) 12%, transparent);',
+      '  color: var(--rw-accent); font-weight: 600; font-size: 11px; cursor: default;',
+      '}',
+      '.rw-coin-tip {',
+      '  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 60;',
+      '  width: max-content; max-width: 260px; padding: 8px 10px; border-radius: 8px;',
+      '  background: var(--rw-fg); color: var(--rw-bg); text-align: left;',
+      '  font-size: 12px; font-weight: 500; line-height: 1.4;',
+      '  box-shadow: 0 6px 20px rgba(0,0,0,0.25); white-space: normal; pointer-events: none;',
+      '}',
+      '.rw-coin-tip-head { display: block; font-weight: 700; margin-bottom: 4px; }',
+      '.rw-coin-tip ul { margin: 0; padding-left: 16px; }',
+      '.rw-coin-tip li { margin: 2px 0; }',
 
       /* header */
       '.rw-hdr {',
@@ -2732,7 +2990,9 @@
       '  background: var(--rw-panel, var(--rw-bg)); border: 1px solid var(--rw-line-2);',
       '  border-radius: 12px; box-shadow: 0 12px 32px -10px rgba(0,0,0,0.4); overflow: hidden;',
       '}',
-      '.rw-notif-head { padding: 10px 14px; font-size: 12px; font-weight: 600; color: var(--rw-fg-2); border-bottom: 1px solid var(--rw-line); }',
+      '.rw-notif-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; font-size: 12px; font-weight: 600; color: var(--rw-fg-2); border-bottom: 1px solid var(--rw-line); }',
+      '.rw-notif-markread { flex: 0 0 auto; border: none; background: none; padding: 0; margin: 0; font: inherit; font-weight: 600; font-size: 11.5px; color: var(--rw-accent); cursor: pointer; }',
+      '.rw-notif-markread:hover { text-decoration: underline; }',
       '.rw-notif-list { max-height: 320px; overflow-y: auto; }',
       '.rw-notif-empty { padding: 16px 14px; font-size: 12.5px; color: var(--rw-muted); }',
       '.rw-notif-item {',
@@ -3311,6 +3571,39 @@
       '}',
       '.rw-assign-btn:hover { background: #1e55c0; }',
       '.rw-assign-btn:disabled { opacity: 0.5; cursor: default; }',
+      /* Approve / Reject actions — the approver-only moderation controls. They
+         appear inline on each "Pending approval" queue card and in the ticket
+         detail head when the viewer holds approve_tickets and the ticket is
+         still awaiting approval. */
+      '.rw-approve-actions {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  gap: 6px;',
+      '  flex-shrink: 0;',
+      '}',
+      '.rw-approve-actions[aria-busy="true"] { opacity: 0.6; pointer-events: none; }',
+      '.rw-approve-btn {',
+      '  display: inline-flex;',
+      '  align-items: center;',
+      '  padding: 4px 10px;',
+      '  border-radius: 6px;',
+      '  background: #1f9d55;',
+      '  color: #fff;',
+      '  font-size: 12px;',
+      '  font-weight: 600;',
+      '  border: none;',
+      '  cursor: pointer;',
+      '  letter-spacing: 0.02em;',
+      '  white-space: nowrap;',
+      '}',
+      '.rw-approve-btn:hover { background: #188446; }',
+      '.rw-approve-btn.rw-reject-btn {',
+      '  background: transparent;',
+      '  color: #c0392b;',
+      '  border: 1px solid #e6c3bd;',
+      '}',
+      '.rw-approve-btn.rw-reject-btn:hover { background: #fbeae7; }',
+      '.rw-approve-btn:disabled { opacity: 0.5; cursor: default; }',
 
       /* Agent attribution line — shown below the title when an agent is
          assigned and the assignment was initiated by an external triager. */
@@ -3613,6 +3906,22 @@
       '  100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }',
       '}',
       '@media (prefers-reduced-motion: reduce) { .rw-intro-pulse { animation: none; } }',
+      // Pinned live-session status bar — sits between the header and the scroll
+      // area (never scrolls away), reflecting the coder's REAL working state.
+      '.rw-live-status {',
+      '  display: flex; align-items: center; gap: 8px; flex: none;',
+      '  padding: 8px 18px; font-size: 12px; font-weight: 600;',
+      '  color: var(--rw-fg-2); background: var(--rw-panel-2);',
+      '  border-bottom: 1px solid var(--rw-line-2);',
+      '}',
+      '.rw-live-status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }',
+      '.rw-live-status.is-working .rw-live-status-dot {',
+      '  background: #16a34a; box-shadow: 0 0 0 0 rgba(22,163,74,0.5);',
+      '  animation: rw-intro-pulse 2s ease-out infinite;',
+      '}',
+      '.rw-live-status.is-idle { color: var(--rw-muted); }',
+      '.rw-live-status.is-idle .rw-live-status-dot { background: var(--rw-muted); opacity: 0.55; }',
+      '@media (prefers-reduced-motion: reduce) { .rw-live-status.is-working .rw-live-status-dot { animation: none; } }',
       '.rw-chat-intro-title {',
       '  font-size: 15px; font-weight: 700; color: var(--rw-fg);',
       '  line-height: 1.35; max-width: 34ch; margin: 0;',
@@ -3723,7 +4032,7 @@
       '  overflow: hidden; flex-shrink: 0;',
       '  border: 1px solid var(--rw-line-2); background: var(--rw-bg);',
       '}',
-      '.rw-chat-img-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }',
+      '.rw-chat-img-chip img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }',
       '.rw-chat-img-chip-x {',
       '  position: absolute; top: 2px; right: 2px;',
       '  width: 16px; height: 16px; border-radius: 50%;',
@@ -3793,6 +4102,17 @@
       '  color: var(--rw-muted); flex: 0 0 auto;',
       '}',
       '.rw-chat-ticket-ref { font-size: 13px; font-weight: 600; color: var(--rw-fg); }',
+      /* Group wrapper for consecutive "similar ticket" deflection cards. A few
+         render at full height; a large set is capped and scrolls internally so
+         it can never push the conversation off-screen. The negative right
+         margin + padding keeps the scrollbar off the cards. */
+      '.rw-chat-ticket-link-group { align-self: stretch; display: flex; flex-direction: column; gap: 8px; }',
+      '.rw-chat-ticket-link-group.rw-scrollable {',
+      '  max-height: 232px; overflow-y: auto; overscroll-behavior: contain;',
+      '  padding: 2px 8px 2px 2px; margin-right: -6px;',
+      '}',
+      '.rw-chat-ticket-link-group.rw-scrollable::-webkit-scrollbar { width: 6px; }',
+      '.rw-chat-ticket-link-group.rw-scrollable::-webkit-scrollbar-thumb { background: var(--rw-line-2); border-radius: 999px; }',
       '.rw-chat-ticket-open {',
       '  flex: 0 0 auto; display: inline-flex; align-items: center; height: 26px; padding: 0 10px;',
       '  border-radius: 999px; border: 1px solid var(--rw-line-2);',
@@ -3878,6 +4198,22 @@
       '  border: 1px solid color-mix(in oklab, var(--rw-accent) 40%, var(--rw-line-2));',
       '}',
       '.rw-staff-btn--ghost:not(:disabled):hover { background: color-mix(in oklab, var(--rw-accent) 10%, var(--rw-bg)); border-color: var(--rw-accent); }',
+
+      /* Assign-agent feedback. A transient failure stays a small red line
+         (`.rw-assign-err`); the terminal "no agent is set up for this project"
+         case gets an amber callout that names the root cause and the exact
+         settings path to fix it — staff kept missing the bare red string. */
+      '.rw-assign-callout {',
+      '  display: flex; align-items: flex-start; gap: 8px; width: 100%;',
+      '  margin-top: 1px; padding: 9px 11px; border-radius: 9px;',
+      '  background: color-mix(in oklab, var(--rw-warn-line) 12%, var(--rw-panel));',
+      '  border: 1px solid color-mix(in oklab, var(--rw-warn-line) 34%, var(--rw-line-2));',
+      '  border-left: 3px solid var(--rw-warn-line);',
+      '}',
+      '.rw-assign-callout-ic { flex: 0 0 auto; font-size: 14px; line-height: 1.35; }',
+      '.rw-assign-callout-body { font-size: 12.5px; line-height: 1.45; color: var(--rw-fg-2); }',
+      '.rw-assign-callout-title { font-weight: 700; color: var(--rw-warn); }',
+      '.rw-assign-callout-path { font-weight: 600; color: var(--rw-fg); white-space: nowrap; }',
 
       /* "Created from a conversation" — collapsed transcript section on the
          ticket detail for tickets born from chat. Reporter-only by
@@ -4156,6 +4492,51 @@
     return items;
   }
 
+  // Ordered [{ url, name }] of every pending chat-composer image (those that
+  // already have a data-URL preview) — the gallery a pending chip pages through.
+  function pendingChatGallery() {
+    var items = [];
+    for (var k = 0; k < pendingChatImages.length; k++) {
+      var p = pendingChatImages[k];
+      if (p && p.dataUrl) items.push({ url: p.dataUrl, name: p.name || "image" });
+    }
+    return items;
+  }
+
+  // A single staged-image chip for the chat composer: an inline <img> preview
+  // that opens the full-screen lightbox on click/Enter/Space (paging the whole
+  // pending set), plus an × that invokes onRemove(entry). Mirrors
+  // renderAttachChip for the ticket composer.
+  function renderPendingChatChip(entry, onRemove) {
+    var chip = h("div", {
+      className: "rw-chat-img-chip" + (entry.uploading ? " rw-uploading" : "") + (entry.failed ? " rw-failed" : ""),
+    });
+    var imgName = entry.name || "image";
+    var img = h("img", {
+      src: entry.dataUrl, alt: imgName,
+      title: imgName, role: "button", tabindex: "0", "aria-label": imgName,
+    });
+    function expand(e) {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      var items = pendingChatGallery();
+      if (!items.length) return;
+      var start = 0;
+      for (var k = 0; k < items.length; k++) { if (items[k].url === entry.dataUrl) { start = k; break; } }
+      openImageLightbox(items, start);
+    }
+    img.addEventListener("click", expand);
+    img.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") expand(e);
+    });
+    chip.appendChild(img);
+    var xBtn = h("button", {
+      className: "rw-chat-img-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
+    }, "×");
+    xBtn.addEventListener("click", function () { onRemove(entry); });
+    chip.appendChild(xBtn);
+    return chip;
+  }
+
   function shotIsImage(att) {
     return (att.mimeType || att.mime || "").indexOf("image/") === 0;
   }
@@ -4244,8 +4625,102 @@
   // Ticket card
   // ===========================================================================
 
+  // Compact number for the coin total (e.g. 1234 → "1,234"). Coin accrues one
+  // per lifecycle step, so totals stay small — a thousands separator is plenty.
+  function formatCoin(n) {
+    try { return Number(n).toLocaleString(); } catch (e) { return String(n); }
+  }
+
+  // Header coin total — ALWAYS shown for an identified viewer (blatant, per spec),
+  // even at zero, so the reward system is discoverable before the first coin. The
+  // tooltip explains how to earn while the balance is still 0. Hidden only for
+  // anonymous viewers, who have no community identity to score.
+  function renderCoinTotalBadge() {
+    if (!communityStats || !communityStats.identified) return null;
+    var bal = communityStats.balance || 0;
+    var label = bal > 0
+      ? "You've earned " + formatCoin(bal) + " coin from feedback you submitted or upvoted"
+      : "Earn coin when feedback you submit or upvote moves forward";
+    return h("span", {
+      className: "rw-coin-total" + (bal > 0 ? "" : " rw-coin-total--zero"),
+      title: label, "aria-label": label,
+    }, [
+      h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
+      h("span", null, formatCoin(bal)),
+    ]);
+  }
+
+  // Per-post "+N 🪙" chip with a hover tooltip explaining why the viewer earned
+  // it (e.g. "you upvoted this and it reached Merged"). `earned` is the
+  // coinByTicket[ticketId] entry: { coin, reasons }.
+  function renderCoinChip(earned) {
+    var reasons = (earned && earned.reasons) || [];
+    var chip = h("span", {
+      className: "rw-coin-chip",
+      "aria-label": "You earned " + earned.coin + " coin from this post. " + reasons.join(". "),
+    }, [
+      h("span", { className: "rw-coin-glyph", "aria-hidden": "true" }, "🪙"),
+      h("span", null, "+" + earned.coin),
+    ]);
+    var tip = null;
+    function show() {
+      if (tip) return;
+      var items = reasons.length
+        ? reasons.map(function (r) { return h("li", null, r); })
+        : [h("li", null, "You helped this post make progress")];
+      tip = h("span", { className: "rw-coin-tip" }, [
+        h("span", { className: "rw-coin-tip-head" }, "Why you earned coin"),
+        h("ul", null, items),
+      ]);
+      chip.appendChild(tip);
+    }
+    function hide() { if (tip && tip.parentNode) { tip.parentNode.removeChild(tip); } tip = null; }
+    chip.addEventListener("mouseenter", show);
+    chip.addEventListener("mouseleave", hide);
+    return chip;
+  }
+
+  // Approve / Reject controls for a ticket awaiting approval. Used both on the
+  // "Pending approval" queue cards and (via renderDetail) the detail head. On
+  // success the ticket leaves the queue (approve → planned, reject → cancelled);
+  // we drop it from the approver cache and null the board cache so the released
+  // ticket re-fetches fresh, then re-render. `onDone` lets the detail view leave
+  // the now-resolved ticket. Errors surface inline on the pressed button.
+  function renderApprovalActions(ticket, onDone) {
+    var wrap = h("div", { className: "rw-approve-actions" });
+    var busy = false;
+    function run(fn) {
+      return function (e) {
+        if (e) e.stopPropagation();
+        if (busy) return;
+        busy = true;
+        wrap.setAttribute("aria-busy", "true");
+        fn(ticket.id).then(function () {
+          // The ticket has left the queue (approve → planned, reject → cancelled).
+          // Null the caches so the queue and board both re-fetch fresh rather than
+          // risk a stale [] when the queue was never loaded in this session.
+          pendingApprovalCache = null;
+          topTicketsCache = null; // a released ticket may now belong on the board
+          if (typeof onDone === "function") { onDone(); return; }
+          if (view === "list") renderPanelBody();
+        }).catch(function () {
+          busy = false;
+          wrap.removeAttribute("aria-busy");
+        });
+      };
+    }
+    var approveBtn = h("button", { className: "rw-approve-btn", type: "button" }, t("approve.approve"));
+    var rejectBtn = h("button", { className: "rw-approve-btn rw-reject-btn", type: "button" }, t("approve.reject"));
+    approveBtn.addEventListener("click", run(approveTicket));
+    rejectBtn.addEventListener("click", run(rejectTicket));
+    wrap.appendChild(approveBtn);
+    wrap.appendChild(rejectBtn);
+    return wrap;
+  }
+
   function renderTicketCard(ticket, opts) {
     var hideStatus = !!(opts && opts.hideStatus);
+    var isApprovals = !!(opts && opts.approvals);
     var voted = ticket.userVote === true;
     var countSpan = h("span", null, String(ticket.yesVotes || 0));
     var voteBtn = h("button", {
@@ -4281,7 +4756,7 @@
     // is already shipped (done/deployed), so the chip carries no information.
     if (!hideStatus) {
       if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
-      metaChildren.push(renderStatusChip(ticket.status));
+      metaChildren.push(renderProgressChip(ticket));
     }
     if (authorName) {
       if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
@@ -4289,6 +4764,15 @@
     }
     if (metaChildren.length > 0) metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
     metaChildren.push(h("span", { className: "rw-meta-when" }, timeAgo(ticket.completedAt || ticket.createdAt)));
+
+    // Per-post coin the viewer earned from this ticket ("if relevant" — only
+    // when they created/upvoted it and it advanced). Sits at the tail of the
+    // meta row; hovering the chip explains why.
+    var earned = communityStats.coinByTicket && communityStats.coinByTicket[ticket.id];
+    if (earned && earned.coin) {
+      metaChildren.push(h("span", { className: "rw-meta-dot" }, "·"));
+      metaChildren.push(renderCoinChip(earned));
+    }
 
     // "Needs your attention" marker — a dot on the title + a highlighted row —
     // for the viewer's OWN tickets that have new activity since they last
@@ -4305,12 +4789,17 @@
     }
     mainChildren.push(h("div", { className: "rw-dash-row-meta" }, metaChildren));
 
+    // On the approver queue there's no right-hand control: voting isn't offered
+    // on unapproved tickets, and Approve / Reject live in the ticket detail
+    // (opened by clicking the card) to avoid duplicating them in the list.
+    var rightControl = isApprovals ? null : voteBtn;
+
     var row = h("button", {
       className: "rw-dash-row" + (unseen ? " rw-dash-row--unseen" : ""), type: "button",
       "aria-label": (unseen ? "New activity — " : "") + t("aria.openTicket", { title: ticket.title }),
     }, [
       h("div", { className: "rw-dash-row-main" }, mainChildren),
-      voteBtn,
+      rightControl,
     ]);
 
     row.addEventListener("click", function () { openDetailModal(ticket); });
@@ -4327,9 +4816,10 @@
     // here so old persisted state still routes to the same list.
     var pendingTab = activeTab === "top" ? "hot" : activeTab;
     var counts = {
-      updates: (updatesCache || []).length,
-      hot:     (topTicketsCache || []).length,
-      mine:    (myTicketsCache || []).length,
+      updates:   (updatesCache || []).length,
+      hot:       (topTicketsCache || []).length,
+      mine:      (myTicketsCache || []).length,
+      approvals: (pendingApprovalCache || []).length,
     };
 
     var defs = [
@@ -4337,6 +4827,9 @@
       { id: "hot",     label: t("tabs.hot") },
       { id: "mine",    label: t("tabs.mine") },
     ];
+    // Approver-only queue of tickets awaiting approval. Only shown to holders of
+    // approve_tickets; the server likewise gates the queue endpoint.
+    if (viewerCanApprove()) defs.push({ id: "approvals", label: t("tabs.approvals") });
 
     // Use `def` (not `t`) for the loop variable — `t` is the i18n function.
     var tabButtons = defs.map(function (def) {
@@ -4350,7 +4843,15 @@
         h("span", { className: "rw-dash-tab-count" }, String(counts[def.id] || 0)),
       ]);
       btn.addEventListener("click", function () {
-        if (pendingTab !== def.id) { activeTab = def.id; renderPanelBody(); }
+        if (pendingTab !== def.id) {
+          activeTab = def.id;
+          // Search + status are per-tab, client-side filters over that tab's
+          // loaded tickets — reset them when switching tabs so a filter never
+          // carries over to a tab where it makes no sense.
+          boardSearchQuery = "";
+          boardStatusFilter = "all";
+          renderPanelBody();
+        }
       });
       return btn;
     });
@@ -4371,6 +4872,10 @@
     ]);
   }
 
+  // Builds the board region that sits below the tab row: an optional toolbar
+  // (search + "Unread only") and the scrolling ticket list. Returns an ARRAY of
+  // nodes (the caller appends them into .rw-list-panel) so the toolbar can be a
+  // pinned sibling of the scroll list rather than scrolling away inside it.
   function renderList() {
     // "top" stayed as the cache name even though the tab is now "Hot" — accept either.
     var tab = activeTab === "top" ? "hot" : activeTab;
@@ -4382,79 +4887,244 @@
     // Submissions. null = not loaded yet; [] = loaded and genuinely empty. Only
     // My Submissions is gated on identity (anon users can't load it).
     var cacheIsNull =
-      tab === "updates" ? updatesCache === null :
-      tab === "hot"     ? topTicketsCache === null :
-                          (myTicketsCache === null && config.isIdentified);
+      tab === "updates"   ? updatesCache === null :
+      tab === "hot"       ? topTicketsCache === null :
+      tab === "approvals" ? pendingApprovalCache === null :
+                            (myTicketsCache === null && config.isIdentified);
     if (cacheIsNull) {
       var reload =
-        tab === "updates" ? loadUpdates().then(function (d) { updatesCache = d.tickets || []; }) :
-        tab === "hot"     ? loadTopTickets().then(function (d) { topTicketsCache = d.tickets || []; }) :
-                            loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; });
+        tab === "updates"   ? loadUpdates().then(function (d) { updatesCache = d.tickets || []; }) :
+        tab === "hot"       ? loadTopTickets().then(function (d) { topTicketsCache = d.tickets || []; }) :
+        tab === "approvals" ? loadPendingApprovals().then(function (d) { pendingApprovalCache = d.tickets || []; }) :
+                              loadMyTickets().then(function (d) { applyMyTicketsResp(d); });
       reload.catch(function () {
         if (tab === "updates") updatesCache = [];
         else if (tab === "hot") topTicketsCache = [];
+        else if (tab === "approvals") pendingApprovalCache = [];
         else myTicketsCache = [];
       }).then(function () {
         if (view === "list") renderPanelBody();
       });
-      return renderLoading();
+      boardListEl = null; boardTab = null; boardAllItems = null;
+      return [renderLoading()];
     }
 
     var allItems =
-      tab === "updates" ? (updatesCache || []) :
-      tab === "hot"     ? (topTicketsCache || []) :
-                          (myTicketsCache || []);
+      tab === "updates"   ? (updatesCache || []) :
+      tab === "hot"       ? (topTicketsCache || []) :
+      tab === "approvals" ? (pendingApprovalCache || []) :
+                            (myTicketsCache || []);
 
-    // "Unread only" filter — My Submissions only.
-    var showFilter = tab === "mine" && config.isIdentified && allItems.length > 0;
-    var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
-    var items = (tab === "mine" && mineUnreadOnly) ? allItems.filter(ticketHasUnseenActivity) : allItems;
-
-    // Whole-area empty states (no tickets at all) replace the list outright.
+    // Whole-area empty states (no tickets at all) replace the list outright —
+    // no toolbar, since there is nothing to search or filter.
     if (allItems.length === 0) {
+      boardListEl = null; boardTab = null; boardAllItems = null;
       if (tab === "mine" && !config.isIdentified) {
-        return renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"));
+        return [renderEmpty(t("empty.signInToSeeMine"), t("empty.signedInPlaceholder"))];
       }
       if (tab === "mine") {
-        return renderEmpty(t("empty.noMineYet"), t("empty.useComposer"));
+        return [renderEmpty(t("empty.noMineYet"), t("empty.useComposer"))];
       }
       if (tab === "updates") {
-        return renderEmpty(t("empty.nothingShipped"), t("empty.updatesWillShow"));
+        return [renderEmpty(t("empty.nothingShipped"), t("empty.updatesWillShow"))];
       }
-      return renderEmpty(t("empty.noTickets"), t("empty.beFirst"));
+      if (tab === "approvals") {
+        return [renderEmpty(t("empty.noApprovals"), t("empty.approvalsWillShow"))];
+      }
+      return [renderEmpty(t("empty.noTickets"), t("empty.beFirst"))];
     }
 
-    // Return the scroll container DIRECTLY (it owns flex:1 + overflow:auto).
-    // The filter is its first child so it inherits the list's left padding and
-    // aligns with the ticket rows — and scrolling keeps working on every tab.
-    var list = h("div", { className: "rw-dash-list" });
-    if (showFilter) list.appendChild(renderUnreadFilter(unreadCount));
+    // Stash the tab + full item set so the toolbar's search / unread handlers
+    // can re-filter in place (fillBoardList) without a full panel rebuild.
+    boardTab = tab;
+    boardAllItems = allItems;
+    boardListEl = h("div", { className: "rw-dash-list" });
+    // "Unread only" chip — My Submissions only.
+    var showUnread = tab === "mine" && config.isIdentified;
+    var unreadCount = tab === "mine" ? allItems.filter(ticketHasUnseenActivity).length : 0;
+    var toolbar = renderBoardToolbar(showUnread, unreadCount);
 
-    if (items.length === 0 && mineUnreadOnly) {
-      list.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
-      return list;
-    }
+    // Status filter row — the distinct statuses present in this tab, in the
+    // canonical lifecycle order. Only offered where cards actually SHOW status
+    // (the "Latest Updates" feed hides it) and where there's more than one
+    // status to choose between (a single-status tab has nothing to filter).
+    var region = [toolbar];
+    var distinctProgress = tab === "updates" ? [] : distinctBoardProgress(allItems);
+    if (distinctProgress.length > 1) region.push(renderStatusFilterRow(distinctProgress));
+    region.push(boardListEl);
 
-    var cardOpts = tab === "updates" ? { hideStatus: true } : null;
-    // Use `tk` for the loop variable — `t` is the i18n function.
-    items.forEach(function (tk) { list.appendChild(renderTicketCard(tk, cardOpts)); });
-    return list;
+    fillBoardList();
+    return region;
   }
 
-  // "Unread only" toggle for My Submissions. Shows the unread count and flips
-  // mineUnreadOnly, re-rendering the list in place.
-  function renderUnreadFilter(unreadCount) {
-    var on = mineUnreadOnly;
-    var btn = h("button", {
-      className: "rw-unread-filter" + (on ? " rw-on" : ""),
-      type: "button",
-      "aria-pressed": on ? "true" : "false",
-    }, [
-      h("span", { className: "rw-unread-filter-dot" }),
-      document.createTextNode(t("filters.unreadOnly") + (unreadCount > 0 ? " (" + unreadCount + ")" : "")),
+  // Order the status-filter chips predictably. Milestone keys first (the
+  // server-derived progress vocabulary — same as the detail stepper), then the
+  // raw-status fallback keys for an older server. Unknown keys append.
+  var PROGRESS_ORDER = [
+    "received", "clarifying", "approval",
+    "pending", "pending_approval", "planned",
+    "in_progress", "needs_review", "in_review", "done",
+    "reviewed", "merged", "deployed", "cancelled",
+  ];
+
+  // Normalize a raw ticket status for grouping: every `deployed:<envId>` variant
+  // collapses to the single "deployed" bucket. Only used by the ticketProgress
+  // fallback — currentMilestone keys are already normalized server-side.
+  function normalizeStatus(s) {
+    if (isDeployedStatus(s)) return "deployed";
+    return s == null ? "" : String(s);
+  }
+
+  // Distinct progress steps present across `items` — one entry per milestone
+  // (or fallback status) with its label + dot color, ordered by PROGRESS_ORDER.
+  // Drives the status-filter chips; keyed the SAME way the chips render, so a
+  // filter chip always matches the cards it filters.
+  function distinctBoardProgress(items) {
+    var seen = {};
+    (items || []).forEach(function (tk) {
+      var p = ticketProgress(tk);
+      if (p && p.key && !seen[p.key]) seen[p.key] = { key: p.key, label: p.label, dot: p.dot };
+    });
+    var ordered = [];
+    PROGRESS_ORDER.forEach(function (k) { if (seen[k]) { ordered.push(seen[k]); delete seen[k]; } });
+    Object.keys(seen).forEach(function (k) { ordered.push(seen[k]); });
+    return ordered;
+  }
+
+  // Case-insensitive substring match over a ticket's title, description, and
+  // short ref id (the #XXXXXXXX shown in detail) — the fields a user would
+  // reasonably search by.
+  function ticketMatchesQuery(tk, q) {
+    if (!tk) return false;
+    var hay = ((tk.title || "") + " " + (tk.description || "")).toLowerCase();
+    if (hay.indexOf(q) !== -1) return true;
+    var refId = String(tk.id || "").slice(0, 8).toLowerCase();
+    return refId.indexOf(q) !== -1;
+  }
+
+  // (Re)populate the current board list from boardAllItems, applying the active
+  // "Unread only" toggle and search query. Rebuilds only the list body so the
+  // search input keeps focus across keystrokes.
+  function fillBoardList() {
+    if (!boardListEl) return;
+    clearChildren(boardListEl);
+    var tab = boardTab;
+    var items = boardAllItems || [];
+    if (tab === "mine" && mineUnreadOnly) items = items.filter(ticketHasUnseenActivity);
+    if (boardStatusFilter !== "all") {
+      items = items.filter(function (tk) { return ticketProgress(tk).key === boardStatusFilter; });
+    }
+    var q = boardSearchQuery.trim().toLowerCase();
+    if (q) items = items.filter(function (tk) { return ticketMatchesQuery(tk, q); });
+
+    if (items.length === 0) {
+      if (q) {
+        boardListEl.appendChild(renderEmpty(t("filters.noMatches"), t("filters.noMatchesHint")));
+      } else if (boardStatusFilter !== "all") {
+        boardListEl.appendChild(renderEmpty(t("filters.noStatusMatches"), t("filters.noStatusMatchesHint")));
+      } else if (tab === "mine" && mineUnreadOnly) {
+        boardListEl.appendChild(renderEmpty(t("filters.allCaughtUp"), t("filters.noUnread")));
+      }
+      return;
+    }
+
+    var cardOpts =
+      tab === "updates"   ? { hideStatus: true } :
+      tab === "approvals" ? { approvals: true } :
+                            null;
+    // Use `tk` for the loop variable — `t` is the i18n function.
+    items.forEach(function (tk) { boardListEl.appendChild(renderTicketCard(tk, cardOpts)); });
+  }
+
+  // Toolbar under the tab row: a search field that filters the current tab's
+  // tickets in place, and (My Submissions only) the "Unread only" toggle. Both
+  // re-filter via fillBoardList so typing never rebuilds the whole panel.
+  function renderBoardToolbar(showUnread, unreadCount) {
+    var input = h("input", {
+      className: "rw-search-input", type: "text", value: boardSearchQuery,
+      placeholder: t("filters.searchPlaceholder"), "aria-label": t("filters.searchPlaceholder"),
+      autocomplete: "off", spellcheck: "false",
+    });
+    var clearBtn = h("button", {
+      className: "rw-search-clear" + (boardSearchQuery ? " rw-show" : ""),
+      type: "button", "aria-label": t("filters.clearSearch"),
+    }, [Icons.close(12)]);
+    var search = h("div", { className: "rw-search" }, [
+      h("span", { className: "rw-search-icon" }, Icons.search(15)),
+      input,
+      clearBtn,
     ]);
-    btn.addEventListener("click", function () { mineUnreadOnly = !mineUnreadOnly; renderPanelBody(); });
-    return h("div", { className: "rw-unread-filter-row" }, [btn]);
+    input.addEventListener("input", function () {
+      boardSearchQuery = input.value;
+      clearBtn.classList.toggle("rw-show", !!boardSearchQuery);
+      fillBoardList();
+    });
+    clearBtn.addEventListener("click", function () {
+      boardSearchQuery = "";
+      input.value = "";
+      clearBtn.classList.remove("rw-show");
+      input.focus();
+      fillBoardList();
+    });
+
+    var children = [search];
+    if (showUnread) {
+      var on = mineUnreadOnly;
+      var unreadBtn = h("button", {
+        className: "rw-unread-filter" + (on ? " rw-on" : ""),
+        type: "button", "aria-pressed": on ? "true" : "false",
+      }, [
+        h("span", { className: "rw-unread-filter-dot" }),
+        document.createTextNode(t("filters.unreadOnly") + (unreadCount > 0 ? " (" + unreadCount + ")" : "")),
+      ]);
+      unreadBtn.addEventListener("click", function () {
+        mineUnreadOnly = !mineUnreadOnly;
+        unreadBtn.classList.toggle("rw-on", mineUnreadOnly);
+        unreadBtn.setAttribute("aria-pressed", mineUnreadOnly ? "true" : "false");
+        fillBoardList();
+      });
+      children.push(unreadBtn);
+    }
+    return h("div", { className: "rw-board-toolbar" }, children);
+  }
+
+  // Status-filter row (pinned under the search toolbar): an "All" chip plus one
+  // chip per distinct progress step present in the tab, each carrying that step's
+  // dot color. Single-select; clicking re-filters the list in place
+  // (fillBoardList) and re-styles the chips without rebuilding the panel. The
+  // row is a horizontal scroller so many steps never wrap in a narrow panel.
+  function renderStatusFilterRow(progress) {
+    var row = h("div", { className: "rw-status-filter", role: "group", "aria-label": t("filters.statusGroup") });
+    var chips = [];
+
+    function makeChip(value, label, dotColor) {
+      var on = boardStatusFilter === value;
+      var kids = [];
+      if (dotColor) kids.push(h("span", { className: "rw-status-chip-dot", style: { background: dotColor } }));
+      kids.push(document.createTextNode(label));
+      var chip = h("button", {
+        className: "rw-status-chip" + (on ? " rw-on" : ""),
+        type: "button", "aria-pressed": on ? "true" : "false",
+      }, kids);
+      chip.addEventListener("click", function () {
+        boardStatusFilter = value;
+        chips.forEach(function (c) {
+          var sel = c._rwValue === value;
+          c.classList.toggle("rw-on", sel);
+          c.setAttribute("aria-pressed", sel ? "true" : "false");
+        });
+        fillBoardList();
+      });
+      chip._rwValue = value;
+      chips.push(chip);
+      return chip;
+    }
+
+    row.appendChild(makeChip("all", t("filters.allStatuses"), null));
+    progress.forEach(function (p) {
+      row.appendChild(makeChip(p.key, p.label, p.dot));
+    });
+    return row;
   }
 
   // -----------------------------------------------------------------------
@@ -4678,7 +5348,7 @@
         refreshPrivateBtn();
         privHint.textContent = t("composer.privateOff");
         submitBtn.firstChild.textContent = t("composer.submit");
-        topTicketsCache = null; updatesCache = null; myTicketsCache = null; assignedTicketsCache = null;
+        topTicketsCache = null; updatesCache = null; myTicketsCache = null; assignedTicketsCache = null; pendingApprovalCache = null;
         composeReturnView = "home";
         activeTab = "mine";
 
@@ -4978,16 +5648,16 @@
         : t("home.greeting");
       scrollEl.appendChild(h("div", { className: "rw-list-topbar" }, [
         h("span", { className: "rw-list-title" }, boardTitle),
+        renderCoinTotalBadge(),
       ]));
 
       // Single full-width panel: tab bar (with [+ New post] on its right)
       // + list. The old left pane (intro copy, inline composer, Recent
       // Submissions) is gone — Home's "Send us a message" card and the
       // [+ New post] button open the compose face instead.
-      scrollEl.appendChild(h("div", { className: "rw-list-panel" }, [
-        renderTabsBar(),
-        renderList(),
-      ]));
+      var listPanel = h("div", { className: "rw-list-panel" }, [renderTabsBar()]);
+      renderList().forEach(function (node) { if (node) listPanel.appendChild(node); });
+      scrollEl.appendChild(listPanel);
     }
   }
 
@@ -5031,19 +5701,130 @@
     // keeps their "My Submissions" list populated on every refresh; gating
     // on config.token alone would silently empty it on panel re-open.
     var mineP = config.isIdentified
-      ? loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; }).catch(function () { myTicketsCache = []; })
+      ? loadMyTickets().then(function (d) { applyMyTicketsResp(d); }).catch(function () { myTicketsCache = []; })
       : Promise.resolve().then(function () { myTicketsCache = []; });
     var assignedP = (config.isIdentified && viewerCanLiveCoder())
-      ? loadAssignedTickets().then(function (d) { assignedTicketsCache = d.tickets || []; }).catch(function () { assignedTicketsCache = []; })
+      ? loadAssignedTickets().then(function (d) { applyAssignedResp(d); }).catch(function () { assignedTicketsCache = []; })
       : Promise.resolve().then(function () { assignedTicketsCache = []; });
+    // Community coin — only meaningful for an identified viewer (the endpoint
+    // 401s for anonymous project keys). Chained on topP so config.isIdentified
+    // is known. Best-effort: coin UI is non-critical and must never block the list.
+    var commP = topP.then(function () {
+      if (!config.isIdentified) { communityStats = { identified: false, balance: 0, coinByTicket: {} }; return; }
+      return loadCommunityStats().then(function (data) {
+        communityStats = {
+          identified: true,
+          balance: (data && data.balance) || 0,
+          coinByTicket: (data && data.coinByTicket) || {},
+        };
+      }).catch(function () { communityStats = { identified: true, balance: 0, coinByTicket: {} }; });
+    }).catch(function () { communityStats = { identified: false, balance: 0, coinByTicket: {} }; });
 
-    return Promise.all([topP, updP, mineP, assignedP]).then(function () {
+    return Promise.all([topP, updP, mineP, assignedP, commP]).then(function () {
       renderPanelBody();
       refreshTabLabel();
     }).catch(function (err) {
       clearChildren(scrollEl);
       scrollEl.appendChild(renderNotice("error", t("list.loadFailed", { msg: err.message || "" })));
     });
+  }
+
+  // Refresh ONLY the unread-driving caches + the label/bell/launcher (not the
+  // list body), so the badge reflects new activity without disrupting the
+  // current view. refreshTabLabel rebuilds the launcher tab, so this updates the
+  // closed "HQ N" pill too — not just the in-panel bell.
+  function refreshBadgeCaches() {
+    if (!config.isIdentified) return Promise.resolve();
+    var jobs = [
+      loadMyTickets().then(function (d) { applyMyTicketsResp(d); }).catch(function () {}),
+    ];
+    if (viewerCanLiveCoder()) {
+      jobs.push(loadAssignedTickets().then(function (d) { applyAssignedResp(d); }).catch(function () {}));
+    }
+    return Promise.all(jobs).then(function () { refreshTabLabel(); });
+  }
+
+  // Fallback poll for the unread badge while the panel is open — only does work
+  // when the real-time notifications stream is NOT connected (the stream is the
+  // primary, instant path; see startNotificationsStream). Runs while open so an
+  // engaged user still gets updates if SSE is unavailable.
+  function startBadgePoll() {
+    stopBadgePoll();
+    if (!config.isIdentified) return;
+    badgePollTimerId = setInterval(function () {
+      if (!isOpen || !config.isIdentified) { stopBadgePoll(); return; }
+      if (notifStreamConnected) return; // SSE is handling it
+      refreshBadgeCaches();
+    }, BADGE_POLL_INTERVAL_MS);
+  }
+
+  function stopBadgePoll() {
+    if (badgePollTimerId !== null) { clearInterval(badgePollTimerId); badgePollTimerId = null; }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-time unread: a single per-user SSE stream (GET /notifications/events)
+  // that fires a payload-free 'ping' whenever a ticket the viewer reported or
+  // assigned changes — including a coder/teammate live-session reply. On a ping
+  // we re-fetch the badge caches. Runs for the page lifetime (open OR closed) so
+  // the launcher pill lights up without the widget being open. Degrades to the
+  // open-panel poll if EventSource is unavailable or the stream errors.
+  // ---------------------------------------------------------------------------
+  function notificationsEventsUrl() {
+    var url = RUNHQ_API + "/api/widget/notifications/events";
+    var params = [];
+    if (config.identitySource !== "runhq" && config.token) {
+      params.push("token=" + encodeURIComponent(config.token));
+    }
+    // ?project= lets cookie-auth members authenticate (EventSource can't send
+    // the X-RW-Project header); the BE shims it in.
+    if (config.project) params.push("project=" + encodeURIComponent(config.project));
+    return params.length ? url + "?" + params.join("&") : url;
+  }
+
+  function startNotificationsStream() {
+    if (!config.isIdentified) return;
+    if (notifEventSourceRef) return; // already streaming
+    if (typeof window.EventSource !== "function") return; // no SSE → poll covers it
+    if (notifReconnectTimerId !== null) { clearTimeout(notifReconnectTimerId); notifReconnectTimerId = null; }
+    try {
+      var es = new EventSource(notificationsEventsUrl(), { withCredentials: wantsCookieAuth() });
+      es.addEventListener("ready", function () { notifStreamConnected = true; });
+      es.addEventListener("ping", function () {
+        notifStreamConnected = true;
+        refreshBadgeCaches();
+      });
+      es.onerror = function () {
+        // A stream that errors is not silently retried in a tight loop: close it
+        // and schedule ONE delayed reconnect, so a transient blip self-heals but
+        // a hard failure (e.g. cookie project shim unsupported) falls back to the
+        // open-panel poll rather than hammering the endpoint.
+        notifStreamConnected = false;
+        try { es.close(); } catch (_) {}
+        if (notifEventSourceRef === es) {
+          notifEventSourceRef = null;
+          if (notifReconnectTimerId === null) {
+            notifReconnectTimerId = setTimeout(function () {
+              notifReconnectTimerId = null;
+              startNotificationsStream();
+            }, NOTIF_RECONNECT_MS);
+          }
+        }
+      };
+      notifEventSourceRef = es;
+    } catch (_) {
+      notifEventSourceRef = null;
+      notifStreamConnected = false;
+    }
+  }
+
+  function stopNotificationsStream() {
+    if (notifEventSourceRef) {
+      try { notifEventSourceRef.close(); } catch (_) {}
+      notifEventSourceRef = null;
+    }
+    if (notifReconnectTimerId !== null) { clearTimeout(notifReconnectTimerId); notifReconnectTimerId = null; }
+    notifStreamConnected = false;
   }
 
   // ===========================================================================
@@ -5181,6 +5962,8 @@
     chatTurnPending = false;
     chatSubmitInFlight = false;
     chatIsLiveSession = true;
+    liveCoderWorking = false;
+    if (liveCoderStaleTimerId !== null) { clearTimeout(liveCoderStaleTimerId); liveCoderStaleTimerId = null; }
     liveSessionTicket = ticket;
     // Return-from-detail bookkeeping.
     detailReturnView = "detail";
@@ -5203,6 +5986,10 @@
     if (chatClosedWatchTimerId !== null) {
       clearInterval(chatClosedWatchTimerId);
       chatClosedWatchTimerId = null;
+    }
+    if (liveCoderStaleTimerId !== null) {
+      clearTimeout(liveCoderStaleTimerId);
+      liveCoderStaleTimerId = null;
     }
   }
 
@@ -5348,6 +6135,14 @@
           try { row = JSON.parse(e.data); } catch (_) { return; }
           chatApplyMessages([row]);
         };
+        // Live-coder activity: a named control frame (not a transcript row) that
+        // toggles the pinned working/standby bar in real time.
+        es.addEventListener("coder_status", function (e) {
+          if (view !== "chat" || chatConversation !== convAtOpen) return;
+          var payload = null;
+          try { payload = JSON.parse(e.data); } catch (_) { return; }
+          if (payload) applyCoderWorking(payload.working);
+        });
         es.onerror = function () {
           try { es.close(); } catch (_) {}
           if (chatEventSourceRef === es) {
@@ -5376,6 +6171,9 @@
     chatLoadMessages(conv.id, chatLastCursor()).then(function (data) {
       if (view !== "chat" || chatConversation !== conv) return;
       chatApplyMessages((data && data.messages) || []);
+      // Poll fallback (no SSE): keep the working indicator current. coderWorking
+      // rides on the live-session messages response.
+      if (chatIsLiveSession && data && "coderWorking" in data) applyCoderWorking(data.coderWorking);
     }).catch(function () {
       // Silent — the next tick retries (matches startDetailPoll's posture).
     }).then(function () {
@@ -5384,10 +6182,16 @@
     });
   }
 
-  // After a ticket is created the agent gets a wrap-up turn and the BE
-  // closes the conversation. Status changes don't stream as message rows,
-  // so watch GET /conversations/active until this conversation stops being
-  // the active one, then flip the footer to "Start new conversation".
+  // After a ticket is created the agent gets a wrap-up turn and the BE closes
+  // the conversation once it has nothing left to resolve. Status changes don't
+  // stream as message rows, so poll for closure.
+  //
+  // We poll THIS conversation's own status (by id), NOT /conversations/active:
+  // the moment a ticket is filed the conversation gains a createdTaskId, which
+  // getActiveConversation deliberately excludes (it only surfaces intake
+  // threads). A multi-ticket intake keeps the conversation open to host the
+  // next proposal — reading "am I still the active intake thread?" would report
+  // that (legitimately open) conversation as closed and hide the pending card.
   function startChatClosedWatch() {
     if (chatClosedWatchTimerId !== null) return;
     var conv = chatConversation;
@@ -5397,10 +6201,9 @@
         chatClosedWatchTimerId = null;
         return;
       }
-      chatLoadActive().then(function (data) {
+      chatLoadStatus(conv.id).then(function (data) {
         if (view !== "chat" || chatConversation !== conv) return;
-        var active = data && data.conversation;
-        if (!active || active.id !== conv.id || active.status === "closed") chatMarkClosed();
+        if (!data || data.status === "closed") chatMarkClosed();
       }).catch(function (err) {
         if (view !== "chat" || chatConversation !== conv) return;
         if (err && err.status === 404) chatMarkClosed();
@@ -5541,8 +6344,13 @@
     if (kind === "proposal") {
       // Only the latest unresolved proposal is actionable; older / resolved
       // proposals collapse (their outcome renders from proposal_resolved).
+      // Never actionable in a Live session: that surface is a staff-to-coder
+      // relay that REUSES the reporter's intake conversation (which the staff
+      // viewer doesn't own), so filing a ticket from it 404s. An unresolved
+      // intake proposal belongs to the reporter's own chat thread.
       if (activeProposal && activeProposal.id === row.id
-          && chatConversation && chatConversation.status === "active") {
+          && chatConversation && chatConversation.status === "active"
+          && !chatIsLiveSession) {
         return renderChatProposalCard(row);
       }
       return null;
@@ -6018,14 +6826,9 @@
   // screen with nothing going on, even though a coder job is running.
   function renderLiveSessionIntro() {
     var children = [];
-    // Signature element: a live "working" pill whose pulsing dot signals that
-    // work is actively happening in the background — the direct answer to the
-    // blank-screen "is anything going on?" feeling. The dot is decorative
-    // (aria-hidden); the text carries the meaning.
-    children.push(h("div", { className: "rw-intro-status" }, [
-      h("span", { className: "rw-intro-pulse", "aria-hidden": "true" }),
-      h("span", null, t("chat.liveSessionStatus", { name: chatIdentityName() })),
-    ]));
+    // The live working/standby state now lives in the pinned status bar above
+    // the scroll area (renderLiveStatusBar), so the empty-state intro is just
+    // orientation: the ticket this session is about + a one-liner.
     // The ticket the session is about, clamped to two lines with an ellipsis
     // (full text on hover via title=) so a long subject can't blow out the
     // layout. Reads as "working on → this".
@@ -6036,6 +6839,41 @@
     children.push(h("div", { className: "rw-intro-body" }, t("chat.liveSessionIntro")));
     return h("div", { className: "rw-chat-empty rw-chat-intro" }, children);
   }
+
+  // Update state + repaint from a coder activity signal. Re-arms the client
+  // staleness fallback on "working" so a dropped idle can't wedge the bar on.
+  function applyCoderWorking(working) {
+    working = !!working;
+    if (liveCoderStaleTimerId !== null) { clearTimeout(liveCoderStaleTimerId); liveCoderStaleTimerId = null; }
+    if (working) {
+      liveCoderStaleTimerId = setTimeout(function () {
+        liveCoderStaleTimerId = null;
+        if (liveCoderWorking) { liveCoderWorking = false; renderLiveStatusBar(); }
+      }, LIVE_CODER_STALE_MS);
+    }
+    if (working === liveCoderWorking) return;
+    liveCoderWorking = working;
+    renderLiveStatusBar();
+  }
+
+  // Paint the pinned live-session status bar (working = pulsing green + "working…",
+  // standing by = steady dim dot + "send a message to steer"). No-op off-live.
+  function renderLiveStatusBar() {
+    if (!chatUi || !chatUi.liveStatusEl) return;
+    var el = chatUi.liveStatusEl;
+    el.setAttribute("class", "rw-live-status " + (liveCoderWorking ? "is-working" : "is-idle"));
+    clearChildren(el);
+    el.appendChild(h("span", { className: "rw-live-status-dot", "aria-hidden": "true" }));
+    el.appendChild(h("span", null, liveCoderWorking ? t("chat.liveWorking") : t("chat.liveStandby")));
+  }
+
+  // A "similar ticket" deflection card the agent surfaced (search_tickets).
+  function isTicketLinkRow(row) {
+    return !!(row && row.role === "event" && row.payload && row.payload.kind === "ticket_link");
+  }
+  // Show this many similar-ticket cards at full height; beyond it the group
+  // becomes a fixed-height internal scroller.
+  var TICKET_LINK_SCROLL_AFTER = 4;
 
   function renderChatMessageList() {
     if (!chatUi) return;
@@ -6061,7 +6899,7 @@
         for (var si = 0; si < chatMessages.length; si++) {
           seenMs = Math.max(seenMs, new Date(chatMessages[si].createdAt || 0).getTime() || 0);
         }
-        if (seenMs > 0) { markLiveSessionSeen(liveTaskId, seenMs); refreshTabLabel(); }
+        if (seenMs > 0) { markLiveSessionSeen(liveTaskId, seenMs); queueReadSync(liveTaskId, { liveSessionMs: seenMs }); refreshTabLabel(); }
       }
     } else {
       // Agentless threads open with a scripted offline notice that doubles as
@@ -6081,14 +6919,33 @@
     }
 
     var activeProposal = chatFindActiveProposal();
-    for (var i = 0; i < chatMessages.length; i++) {
+    var i = 0;
+    while (i < chatMessages.length) {
       var row = chatMessages[i];
+      // Group a run of consecutive "similar ticket" deflection cards
+      // (search_tickets → ticket_link events) into ONE container. When the run
+      // is large, the container is height-capped and scrolls internally, so a
+      // big result set can't push the rest of the conversation off-screen.
+      if (isTicketLinkRow(row)) {
+        var group = h("div", { className: "rw-chat-ticket-link-group" });
+        var count = 0;
+        while (i < chatMessages.length && isTicketLinkRow(chatMessages[i])) {
+          group.appendChild(renderChatTicketLinkCard(chatMessages[i].payload));
+          count++;
+          i++;
+        }
+        // A couple render inline; only cap+scroll once they'd overflow.
+        if (count > TICKET_LINK_SCROLL_AFTER) group.classList.add("rw-scrollable");
+        listEl.appendChild(group);
+        continue;
+      }
       var node = null;
       if (row.role === "user") node = renderChatUserRow(row);
       else if (row.role === "agent") node = renderChatAgentRow(row);
       else if (row.role === "team") node = renderChatTeamRow(row);
       else if (row.role === "event") node = renderChatEventRow(row, activeProposal);
       if (node) listEl.appendChild(node);
+      i++;
     }
 
     if (chatTurnPending && chatConversation && chatConversation.status === "active") {
@@ -6249,21 +7106,11 @@
       clearChildren(pendingChipsRow);
       pendingChipsRow.style.display = pendingChatImages.length > 0 ? "flex" : "none";
       pendingChatImages.forEach(function (entry, idx) {
-        var chip = h("div", {
-          className: "rw-chat-img-chip" + (entry.uploading ? " rw-uploading" : "") + (entry.failed ? " rw-failed" : ""),
-        });
-        var img = h("img", { src: entry.dataUrl, alt: entry.name || "image" });
-        chip.appendChild(img);
-        var xBtn = h("button", {
-          className: "rw-chat-img-chip-x", type: "button", "aria-label": t("aria.removeAttach"),
-        }, "×");
-        xBtn.addEventListener("click", function () {
+        pendingChipsRow.appendChild(renderPendingChatChip(entry, function () {
           pendingChatImages.splice(idx, 1);
           renderPendingChips();
           updateSendState();
-        });
-        chip.appendChild(xBtn);
-        pendingChipsRow.appendChild(chip);
+        }));
       });
     }
 
@@ -6525,11 +7372,21 @@
       root.appendChild(actionBar);
     }
 
+    // Live session only: a pinned working/standby status bar between the header
+    // and the scroll area, so the coder's real activity is always visible (not
+    // just in the empty state) and never scrolls away.
+    var liveStatusEl = null;
+    if (isLive) {
+      liveStatusEl = h("div", { className: "rw-live-status is-idle", role: "status", "aria-live": "polite" });
+      root.appendChild(liveStatusEl);
+    }
+
     var listEl = h("div", { className: "rw-chat-scroll" });
     var footerEl = h("div", { className: "rw-chat-footer" });
     root.appendChild(listEl);
     root.appendChild(footerEl);
-    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, actionBar: actionBar };
+    chatUi = { listEl: listEl, footerEl: footerEl, hatchSlot: null, inputEl: null, actionBar: actionBar, liveStatusEl: liveStatusEl };
+    if (isLive) renderLiveStatusBar();
 
     listEl.appendChild(renderLoading());
 
@@ -6544,6 +7401,7 @@
         chatSubmitInFlight = false;
         renderChatMessageList();
         renderChatFooter();
+        applyCoderWorking(data && data.coderWorking);
         startChatTransport();
       }).catch(function (err) {
         if (view !== "chat" || !chatUi) return;
@@ -6606,6 +7464,13 @@
     currentDetailTicket = ticketSummary;
     renderPanelBody();
     if (scrollEl) scrollEl.scrollTop = 0;
+    // Refresh the viewer's permissions from /api/widget/me on every detail open
+    // so staff affordances (the Live-session button, assign/preview) reflect the
+    // CURRENT role — a role changed out-of-band (e.g. in the Members tab) takes
+    // effect here without a full widget reload. fetchAndApplyMe re-renders when
+    // the fresh permissions land. Server-side gating is the real boundary; this
+    // just keeps the UI honest.
+    fetchAndApplyMe();
   }
 
   // ===========================================================================
@@ -6933,6 +7798,7 @@
         seenMs = Math.max(seenMs, new Date(activity[ai].createdAt || 0).getTime() || 0);
       }
       markTicketSeen(ticket.id, seenMs);
+      queueReadSync(ticket.id, { seenMs: seenMs });
       refreshTabLabel();
     }
 
@@ -6981,7 +7847,7 @@
 
     // The #refId chip used to live here too — it was visual noise (most
     // users never reference it). Status chip + visibility chip stay.
-    var headRefChildren = [renderStatusChip(ticket.status)];
+    var headRefChildren = [renderProgressChip(ticket)];
     if (visChip) headRefChildren.push(visChip);
 
     // Manual "Assign agent" button removed — assignment is automatic and
@@ -7148,10 +8014,33 @@
     // suggest → assign tail; on success the detail re-fetches and this button
     // disappears (the ticket now shows its assigned agent + Live session).
     if (!loading && data.canAssign) {
-      var assignErrEl = h("span", {
-        className: "rw-assign-err",
-        style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+      // Feedback slot below the button. A transient failure renders as a small
+      // red line; the terminal "no agent is set up for this project" case
+      // renders an amber callout that names the cause and where to fix it.
+      var assignMsgEl = h("div", {
+        className: "rw-assign-msg",
+        style: { width: "100%" },
       }, "");
+      var clearAssignMsg = function () { assignMsgEl.textContent = ""; };
+      var showAssignError = function (text) {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("span", {
+          className: "rw-assign-err",
+          style: { fontSize: "12px", color: "var(--rw-danger, #dc2626)" },
+        }, text));
+      };
+      var showNoAgentCallout = function () {
+        assignMsgEl.textContent = "";
+        assignMsgEl.appendChild(h("div", { className: "rw-assign-callout" }, [
+          h("span", { className: "rw-assign-callout-ic", "aria-hidden": "true" }, "⚠️"),
+          h("div", { className: "rw-assign-callout-body" }, [
+            h("span", { className: "rw-assign-callout-title" }, "No agents are set up for this project."),
+            " To assign one, open ",
+            h("span", { className: "rw-assign-callout-path" }, "Workspace Settings → Widget → Permissions"),
+            " and expose at least one agent, then try again.",
+          ]),
+        ]));
+      };
       var assignBtn = h("button", {
         className: "rw-staff-btn rw-staff-btn--primary",
         type: "button",
@@ -7171,7 +8060,7 @@
         assigning = true;
         assignBtn.disabled = true;
         assignBtn.textContent = "Assigning…";
-        assignErrEl.textContent = "";
+        clearAssignMsg();
         assignTicketAgent(ticket.id).then(function (resp) {
           var status = resp && resp.outcome && resp.outcome.status;
           if (status === "assigned") {
@@ -7181,20 +8070,24 @@
               if (view !== "detail") return;
               renderDetailInto(card, freshData, false);
             }).catch(resetAssignBtn);
-          } else {
-            // Reached the server but it could not assign (no matching agent or
-            // a transient failure). Surface it and let the user retry.
+          } else if (status === "skipped_no_agent") {
+            // Terminal: the project has no exposed agent for the picker to
+            // choose. Retrying won't help until an operator exposes one, so
+            // guide them there instead of a bare red line.
             resetAssignBtn();
-            assignErrEl.textContent = status === "skipped_no_agent"
-              ? "No matching agent available"
-              : "Couldn't assign — try again";
+            showNoAgentCallout();
+          } else {
+            // Reached the server but a transient failure stopped the assign.
+            // Surface it and let the user retry.
+            resetAssignBtn();
+            showAssignError("Couldn't assign — try again");
           }
         }).catch(function (err) {
           resetAssignBtn();
-          assignErrEl.textContent =
+          showAssignError(
             (err && err.status === 409) ? "Already assigned"
             : (err && err.status === 403) ? "Not authorized"
-            : "Couldn't assign — try again";
+            : "Couldn't assign — try again");
         });
       });
       // Non-technical framing: state plainly that nobody is on the task yet,
@@ -7206,8 +8099,37 @@
       }, "No agent is working on this task yet.");
       var assignGroup = h("div", {
         style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
-      }, [assignNote, assignBtn, assignErrEl]);
+      }, [assignNote, assignBtn, assignMsgEl]);
       staffActionEls.push(assignGroup);
+    }
+
+    // Approve / Reject affordance — approver-only (server sets data.canApprove
+    // true only when the viewer holds `approve_tickets` and the ticket is still
+    // `pending_approval`). Approving releases it onto the board (→ planned);
+    // rejecting closes it (→ cancelled). On success we re-fetch and re-render the
+    // detail in place so the approver STAYS on the ticket and sees its new status
+    // (the Approve/Reject buttons drop away as canApprove flips false). Only if
+    // the ticket is no longer viewable to them — an approver without view_tickets,
+    // once it leaves pending_approval — do we fall back to the approver queue.
+    if (!loading && data.canApprove) {
+      var approveNote = h("div", {
+        className: "rw-staff-assign-note",
+        style: { fontSize: "12.5px", lineHeight: "1.4", color: "var(--rw-muted, #6b7280)" },
+      }, t("approve.detailNote"));
+      var approveActions = renderApprovalActions(ticket, function () {
+        loadTicketDetail(ticket.id).then(function (freshData) {
+          if (view !== "detail") return;
+          renderDetailInto(card, freshData, false);
+        }).catch(function () {
+          activeTab = "approvals";
+          view = "list";
+          renderPanelBody();
+        });
+      });
+      var approveGroup = h("div", {
+        style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "7px", width: "100%" },
+      }, [approveNote, approveActions]);
+      staffActionEls.push(approveGroup);
     }
 
     // Live session affordance — staff-only (requires the `live_coder`
@@ -7865,6 +8787,8 @@
     if (afterRefresh && p && typeof p.then === "function") {
       p.then(afterRefresh);
     }
+    // Keep the unread badge/bell current while the panel is open.
+    startBadgePoll();
   }
 
   // ---------------------------------------------------------------------------
@@ -8007,6 +8931,7 @@
     // Stop any running detail poll before resetting view state.
     stopDetailPoll();
     stopChatTransport();
+    stopBadgePoll();
     chatUi = null;
     chatTurnPending = false;
     chatSubmitInFlight = false;
@@ -8017,6 +8942,9 @@
     view = "list";
     currentDetailTicket = null;
     activeTab = "hot";
+    mineUnreadOnly = false;
+    boardSearchQuery = "";
+    boardStatusFilter = "all";
     // The launcher is hidden while open; rebuild it on close so its badge
     // reflects any tickets the user just viewed (seen marks updated).
     refreshTabLabel();
@@ -8301,8 +9229,11 @@
         // Authenticated viewers (app token OR runhq cookie) get their own
         // ticket list. Pure-anon viewers only get the public update feed.
         if (config.isIdentified) {
-          loadMyTickets().then(function (d) { myTicketsCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
+          loadMyTickets().then(function (d) { applyMyTicketsResp(d); refreshTabLabel(); }).catch(function () {});
           loadUpdates().then(function (d) { updatesCache = d.tickets || []; refreshTabLabel(); }).catch(function () {});
+          // Open the real-time unread stream for the page lifetime so the
+          // launcher pill lights up even while the widget is closed.
+          startNotificationsStream();
         } else {
           myTicketsCache = [];
           assignedTicketsCache = [];
@@ -8353,7 +9284,29 @@
     window._rwTestHooks.renderAttachChip = renderAttachChip;
     window._rwTestHooks.releaseAttachPreview = releaseAttachPreview;
     window._rwTestHooks.stagedGallery = stagedGallery;
+    window._rwTestHooks.renderPendingChatChip = renderPendingChatChip;
+    window._rwTestHooks.pendingChatGallery = pendingChatGallery;
+    window._rwTestHooks._setPendingChatImages = function (imgs) {
+      pendingChatImages = (imgs || []).slice();
+    };
+    window._rwTestHooks._setModalMountEl = function (el) { modalMountEl = el; };
     window._rwTestHooks.renderLiveSessionIntro = renderLiveSessionIntro;
+    window._rwTestHooks.applyCoderWorking = applyCoderWorking;
+    window._rwTestHooks.renderLiveStatusBar = renderLiveStatusBar;
+    // Stand up a minimal live-session chat UI (just the pinned status bar) so a
+    // vm test can drive applyCoderWorking and inspect the rendered bar without
+    // bootstrapping the whole chat shell. Returns the status bar node.
+    window._rwTestHooks._setupLiveStatusUi = function () {
+      chatIsLiveSession = true;
+      liveCoderWorking = false;
+      if (liveCoderStaleTimerId !== null) { clearTimeout(liveCoderStaleTimerId); liveCoderStaleTimerId = null; }
+      var el = h("div", { className: "rw-live-status is-idle" });
+      chatUi = { listEl: h("div", null), footerEl: h("div", null), hatchSlot: null, inputEl: null, actionBar: null, liveStatusEl: el };
+      view = "chat";
+      renderLiveStatusBar();
+      return el;
+    };
+    window._rwTestHooks._getLiveCoderWorking = function () { return liveCoderWorking; };
     window._rwTestHooks.renderChatTeamRow = renderChatTeamRow;
     window._rwTestHooks.renderChatEventRow = renderChatEventRow;
     window._rwTestHooks.renderChatProposalCard = renderChatProposalCard;
@@ -8371,12 +9324,19 @@
     window._rwTestHooks._setChatConversation = function (conv) {
       chatConversation = conv;
     };
+    // Toggle the live-session flag so a vm test can assert that intake proposal
+    // cards are non-actionable in the staff-to-coder relay surface.
+    window._rwTestHooks._setChatIsLiveSession = function (on) {
+      chatIsLiveSession = !!on;
+    };
     // Unread-badge test helpers: expose the badge counter, the seen-marker, and
     // direct cache setters so vm tests can drive the full seen/unseen lifecycle
     // without bootstrapping the full network layer.
     window._rwTestHooks.launcherBadgeCount = launcherBadgeCount;
     window._rwTestHooks.markTicketSeen = markTicketSeen;
     window._rwTestHooks.markLiveSessionSeen = markLiveSessionSeen;
+    window._rwTestHooks.markAllTicketsRead = markAllTicketsRead;
+    window._rwTestHooks.seedSeenFromServer = seedSeenFromServer;
     window._rwTestHooks.hasUnreadLiveSession = hasUnreadLiveSession;
     window._rwTestHooks.viewerCanLiveCoder = viewerCanLiveCoder;
     window._rwTestHooks._setCaches = function (mine, assigned) {
@@ -8390,6 +9350,42 @@
     };
     window._rwTestHooks._setCurrentUser = function (updates) {
       Object.assign(currentUser, updates);
+    };
+    // Board search / toolbar hooks — let a vm test drive the real renderList
+    // (toolbar + list) and in-place search/unread filtering without the full
+    // network bootstrap. _setBoardCaches seeds the four tab caches; renderList
+    // returns the array of region nodes; _setSearchQuery + fillBoardList mirror
+    // typing into the search box.
+    window._rwTestHooks.renderList = renderList;
+    window._rwTestHooks.fillBoardList = fillBoardList;
+    window._rwTestHooks.ticketMatchesQuery = ticketMatchesQuery;
+    window._rwTestHooks._getBoardListEl = function () { return boardListEl; };
+    window._rwTestHooks._setActiveTab = function (tab) { activeTab = tab; };
+    window._rwTestHooks._setSearchQuery = function (q) { boardSearchQuery = q; };
+    window._rwTestHooks._setStatusFilter = function (s) { boardStatusFilter = s; };
+    window._rwTestHooks.distinctBoardProgress = distinctBoardProgress;
+    window._rwTestHooks.ticketProgress = ticketProgress;
+    window._rwTestHooks.normalizeStatus = normalizeStatus;
+    window._rwTestHooks._setUnreadOnly = function (on) { mineUnreadOnly = !!on; };
+    // Chat "similar ticket" grouping hooks — drive the real renderChatMessageList
+    // with canned ticket_link runs to assert the height-capped scroll grouping.
+    window._rwTestHooks.renderChatMessageList = renderChatMessageList;
+    window._rwTestHooks.isTicketLinkRow = isTicketLinkRow;
+    window._rwTestHooks.TICKET_LINK_SCROLL_AFTER = TICKET_LINK_SCROLL_AFTER;
+    window._rwTestHooks._setupChatUi = function () {
+      chatIsLiveSession = false;
+      view = "chat";
+      chatConversation = { id: "c1", status: "active" };
+      var listEl = h("div", { className: "rw-chat-scroll" });
+      chatUi = { listEl: listEl, footerEl: h("div", null), hatchSlot: h("div", null), inputEl: null, actionBar: h("div", null), liveStatusEl: null };
+      return listEl;
+    };
+    window._rwTestHooks._setChatMessages = function (msgs) { chatMessages = (msgs || []).slice(); };
+    window._rwTestHooks._setBoardCaches = function (caches) {
+      if (caches.updates !== undefined) updatesCache = caches.updates;
+      if (caches.hot !== undefined) topTicketsCache = caches.hot;
+      if (caches.mine !== undefined) myTicketsCache = caches.mine;
+      if (caches.approvals !== undefined) pendingApprovalCache = caches.approvals;
     };
   }
 

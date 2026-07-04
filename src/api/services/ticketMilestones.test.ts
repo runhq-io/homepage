@@ -13,7 +13,8 @@
  * sharing "Received".
  */
 import { describe, it, expect } from 'vitest';
-import { deriveTicketMilestones, type MilestoneInput } from './ticketMilestones';
+import { deriveTicketMilestones, currentMilestone, currentMilestoneDisplay, type MilestoneInput } from './ticketMilestones';
+import { TODO_STATUS_DISPLAY } from '@runhq/server-protocol';
 
 function keysWithState(input: MilestoneInput) {
   return deriveTicketMilestones(input).map((m) => `${m.key}:${m.state}`);
@@ -184,6 +185,60 @@ describe('deriveTicketMilestones', () => {
     ]);
   });
 
+  it('the done step is labelled "Done" (matches the status chip)', () => {
+    expect(labelFor({ status: 'done' }, 'in_review')).toBe('Done');
+  });
+
+  describe('approval step (requiresApproval)', () => {
+    it('is absent for tickets that did not go through the queue', () => {
+      expect(keysWithState({ status: 'pending' })).not.toContain('approval:current');
+      expect(deriveTicketMilestones({ status: 'in_progress' }).some((m) => m.key === 'approval')).toBe(false);
+    });
+
+    it('pending_approval: approval is the current step, labelled "Pending approval"', () => {
+      const input: MilestoneInput = { status: 'pending_approval', requiresApproval: true, clarificationStatus: 'skipped' };
+      expect(keysWithState(input)).toEqual([
+        'received:done',
+        'clarifying:done',
+        'approval:current',
+        'in_progress:upcoming',
+        'in_review:upcoming',
+        'reviewed:upcoming',
+        'merged:upcoming',
+        'deployed:upcoming',
+      ]);
+      expect(labelFor(input, 'approval')).toBe('Pending approval');
+    });
+
+    it('pending_approval pins at the gate even with a skipped clarifier (not In progress)', () => {
+      // Regression: the chat "skipped" clarifier used to pull the marker to In progress.
+      const input: MilestoneInput = { status: 'pending_approval', requiresApproval: true, clarificationStatus: 'skipped' };
+      const current = deriveTicketMilestones(input).find((m) => m.state === 'current');
+      expect(current?.key).toBe('approval');
+    });
+
+    it('approved (planned) with no work yet: approval done+"Approved", In progress current', () => {
+      const input: MilestoneInput = { status: 'planned', requiresApproval: true };
+      expect(keysWithState(input)).toEqual([
+        'received:done',
+        'approval:done',
+        'in_progress:current',
+        'in_review:upcoming',
+        'reviewed:upcoming',
+        'merged:upcoming',
+        'deployed:upcoming',
+      ]);
+      expect(labelFor(input, 'approval')).toBe('Approved');
+    });
+
+    it('approved + further advanced keeps approval "Approved" (done)', () => {
+      const input: MilestoneInput = { status: 'done', requiresApproval: true, clarificationStatus: 'skipped' };
+      expect(labelFor(input, 'approval')).toBe('Approved');
+      expect(keysWithState(input)).toContain('approval:done');
+      expect(keysWithState(input)).toContain('in_review:current'); // "Done" step is current
+    });
+  });
+
   it('every milestone carries a non-empty human label', () => {
     for (const m of deriveTicketMilestones({ status: 'in_progress', clarificationStatus: 'asking', prState: 'open' })) {
       expect(typeof m.label).toBe('string');
@@ -193,12 +248,64 @@ describe('deriveTicketMilestones', () => {
 
   it('is total: never throws for any status value', () => {
     const statuses: MilestoneInput['status'][] = [
-      'pending', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
+      'pending', 'pending_approval', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
       'deployed', 'deployed:prod-env-id',
     ];
     for (const status of statuses) {
       expect(() => deriveTicketMilestones({ status })).not.toThrow();
       expect(deriveTicketMilestones({ status }).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('currentMilestone / currentMilestoneDisplay — single source of truth for the chip', () => {
+  it('an open PR on an in_progress ticket reports the PR-aware step (the reported bug)', () => {
+    // The exact discrepancy: status is still in_progress, but the linked PR is
+    // open. The stepper advances to the review step, and the chip MUST follow it
+    // — not report the stale "In progress".
+    const cur = currentMilestone({ status: 'in_progress', prState: 'open' });
+    expect(cur.key).toBe('in_review');
+    // The chip label matches the stepper's, and borrows the `done` palette.
+    const disp = currentMilestoneDisplay({ status: 'in_progress', prState: 'open' });
+    expect(disp.key).toBe('in_review');
+    expect(disp.label).toBe(cur.label);
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.done.dot);
+  });
+
+  it('without a PR, an in_progress ticket reads in_progress', () => {
+    const disp = currentMilestoneDisplay({ status: 'in_progress' });
+    expect(disp.key).toBe('in_progress');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.in_progress.dot);
+  });
+
+  it('a pending_approval ticket reports the approval step', () => {
+    const disp = currentMilestoneDisplay({ status: 'pending_approval', requiresApproval: true });
+    expect(disp.key).toBe('approval');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.pending_approval.dot);
+  });
+
+  it('a deployed ticket reports the (terminal) deploy step with the env label + color', () => {
+    const disp = currentMilestoneDisplay({ status: 'deployed:prod', environments: [{ id: 'prod', name: 'Production' }] });
+    expect(disp.key).toBe('deployed');
+    expect(disp.label).toBe('Deployed → Production');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.deployed.dot);
+  });
+
+  it('a cancelled ticket reports the cancelled step', () => {
+    const disp = currentMilestoneDisplay({ status: 'cancelled' });
+    expect(disp.key).toBe('cancelled');
+    expect(disp.dot).toBe(TODO_STATUS_DISPLAY.cancelled.dot);
+  });
+
+  it('is total: returns a labelled, colored step for every status', () => {
+    const statuses: MilestoneInput['status'][] = [
+      'pending', 'pending_approval', 'planned', 'in_progress', 'done', 'reviewed', 'merged', 'cancelled',
+      'deployed', 'deployed:prod-env-id',
+    ];
+    for (const status of statuses) {
+      const disp = currentMilestoneDisplay({ status });
+      expect(disp.label.length).toBeGreaterThan(0);
+      expect(disp.dot).toMatch(/^#/);
     }
   });
 });
