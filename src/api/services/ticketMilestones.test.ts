@@ -8,9 +8,9 @@
  * clarification status, agent-assigned flag, PR state, and a deploy-env id→name
  * map used only to label the deploy step — never code).
  *
- * The track mirrors the runhq lifecycle: done → "In review", reviewed →
- * "Reviewed", merged → "Merged", deployed → "Deployed" (each its own step),
- * with pending/planned sharing "Received".
+ * The track mirrors the runhq lifecycle: done/reviewed → "Reviewed", merged →
+ * "Merged", deployed → "Deployed" (each its own step), with pending/planned
+ * sharing "Received".
  */
 import { describe, it, expect } from 'vitest';
 import { deriveTicketMilestones, type MilestoneInput } from './ticketMilestones';
@@ -28,7 +28,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'pending' })).toEqual([
       'received:current',
       'in_progress:upcoming',
-      'in_review:upcoming',
       'reviewed:upcoming',
       'merged:upcoming',
       'deployed:upcoming',
@@ -39,7 +38,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'planned' })).toEqual([
       'received:current',
       'in_progress:upcoming',
-      'in_review:upcoming',
       'reviewed:upcoming',
       'merged:upcoming',
       'deployed:upcoming',
@@ -51,7 +49,6 @@ describe('deriveTicketMilestones', () => {
       'received:done',
       'clarifying:current',
       'in_progress:upcoming',
-      'in_review:upcoming',
       'reviewed:upcoming',
       'merged:upcoming',
       'deployed:upcoming',
@@ -63,7 +60,6 @@ describe('deriveTicketMilestones', () => {
       'received:done',
       'clarifying:done',
       'in_progress:current',
-      'in_review:upcoming',
       'reviewed:upcoming',
       'merged:upcoming',
       'deployed:upcoming',
@@ -74,7 +70,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'pending', agentAssigned: true })).toEqual([
       'received:done',
       'in_progress:current',
-      'in_review:upcoming',
       'reviewed:upcoming',
       'merged:upcoming',
       'deployed:upcoming',
@@ -85,30 +80,27 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'in_progress' })).toEqual([
       'received:done',
       'in_progress:current',
-      'in_review:upcoming',
       'reviewed:upcoming',
       'merged:upcoming',
       'deployed:upcoming',
     ]);
   });
 
-  it('done (PR up, under review): in_review current', () => {
+  it('done (PR up, under review): reviewed current', () => {
     expect(keysWithState({ status: 'done' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:current',
-      'reviewed:upcoming',
+      'reviewed:current',
       'merged:upcoming',
       'deployed:upcoming',
     ]);
   });
 
-  it('an open PR advances to in_review even while status is in_progress', () => {
+  it('an open PR advances to reviewed even while status is in_progress', () => {
     expect(keysWithState({ status: 'in_progress', prState: 'open' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:current',
-      'reviewed:upcoming',
+      'reviewed:current',
       'merged:upcoming',
       'deployed:upcoming',
     ]);
@@ -118,7 +110,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'reviewed' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:done',
       'reviewed:current',
       'merged:upcoming',
       'deployed:upcoming',
@@ -129,7 +120,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'merged' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:done',
       'reviewed:done',
       'merged:current',
       'deployed:upcoming',
@@ -140,7 +130,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'in_progress', prState: 'merged' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:done',
       'reviewed:done',
       'merged:current',
       'deployed:upcoming',
@@ -151,7 +140,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'deployed' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:done',
       'reviewed:done',
       'merged:done',
       'deployed:done',
@@ -162,7 +150,6 @@ describe('deriveTicketMilestones', () => {
     expect(keysWithState({ status: 'deployed:11111111-2222-3333-4444-555555555555' })).toEqual([
       'received:done',
       'in_progress:done',
-      'in_review:done',
       'reviewed:done',
       'merged:done',
       'deployed:done',

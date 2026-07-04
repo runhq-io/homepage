@@ -53,25 +53,24 @@ export interface Milestone {
 
 /**
  * Absolute position of each step on the canonical linear track. Mirrors the
- * runhq lifecycle statuses: the internal `done`/`reviewed`/`merged`/`deployed`
- * states each get their own partner-facing step (previously all collapsed into
- * "In review" / "Shipped"). `pending` + `planned` still share "Received".
+ * runhq lifecycle statuses: the internal `reviewed`/`merged`/`deployed` states
+ * each get their own partner-facing step (`done` — PR up, under review — is
+ * surfaced as the "Reviewed" step, previously all collapsed into "In review" /
+ * "Shipped"). `pending` + `planned` still share "Received".
  */
 const TRACK = {
   received: 0,
   clarifying: 1,
   in_progress: 2,
-  in_review: 3,
-  reviewed: 4,
-  merged: 5,
-  deployed: 6,
+  reviewed: 3,
+  merged: 4,
+  deployed: 5,
 } as const;
 
 const LABELS: Record<string, string> = {
   received: 'Received',
   clarifying: 'Clarifying',
   in_progress: 'In progress',
-  in_review: 'In review',
   reviewed: 'Reviewed',
   merged: 'Merged',
   deployed: 'Deployed',
@@ -108,8 +107,8 @@ function reachedIndex(input: MilestoneInput): number {
       case 'in_progress':
         statusReached = TRACK.in_progress;
         break;
-      case 'done':       // PR up, under review
-        statusReached = TRACK.in_review;
+      case 'done':       // PR up, under review — surfaced as the reviewed step
+        statusReached = TRACK.reviewed;
         break;
       case 'reviewed':   // approved, awaiting merge
         statusReached = TRACK.reviewed;
@@ -134,7 +133,7 @@ function reachedIndex(input: MilestoneInput): number {
   // means it has landed in the base branch.
   const prReached =
     input.prState === 'merged' ? TRACK.merged :
-    input.prState ? TRACK.in_review :
+    input.prState ? TRACK.reviewed :
     TRACK.received;
 
   return Math.max(statusReached, clarReached, agentReached, prReached);
@@ -167,7 +166,6 @@ export function deriveTicketMilestones(input: MilestoneInput): Milestone[] {
     milestones.push(step('clarifying', reached, complete));
   }
   milestones.push(step('in_progress', reached, complete));
-  milestones.push(step('in_review', reached, complete));
   milestones.push(step('reviewed', reached, complete));
   milestones.push(step('merged', reached, complete));
 

@@ -301,7 +301,7 @@ export type PublicTicketDetail = {
    * Code-safe view of the linked pull request, derived from the most recent
    * `pr_linked` activity. We expose ONLY the state — never the PR number, URL,
    * or branch, which are internal locators that point at code. The state feeds
-   * the `in_review`/`shipped` milestones. null if no PR has been linked.
+   * the `reviewed`/`merged` milestones. null if no PR has been linked.
    */
   linkedPr: { state: PrState } | null;
   /**

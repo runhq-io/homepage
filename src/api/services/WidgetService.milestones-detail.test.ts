@@ -72,7 +72,7 @@ describe('getPublicTicketDetail — milestones', () => {
       expect(detail).not.toBeNull();
       expect(Array.isArray(detail!.milestones)).toBe(true);
       const keys = detail!.milestones.map((m) => m.key);
-      expect(keys).toEqual(['received', 'in_progress', 'in_review', 'reviewed', 'merged', 'deployed']);
+      expect(keys).toEqual(['received', 'in_progress', 'reviewed', 'merged', 'deployed']);
       expect(detail!.milestones.find((m) => m.key === 'in_progress')!.state).toBe('current');
     } finally {
       await db.delete(workspaceTasks).where(eq(workspaceTasks.id, id));
@@ -110,7 +110,7 @@ describe('getPublicTicketDetail — milestones', () => {
     }
   });
 
-  it('a linked PR exposes ONLY state — never number/url/branch — and advances to In review', async () => {
+  it('a linked PR exposes ONLY state — never number/url/branch — and advances to Reviewed', async () => {
     const id = await makeTask('in_progress');
     await db.insert(workspaceTaskActivity).values({
       serverId: SERVER_ID,
@@ -127,7 +127,7 @@ describe('getPublicTicketDetail — milestones', () => {
       expect(serialized).not.toContain('99');
       expect(serialized).not.toContain('github.com');
       expect(serialized).not.toContain('session/job');
-      expect(detail!.milestones.find((m) => m.key === 'in_review')!.state).toBe('current');
+      expect(detail!.milestones.find((m) => m.key === 'reviewed')!.state).toBe('current');
       // The activity feed must NOT leak the PR locators either — only state.
       const prActivity = detail!.activity.find((a) => a.type === 'pr_linked');
       expect(prActivity).toBeTruthy();
