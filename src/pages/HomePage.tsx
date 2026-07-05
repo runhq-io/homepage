@@ -8,9 +8,10 @@ import heroScreenshotSm from '../assets/smaller_screenshot.png';
 const HOME_T = {
   en: {
     // Hero
-    heroH1Line1: 'Your autonomous dev team,',
-    heroH1Line2: 'powered by Claude Code.',
-    heroLede: 'Stop prompting. RunHQ turns user feedback, telemetry events, and product signals into completed PRs ready for your review.',
+    heroEyebrow: 'Signal-to-code',
+    heroH1Line1: 'Automatically turn product signals into code.',
+    heroH1Line2: 'Reviewed, tested, shipped.',
+    heroLede: 'RunHQ turns every product signal — user feedback, telemetry, support tickets, and more — into agent-built pull requests, audited and waiting for review when you log on. You review, you ship.',
     ctaStartFree: 'Start free',
     ctaWatchDemo: 'Watch Demo',
     heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
@@ -103,9 +104,10 @@ const HOME_T = {
   },
   ko: {
     // Hero
-    heroH1Line1: 'Claude Code로 구동되는',
-    heroH1Line2: '자율 개발 팀.',
-    heroLede: '프롬프트는 그만. RunHQ는 사용자 피드백, 텔레메트리 이벤트, 제품 신호를 검토할 준비가 된 완성된 PR로 바꿔줍니다.',
+    heroEyebrow: '시그널을 코드로',
+    heroH1Line1: '제품 시그널을 자동으로 코드로.',
+    heroH1Line2: '리뷰, 테스트, 배포까지.',
+    heroLede: 'RunHQ는 모든 제품 시그널 — 사용자 피드백, 텔레메트리, 지원 티켓 등 — 을 에이전트가 만든 풀 리퀘스트로 바꿉니다. 로그인하면 이미 검수를 마치고 리뷰를 기다리고 있습니다. 리뷰하고, 배포하세요.',
     ctaStartFree: '무료로 시작하기',
     ctaWatchDemo: '데모 보기',
     heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
@@ -333,8 +335,9 @@ export default function HomePage() {
       {/* HERO */}
       <section className="rhw-hero">
         <div className="rhw-hero-side">
+          <div className="rhw-eyebrow"><span className="rhw-dot" />{t.heroEyebrow}</div>
           <h1 className="rhw-hero-h1">
-            {t.heroH1Line1} {t.heroH1Line2}
+            {t.heroH1Line1}<br />{t.heroH1Line2}
           </h1>
           <p className="rhw-hero-lede">
             {t.heroLede}
