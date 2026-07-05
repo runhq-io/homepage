@@ -26,6 +26,9 @@ jobs:
         run: npm run build
         env:
           VITE_API_URL: https://console.runhq.io
+          # GA4 Measurement ID, injected from a repo secret (not committed).
+          # If the secret is unset the build omits analytics entirely.
+          VITE_GA_ID: ${{ secrets.VITE_GA_ID }}
 
       - name: Deploy to Cloudflare Pages
         run: npx wrangler pages deploy dist --project-name=fishtank-homepage --branch=main --commit-dirty=true

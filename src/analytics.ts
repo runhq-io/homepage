@@ -2,10 +2,12 @@
 //
 // Two things the raw gtag snippet got wrong are fixed here:
 //
-//  1. Consent. GA must not fire unconditionally. We initialise Google Consent
-//     Mode v2 with every storage type denied by default, and we do not inject
-//     the gtag.js script at all until the visitor opts in. Until then no GA
-//     cookies are set and no data is sent to Google.
+//  1. Consent. GA must not fire unconditionally. Until the visitor opts in we
+//     touch nothing: no dataLayer, no gtag stub, no 'js' event, no script. The
+//     first thing that ever reaches the dataLayer is the Consent Mode v2
+//     defaults (all storage denied), and that only happens at the moment we
+//     activate — i.e. once consent is granted. So genuinely nothing reaches
+//     Google, and nothing is queued for another tag to process, before opt-in.
 //
 //  2. No hardcoded Measurement ID. The ID is injected at build time via
 //     VITE_GA_ID so each environment (dev/staging/prod) targets its own GA
@@ -14,6 +16,10 @@
 const GA_ID = import.meta.env.VITE_GA_ID;
 
 export const CONSENT_KEY = 'runhq_analytics_consent';
+// Fired on window whenever the stored consent changes in this tab, so
+// same-tab UI (the consent banner, a privacy-page toggle) can react without a
+// reload. Cross-tab changes arrive via the native 'storage' event instead.
+export const CONSENT_EVENT = 'runhq:consent-change';
 export type ConsentValue = 'granted' | 'denied';
 
 declare global {
@@ -43,13 +49,15 @@ function gtag(...args: unknown[]) {
   window.dataLayer.push(args);
 }
 
-let defaultsSet = false;
+let activated = false;
 
-// Install the dataLayer/gtag shim and declare Consent Mode defaults (all
-// denied). Idempotent — safe to call more than once.
-function ensureConsentDefaults() {
-  if (defaultsSet) return;
-  defaultsSet = true;
+// Bring GA online: install the dataLayer/gtag shim, declare Consent Mode
+// defaults (all denied), grant analytics storage, then load gtag.js. This is
+// the ONLY place that writes to the dataLayer, and it only runs once consent
+// has been granted — so nothing is queued before opt-in. Idempotent.
+function activate() {
+  if (activated || !GA_ID) return;
+  activated = true;
   window.dataLayer = window.dataLayer || [];
   window.gtag = gtag;
   gtag('consent', 'default', {
@@ -59,15 +67,7 @@ function ensureConsentDefaults() {
     analytics_storage: 'denied',
   });
   gtag('js', new Date());
-}
-
-let scriptLoaded = false;
-
-// Inject gtag.js and configure the property. Only ever called once consent
-// has been granted, so nothing reaches Google before the visitor opts in.
-function loadGtagScript() {
-  if (scriptLoaded || !GA_ID) return;
-  scriptLoaded = true;
+  gtag('consent', 'update', { analytics_storage: 'granted' });
   const s = document.createElement('script');
   s.async = true;
   s.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(GA_ID)}`;
@@ -77,15 +77,12 @@ function loadGtagScript() {
 
 /**
  * Call once on app start. Activates analytics only if the visitor previously
- * granted consent; otherwise it stays dormant until setAnalyticsConsent(true).
+ * granted consent; otherwise it stays completely dormant (nothing is written
+ * to the dataLayer) until setAnalyticsConsent(true).
  */
 export function initAnalytics() {
   if (!analyticsEnabled()) return;
-  ensureConsentDefaults();
-  if (storedConsent() === 'granted') {
-    gtag('consent', 'update', { analytics_storage: 'granted' });
-    loadGtagScript();
-  }
+  if (storedConsent() === 'granted') activate();
 }
 
 /** Record the visitor's choice and (de)activate analytics accordingly. */
@@ -95,12 +92,17 @@ export function setAnalyticsConsent(granted: boolean) {
   } catch {
     // localStorage may be unavailable — proceed with the in-memory signal.
   }
+  // Notify same-tab listeners (the 'storage' event only fires in other tabs).
+  try {
+    window.dispatchEvent(new CustomEvent(CONSENT_EVENT));
+  } catch {
+    // CustomEvent may be unavailable in exotic environments — non-fatal.
+  }
   if (!analyticsEnabled()) return;
-  ensureConsentDefaults();
   if (granted) {
-    gtag('consent', 'update', { analytics_storage: 'granted' });
-    loadGtagScript();
-  } else {
+    activate();
+  } else if (activated) {
+    // Only relevant if GA was already brought online earlier this session.
     gtag('consent', 'update', { analytics_storage: 'denied' });
   }
 }

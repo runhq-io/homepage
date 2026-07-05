@@ -1,7 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useT, useLocalePath } from '../i18n/context';
-import { analyticsEnabled, storedConsent, setAnalyticsConsent } from '../analytics';
+import {
+  analyticsEnabled,
+  storedConsent,
+  setAnalyticsConsent,
+  CONSENT_KEY,
+  CONSENT_EVENT,
+} from '../analytics';
+
+// Show the bar only while analytics is configured and the visitor is undecided.
+function shouldShow(): boolean {
+  return analyticsEnabled() && storedConsent() === null;
+}
 
 const COPY = {
   en: {
@@ -23,9 +34,24 @@ const COPY = {
 export function ConsentBanner() {
   const t = useT(COPY);
   const localePath = useLocalePath();
-  const [visible, setVisible] = useState(
-    () => analyticsEnabled() && storedConsent() === null,
-  );
+  const [visible, setVisible] = useState(shouldShow);
+
+  // Re-evaluate visibility when consent changes elsewhere: another tab
+  // (native 'storage' event) or the privacy page in this tab (CONSENT_EVENT).
+  // Without this the initializer would only run once and the banner could not
+  // reappear after consent is cleared.
+  useEffect(() => {
+    const sync = () => setVisible(shouldShow());
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CONSENT_KEY || e.key === null) sync();
+    };
+    window.addEventListener(CONSENT_EVENT, sync);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(CONSENT_EVENT, sync);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   if (!visible) return null;
 
