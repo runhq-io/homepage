@@ -48,6 +48,22 @@ Deployed via **Cloudflare Pages** (project: `fishtank-homepage`). Requires manua
 - **Build command**: `npm run build`
 - **Output directory**: `dist`
 
+## Analytics
+
+Google Analytics 4 is loaded via `src/analytics.ts`, gated behind an explicit
+cookie-consent banner (Consent Mode v2 — nothing reaches Google until the
+visitor opts in). The Measurement ID is **not** committed; it is injected at
+build time from the GitHub Actions repo secret `VITE_GA_ID` (see
+`.github/workflows/deploy-*.yml`). Leaving it unset disables analytics, which
+is the default for local development.
+
+> **Note on the previously-committed ID.** An earlier revision briefly hardcoded
+> the Measurement ID `G-PK433W7S1P` in `index.html`. It has been removed from
+> the source, but it remains in git history. A GA4 Measurement ID is public by
+> design (served to every visitor's browser) and is not a secret, but it can be
+> used to send spoofed hits. Auditing and, if desired, rotating that GA property
+> is a manual account-side action tracked outside this repo.
+
 ## Project Structure
 
 ```

@@ -62,8 +62,7 @@ export function ConsentBanner() {
 
   return (
     <div
-      role="dialog"
-      aria-live="polite"
+      role="region"
       aria-label="Cookie consent"
       style={{
         position: 'fixed',

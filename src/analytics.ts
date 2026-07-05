@@ -60,19 +60,25 @@ function activate() {
   activated = true;
   window.dataLayer = window.dataLayer || [];
   window.gtag = gtag;
+  // Consent Mode v2: declare defaults (all denied) and grant analytics storage
+  // up front, so the initial page_view is recorded under a granted signal.
   gtag('consent', 'default', {
     ad_storage: 'denied',
     ad_user_data: 'denied',
     ad_personalization: 'denied',
     analytics_storage: 'denied',
   });
-  gtag('js', new Date());
   gtag('consent', 'update', { analytics_storage: 'granted' });
+  // Load gtag.js, then push 'js' immediately followed by 'config' — the
+  // canonical order documented by Google. These pushes are queued on the
+  // dataLayer and replayed in order once the async library finishes loading.
+  // (GA4 anonymises IPs by default, so no anonymize_ip flag is needed.)
   const s = document.createElement('script');
   s.async = true;
   s.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(GA_ID)}`;
   document.head.appendChild(s);
-  gtag('config', GA_ID, { anonymize_ip: true });
+  gtag('js', new Date());
+  gtag('config', GA_ID);
 }
 
 /**
