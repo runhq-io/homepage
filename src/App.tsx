@@ -9,6 +9,7 @@ import AboutPage from './pages/AboutPage';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
 import { LocaleProvider, BrowserDetector } from './i18n/context';
+import { ConsentBanner } from './components/ConsentBanner';
 
 // Code-split: the widget board (and its 404 fallback) load their own chunk so a
 // shared `/:slug` board never pulls the marketing/Three.js bundle, and the
@@ -55,6 +56,7 @@ function App() {
             <Route path="/:slug" element={<BoardPage />} />
           </Routes>
         </Suspense>
+        <ConsentBanner />
       </LocaleProvider>
     </BrowserRouter>
   );
