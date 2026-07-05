@@ -9,6 +9,7 @@ import AboutPage from './pages/AboutPage';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
 import { LocaleProvider, BrowserDetector } from './i18n/context';
+import { ConsentBanner } from './components/ConsentBanner';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -43,6 +44,7 @@ function App() {
           <Route path="/ko/privacy" element={<PrivacyPage />} />
           <Route path="/ko/terms" element={<TermsPage />} />
         </Routes>
+        <ConsentBanner />
       </LocaleProvider>
     </BrowserRouter>
   );
