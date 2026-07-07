@@ -10,6 +10,7 @@ import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
 import { LocaleProvider, BrowserDetector } from './i18n/context';
 import { ConsentBanner } from './components/ConsentBanner';
+import RunHQWidget from './components/RunHQWidget';
 
 // Code-split: the widget board (and its 404 fallback) load their own chunk so a
 // shared `/:slug` board never pulls the marketing/Three.js bundle, and the
@@ -30,6 +31,9 @@ function App() {
       <LocaleProvider>
         <BrowserDetector />
         <ScrollToTop />
+        {/* Floating RunHQ bug-report launcher on every marketing page (stays out
+            of the way on the /:slug full-page board — see RunHQWidget). */}
+        <RunHQWidget />
         <Suspense fallback={<div style={{ minHeight: '100vh', background: '#0b0b0f' }} />}>
           <Routes>
             <Route path="/" element={<HomePage />} />

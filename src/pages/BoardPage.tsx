@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import NotFoundPage from './NotFoundPage';
+import { RESERVED_SLUGS, loadWidgetScript, removeWidgetHost } from '../widget';
 
 /**
  * Full-page RunHQ widget board, served at `www.runhq.io/:slug`.
@@ -15,27 +16,11 @@ import NotFoundPage from './NotFoundPage';
  * `www.runhq.io` and the API host (`console.runhq.io`) are same-SITE, so the
  * host-only `rw_session` cookie flows on the widget's cross-origin credentialed
  * calls; the API recognises members via its first-party-origin auth branch.
+ *
+ * `API_BASE`, `RESERVED_SLUGS`, and the widget loader/teardown helpers are
+ * shared with the marketing-site floating launcher (see ../widget and
+ * components/RunHQWidget) so the two embed surfaces stay in lockstep.
  */
-
-// The API/script origin. Baked per-env by CI (`console.runhq.io` for prod,
-// `console-staging.runhq.io` for staging); falls back to prod.
-const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, '')
-  || 'https://console.runhq.io';
-
-// Top-level paths owned by the marketing site (and a few structural names). A
-// project slug can never shadow these — react-router already routes declared
-// paths to their pages before this catch-all, but this set is the single source
-// of truth and a hard backstop. Keep in sync when adding a marketing route.
-const RESERVED_SLUGS = new Set([
-  'products', 'pricing', 'docs', 'visual', 'about', 'privacy', 'terms',
-  'ko', 'api', 'w', 'assets', 'images', 'robots.txt', 'favicon.svg', 'favicon.ico',
-]);
-
-declare global {
-  interface Window {
-    RunHQWidget?: { init: (opts: Record<string, unknown>) => void };
-  }
-}
 
 export default function BoardPage() {
   const { slug = '' } = useParams();
@@ -65,6 +50,11 @@ export default function BoardPage() {
     document.head.appendChild(robots);
 
     const start = () => {
+      // The full-page board owns the page's single widget instance. If the
+      // marketing launcher (or a previous board) already mounted one, release
+      // the slot so this standalone init isn't ignored by the script's
+      // single-widget guard.
+      removeWidgetHost();
       try {
         window.RunHQWidget?.init({ project: slug, standalone: true, useCookieAuth: true });
       } catch {
@@ -72,26 +62,18 @@ export default function BoardPage() {
       }
     };
 
-    // Reuse an already-loaded widget script (SPA navigation between boards);
-    // otherwise inject it once.
-    let script = document.querySelector<HTMLScriptElement>('script[data-runhq-widget]');
-    if (window.RunHQWidget) {
-      start();
-    } else if (script) {
-      script.addEventListener('load', start, { once: true });
-    } else {
-      script = document.createElement('script');
-      script.src = `${API_BASE}/widget.js`;
-      script.async = true;
-      script.dataset.runhqWidget = 'true';
-      script.addEventListener('load', start, { once: true });
-      document.body.appendChild(script);
-    }
+    // Reuse an already-loaded widget script (SPA navigation between boards, or a
+    // launcher mounted on a marketing page); otherwise inject it once.
+    loadWidgetScript(start);
 
     return () => {
       document.body.style.background = prevBodyBg;
       document.documentElement.style.background = prevHtmlBg;
       robots.remove();
+      // Don't leave the standalone board's widget mounted over whatever page the
+      // visitor navigates to next (e.g. back to marketing); the launcher there
+      // will mount its own instance.
+      removeWidgetHost();
     };
   }, [slug, reserved]);
 
