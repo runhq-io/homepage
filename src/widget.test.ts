@@ -44,6 +44,16 @@ describe('isBoardRoute', () => {
     expect(isBoardRoute('/some-project')).toBe(true);
   });
 
+  it('is true for a board tab sub-path (launcher stays out across tab nav)', () => {
+    // /:slug/* — the widget owns these segments; the board still owns the page.
+    expect(isBoardRoute('/arrr/tickets')).toBe(true);
+    expect(isBoardRoute('/arrr/deploys')).toBe(true);
+    expect(isBoardRoute('/arrr/my-tickets')).toBe(true);
+    expect(isBoardRoute('/arrr/tickets/')).toBe(true);
+    // A reserved first segment stays a marketing route even with sub-paths.
+    expect(isBoardRoute('/docs/anything')).toBe(false);
+  });
+
   it('is case-insensitive about reserved slugs', () => {
     expect(isBoardRoute('/Products')).toBe(false);
     expect(isBoardRoute('/KO')).toBe(false);

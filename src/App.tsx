@@ -54,10 +54,13 @@ function App() {
             <Route path="/ko/privacy" element={<PrivacyPage />} />
             <Route path="/ko/terms" element={<TermsPage />} />
 
-            {/* Catch-all: full-page widget board at www.runhq.io/:slug. MUST stay
-                last so every declared marketing path wins first. Non-project /
-                reserved slugs render a 404 from within BoardPage. */}
-            <Route path="/:slug" element={<BoardPage />} />
+            {/* Catch-all: full-page widget board at www.runhq.io/:slug, plus its
+                per-tab sub-paths (/:slug/tickets, /:slug/deploys, /:slug/my-tickets)
+                — the trailing splat keeps BoardPage mounted while the widget owns
+                that segment (see be/public/widget.js tab routing). MUST stay last so
+                every declared marketing path wins first. Non-project / reserved
+                slugs render a 404 from within BoardPage. */}
+            <Route path="/:slug/*" element={<BoardPage />} />
           </Routes>
         </Suspense>
         <ConsentBanner />

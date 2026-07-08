@@ -39,15 +39,17 @@ export const RESERVED_SLUGS = new Set([
 ]);
 
 /**
- * True when `pathname` resolves to the full-page widget board (`/:slug`) rather
- * than a marketing page. That route is a single non-empty path segment whose
- * slug is not reserved — exactly the complement of every declared marketing
- * route. The board owns the page's single widget instance there, so the
- * floating launcher stays out.
+ * True when `pathname` resolves to the full-page widget board (`/:slug` and its
+ * per-tab sub-paths `/:slug/tickets`, `/:slug/deploys`, `/:slug/my-tickets`)
+ * rather than a marketing page. The board route is any path whose FIRST segment
+ * is a non-empty, non-reserved slug — reserved first segments (`docs`, `ko`, …)
+ * are the declared marketing routes and their descendants. The board owns the
+ * page's single widget instance on every one of these paths, so the floating
+ * launcher stays out across tab navigation too.
  */
 export function isBoardRoute(pathname: string): boolean {
   const segments = pathname.replace(/^\/+|\/+$/g, '').split('/');
-  if (segments.length !== 1 || segments[0] === '') return false;
+  if (segments.length === 0 || segments[0] === '') return false;
   return !RESERVED_SLUGS.has(segments[0].toLowerCase());
 }
 
