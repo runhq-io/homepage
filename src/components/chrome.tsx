@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useT, useLocale, useLocalePath, useLocaleSwitch, LOCALES, type Locale } from '../i18n/context';
+import { useT, useLocale, useLocaleSwitch, LOCALES, type Locale } from '../i18n/context';
 
 export const SIGNUP_URL = 'https://app.runhq.io/signup';
 export const LOGIN_URL = 'https://app.runhq.io';
@@ -295,19 +295,18 @@ type NavActive = 'products' | 'pricing' | 'docs' | null;
 
 export function Navbar({ active = null }: { active?: NavActive } = {}) {
   const t = useT(NAV_T);
-  const lp = useLocalePath();
   return (
     <header className="rhc-nav">
       <style>{NAV_STYLES}</style>
       <div className="rhc-nav-l">
-        <Link className="rhc-brand" to={lp('/')}>
+        <Link className="rhc-brand" to="/">
           <span className="rhc-brand-mark"><MercuryMark size={22} /></span>
           <span className="rhc-brand-name">RunHQ</span>
         </Link>
         <nav className="rhc-nav-c">
-          <Link to={lp('/products')} className={`rhc-nav-i ${active === 'products' ? 'rhc-nav-on' : ''}`}>{t.products}</Link>
-          <Link to={lp('/pricing')} className={`rhc-nav-i ${active === 'pricing' ? 'rhc-nav-on' : ''}`}>{t.pricing}</Link>
-          <Link to={lp('/docs')} className={`rhc-nav-i ${active === 'docs' ? 'rhc-nav-on' : ''}`}>{t.docs}</Link>
+          <Link to="/products" className={`rhc-nav-i ${active === 'products' ? 'rhc-nav-on' : ''}`}>{t.products}</Link>
+          <Link to="/pricing" className={`rhc-nav-i ${active === 'pricing' ? 'rhc-nav-on' : ''}`}>{t.pricing}</Link>
+          <Link to="/docs" className={`rhc-nav-i ${active === 'docs' ? 'rhc-nav-on' : ''}`}>{t.docs}</Link>
         </nav>
       </div>
       <div className="rhc-nav-r">
@@ -321,7 +320,6 @@ export function Navbar({ active = null }: { active?: NavActive } = {}) {
 
 export function Footer() {
   const t = useT(FOOTER_T);
-  const lp = useLocalePath();
   return (
     <footer className="rhc-footer">
       <style>{FOOTER_STYLES}</style>
@@ -335,17 +333,17 @@ export function Footer() {
         </div>
         <div>
           <div className="rhc-footer-h">{t.productsH}</div>
-          <Link to={lp('/products')}>{t.agentAutomation}</Link>
-          <Link to={lp('/products')}>{t.projectManagement}</Link>
-          <Link to={lp('/products')}>{t.devEnvironment}</Link>
-          <Link to={lp('/products')}>{t.feedbackWidget}</Link>
+          <Link to="/products">{t.agentAutomation}</Link>
+          <Link to="/products">{t.projectManagement}</Link>
+          <Link to="/products">{t.devEnvironment}</Link>
+          <Link to="/products">{t.feedbackWidget}</Link>
         </div>
         <div>
           <div className="rhc-footer-h">{t.companyH}</div>
-          <Link to={lp('/docs')}>{t.docs}</Link>
-          <Link to={lp('/about')}>{t.about}</Link>
-          <Link to={lp('/privacy')}>{t.privacy}</Link>
-          <Link to={lp('/terms')}>{t.terms}</Link>
+          <Link to="/docs">{t.docs}</Link>
+          <Link to="/about">{t.about}</Link>
+          <Link to="/privacy">{t.privacy}</Link>
+          <Link to="/terms">{t.terms}</Link>
         </div>
       </div>
       <div className="rhc-footer-base">

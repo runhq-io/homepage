@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { Navbar, Footer, Avatar, SIGNUP_URL } from '../components/chrome';
-import { useT, useLocalePath } from '../i18n/context';
+import { useT } from '../i18n/context';
 
 const PRODUCTS_T = {
   en: {
@@ -245,7 +245,6 @@ type Product = {
 
 export default function ProductsPage() {
   const t = useT(PRODUCTS_T);
-  const lp = useLocalePath();
 
   const projRows = [
     { v: 47, t: t.pvProjRow1, s: 'shipping', label: t.pvProjStatusShipping },
@@ -329,7 +328,7 @@ export default function ProductsPage() {
         </p>
         <div className="rhpp-hero-cta">
           <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.startFree}</a>
-          <Link className="rhp-btn-ghost" to={lp('/pricing')}>{t.seePricing}</Link>
+          <Link className="rhp-btn-ghost" to="/pricing">{t.seePricing}</Link>
         </div>
       </section>
 
@@ -387,7 +386,7 @@ export default function ProductsPage() {
         <p className="rhpp-cta-sub">{t.ctaSub}</p>
         <div className="rhpp-cta-row">
           <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.startFree}</a>
-          <Link className="rhp-btn-ghost" to={lp('/pricing')}>{t.seePricing}</Link>
+          <Link className="rhp-btn-ghost" to="/pricing">{t.seePricing}</Link>
         </div>
       </section>
 

@@ -33,43 +33,31 @@ export const RUNHQ_PROJECT = 'runhq';
 // their pages before the `/:slug` board catch-all, but this set is the single
 // source of truth and a hard backstop. Keep in sync when adding a marketing
 // route. Mirrors the routes declared in App.tsx.
+//
+// `ko` is deliberately absent: the locale is no longer a path prefix (see
+// i18n/context), so nothing but the legacy `/ko/*` redirect claims that segment.
+// Reserving it would make `isBoardRoute('/ko/arrr')` false, the launcher would
+// grab the page's single widget slot during the render before that redirect
+// commits, and the board's own `init()` would lose to the widget script's
+// `initInFlight` guard — a blank board.
 export const RESERVED_SLUGS = new Set([
   'products', 'pricing', 'docs', 'visual', 'about', 'privacy', 'terms',
-  'ko', 'api', 'w', 'assets', 'images', 'robots.txt', 'favicon.svg', 'favicon.ico',
+  'api', 'w', 'assets', 'images', 'robots.txt', 'favicon.svg', 'favicon.ico',
 ]);
-
-// Locale prefixes owned by the marketing site. A board URL never carries one,
-// but the locale auto-detector used to mint them and visitors shared the result,
-// so App.tsx redirects `/ko/<slug>` onto `/<slug>`. That makes `/ko/<slug>` a
-// board route *in waiting*, and `isBoardRoute` must say so: the launcher renders
-// once before the redirect commits, and if it claims the page's single widget
-// slot there, the board's own `init()` loses to the script's `initInFlight`
-// guard and the page stays blank. Kept here (not imported from i18n) because
-// i18n/context imports `isBoardRoute` — the dependency runs one way.
-const LOCALE_PREFIXES = new Set(['ko']);
 
 /**
  * True when `pathname` resolves to the full-page widget board (`/:slug` and its
  * per-tab sub-paths `/:slug/tickets`, `/:slug/deploys`, `/:slug/my-tickets`)
- * rather than a marketing page. The board route is any path whose first
- * meaningful segment is a non-empty, non-reserved slug — reserved segments
- * (`docs`, `ko`, …) are the declared marketing routes and their descendants.
- * The board owns the page's single widget instance on every one of these paths,
- * so the floating launcher stays out across tab navigation too.
- *
- * A leading locale prefix is skipped, because `/ko/<slug>` redirects onto the
- * board (see App.tsx / BoardPage's LocalizedBoardRedirect) and therefore *is* a
- * board route. `/ko` alone, and `/ko/<reserved>`, remain marketing.
+ * rather than a marketing page. The board route is any path whose first segment
+ * is a non-empty, non-reserved slug — reserved first segments (`docs`, `pricing`,
+ * …) are the declared marketing routes and their descendants. The board owns the
+ * page's single widget instance on every one of these paths, so the floating
+ * launcher stays out across tab navigation too.
  */
 export function isBoardRoute(pathname: string): boolean {
   const segments = pathname.replace(/^\/+|\/+$/g, '').split('/');
-  const first = segments[0]?.toLowerCase() ?? '';
-  if (!first) return false;
-  if (LOCALE_PREFIXES.has(first)) {
-    const second = segments[1]?.toLowerCase() ?? '';
-    return !!second && !RESERVED_SLUGS.has(second);
-  }
-  return !RESERVED_SLUGS.has(first);
+  if (segments.length === 0 || segments[0] === '') return false;
+  return !RESERVED_SLUGS.has(segments[0].toLowerCase());
 }
 
 declare global {
@@ -115,7 +103,7 @@ export function loadWidgetScript(onReady: () => void): void {
  * CAVEAT: it only releases a *settled* instance. The script's guard is
  * `initInFlight || document.querySelector('runhq-widget-host')`, and nothing a
  * host page can call clears `initInFlight` — so an `init()` issued inside
- * another surface's async init gap is still dropped with a "already mounted"
+ * another surface's async init gap is still dropped with an "already mounted"
  * warning. Callers must therefore never let both surfaces init for the same
  * navigation; `isBoardRoute` is what keeps the launcher out of the board's way.
  * Closing the race properly means letting a fresh `init()` supersede an
