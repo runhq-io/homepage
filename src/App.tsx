@@ -16,6 +16,10 @@ import RunHQWidget from './components/RunHQWidget';
 // shared `/:slug` board never pulls the marketing/Three.js bundle, and the
 // marketing pages never pull the board. See BoardPage for the design.
 const BoardPage = lazy(() => import('./pages/BoardPage'));
+// Same chunk as BoardPage — it is the board route's locale-prefix repair hatch.
+const LocalizedBoardRedirect = lazy(() =>
+  import('./pages/BoardPage').then((m) => ({ default: m.LocalizedBoardRedirect })),
+);
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -53,6 +57,12 @@ function App() {
             <Route path="/ko/about" element={<AboutPage />} />
             <Route path="/ko/privacy" element={<PrivacyPage />} />
             <Route path="/ko/terms" element={<TermsPage />} />
+
+            {/* Boards have no Korean twin, so /ko/<slug> is never a URL we mint —
+                but the locale auto-detector used to produce (and visitors shared)
+                them. Redirect back onto the canonical board instead of resolving
+                slug `ko` and 404ing. Declared /ko/* routes above win first. */}
+            <Route path="/ko/:slug/*" element={<LocalizedBoardRedirect />} />
 
             {/* Catch-all: full-page widget board at www.runhq.io/:slug, plus its
                 per-tab sub-paths (/:slug/tickets, /:slug/deploys, /:slug/my-tickets)
