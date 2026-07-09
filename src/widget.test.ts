@@ -44,6 +44,29 @@ describe('isBoardRoute', () => {
     expect(isBoardRoute('/some-project')).toBe(true);
   });
 
+  /**
+   * `/ko/<slug>` redirects onto `/<slug>`, so it IS a board route. If the
+   * launcher mounts during the render before that redirect commits, it takes the
+   * page's single widget slot; the board's init() then hits the script's
+   * `initInFlight` guard, is dropped as a "duplicate", and the board never
+   * paints — a blank page with a stray launcher bubble. Regression guard.
+   */
+  it('is true for a locale-prefixed board (the redirect lands on a board)', () => {
+    expect(isBoardRoute('/ko/arrr')).toBe(true);
+    expect(isBoardRoute('/ko/runhq')).toBe(true);
+    expect(isBoardRoute('/ko/arrr/tickets')).toBe(true);
+  });
+
+  it('keeps the locale prefix itself, and its reserved children, marketing', () => {
+    expect(isBoardRoute('/ko')).toBe(false);
+    expect(isBoardRoute('/ko/')).toBe(false);
+    expect(isBoardRoute('/ko/ko')).toBe(false);
+    expect(isBoardRoute('/ko/api')).toBe(false);
+    for (const slug of RESERVED_SLUGS) {
+      expect(isBoardRoute(`/ko/${slug}`)).toBe(false);
+    }
+  });
+
   it('is true for a board tab sub-path (launcher stays out across tab nav)', () => {
     // /:slug/* — the widget owns these segments; the board still owns the page.
     expect(isBoardRoute('/arrr/tickets')).toBe(true);
