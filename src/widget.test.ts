@@ -26,12 +26,6 @@ describe('isBoardRoute', () => {
     expect(isBoardRoute('/docs/a/b')).toBe(false);
   });
 
-  it('is false for the Korean locale home and its sub-routes', () => {
-    expect(isBoardRoute('/ko')).toBe(false);
-    expect(isBoardRoute('/ko/products')).toBe(false);
-    expect(isBoardRoute('/ko/docs/intro')).toBe(false);
-  });
-
   it('is false for every reserved / structural slug', () => {
     for (const slug of RESERVED_SLUGS) {
       expect(isBoardRoute(`/${slug}`)).toBe(false);
@@ -45,26 +39,17 @@ describe('isBoardRoute', () => {
   });
 
   /**
-   * `/ko/<slug>` redirects onto `/<slug>`, so it IS a board route. If the
-   * launcher mounts during the render before that redirect commits, it takes the
-   * page's single widget slot; the board's init() then hits the script's
-   * `initInFlight` guard, is dropped as a "duplicate", and the board never
-   * paints — a blank page with a stray launcher bubble. Regression guard.
+   * `ko` MUST NOT be reserved. `/ko/*` is a legacy redirect onto the unprefixed
+   * path, so `/ko/arrr` lands on a board. Reserving `ko` would make this false,
+   * the launcher would claim the page's single widget slot during the render
+   * before the redirect commits, and the board's own `init()` would be dropped
+   * by the widget script's `initInFlight` guard — a blank board with a stray
+   * launcher bubble. That shipped once; this is the regression guard.
    */
-  it('is true for a locale-prefixed board (the redirect lands on a board)', () => {
+  it('does not reserve the retired locale prefix', () => {
+    expect(RESERVED_SLUGS.has('ko')).toBe(false);
     expect(isBoardRoute('/ko/arrr')).toBe(true);
-    expect(isBoardRoute('/ko/runhq')).toBe(true);
     expect(isBoardRoute('/ko/arrr/tickets')).toBe(true);
-  });
-
-  it('keeps the locale prefix itself, and its reserved children, marketing', () => {
-    expect(isBoardRoute('/ko')).toBe(false);
-    expect(isBoardRoute('/ko/')).toBe(false);
-    expect(isBoardRoute('/ko/ko')).toBe(false);
-    expect(isBoardRoute('/ko/api')).toBe(false);
-    for (const slug of RESERVED_SLUGS) {
-      expect(isBoardRoute(`/ko/${slug}`)).toBe(false);
-    }
   });
 
   it('is true for a board tab sub-path (launcher stays out across tab nav)', () => {
@@ -79,7 +64,8 @@ describe('isBoardRoute', () => {
 
   it('is case-insensitive about reserved slugs', () => {
     expect(isBoardRoute('/Products')).toBe(false);
-    expect(isBoardRoute('/KO')).toBe(false);
+    expect(isBoardRoute('/DOCS')).toBe(false);
+    expect(isBoardRoute('/Docs/intro')).toBe(false);
   });
 
   it('tolerates trailing slashes on a board slug', () => {

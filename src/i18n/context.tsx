@@ -1,6 +1,4 @@
-import { createContext, useContext, useEffect } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { isBoardRoute } from '../widget';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 export type Locale = 'en' | 'ko';
 
@@ -9,51 +7,76 @@ export const LOCALES: { code: Locale; label: string }[] = [
   { code: 'ko', label: '한국어' },
 ];
 
-const LocaleContext = createContext<Locale>('en');
-
-const LOCALE_KEY = 'runhq_locale';
-const KO_PREFIX = '/ko';
+export const LOCALE_KEY = 'runhq_locale';
 
 /**
- * The `/ko` prefix is a **marketing-site** concept: only the routes declared in
- * App.tsx have a Korean twin (`/pricing` → `/ko/pricing`). The full-page widget
- * board served by the `/:slug/*` catch-all has none — it renders the customer's
- * board, not our copy. Prefixing one yields `/ko/<slug>`, which the router reads
- * as slug `ko` (a reserved slug) and renders as a 404.
+ * Locale is a **user preference**, not a URL segment.
  *
- * So no locale move — automatic (BrowserDetector) or user-driven (the language
- * switcher) — may ever carry a board URL under `/ko`.
+ * It used to be a path prefix (`/ko/pricing`). That put locales and project
+ * slugs in the same namespace: the board catch-all `/:slug` cannot tell whether
+ * a lone `/ko` is a language or a project, and every attempt to disambiguate it
+ * was a guard bolted onto a guard. Path-based locale exists to give crawlers a
+ * distinct URL per language, and this site emits no `hreflang`, no canonical
+ * link, and no sitemap — so the prefix paid the collision and bought nothing.
+ *
+ * Now: one URL per page. The locale comes from `localStorage`, defaulting to the
+ * browser's language, and the switcher writes it. Legacy `/ko/*` links redirect
+ * to their unprefixed path (see App.tsx) so URLs already shared keep working.
  */
-export function isLocalizablePath(pathname: string): boolean {
-  return !isBoardRoute(pathname);
+
+interface LocaleContextValue {
+  locale: Locale;
+  setLocale: (next: Locale) => void;
 }
 
-export function pathForLocale(currentPath: string, targetLocale: Locale): string {
-  const stripped = currentPath.startsWith(KO_PREFIX)
-    ? currentPath.slice(KO_PREFIX.length) || '/'
-    : currentPath;
-  if (targetLocale === 'ko' && isLocalizablePath(stripped)) {
-    return stripped === '/' ? KO_PREFIX : `${KO_PREFIX}${stripped}`;
+const LocaleContext = createContext<LocaleContextValue>({ locale: 'en', setLocale: () => {} });
+
+function isLocale(value: unknown): value is Locale {
+  return value === 'en' || value === 'ko';
+}
+
+/** The persisted preference, or null when unset / unreadable (private mode). */
+export function readStoredLocale(): Locale | null {
+  try {
+    const stored = localStorage.getItem(LOCALE_KEY);
+    return isLocale(stored) ? stored : null;
+  } catch {
+    return null;
   }
-  return stripped;
 }
 
-export function localeFromPath(pathname: string): Locale {
-  if (pathname === KO_PREFIX || pathname.startsWith(`${KO_PREFIX}/`)) return 'ko';
-  return 'en';
+/** Explicit preference wins; otherwise fall back to the browser's language. */
+export function detectLocale(navigatorLanguage: string = ''): Locale {
+  const stored = readStoredLocale();
+  if (stored) return stored;
+  return navigatorLanguage.toLowerCase().startsWith('ko') ? 'ko' : 'en';
 }
 
 export function LocaleProvider({ children }: { children: React.ReactNode }) {
-  const { pathname } = useLocation();
-  const locale = localeFromPath(pathname);
+  const [locale, setLocaleState] = useState<Locale>(() =>
+    detectLocale(typeof navigator !== 'undefined' ? navigator.language || '' : ''),
+  );
+
   useEffect(() => {
     if (typeof document !== 'undefined') document.documentElement.lang = locale;
   }, [locale]);
-  return <LocaleContext.Provider value={locale}>{children}</LocaleContext.Provider>;
+
+  const setLocale = useCallback((next: Locale) => {
+    try {
+      localStorage.setItem(LOCALE_KEY, next);
+    } catch {
+      // localStorage may be unavailable (private mode, etc.) — the switch still
+      // applies for this session, it just won't persist.
+    }
+    setLocaleState(next);
+  }, []);
+
+  const value = useMemo(() => ({ locale, setLocale }), [locale, setLocale]);
+  return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;
 }
 
 export function useLocale(): Locale {
-  return useContext(LocaleContext);
+  return useContext(LocaleContext).locale;
 }
 
 export function useT<T extends Record<Locale, unknown>>(content: T): T[Locale] {
@@ -61,59 +84,10 @@ export function useT<T extends Record<Locale, unknown>>(content: T): T[Locale] {
   return content[locale];
 }
 
-export function useLocalePath() {
-  const locale = useLocale();
-  return (path: string): string => {
-    if (locale !== 'ko') return path;
-    if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('mailto:')) return path;
-    if (path.startsWith('/') && !isLocalizablePath(path)) return path;
-    if (path === '/') return KO_PREFIX;
-    if (path.startsWith(KO_PREFIX)) return path;
-    return `${KO_PREFIX}${path.startsWith('/') ? path : `/${path}`}`;
-  };
-}
-
+/**
+ * Switch language in place. No navigation — the URL does not encode the locale,
+ * so the current page simply re-renders in the new language.
+ */
 export function useLocaleSwitch() {
-  const { pathname, search, hash } = useLocation();
-  const navigate = useNavigate();
-  return (target: Locale) => {
-    try {
-      localStorage.setItem(LOCALE_KEY, target);
-    } catch {
-      // localStorage may be unavailable (private mode, etc.) — fail silently.
-    }
-    navigate(`${pathForLocale(pathname, target)}${search}${hash}`);
-  };
-}
-
-export function BrowserDetector() {
-  const { pathname, search, hash } = useLocation();
-  const navigate = useNavigate();
-  useEffect(() => {
-    // A shared board link (www.runhq.io/arrr) must open the board for everyone,
-    // whatever their browser language. Sending a Korean visitor to /ko/arrr made
-    // the router resolve slug `ko` and render a 404 — see isLocalizablePath.
-    if (!isLocalizablePath(pathname)) return;
-
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem(LOCALE_KEY);
-    } catch {
-      stored = null;
-    }
-    const onKoPath = localeFromPath(pathname) === 'ko';
-
-    if (stored === 'ko' && !onKoPath) {
-      navigate(`${pathForLocale(pathname, 'ko')}${search}${hash}`, { replace: true });
-      return;
-    }
-    if (!stored && !onKoPath) {
-      const lang = typeof navigator !== 'undefined' ? navigator.language || '' : '';
-      if (lang.toLowerCase().startsWith('ko')) {
-        navigate(`${pathForLocale(pathname, 'ko')}${search}${hash}`, { replace: true });
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  return null;
+  return useContext(LocaleContext).setLocale;
 }

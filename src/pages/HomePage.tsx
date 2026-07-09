@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, SIGNUP_URL, LOGIN_URL } from '../components/chrome';
 import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
-import { useT, useLocalePath } from '../i18n/context';
+import { useT } from '../i18n/context';
 import heroScreenshot from '../assets/screenshot.png';
 import heroScreenshotSm from '../assets/smaller_screenshot.png';
 
@@ -231,9 +231,6 @@ function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: R
 
 export default function HomePage() {
   const t = useT(HOME_T);
-  const lp = useLocalePath();
-  // lp is wired up for any future internal links; current CTAs use external auth URLs.
-  void lp;
   const [demoOpen, setDemoOpen] = useState(false);
   const demoBtnRef = useRef<HTMLButtonElement>(null);
   const [pipelineResetTick, setPipelineResetTick] = useState(0);

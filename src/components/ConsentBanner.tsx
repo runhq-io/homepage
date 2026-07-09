@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useT, useLocalePath } from '../i18n/context';
+import { useT } from '../i18n/context';
 import {
   analyticsEnabled,
   storedConsent,
@@ -33,7 +33,6 @@ const COPY = {
 // and the visitor hasn't chosen yet; the choice is persisted and gates GA.
 export function ConsentBanner() {
   const t = useT(COPY);
-  const localePath = useLocalePath();
   const [visible, setVisible] = useState(shouldShow);
 
   // Re-evaluate visibility when consent changes elsewhere: another tab
@@ -89,7 +88,7 @@ export function ConsentBanner() {
       <p style={{ margin: 0, flex: '1 1 260px' }}>
         {t.text}{' '}
         <Link
-          to={localePath('/privacy')}
+          to="/privacy"
           style={{ color: 'var(--rhw-accent)', textDecoration: 'underline' }}
         >
           {t.privacy}

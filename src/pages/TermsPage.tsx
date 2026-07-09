@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { Navbar, Footer } from '../components/chrome';
 import { LEGAL_STYLES } from './PrivacyPage';
-import { useT, useLocalePath } from '../i18n/context';
+import { useT } from '../i18n/context';
 
 const TERMS_T = {
   en: {
@@ -366,7 +366,6 @@ const TERMS_T = {
 
 export default function TermsPage() {
   const t = useT(TERMS_T);
-  const lp = useLocalePath();
   return (
     <div className="rhp-root rhl-root">
       <style>{LEGAL_STYLES}</style>
@@ -498,7 +497,7 @@ export default function TermsPage() {
         <section className="rhl-sec">
           <h2>{t.s16H}</h2>
           <p>
-            {t.s16p1Pre}<Link className="rhl-link" to={lp('/privacy')}>{t.s16p1Link}</Link>{t.s16p1Post}
+            {t.s16p1Pre}<Link className="rhl-link" to="/privacy">{t.s16p1Link}</Link>{t.s16p1Post}
           </p>
         </section>
 

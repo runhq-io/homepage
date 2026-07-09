@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Navbar, Footer, SIGNUP_URL } from '../components/chrome';
-import { useT, useLocale, useLocalePath } from '../i18n/context';
+import { useT, useLocale } from '../i18n/context';
 
 // =============================================================================
 // Inline helpers — keep markup short inside the page registry below.
@@ -13,18 +13,15 @@ const Kbd = ({ children }: { children: React.ReactNode }) => <span className="rh
 const UL = ({ children }: { children: React.ReactNode }) => <ul className="rhpd-ul">{children}</ul>;
 const OL = ({ children }: { children: React.ReactNode }) => <ol className="rhpd-ol">{children}</ol>;
 
-// NL: internal docs link. Accepts an unprefixed path (e.g. "/docs/foo") and prepends
-// the locale prefix at render time via useLocalePath().
+// NL: internal docs link. Paths are absolute and locale-free (e.g. "/docs/foo").
 const NL = ({ to, children }: { to: string; children: React.ReactNode }) => {
-  const lp = useLocalePath();
-  return <Link className="rhpd-link" to={lp(to)}>{children}</Link>;
+  return <Link className="rhpd-link" to={to}>{children}</Link>;
 };
 
 // LL: locale-aware Link with a caller-supplied className. Used for buttons and
 // card links in WELCOME_HERO where we need custom classes.
 const LL = ({ to, className, children }: { to: string; className?: string; children: React.ReactNode }) => {
-  const lp = useLocalePath();
-  return <Link className={className} to={lp(to)}>{children}</Link>;
+  return <Link className={className} to={to}>{children}</Link>;
 };
 
 const Code = ({ title, children }: { title?: string; children: string }) => (
@@ -2349,14 +2346,13 @@ function buildSidebar(pages: DocPage[]) {
 
 function PrevNext({ pages, idx }: { pages: DocPage[]; idx: number }) {
   const t = useT(DOCS_T);
-  const lp = useLocalePath();
   const prev = idx > 0 ? pages[idx - 1] : null;
   const next = idx < pages.length - 1 ? pages[idx + 1] : null;
   if (!prev && !next) return null;
   return (
     <nav className="rhpd-prevnext">
       {prev ? (
-        <Link to={lp(prev.path)} className="rhpd-pn rhpd-pn-prev">
+        <Link to={prev.path} className="rhpd-pn rhpd-pn-prev">
           <span className="rhpd-pn-arrow">←</span>
           <span>
             <span className="rhpd-pn-kicker mono">{t.prevLabel}</span>
@@ -2365,7 +2361,7 @@ function PrevNext({ pages, idx }: { pages: DocPage[]; idx: number }) {
         </Link>
       ) : <span />}
       {next ? (
-        <Link to={lp(next.path)} className="rhpd-pn rhpd-pn-next">
+        <Link to={next.path} className="rhpd-pn rhpd-pn-next">
           <span>
             <span className="rhpd-pn-kicker mono">{t.nextLabel}</span>
             <span className="rhpd-pn-title">{next.title}</span>
@@ -2410,7 +2406,6 @@ function SearchBar({ query, setQuery }: { query: string; setQuery: (q: string) =
 
 function Sidebar({ pages, currentPath, query, setQuery }: { pages: DocPage[]; currentPath: string; query: string; setQuery: (q: string) => void }) {
   const locale = useLocale();
-  const lp = useLocalePath();
   const groups = useMemo(() => buildSidebar(pages), [pages]);
   const q = query.trim().toLowerCase();
   return (
@@ -2426,7 +2421,7 @@ function Sidebar({ pages, currentPath, query, setQuery }: { pages: DocPage[]; cu
               {items.map((p) => (
                 <Link
                   key={p.path}
-                  to={lp(p.path)}
+                  to={p.path}
                   className={`rhpd-side-i ${p.path === currentPath ? 'rhpd-side-on' : ''}`}
                 >
                   {p.title}
@@ -2493,11 +2488,10 @@ function useActiveSection(ids: string[]) {
 export default function DocsPage() {
   const loc = useLocation();
   const locale = useLocale();
-  const lp = useLocalePath();
   const t = useT(DOCS_T);
 
-  // Strip the /ko prefix before matching against the page registry paths.
-  const path = loc.pathname.replace(/^\/ko/, '').replace(/\/+$/, '') || '/docs';
+  // Normalize the trailing slash before matching against the page registry paths.
+  const path = loc.pathname.replace(/\/+$/, '') || '/docs';
 
   const pages = locale === 'ko' ? PAGES_KO : PAGES_EN;
   const idx = pages.findIndex((p) => p.path === path);
@@ -2519,7 +2513,7 @@ export default function DocsPage() {
           {page ? (
             <>
               <div className="rhpd-crumbs mono">
-                <Link to={lp('/docs')}>{t.crumbsDocs}</Link>
+                <Link to="/docs">{t.crumbsDocs}</Link>
                 <span>/</span>
                 <span>{GROUP_LABEL[locale][page.group]}</span>
                 <span>/</span>
@@ -2546,12 +2540,12 @@ export default function DocsPage() {
           ) : (
             <div className="rhpd-404">
               <div className="rhpd-crumbs mono">
-                <Link to={lp('/docs')}>{t.crumbsDocs}</Link>
+                <Link to="/docs">{t.crumbsDocs}</Link>
                 <span>/</span>
                 <span className="rhpd-cur">{t.crumbsNotFound}</span>
               </div>
               <h1 className="rhpd-h1">{t.notFoundH1}</h1>
-              <p className="rhpd-lede">{t.notFoundLedePre}<Link className="rhpd-link" to={lp('/docs')}>{t.notFoundLedeLink}</Link>{t.notFoundLedeSuffix}</p>
+              <p className="rhpd-lede">{t.notFoundLedePre}<Link className="rhpd-link" to="/docs">{t.notFoundLedeLink}</Link>{t.notFoundLedeSuffix}</p>
             </div>
           )}
         </main>

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import HomePage from './pages/HomePage';
 import ProductsPage from './pages/ProductsPage';
 import PricingPage from './pages/PricingPage';
@@ -8,7 +8,7 @@ import VisualPage from './pages/VisualPage';
 import AboutPage from './pages/AboutPage';
 import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
-import { LocaleProvider, BrowserDetector } from './i18n/context';
+import { LocaleProvider } from './i18n/context';
 import { ConsentBanner } from './components/ConsentBanner';
 import RunHQWidget from './components/RunHQWidget';
 
@@ -16,10 +16,6 @@ import RunHQWidget from './components/RunHQWidget';
 // shared `/:slug` board never pulls the marketing/Three.js bundle, and the
 // marketing pages never pull the board. See BoardPage for the design.
 const BoardPage = lazy(() => import('./pages/BoardPage'));
-// Same chunk as BoardPage — it is the board route's locale-prefix repair hatch.
-const LocalizedBoardRedirect = lazy(() =>
-  import('./pages/BoardPage').then((m) => ({ default: m.LocalizedBoardRedirect })),
-);
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -29,11 +25,30 @@ function ScrollToTop() {
   return null;
 }
 
+/**
+ * Retires the old `/ko/*` locale prefix.
+ *
+ * The locale is a stored preference now, not a path segment (see i18n/context),
+ * so every `/ko/...` URL maps onto its unprefixed twin: `/ko/pricing` → `/pricing`,
+ * `/ko/arrr/tickets` → `/arrr/tickets`, `/ko` → `/`. Those URLs are in chat logs
+ * and bookmarks, so they redirect rather than 404.
+ *
+ * This route is the ONLY thing that claims the `ko` segment, which is why `ko` is
+ * not in RESERVED_SLUGS: `isBoardRoute('/ko/arrr')` must stay true so the floating
+ * launcher yields the page's single widget slot during the render before this
+ * redirect commits (see widget.ts). The cost is that no project may use the slug
+ * `ko` — one explicit trade, in one place.
+ */
+function LegacyLocalePathRedirect() {
+  const { '*': rest = '' } = useParams();
+  const { search, hash } = useLocation();
+  return <Navigate to={`/${rest}${search}${hash}`} replace />;
+}
+
 function App() {
   return (
     <BrowserRouter>
       <LocaleProvider>
-        <BrowserDetector />
         <ScrollToTop />
         {/* Floating RunHQ bug-report launcher on every marketing page (stays out
             of the way on the /:slug full-page board — see RunHQWidget). */}
@@ -49,20 +64,8 @@ function App() {
             <Route path="/privacy" element={<PrivacyPage />} />
             <Route path="/terms" element={<TermsPage />} />
 
-            <Route path="/ko" element={<HomePage />} />
-            <Route path="/ko/products" element={<ProductsPage />} />
-            <Route path="/ko/pricing" element={<PricingPage />} />
-            <Route path="/ko/docs/*" element={<DocsPage />} />
-            <Route path="/ko/visual" element={<VisualPage />} />
-            <Route path="/ko/about" element={<AboutPage />} />
-            <Route path="/ko/privacy" element={<PrivacyPage />} />
-            <Route path="/ko/terms" element={<TermsPage />} />
-
-            {/* Boards have no Korean twin, so /ko/<slug> is never a URL we mint —
-                but the locale auto-detector used to produce (and visitors shared)
-                them. Redirect back onto the canonical board instead of resolving
-                slug `ko` and 404ing. Declared /ko/* routes above win first. */}
-            <Route path="/ko/:slug/*" element={<LocalizedBoardRedirect />} />
+            {/* Legacy locale-prefixed URLs → their unprefixed twin. */}
+            <Route path="/ko/*" element={<LegacyLocalePathRedirect />} />
 
             {/* Catch-all: full-page widget board at www.runhq.io/:slug, plus its
                 per-tab sub-paths (/:slug/tickets, /:slug/deploys, /:slug/my-tickets)

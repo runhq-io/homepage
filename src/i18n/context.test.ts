@@ -1,58 +1,78 @@
-import { describe, it, expect } from 'vitest';
-import { isLocalizablePath, pathForLocale, localeFromPath } from './context';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { detectLocale, readStoredLocale, LOCALE_KEY } from './context';
 
 /**
- * The `/ko` prefix belongs to the marketing site only. The full-page widget
- * board (`/:slug`) has no Korean twin, so nothing may move a board URL under
- * `/ko` — doing so made the router resolve slug `ko` and render a 404, which is
- * how a shared `www.runhq.io/arrr` link broke for every Korean-language browser
- * while working for everyone else.
+ * Locale is a stored user preference, not a URL segment. Nothing here may look at
+ * `location`: a path prefix is what put locales in the same namespace as project
+ * slugs, so `/ko` was ambiguous with a board named `ko` and shared board links
+ * 404'd for Korean browsers.
+ *
+ * Tests run in vitest's node environment, which has no `localStorage`, so we
+ * install a real in-memory Storage — the code under test is exercised unchanged.
  */
-describe('isLocalizablePath', () => {
-  it('is true for the marketing routes that have a Korean twin', () => {
-    for (const path of [
-      '/', '/products', '/pricing', '/docs', '/docs/getting-started',
-      '/visual', '/about', '/privacy', '/terms',
-    ]) {
-      expect(isLocalizablePath(path)).toBe(true);
-    }
+function installStorage(impl?: Partial<Storage>) {
+  const map = new Map<string, string>();
+  const store: Storage = {
+    get length() {
+      return map.size;
+    },
+    clear: () => map.clear(),
+    getItem: (k) => map.get(k) ?? null,
+    key: (i) => [...map.keys()][i] ?? null,
+    removeItem: (k) => void map.delete(k),
+    setItem: (k, v) => void map.set(k, String(v)),
+    ...impl,
+  };
+  Object.defineProperty(globalThis, 'localStorage', { value: store, configurable: true });
+  return store;
+}
+
+describe('detectLocale', () => {
+  beforeEach(() => {
+    installStorage();
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, 'localStorage');
   });
 
-  it('is false for a full-page board and its per-tab sub-paths', () => {
-    expect(isLocalizablePath('/arrr')).toBe(false);
-    expect(isLocalizablePath('/arrr/tickets')).toBe(false);
-    expect(isLocalizablePath('/runhq/deploys')).toBe(false);
-  });
-});
-
-describe('pathForLocale', () => {
-  it('prefixes marketing paths when switching to Korean', () => {
-    expect(pathForLocale('/', 'ko')).toBe('/ko');
-    expect(pathForLocale('/pricing', 'ko')).toBe('/ko/pricing');
-    expect(pathForLocale('/docs/getting-started', 'ko')).toBe('/ko/docs/getting-started');
+  it('falls back to the browser language when nothing is stored', () => {
+    expect(detectLocale('ko-KR')).toBe('ko');
+    expect(detectLocale('ko')).toBe('ko');
+    expect(detectLocale('KO-kr')).toBe('ko');
+    expect(detectLocale('en-US')).toBe('en');
+    expect(detectLocale('fr')).toBe('en');
+    expect(detectLocale('')).toBe('en');
+    expect(detectLocale()).toBe('en');
   });
 
-  it('strips the prefix when switching back to English', () => {
-    expect(pathForLocale('/ko', 'en')).toBe('/');
-    expect(pathForLocale('/ko/pricing', 'en')).toBe('/pricing');
+  it('lets an explicit stored preference beat the browser language', () => {
+    localStorage.setItem(LOCALE_KEY, 'en');
+    expect(detectLocale('ko-KR')).toBe('en');
+    localStorage.setItem(LOCALE_KEY, 'ko');
+    expect(detectLocale('en-US')).toBe('ko');
   });
 
-  it('leaves a board path alone in BOTH directions — a board has no /ko twin', () => {
-    expect(pathForLocale('/arrr', 'ko')).toBe('/arrr');
-    expect(pathForLocale('/arrr/tickets', 'ko')).toBe('/arrr/tickets');
-    expect(pathForLocale('/arrr', 'en')).toBe('/arrr');
+  it('ignores a garbage stored value rather than trusting it', () => {
+    localStorage.setItem(LOCALE_KEY, 'klingon');
+    expect(readStoredLocale()).toBeNull();
+    expect(detectLocale('ko-KR')).toBe('ko');
+    expect(detectLocale('en-US')).toBe('en');
   });
 
-  it('is idempotent for a board path, so no redirect loop is possible', () => {
-    expect(pathForLocale(pathForLocale('/arrr', 'ko'), 'ko')).toBe('/arrr');
+  it('survives localStorage throwing (private mode) instead of blanking the page', () => {
+    installStorage({
+      getItem: () => {
+        throw new Error('access denied');
+      },
+    });
+    expect(readStoredLocale()).toBeNull();
+    expect(detectLocale('ko-KR')).toBe('ko');
+    expect(detectLocale('en-US')).toBe('en');
   });
-});
 
-describe('localeFromPath', () => {
-  it('reads the locale off the prefix, not off a board slug', () => {
-    expect(localeFromPath('/ko')).toBe('ko');
-    expect(localeFromPath('/ko/pricing')).toBe('ko');
-    expect(localeFromPath('/')).toBe('en');
-    expect(localeFromPath('/arrr')).toBe('en');
+  it('survives localStorage being absent entirely', () => {
+    Reflect.deleteProperty(globalThis, 'localStorage');
+    expect(readStoredLocale()).toBeNull();
+    expect(detectLocale('ko-KR')).toBe('ko');
   });
 });

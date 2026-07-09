@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Navigate, useLocation, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import NotFoundPage from './NotFoundPage';
 import { RESERVED_SLUGS, loadWidgetScript, removeWidgetHost } from '../widget';
 
@@ -88,27 +88,4 @@ export default function BoardPage() {
       aria-busy="true"
     />
   );
-}
-
-/**
- * Heals locale-prefixed board URLs: `/ko/arrr/tickets` → `/arrr/tickets`.
- *
- * A board has no localized twin (see i18n/context `isLocalizablePath`), so
- * `/ko/:slug` is never a URL we mint. It exists in the wild because the locale
- * auto-detector used to prefix *every* path for Korean browsers, rewriting
- * shared board links into a path the router resolves as slug `ko` — a 404. Those
- * URLs are now in chat logs and bookmarks, so redirect rather than 404 them.
- *
- * A reserved second segment (`/ko/api`, `/ko/ko`) is not a board and never was:
- * it keeps the 404 it has always rendered. Declared `/ko/*` marketing routes are
- * matched ahead of this one and never reach it.
- */
-export function LocalizedBoardRedirect() {
-  const { slug = '', '*': rest = '' } = useParams();
-  const { search, hash } = useLocation();
-
-  if (!slug || RESERVED_SLUGS.has(slug.toLowerCase())) return <NotFoundPage />;
-
-  const suffix = rest ? `/${rest}` : '';
-  return <Navigate to={`/${slug}${suffix}${search}${hash}`} replace />;
 }
