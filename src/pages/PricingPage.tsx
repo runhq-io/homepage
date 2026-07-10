@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react';
 import { Navbar, Footer, Wordmark, LOGOS, SIGNUP_URL } from '../components/chrome';
+import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT } from '../i18n/context';
 
 type Plan = {
@@ -529,7 +530,7 @@ export default function PricingPage() {
         <h2 className="rhpx-cta-h">{t.ctaH}</h2>
         <div className="rhpx-cta-row">
           <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.ctaPrimary}</a>
-          <a className="rhp-btn-ghost" href={SIGNUP_URL}>{t.ctaSecondary}</a>
+          <TalkToUsButton className="rhp-btn-ghost">{t.ctaSecondary}</TalkToUsButton>
         </div>
         <div className="rhpx-cta-meta">{t.ctaMeta}</div>
       </section>

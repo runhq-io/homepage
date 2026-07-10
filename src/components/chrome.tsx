@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useT, useLocale, useLocalePath, useLocaleSwitch, LOCALES, type Locale } from '../i18n/context';
+import { TalkToUsButton } from './TalkToUsModal';
 
 export const SIGNUP_URL = 'https://app.runhq.io/signup';
 export const LOGIN_URL = 'https://app.runhq.io';
@@ -11,7 +12,7 @@ const NAV_T = {
     pricing: 'Pricing',
     docs: 'Docs',
     signIn: 'Sign in',
-    startFree: 'Start free',
+    startFree: 'Talk to us',
     langMenuAria: 'Change language',
   },
   ko: {
@@ -19,7 +20,7 @@ const NAV_T = {
     pricing: '요금제',
     docs: '문서',
     signIn: '로그인',
-    startFree: '무료 시작',
+    startFree: '문의하기',
     langMenuAria: '언어 변경',
   },
 } as const;
@@ -313,7 +314,7 @@ export function Navbar({ active = null }: { active?: NavActive } = {}) {
       <div className="rhc-nav-r">
         <LangSwitcher />
         <a className="rhc-signin" href={LOGIN_URL}>{t.signIn}</a>
-        <a className="rhc-cta" href={SIGNUP_URL}>{t.startFree}</a>
+        <TalkToUsButton className="rhc-cta">{t.startFree}</TalkToUsButton>
       </div>
     </header>
   );

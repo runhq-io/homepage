@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
-import { Navbar, Footer, Avatar, SIGNUP_URL } from '../components/chrome';
+import { Navbar, Footer, Avatar } from '../components/chrome';
+import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT, useLocalePath } from '../i18n/context';
 
 const PRODUCTS_T = {
@@ -8,7 +9,7 @@ const PRODUCTS_T = {
     heroH1: 'One platform. Four surfaces. The whole loop.',
     heroLede:
       'RunHQ captures the moment someone tells you something is broken, hands it to the right agent in a reproducible workspace, then routes the diff back to a reviewer. Four products. One queue. One audit log.',
-    startFree: 'Start free →',
+    startFree: 'Talk to us →',
     seePricing: 'See pricing',
 
     // Product visuals — status labels (Projects mock)
@@ -99,7 +100,7 @@ const PRODUCTS_T = {
     heroH1: '하나의 플랫폼. 네 개의 표면. 전체 루프.',
     heroLede:
       'RunHQ는 누군가 "이거 안 돼요"라고 말하는 순간을 포착해, 재현 가능한 워크스페이스에서 알맞은 에이전트에게 넘기고, 그 결과 diff를 다시 리뷰어에게 라우팅합니다. 제품 네 개. 큐 하나. 감사 로그 하나.',
-    startFree: '무료로 시작하기 →',
+    startFree: '문의하기 →',
     seePricing: '가격 보기',
 
     // Product visuals — status labels (Projects mock)
@@ -328,7 +329,7 @@ export default function ProductsPage() {
           {t.heroLede}
         </p>
         <div className="rhpp-hero-cta">
-          <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.startFree}</a>
+          <TalkToUsButton className="rhp-btn-primary">{t.startFree}</TalkToUsButton>
           <Link className="rhp-btn-ghost" to={lp('/pricing')}>{t.seePricing}</Link>
         </div>
       </section>
@@ -386,7 +387,7 @@ export default function ProductsPage() {
         <h2 className="rhpp-cta-h">{t.ctaH}</h2>
         <p className="rhpp-cta-sub">{t.ctaSub}</p>
         <div className="rhpp-cta-row">
-          <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.startFree}</a>
+          <TalkToUsButton className="rhp-btn-primary">{t.startFree}</TalkToUsButton>
           <Link className="rhp-btn-ghost" to={lp('/pricing')}>{t.seePricing}</Link>
         </div>
       </section>
