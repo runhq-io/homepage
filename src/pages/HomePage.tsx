@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, SIGNUP_URL, LOGIN_URL } from '../components/chrome';
 import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
 import { useT, useLocalePath } from '../i18n/context';
+import { API_BASE } from '../widget';
 import heroScreenshot from '../assets/screenshot.png';
 import heroScreenshotSm from '../assets/smaller_screenshot.png';
+import arrrCover from '../assets/arrr-cover.jpg';
 
 const HOME_T = {
   en: {
@@ -86,6 +88,25 @@ const HOME_T = {
     deployDeployV: 'vercel · production',
     deployLiveLabel: 'live:',
     deployLiveV: 'portal.runhq.io · 200 OK',
+    // Showcase — live boards
+    showcaseEyebrow: 'Live boards',
+    showcaseH2Line1: 'Real projects.',
+    showcaseH2Line2: 'Running right now.',
+    showcaseDeck: 'Every RunHQ project gets a public board — the same tickets, agent runs, and deploys you would run on your own product. Open one and watch the loop turn in real time.',
+    showcaseOpenBoard: 'Open the live board',
+    showcaseOpen: 'Open board',
+    showcaseLive: 'live',
+    showcaseStatTicketsWeek: 'tickets this week',
+    showcaseStatContributors: 'contributors',
+    showcaseStatDeploysWeek: 'deploys this week',
+    showcaseStatTicketsTotal: 'total tickets',
+    showcaseArrrName: 'ARRR',
+    showcaseArrrTagline: 'A community shipping features by vote — hundreds of tickets a week, agents merging around the clock.',
+    showcaseArrrArtAlt: 'ARRR — a voxel pirate game built on RunHQ',
+    showcaseRunhqName: 'RunHQ',
+    showcaseRunhqTagline: 'Our own board. We run RunHQ on RunHQ — every fix you see ships through this loop.',
+    showcaseModdioName: 'Moddio',
+    showcaseModdioTagline: 'A game platform routing player feedback straight into agent-built changes.',
     // CTA band
     ctaH1: 'Stop translating feedback by hand.',
     ctaH2: 'Start shipping it.',
@@ -181,6 +202,25 @@ const HOME_T = {
     deployDeployV: 'vercel · production',
     deployLiveLabel: '라이브:',
     deployLiveV: 'portal.runhq.io · 200 OK',
+    // Showcase — live boards
+    showcaseEyebrow: '라이브 보드',
+    showcaseH2Line1: '실제 프로젝트가',
+    showcaseH2Line2: '지금 돌아가고 있습니다.',
+    showcaseDeck: '모든 RunHQ 프로젝트에는 공개 보드가 있습니다 — 여러분이 자기 제품에서 돌릴 것과 똑같은 티켓, 에이전트 실행, 배포가 담겨 있죠. 하나 열어서 루프가 실시간으로 도는 걸 지켜보세요.',
+    showcaseOpenBoard: '라이브 보드 열기',
+    showcaseOpen: '보드 열기',
+    showcaseLive: '라이브',
+    showcaseStatTicketsWeek: '이번 주 티켓',
+    showcaseStatContributors: '기여자',
+    showcaseStatDeploysWeek: '이번 주 배포',
+    showcaseStatTicketsTotal: '전체 티켓',
+    showcaseArrrName: 'ARRR',
+    showcaseArrrTagline: '투표로 기능을 배포하는 커뮤니티 — 매주 수백 개의 티켓, 24시간 내내 머지하는 에이전트.',
+    showcaseArrrArtAlt: 'ARRR — RunHQ로 만든 복셀 해적 게임',
+    showcaseRunhqName: 'RunHQ',
+    showcaseRunhqTagline: '우리 자신의 보드. RunHQ는 RunHQ 위에서 돌아갑니다 — 여러분이 보는 모든 수정이 이 루프를 거쳐 배포됩니다.',
+    showcaseModdioName: 'Moddio',
+    showcaseModdioTagline: '플레이어 피드백을 에이전트가 만든 변경으로 곧장 연결하는 게임 플랫폼.',
     // CTA band
     ctaH1: '피드백을 손으로 옮기는 건 그만.',
     ctaH2: '바로 배포하세요.',
@@ -197,6 +237,82 @@ const HOME_T = {
     modalCloseLabel: '데모 영상 닫기',
   },
 } as const;
+
+/**
+ * Live stats for the "Real projects" showcase, pulled from the public board API
+ * (same host the widget talks to). Two unauthenticated GETs on mount:
+ *   - `/api/widget/projects` → total ticket counts for every card (one call).
+ *   - `/api/widget/home-stats` w/ `X-RW-Project: arrr` → the hero's weekly numbers.
+ * Credentials are omitted (public data), and state seeds with the fallbacks below
+ * so first paint, localhost dev (CORS blocks the fetch there), and any failure all
+ * render sensible numbers. See the design spec under docs/superpowers/specs.
+ */
+const SHOWCASE_FALLBACK = {
+  arrr: { ticketsWeek: 500, contributors: 130, deploysWeek: 100, ticketsTotal: 650 },
+  runhq: { ticketsTotal: 60 },
+  moddio: { ticketsTotal: 20 },
+} as const;
+
+type ShowcaseStats = {
+  arrr: { ticketsWeek: number; contributors: number; deploysWeek: number };
+  totals: { arrr: number; runhq: number; moddio: number };
+};
+
+function useBoardStats(): ShowcaseStats {
+  const [stats, setStats] = useState<ShowcaseStats>({
+    arrr: {
+      ticketsWeek: SHOWCASE_FALLBACK.arrr.ticketsWeek,
+      contributors: SHOWCASE_FALLBACK.arrr.contributors,
+      deploysWeek: SHOWCASE_FALLBACK.arrr.deploysWeek,
+    },
+    totals: {
+      arrr: SHOWCASE_FALLBACK.arrr.ticketsTotal,
+      runhq: SHOWCASE_FALLBACK.runhq.ticketsTotal,
+      moddio: SHOWCASE_FALLBACK.moddio.ticketsTotal,
+    },
+  });
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const opts: RequestInit = { signal: ctrl.signal, credentials: 'omit' };
+
+    // Total ticket counts for all cards in one call.
+    fetch(`${API_BASE}/api/widget/projects`, opts)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((data: { projects?: Array<{ slug: string; ticketCount: number }> }) => {
+        const bySlug = new Map((data.projects ?? []).map((p) => [p.slug, p.ticketCount]));
+        setStats((s) => ({
+          ...s,
+          totals: {
+            arrr: bySlug.get('arrr') ?? s.totals.arrr,
+            runhq: bySlug.get('runhq') ?? s.totals.runhq,
+            moddio: bySlug.get('moddio') ?? s.totals.moddio,
+          },
+        }));
+      })
+      .catch(() => {/* keep fallbacks */});
+
+    // Rich weekly stats for the ARRR hero.
+    fetch(`${API_BASE}/api/widget/home-stats`, { ...opts, headers: { 'X-RW-Project': 'arrr' } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d: { ticketsCreated7d?: number; activeContributors7d?: number; dailyDeployVolume?: Array<{ count?: number }> }) => {
+        const deploysWeek = (d.dailyDeployVolume ?? []).reduce((n, x) => n + (x.count ?? 0), 0);
+        setStats((s) => ({
+          ...s,
+          arrr: {
+            ticketsWeek: d.ticketsCreated7d ?? s.arrr.ticketsWeek,
+            contributors: d.activeContributors7d ?? s.arrr.contributors,
+            deploysWeek: deploysWeek || s.arrr.deploysWeek,
+          },
+        }));
+      })
+      .catch(() => {/* keep fallbacks */});
+
+    return () => ctrl.abort();
+  }, []);
+
+  return stats;
+}
 
 function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: React.RefObject<HTMLButtonElement | null> }) {
   const t = useT(HOME_T);
@@ -237,6 +353,7 @@ export default function HomePage() {
   const [demoOpen, setDemoOpen] = useState(false);
   const demoBtnRef = useRef<HTMLButtonElement>(null);
   const [pipelineResetTick, setPipelineResetTick] = useState(0);
+  const boardStats = useBoardStats();
 
   useEffect(() => {
     const id = setInterval(() => setPipelineResetTick(tick => tick + 1), 4 * 60 * 1000);
@@ -415,6 +532,66 @@ export default function HomePage() {
               </div>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* SHOWCASE — real, live project boards */}
+      <section className="rhw-showcase">
+        <div className="rhw-section-head">
+          <div className="rhw-eyebrow"><span className="rhw-dot" />{t.showcaseEyebrow}</div>
+          <h2 className="rhw-h2">{t.showcaseH2Line1}<br />{t.showcaseH2Line2}</h2>
+          <p className="rhw-section-deck">{t.showcaseDeck}</p>
+        </div>
+
+        <div className="rhw-showcase-grid">
+          {/* Hero — ARRR */}
+          <a className="rhw-sc-card rhw-sc-hero" href="/arrr">
+            <img className="rhw-sc-hero-art" src={arrrCover} alt={t.showcaseArrrArtAlt} loading="lazy" />
+            <div className="rhw-sc-hero-body">
+              <div>
+                <div className="rhw-sc-top">
+                  <div className="rhw-sc-name">{t.showcaseArrrName}</div>
+                  <span className="rhw-sc-live"><span className="rhw-live-dot" />{t.showcaseLive}</span>
+                </div>
+                <p className="rhw-sc-tagline">{t.showcaseArrrTagline}</p>
+              </div>
+              <div className="rhw-sc-stats">
+                <div className="rhw-sc-stat">
+                  <div className="rhw-sc-stat-n">{boardStats.arrr.ticketsWeek.toLocaleString()}</div>
+                  <div className="rhw-sc-stat-l">{t.showcaseStatTicketsWeek}</div>
+                </div>
+                <div className="rhw-sc-stat">
+                  <div className="rhw-sc-stat-n">{boardStats.arrr.contributors.toLocaleString()}</div>
+                  <div className="rhw-sc-stat-l">{t.showcaseStatContributors}</div>
+                </div>
+                <div className="rhw-sc-stat">
+                  <div className="rhw-sc-stat-n">{boardStats.arrr.deploysWeek.toLocaleString()}</div>
+                  <div className="rhw-sc-stat-l">{t.showcaseStatDeploysWeek}</div>
+                </div>
+              </div>
+              <span className="rhw-sc-open rhw-sc-open-primary">{t.showcaseOpenBoard} <span>→</span></span>
+            </div>
+          </a>
+
+          {/* Secondary — RunHQ, Moddio */}
+          <div className="rhw-sc-side">
+            <a className="rhw-sc-card rhw-sc-sm" href="/runhq">
+              <div className="rhw-sc-name">{t.showcaseRunhqName}</div>
+              <p className="rhw-sc-tagline">{t.showcaseRunhqTagline}</p>
+              <div className="rhw-sc-sm-foot">
+                <span className="rhw-sc-sm-stat"><strong>{boardStats.totals.runhq.toLocaleString()}</strong> {t.showcaseStatTicketsTotal}</span>
+                <span className="rhw-sc-open">{t.showcaseOpen} <span>→</span></span>
+              </div>
+            </a>
+            <a className="rhw-sc-card rhw-sc-sm" href="/moddio">
+              <div className="rhw-sc-name">{t.showcaseModdioName}</div>
+              <p className="rhw-sc-tagline">{t.showcaseModdioTagline}</p>
+              <div className="rhw-sc-sm-foot">
+                <span className="rhw-sc-sm-stat"><strong>{boardStats.totals.moddio.toLocaleString()}</strong> {t.showcaseStatTicketsTotal}</span>
+                <span className="rhw-sc-open">{t.showcaseOpen} <span>→</span></span>
+              </div>
+            </a>
+          </div>
         </div>
       </section>
 
@@ -972,6 +1149,118 @@ const HOME_STYLES = `
     color: var(--rhw-ink-soft);
   }
   .rhw-lv-pr-btn-on { background: var(--rhw-good); color: #fff; border-color: var(--rhw-good); }
+
+  /* Showcase — live boards */
+  .rhw-showcase { padding-bottom: 80px; }
+  .rhw-showcase-grid {
+    display: grid; grid-template-columns: 1.4fr 1fr;
+    gap: 14px;
+    padding: 0 48px;
+    align-items: stretch;
+  }
+  .rhw-sc-card {
+    display: flex; flex-direction: column;
+    background: var(--rhw-surface);
+    border: 1px solid var(--rhw-line);
+    border-radius: 14px;
+    padding: 26px 24px;
+    color: inherit;
+    transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+  }
+  .rhw-sc-card:hover {
+    border-color: var(--rhw-accent);
+    transform: translateY(-2px);
+    box-shadow: 0 24px 56px -28px rgba(20, 19, 15, 0.24);
+  }
+  .rhw-sc-hero { flex-direction: row; padding: 0; gap: 0; overflow: hidden; }
+  .rhw-sc-hero-art {
+    flex: 0 0 42%;
+    align-self: stretch;
+    width: 42%;
+    object-fit: cover;
+    object-position: center;
+    display: block;
+    border-right: 1px solid var(--rhw-line);
+    background: var(--rhw-bg-2);
+  }
+  .rhw-sc-hero-body {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 26px 24px;
+  }
+  .rhw-sc-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .rhw-sc-name { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+  .rhw-sc-hero .rhw-sc-name { font-size: 28px; }
+  .rhw-sc-live {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--rhw-good);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .rhw-sc-tagline {
+    font-size: 14px; line-height: 1.55;
+    color: var(--rhw-ink-soft);
+    margin: 10px 0 0;
+    text-wrap: pretty;
+  }
+  .rhw-sc-hero .rhw-sc-tagline { font-size: 15px; max-width: 480px; }
+  .rhw-sc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .rhw-sc-stat {
+    background: var(--rhw-bg-2);
+    border: 1px solid var(--rhw-line-soft);
+    border-radius: 10px;
+    padding: 16px 14px;
+  }
+  .rhw-sc-stat-n {
+    font-size: 30px; font-weight: 600; letter-spacing: -0.02em;
+    line-height: 1; color: var(--rhw-ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .rhw-sc-stat-l { font-size: 12px; color: var(--rhw-ink-mute); margin-top: 6px; }
+  .rhw-sc-open {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 500;
+    color: var(--rhw-accent) !important;
+  }
+  .rhw-sc-open span { transition: transform 0.15s; }
+  .rhw-sc-card:hover .rhw-sc-open span { transform: translateX(3px); }
+  .rhw-sc-open-primary {
+    align-self: flex-start;
+    padding: 11px 18px;
+    background: var(--rhw-ink);
+    color: #fff !important;
+    border-radius: 9px;
+    font-size: 14px;
+    transition: background 0.15s;
+  }
+  .rhw-sc-hero:hover .rhw-sc-open-primary { background: var(--rhw-accent); }
+  .rhw-sc-side { display: flex; flex-direction: column; gap: 14px; }
+  .rhw-sc-sm { flex: 1; }
+  .rhw-sc-sm-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-top: auto; padding-top: 18px;
+  }
+  .rhw-sc-sm-stat { font-size: 12.5px; color: var(--rhw-ink-mute); }
+  .rhw-sc-sm-stat strong { color: var(--rhw-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  @media (max-width: 1100px) {
+    .rhw-showcase-grid { grid-template-columns: 1fr; padding: 0 32px; }
+  }
+  @media (max-width: 720px) {
+    .rhw-sc-stats { gap: 8px; }
+    .rhw-sc-stat { padding: 13px 10px; }
+    .rhw-sc-stat-n { font-size: 24px; }
+    .rhw-sc-hero .rhw-sc-name { font-size: 24px; }
+    .rhw-sc-hero { flex-direction: column; }
+    .rhw-sc-hero-art {
+      width: 100%; flex-basis: auto;
+      height: 200px;
+      object-position: center 42%;
+      border-right: none;
+      border-bottom: 1px solid var(--rhw-line);
+    }
+  }
 
   /* Integrations */
   .rhw-int { padding-bottom: 80px; }
