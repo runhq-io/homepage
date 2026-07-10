@@ -9,11 +9,32 @@
 //     activate — i.e. once consent is granted. So genuinely nothing reaches
 //     Google, and nothing is queued for another tag to process, before opt-in.
 //
-//  2. No hardcoded Measurement ID. The ID is injected at build time via
-//     VITE_GA_ID so each environment (dev/staging/prod) targets its own GA
-//     property. If VITE_GA_ID is unset (e.g. local dev), analytics is disabled.
+//  2. Per-environment Measurement ID. VITE_GA_ID is injected at build time so a
+//     build can *override* the target GA property (e.g. point staging at its own).
+//     A GA4 Measurement ID is not a secret — it ships in cleartext in every page's
+//     bundle (and was hardcoded in index.html before analytics moved here) — so a
+//     production build falls back to the production property when the env var is
+//     absent. That fallback is deliberate: a forgotten CI secret must never again
+//     silently black out analytics, the failure that let www.runhq.io/:slug board
+//     traffic go completely uncounted. Non-production builds (local dev, tests)
+//     stay disabled unless an ID is given explicitly, so they never pollute real
+//     analytics.
 
-const GA_ID = import.meta.env.VITE_GA_ID;
+/** The production GA4 property (public — it ships in the client bundle). */
+export const PRODUCTION_GA_ID = 'G-PK433W7S1P';
+
+/**
+ * Resolve the GA4 Measurement ID for this build: an explicit VITE_GA_ID always
+ * wins; otherwise production builds use {@link PRODUCTION_GA_ID} and non-production
+ * builds get none (analytics stays off). Pure so it is unit-testable without
+ * rebuilding under different envs.
+ */
+export function resolveGaId(envId: string | undefined, isProd: boolean): string | undefined {
+  if (typeof envId === 'string' && envId.length > 0) return envId;
+  return isProd ? PRODUCTION_GA_ID : undefined;
+}
+
+const GA_ID = resolveGaId(import.meta.env.VITE_GA_ID, import.meta.env.PROD);
 
 export const CONSENT_KEY = 'runhq_analytics_consent';
 // Fired on window whenever the stored consent changes in this tab, so
