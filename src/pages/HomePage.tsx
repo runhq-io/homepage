@@ -5,6 +5,7 @@ import { useT, useLocalePath } from '../i18n/context';
 import { API_BASE } from '../widget';
 import heroScreenshot from '../assets/screenshot.png';
 import heroScreenshotSm from '../assets/smaller_screenshot.png';
+import arrrCover from '../assets/arrr-cover.jpg';
 
 const HOME_T = {
   en: {
@@ -101,6 +102,7 @@ const HOME_T = {
     showcaseStatTicketsTotal: 'total tickets',
     showcaseArrrName: 'ARRR',
     showcaseArrrTagline: 'A community shipping features by vote — hundreds of tickets a week, agents merging around the clock.',
+    showcaseArrrArtAlt: 'ARRR — a voxel pirate game built on RunHQ',
     showcaseRunhqName: 'RunHQ',
     showcaseRunhqTagline: 'Our own board. We run RunHQ on RunHQ — every fix you see ships through this loop.',
     showcaseModdioName: 'Moddio',
@@ -214,6 +216,7 @@ const HOME_T = {
     showcaseStatTicketsTotal: '전체 티켓',
     showcaseArrrName: 'ARRR',
     showcaseArrrTagline: '투표로 기능을 배포하는 커뮤니티 — 매주 수백 개의 티켓, 24시간 내내 머지하는 에이전트.',
+    showcaseArrrArtAlt: 'ARRR — RunHQ로 만든 복셀 해적 게임',
     showcaseRunhqName: 'RunHQ',
     showcaseRunhqTagline: '우리 자신의 보드. RunHQ는 RunHQ 위에서 돌아갑니다 — 여러분이 보는 모든 수정이 이 루프를 거쳐 배포됩니다.',
     showcaseModdioName: 'Moddio',
@@ -543,28 +546,31 @@ export default function HomePage() {
         <div className="rhw-showcase-grid">
           {/* Hero — ARRR */}
           <a className="rhw-sc-card rhw-sc-hero" href="/arrr">
-            <div>
-              <div className="rhw-sc-top">
-                <div className="rhw-sc-name">{t.showcaseArrrName}</div>
-                <span className="rhw-sc-live"><span className="rhw-live-dot" />{t.showcaseLive}</span>
+            <img className="rhw-sc-hero-art" src={arrrCover} alt={t.showcaseArrrArtAlt} loading="lazy" />
+            <div className="rhw-sc-hero-body">
+              <div>
+                <div className="rhw-sc-top">
+                  <div className="rhw-sc-name">{t.showcaseArrrName}</div>
+                  <span className="rhw-sc-live"><span className="rhw-live-dot" />{t.showcaseLive}</span>
+                </div>
+                <p className="rhw-sc-tagline">{t.showcaseArrrTagline}</p>
               </div>
-              <p className="rhw-sc-tagline">{t.showcaseArrrTagline}</p>
+              <div className="rhw-sc-stats">
+                <div className="rhw-sc-stat">
+                  <div className="rhw-sc-stat-n">{boardStats.arrr.ticketsWeek.toLocaleString()}</div>
+                  <div className="rhw-sc-stat-l">{t.showcaseStatTicketsWeek}</div>
+                </div>
+                <div className="rhw-sc-stat">
+                  <div className="rhw-sc-stat-n">{boardStats.arrr.contributors.toLocaleString()}</div>
+                  <div className="rhw-sc-stat-l">{t.showcaseStatContributors}</div>
+                </div>
+                <div className="rhw-sc-stat">
+                  <div className="rhw-sc-stat-n">{boardStats.arrr.deploysWeek.toLocaleString()}</div>
+                  <div className="rhw-sc-stat-l">{t.showcaseStatDeploysWeek}</div>
+                </div>
+              </div>
+              <span className="rhw-sc-open rhw-sc-open-primary">{t.showcaseOpenBoard} <span>→</span></span>
             </div>
-            <div className="rhw-sc-stats">
-              <div className="rhw-sc-stat">
-                <div className="rhw-sc-stat-n">{boardStats.arrr.ticketsWeek.toLocaleString()}</div>
-                <div className="rhw-sc-stat-l">{t.showcaseStatTicketsWeek}</div>
-              </div>
-              <div className="rhw-sc-stat">
-                <div className="rhw-sc-stat-n">{boardStats.arrr.contributors.toLocaleString()}</div>
-                <div className="rhw-sc-stat-l">{t.showcaseStatContributors}</div>
-              </div>
-              <div className="rhw-sc-stat">
-                <div className="rhw-sc-stat-n">{boardStats.arrr.deploysWeek.toLocaleString()}</div>
-                <div className="rhw-sc-stat-l">{t.showcaseStatDeploysWeek}</div>
-              </div>
-            </div>
-            <span className="rhw-sc-open rhw-sc-open-primary">{t.showcaseOpenBoard} <span>→</span></span>
           </a>
 
           {/* Secondary — RunHQ, Moddio */}
@@ -1166,7 +1172,24 @@ const HOME_STYLES = `
     transform: translateY(-2px);
     box-shadow: 0 24px 56px -28px rgba(20, 19, 15, 0.24);
   }
-  .rhw-sc-hero { justify-content: space-between; gap: 24px; }
+  .rhw-sc-hero { flex-direction: row; padding: 0; gap: 0; overflow: hidden; }
+  .rhw-sc-hero-art {
+    flex: 0 0 42%;
+    align-self: stretch;
+    width: 42%;
+    object-fit: cover;
+    object-position: center;
+    display: block;
+    border-right: 1px solid var(--rhw-line);
+    background: var(--rhw-bg-2);
+  }
+  .rhw-sc-hero-body {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 26px 24px;
+  }
   .rhw-sc-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .rhw-sc-name { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
   .rhw-sc-hero .rhw-sc-name { font-size: 28px; }
@@ -1229,6 +1252,14 @@ const HOME_STYLES = `
     .rhw-sc-stat { padding: 13px 10px; }
     .rhw-sc-stat-n { font-size: 24px; }
     .rhw-sc-hero .rhw-sc-name { font-size: 24px; }
+    .rhw-sc-hero { flex-direction: column; }
+    .rhw-sc-hero-art {
+      width: 100%; flex-basis: auto;
+      height: 200px;
+      object-position: center 42%;
+      border-right: none;
+      border-bottom: 1px solid var(--rhw-line);
+    }
   }
 
   /* Integrations */
