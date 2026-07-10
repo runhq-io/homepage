@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, SIGNUP_URL, LOGIN_URL } from '../components/chrome';
+import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, LOGIN_URL } from '../components/chrome';
+import { TalkToUsButton } from '../components/TalkToUsModal';
 import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
 import { useT, useLocalePath } from '../i18n/context';
 import { API_BASE } from '../widget';
@@ -13,7 +14,7 @@ const HOME_T = {
     heroH1Line1: 'Signal-to-code.',
     heroH1Line2: 'Ship what users actually need.',
     heroLede: 'RunHQ turns user feedback, telemetry, and support tickets into agent-built PRs — ready to review and ship. Come to work, approve the diff, merge.',
-    ctaStartFree: 'Start free',
+    ctaStartFree: 'Talk to us',
     ctaWatchDemo: 'Watch Demo',
     heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
     heroScreenshotSmAlt: 'RunHQ feedback widget and latest updates',
@@ -110,7 +111,7 @@ const HOME_T = {
     // CTA band
     ctaH1: 'Stop translating feedback by hand.',
     ctaH2: 'Start shipping it.',
-    ctaBtnPrimary: 'Start free →',
+    ctaBtnPrimary: 'Talk to us →',
     ctaBtnSecondary: 'Book a 20-min demo',
     ctaMeta1Strong: 'Live in 60 minutes.',
     ctaMeta1: 'Drop the widget, connect a source, ship before lunch.',
@@ -127,7 +128,7 @@ const HOME_T = {
     heroH1Line1: '시그널에서 코드로.',
     heroH1Line2: '사용자가 실제로 필요한 걸 배포하세요.',
     heroLede: 'RunHQ는 사용자 피드백, 텔레메트리, 지원 티켓을 에이전트가 만든 PR로 바꿔줍니다 — 검토하고 배포할 준비가 된 채로. 출근해서 diff 승인하고 머지하세요.',
-    ctaStartFree: '무료로 시작하기',
+    ctaStartFree: '문의하기',
     ctaWatchDemo: '데모 보기',
     heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
     heroScreenshotSmAlt: 'RunHQ 피드백 위젯과 최신 업데이트',
@@ -224,7 +225,7 @@ const HOME_T = {
     // CTA band
     ctaH1: '피드백을 손으로 옮기는 건 그만.',
     ctaH2: '바로 배포하세요.',
-    ctaBtnPrimary: '무료로 시작하기 →',
+    ctaBtnPrimary: '문의하기 →',
     ctaBtnSecondary: '20분 데모 예약하기',
     ctaMeta1Strong: '60분 안에 라이브.',
     ctaMeta1: '위젯을 붙이고, 소스를 연결하고, 점심 전에 배포하세요.',
@@ -457,7 +458,7 @@ export default function HomePage() {
             {t.heroLede}
           </p>
           <div className="rhw-hero-cta">
-            <a className="rhw-btn-primary" href={SIGNUP_URL}>{t.ctaStartFree} <span>→</span></a>
+            <TalkToUsButton className="rhw-btn-primary">{t.ctaStartFree} <span>→</span></TalkToUsButton>
             <button
               ref={demoBtnRef}
               type="button"
@@ -603,7 +604,7 @@ export default function HomePage() {
             {t.ctaH2}
           </h2>
           <div className="rhw-cta-actions">
-            <a className="rhw-btn-primary rhw-btn-lg" href={SIGNUP_URL}>{t.ctaBtnPrimary}</a>
+            <TalkToUsButton className="rhw-btn-primary rhw-btn-lg">{t.ctaBtnPrimary}</TalkToUsButton>
             <a className="rhw-btn-ghost rhw-btn-lg" href={LOGIN_URL}>{t.ctaBtnSecondary}</a>
           </div>
           <div className="rhw-cta-meta">

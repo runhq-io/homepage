@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Navbar, Footer, SIGNUP_URL } from '../components/chrome';
+import { Navbar, Footer } from '../components/chrome';
+import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT, useLocale, useLocalePath } from '../i18n/context';
 
 // =============================================================================
@@ -121,7 +122,7 @@ const DOCS_T = {
     nextLabel: 'Next',
     helpH: 'Need a hand?',
     helpP: 'Solutions team responds in <4 hours, weekdays. Enterprise is 24/7.',
-    helpOpenChat: 'Open chat',
+    helpOpenChat: 'Talk to us',
     helpEmail: 'Email support →',
     notFoundH1: "That page doesn't exist.",
     notFoundLedePre: 'Try the ',
@@ -148,7 +149,7 @@ const DOCS_T = {
     nextLabel: '다음',
     helpH: '도움이 필요하신가요?',
     helpP: '솔루션 팀은 평일 4시간 이내에 응답합니다. 엔터프라이즈는 24시간 지원됩니다.',
-    helpOpenChat: '채팅 열기',
+    helpOpenChat: '문의하기',
     helpEmail: '이메일 문의 →',
     notFoundH1: '해당 페이지를 찾을 수 없습니다.',
     notFoundLedePre: '',
@@ -2386,7 +2387,7 @@ function HelpBlock() {
         <p className="rhpd-help-p">{t.helpP}</p>
       </div>
       <div className="rhpd-help-r">
-        <a className="rhp-btn-ghost" href={SIGNUP_URL}>{t.helpOpenChat}</a>
+        <TalkToUsButton className="rhp-btn-ghost">{t.helpOpenChat}</TalkToUsButton>
         <a className="rhp-btn-primary" href="mailto:admin@runhq.io">{t.helpEmail}</a>
       </div>
     </div>

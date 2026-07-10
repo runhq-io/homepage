@@ -1,4 +1,5 @@
-import { Navbar, Footer, SIGNUP_URL } from '../components/chrome';
+import { Navbar, Footer } from '../components/chrome';
+import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT } from '../i18n/context';
 
 const ABOUT_T = {
@@ -24,7 +25,7 @@ const ABOUT_T = {
     contactH2: 'Get in touch.',
     contactPre: 'Press, partnerships, or anything else — ',
     contactSuffix: '.',
-    startFree: 'Start free →',
+    startFree: 'Talk to us →',
   },
   ko: {
     eyebrow: '소개 · RunHQ',
@@ -48,7 +49,7 @@ const ABOUT_T = {
     contactH2: '문의하기.',
     contactPre: '언론, 파트너십, 그 밖의 무엇이든 — ',
     contactSuffix: '로 보내주세요.',
-    startFree: '무료로 시작하기 →',
+    startFree: '문의하기 →',
   },
 } as const;
 
@@ -103,7 +104,7 @@ export default function AboutPage() {
           {t.contactPre}<a className="rha-link" href="mailto:admin@runhq.io">admin@runhq.io</a>{t.contactSuffix}
         </p>
         <div className="rha-cta-row">
-          <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.startFree}</a>
+          <TalkToUsButton className="rhp-btn-primary">{t.startFree}</TalkToUsButton>
         </div>
       </section>
 
