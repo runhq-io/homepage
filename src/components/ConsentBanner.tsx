@@ -14,15 +14,19 @@ function shouldShow(): boolean {
   return analyticsEnabled() && storedConsent() === null;
 }
 
+// Copy must match what the code actually does (see analytics.ts): under Consent
+// Mode v2 we measure anonymous, cookieless traffic before a choice is made, and
+// only set analytics cookies once the visitor accepts. Claiming "nothing is
+// collected until you accept" would now be untrue.
 const COPY = {
   en: {
-    text: 'We use analytics cookies to understand how visitors use our site. Nothing is collected until you accept.',
+    text: 'We use analytics cookies to understand how visitors use our site. Until you accept, we only measure anonymous traffic — no cookies are set.',
     privacy: 'Privacy Policy',
     accept: 'Accept',
     decline: 'Decline',
   },
   ko: {
-    text: '방문자가 사이트를 어떻게 사용하는지 파악하기 위해 분석 쿠키를 사용합니다. 동의하기 전에는 아무것도 수집하지 않습니다.',
+    text: '방문자가 사이트를 어떻게 사용하는지 파악하기 위해 분석 쿠키를 사용합니다. 동의하기 전에는 쿠키를 설정하지 않고 익명 트래픽만 측정합니다.',
     privacy: '개인정보 처리방침',
     accept: '동의',
     decline: '거부',

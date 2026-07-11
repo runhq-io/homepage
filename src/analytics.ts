@@ -1,13 +1,19 @@
-// Google Analytics 4 (gtag.js) bootstrap, gated behind explicit visitor consent.
+// Google Analytics 4 (gtag.js) under Google Consent Mode v2.
 //
-// Two things the raw gtag snippet got wrong are fixed here:
+//  1. Consent Mode, not an on/off switch. gtag.js loads for EVERY visitor, but
+//     with all storage denied by default. Under Consent Mode v2 that means GA
+//     receives cookieless pings: it can count the visit and model the aggregate,
+//     while setting no cookies and storing no client-side identifier. Clicking
+//     Accept pushes a `consent update` to granted, which turns on ordinary
+//     cookie-based analytics; Decline leaves storage denied, so that visitor
+//     stays cookieless forever.
 //
-//  1. Consent. GA must not fire unconditionally. Until the visitor opts in we
-//     touch nothing: no dataLayer, no gtag stub, no 'js' event, no script. The
-//     first thing that ever reaches the dataLayer is the Consent Mode v2
-//     defaults (all storage denied), and that only happens at the moment we
-//     activate — i.e. once consent is granted. So genuinely nothing reaches
-//     Google, and nothing is queued for another tag to process, before opt-in.
+//     This replaces an activate-only-after-opt-in design that sent literally
+//     nothing — no gtag.js, no ping — until the visitor clicked Accept. Anyone
+//     who landed and bounced (i.e. nearly all of a viral traffic spike) was
+//     therefore counted as zero, and www.runhq.io/:slug board traffic went
+//     unmeasured. Consent Mode is Google's supported answer to exactly that:
+//     measure without storing.
 //
 //  2. Per-environment Measurement ID. VITE_GA_ID is injected at build time so a
 //     build can *override* the target GA property (e.g. point staging at its own).
@@ -70,49 +76,98 @@ function gtag(...args: unknown[]) {
   window.dataLayer.push(args);
 }
 
-let activated = false;
+function gtagStorage(granted: boolean) {
+  return { analytics_storage: granted ? 'granted' : 'denied' } as const;
+}
 
-// Bring GA online: install the dataLayer/gtag shim, declare Consent Mode
-// defaults (all denied), grant analytics storage, then load gtag.js. This is
-// the ONLY place that writes to the dataLayer, and it only runs once consent
-// has been granted — so nothing is queued before opt-in. Idempotent.
-function activate() {
-  if (activated || !GA_ID) return;
-  activated = true;
+/**
+ * The gtag command sequence that brings GA online under Consent Mode v2, in
+ * order. Exported and pure because the ORDER is the whole ballgame: the
+ * `consent default` must be queued before `config`, or gtag.js will have already
+ * decided it may use storage by the time consent arrives.
+ *
+ * A visitor who opted in on a previous visit is upgraded to granted *before* the
+ * first `config`, so their very first page_view of the session is measured with
+ * storage granted rather than as a cookieless ping.
+ */
+export function consentModeCommands(gaId: string, priorConsent: ConsentValue | null): unknown[][] {
+  const commands: unknown[][] = [
+    [
+      'consent',
+      'default',
+      {
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied',
+        analytics_storage: 'denied',
+      },
+    ],
+  ];
+  if (priorConsent === 'granted') commands.push(['consent', 'update', gtagStorage(true)]);
+  // 'js' then 'config' — the canonical order documented by Google. GA4 anonymises
+  // IPs by default, so no anonymize_ip flag is needed.
+  commands.push(['js', new Date()]);
+  commands.push(['config', gaId]);
+  return commands;
+}
+
+let booted = false;
+
+/**
+ * Load gtag.js under Consent Mode v2 with all storage denied. Runs once for
+ * EVERY visitor regardless of consent — denied storage is what makes that
+ * privacy-safe: GA gets a cookieless ping it can count and model, and sets no
+ * cookies. Idempotent.
+ */
+function boot() {
+  if (booted || !GA_ID) return;
+  booted = true;
   window.dataLayer = window.dataLayer || [];
   window.gtag = gtag;
-  // Consent Mode v2: declare defaults (all denied) and grant analytics storage
-  // up front, so the initial page_view is recorded under a granted signal.
-  gtag('consent', 'default', {
-    ad_storage: 'denied',
-    ad_user_data: 'denied',
-    ad_personalization: 'denied',
-    analytics_storage: 'denied',
-  });
-  gtag('consent', 'update', { analytics_storage: 'granted' });
-  // Load gtag.js, then push 'js' immediately followed by 'config' — the
-  // canonical order documented by Google. These pushes are queued on the
-  // dataLayer and replayed in order once the async library finishes loading.
-  // (GA4 anonymises IPs by default, so no anonymize_ip flag is needed.)
+  // Queue every command before requesting the library. JS is single-threaded, so
+  // the async script cannot execute until this block finishes — gtag.js replays
+  // the queue in order on load.
+  for (const command of consentModeCommands(GA_ID, storedConsent())) {
+    window.dataLayer.push(command);
+  }
   const s = document.createElement('script');
   s.async = true;
   s.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(GA_ID)}`;
   document.head.appendChild(s);
-  gtag('js', new Date());
-  gtag('config', GA_ID);
 }
 
 /**
- * Call once on app start. Activates analytics only if the visitor previously
- * granted consent; otherwise it stays completely dormant (nothing is written
- * to the dataLayer) until setAnalyticsConsent(true).
+ * Report a client-side (react-router) navigation as a page_view. The initial
+ * hard load is already reported by `config`, so callers must only fire this for
+ * navigations that follow — otherwise the landing page is counted twice.
+ * No-ops until GA has booted.
+ */
+export function trackPageview(pagePath: string) {
+  if (!booted) return;
+  gtag('event', 'page_view', {
+    page_path: pagePath,
+    page_location: window.location.href,
+    page_title: document.title,
+  });
+}
+
+/**
+ * Call once on app start. Brings GA online for every visitor under Consent Mode
+ * v2 (storage denied unless they previously opted in), so traffic is measured
+ * cookielessly from the first hit instead of being lost until someone clicks
+ * Accept.
  */
 export function initAnalytics() {
   if (!analyticsEnabled()) return;
-  if (storedConsent() === 'granted') activate();
+  boot();
 }
 
-/** Record the visitor's choice and (de)activate analytics accordingly. */
+/**
+ * Record the visitor's choice and move GA's storage grant to match. Under
+ * Consent Mode consent is an upgrade/downgrade, not an on/off switch: GA is
+ * already running cookielessly, so Accept grants storage (cookies on) and
+ * Decline keeps it denied (the visitor stays a cookieless ping).
+ */
 export function setAnalyticsConsent(granted: boolean) {
   try {
     localStorage.setItem(CONSENT_KEY, granted ? 'granted' : 'denied');
@@ -126,10 +181,8 @@ export function setAnalyticsConsent(granted: boolean) {
     // CustomEvent may be unavailable in exotic environments — non-fatal.
   }
   if (!analyticsEnabled()) return;
-  if (granted) {
-    activate();
-  } else if (activated) {
-    // Only relevant if GA was already brought online earlier this session.
-    gtag('consent', 'update', { analytics_storage: 'denied' });
-  }
+  // Normally a no-op (initAnalytics booted GA at startup); covers the case where
+  // a choice is made before init ran.
+  boot();
+  gtag('consent', 'update', gtagStorage(granted));
 }
