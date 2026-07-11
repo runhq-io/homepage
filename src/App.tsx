@@ -1,5 +1,6 @@
-import { lazy, Suspense, useEffect } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { trackPageview } from './analytics';
 import HomePage from './pages/HomePage';
 import ProductsPage from './pages/ProductsPage';
 import PricingPage from './pages/PricingPage';
@@ -30,12 +31,32 @@ function ScrollToTop() {
   return null;
 }
 
+// Report client-side navigations to GA. This is a single-page app, so only the
+// first hard load produces a document request — every move after that (marketing
+// nav, and the board's per-tab sub-paths like /arrr/tickets) is a pushState that
+// GA would otherwise never see.
+function RouteChangeTracker() {
+  const { pathname, search } = useLocation();
+  const reportedFirst = useRef(false);
+  useEffect(() => {
+    // gtag's `config` already reported the initial page_view for the hard load;
+    // reporting it again here would double-count every landing.
+    if (!reportedFirst.current) {
+      reportedFirst.current = true;
+      return;
+    }
+    trackPageview(`${pathname}${search}`);
+  }, [pathname, search]);
+  return null;
+}
+
 function App() {
   return (
     <BrowserRouter>
       <LocaleProvider>
         <BrowserDetector />
         <ScrollToTop />
+        <RouteChangeTracker />
         {/* Floating RunHQ bug-report launcher on every marketing page (stays out
             of the way on the /:slug full-page board — see RunHQWidget). */}
         <RunHQWidget />
