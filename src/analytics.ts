@@ -30,13 +30,32 @@
 export const PRODUCTION_GA_ID = 'G-PK433W7S1P';
 
 /**
- * Resolve the GA4 Measurement ID for this build: an explicit VITE_GA_ID always
- * wins; otherwise production builds use {@link PRODUCTION_GA_ID} and non-production
- * builds get none (analytics stays off). Pure so it is unit-testable without
- * rebuilding under different envs.
+ * The explicit opt-out value for VITE_GA_ID: a build that deliberately ships with
+ * no analytics at all. Staging uses this — see .github/workflows/deploy-staging.yml.
+ */
+export const GA_DISABLED = 'none';
+
+/**
+ * Resolve the GA4 Measurement ID for this build.
+ *
+ * - An explicit id always wins (per-environment targeting).
+ * - The literal {@link GA_DISABLED} means "this build ships without analytics",
+ *   and must NOT inherit the production fallback below. Staging needs this: a
+ *   staging build is still a *production-mode* vite build, so leaving the var
+ *   empty would fall back to the production property and pollute real data with
+ *   staging traffic.
+ * - Unset/empty means somebody forgot to configure it. That must never again
+ *   silently black out production analytics, so production falls back to
+ *   {@link PRODUCTION_GA_ID}. Distinguishing "deliberately none" from "forgotten"
+ *   is exactly why the sentinel exists rather than just using an empty string.
+ * - Non-production builds (local dev, tests) stay off unless given an id.
+ *
+ * Pure, so it is unit-testable without rebuilding under different envs.
  */
 export function resolveGaId(envId: string | undefined, isProd: boolean): string | undefined {
-  if (typeof envId === 'string' && envId.length > 0) return envId;
+  const declared = typeof envId === 'string' ? envId.trim() : '';
+  if (declared.toLowerCase() === GA_DISABLED) return undefined;
+  if (declared.length > 0) return declared;
   return isProd ? PRODUCTION_GA_ID : undefined;
 }
 
