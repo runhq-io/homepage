@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveGaId, PRODUCTION_GA_ID } from './analytics';
+import { resolveGaId, PRODUCTION_GA_ID, GA_DISABLED } from './analytics';
 
 /**
  * Regression guard for the analytics blackout: the 2026-07-05 consent refactor
@@ -25,5 +25,26 @@ describe('resolveGaId', () => {
   it('stays disabled in non-production builds when unset (no dev/test pollution)', () => {
     expect(resolveGaId(undefined, false)).toBeUndefined();
     expect(resolveGaId('', false)).toBeUndefined();
+  });
+
+  /**
+   * Staging pollution guard. A staging build is still a *production-mode* vite
+   * build, so `isProd` is true there — leaving the var empty would hand staging
+   * the production property and mix staging traffic into real data. The explicit
+   * `none` sentinel is what distinguishes "deliberately no analytics" from
+   * "somebody forgot to set it" (which must still fall back, per the tests above).
+   */
+  it('honors the explicit `none` opt-out even in a production build (staging)', () => {
+    expect(resolveGaId(GA_DISABLED, true)).toBeUndefined();
+    expect(resolveGaId('none', true)).toBeUndefined();
+    expect(resolveGaId('NONE', true)).toBeUndefined();
+    expect(resolveGaId('  none  ', true)).toBeUndefined();
+  });
+
+  it('does not confuse the opt-out with a forgotten value', () => {
+    // Forgotten -> still falls back (never black out prod again).
+    expect(resolveGaId('', true)).toBe(PRODUCTION_GA_ID);
+    // Deliberate -> off.
+    expect(resolveGaId(GA_DISABLED, true)).toBeUndefined();
   });
 });

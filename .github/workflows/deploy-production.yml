@@ -26,9 +26,12 @@ jobs:
         run: npm run build
         env:
           VITE_API_URL: https://console.runhq.io
-          # GA4 Measurement ID, injected from a repo secret (not committed).
-          # If the secret is unset the build omits analytics entirely.
-          VITE_GA_ID: ${{ secrets.VITE_GA_ID }}
+          # A GA4 Measurement ID is NOT a secret — it ships in cleartext in every
+          # visitor's bundle. It used to be read from `secrets.VITE_GA_ID`, that
+          # secret was never actually set, and the build silently shipped with
+          # analytics disabled: www.runhq.io captured nothing for weeks. Declaring
+          # it as plain config here makes that failure impossible to repeat.
+          VITE_GA_ID: G-PK433W7S1P
 
       - name: Deploy to Cloudflare Pages
         run: npx wrangler pages deploy dist --project-name=fishtank-homepage --branch=main --commit-dirty=true
