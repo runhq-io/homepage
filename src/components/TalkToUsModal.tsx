@@ -195,7 +195,12 @@ function TalkToUsModal({ onClose }: { onClose: () => void }) {
     try {
       const res = await fetch(LEADS_ENDPOINT, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Use text/plain so this stays a CORS "simple" request and the browser
+        // does NOT send a preflight. The site is served on both www.runhq.io and
+        // the bare apex runhq.io; a preflight from the apex was being blocked and
+        // silently dropping leads. The server parses the body as JSON by content,
+        // so the header value doesn't affect handling.
+        headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify({ name, email, website, communitySize, monthlyRevenue }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
