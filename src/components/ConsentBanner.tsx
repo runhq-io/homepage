@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useT, useLocalePath } from '../i18n/context';
 import {
@@ -39,6 +39,42 @@ export function ConsentBanner() {
   const t = useT(COPY);
   const localePath = useLocalePath();
   const [visible, setVisible] = useState(shouldShow);
+  const barRef = useRef<HTMLDivElement>(null);
+
+  // Escape the stacking order entirely.
+  //
+  // The `/:slug` board mounts the RunHQ widget host at z-index 2147483647 —
+  // INT_MAX — which paints over this bar and swallows every click on it. To a
+  // visitor the banner appears over the black loading screen and then "vanishes"
+  // the instant the board renders, so nobody can accept OR decline: consent could
+  // never be granted on the very pages the traffic lands on. No z-index can
+  // outrank INT_MAX, so we promote the bar into the browser's top layer instead,
+  // which paints above every stacking context regardless of z-index. A `manual`
+  // popover leaves the page behind it fully interactive — unlike showModal(),
+  // which would trap focus and dim the board.
+  useEffect(() => {
+    const el = barRef.current;
+    if (!visible || !el) return;
+    // Only opt in when the API is actually present: the bare `popover` attribute
+    // renders the element display:none until showPopover() runs, so setting it
+    // without support would hide the banner outright.
+    if (typeof el.showPopover !== 'function') return;
+    el.setAttribute('popover', 'manual');
+    try {
+      el.showPopover();
+    } catch {
+      // Fall back to plain fixed positioning rather than leave it hidden.
+      el.removeAttribute('popover');
+    }
+    return () => {
+      try {
+        el.hidePopover();
+      } catch {
+        // Already hidden or never shown — nothing to undo.
+      }
+      el.removeAttribute('popover');
+    };
+  }, [visible]);
 
   // Re-evaluate visibility when consent changes elsewhere: another tab
   // (native 'storage' event) or the privacy page in this tab (CONSENT_EVENT).
@@ -66,6 +102,7 @@ export function ConsentBanner() {
 
   return (
     <div
+      ref={barRef}
       role="region"
       aria-label="Cookie consent"
       style={{
@@ -73,7 +110,15 @@ export function ConsentBanner() {
         left: 16,
         right: 16,
         bottom: 16,
-        zIndex: 1000,
+        // `top: auto` / `width` / `height` / `overflow` override the UA stylesheet
+        // for [popover] (inset: 0; width/height: fit-content; overflow: auto),
+        // which would otherwise stretch the bar over the whole viewport.
+        top: 'auto',
+        width: 'auto',
+        height: 'auto',
+        overflow: 'visible',
+        // Only relevant in the no-popover fallback path; the top layer ignores it.
+        zIndex: 2147483647,
         margin: '0 auto',
         maxWidth: 640,
         display: 'flex',
