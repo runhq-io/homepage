@@ -104,7 +104,7 @@ export default function AboutPage() {
           {t.contactPre}<a className="rha-link" href="mailto:admin@runhq.io">admin@runhq.io</a>{t.contactSuffix}
         </p>
         <div className="rha-cta-row">
-          <TalkToUsButton className="rhp-btn-primary">{t.startFree}</TalkToUsButton>
+          <TalkToUsButton className="rhp-btn-primary" cta="about_contact">{t.startFree}</TalkToUsButton>
         </div>
       </section>
 

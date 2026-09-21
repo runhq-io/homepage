@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Navigate, useLocation, useParams } from 'react-router-dom';
 import NotFoundPage from './NotFoundPage';
 import { RESERVED_SLUGS, loadWidgetScript, removeWidgetHost } from '../widget';
+import { widgetInitOptions } from '../telemetry';
 
 /**
  * Full-page RunHQ widget board, served at `www.runhq.io/:slug`.
@@ -56,7 +57,14 @@ export default function BoardPage() {
       // single-widget guard.
       removeWidgetHost();
       try {
-        window.RunHQWidget?.init({ project: slug, standalone: true, useCookieAuth: true });
+        // `surface: 'board'` is what keeps the SDK's tracker off here. The
+        // tracker pins the project it was init'd with for the lifetime of the
+        // page, so a board init was recording RunHQ's own marketing page views
+        // into whichever customer's project the visitor happened to open — see
+        // `shouldTrack` in ../telemetry.
+        window.RunHQWidget?.init(
+          widgetInitOptions({ project: slug, surface: 'board', consent: null, standalone: true }),
+        );
       } catch {
         /* init is idempotent; a redundant call is a no-op */
       }

@@ -36,6 +36,11 @@ jobs:
           # vite build, so an empty value falls back to the production property and
           # pollutes real data with staging traffic.
           VITE_GA_ID: none
+          # Staging must be distinguishable from production in RunHQ's own
+          # telemetry too, not just in GA. The SDK defaults to "production" when
+          # an embed says nothing — that default is exactly the pollution the
+          # VITE_GA_ID line above exists to prevent.
+          VITE_RUNHQ_ENV: staging
 
       - name: Deploy to Cloudflare Pages
         run: npx wrangler pages deploy dist --project-name=runhq-homepage-staging --branch=main --commit-dirty=true

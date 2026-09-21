@@ -72,9 +72,28 @@ export function isBoardRoute(pathname: string): boolean {
   return !RESERVED_SLUGS.has(first);
 }
 
+/**
+ * The RunHQ SDK's public surface, as far as this site uses it.
+ *
+ * `widget.js` is one script carrying two products: the feedback widget mounted
+ * by `init()`, and the acquisition/CRM tracker behind `identify`/`stage`/
+ * `track`. The tracking half is optional on the global (an older cached copy of
+ * the script predates it), so every method is declared optional and called with
+ * `?.` — see telemetry.ts, which is the only caller.
+ */
 declare global {
   interface Window {
-    RunHQWidget?: { init: (opts: Record<string, unknown>) => void };
+    RunHQWidget?: {
+      init: (opts: Record<string, unknown>) => void;
+      /** Join this browser's anonymous id to a known person. */
+      identify?: (userId: string, traits?: Record<string, unknown>) => void;
+      /** Move the visitor to a named funnel stage. */
+      stage?: (stageKey: string) => void;
+      /** Record a named event. */
+      track?: (name: string, meta?: Record<string, unknown>) => void;
+      /** Record revenue against the visitor. */
+      revenue?: (amount: number, meta?: Record<string, unknown>) => void;
+    };
   }
 }
 

@@ -32,6 +32,10 @@ jobs:
           # analytics disabled: www.runhq.io captured nothing for weeks. Declaring
           # it as plain config here makes that failure impossible to repeat.
           VITE_GA_ID: G-PK433W7S1P
+          # Which deployment RunHQ's own telemetry reports as. The SDK assumes
+          # "production" when an embed says nothing, so declaring it is how the
+          # two environments stay apart in RunHQ's numbers.
+          VITE_RUNHQ_ENV: production
 
       - name: Deploy to Cloudflare Pages
         run: npx wrangler pages deploy dist --project-name=fishtank-homepage --branch=main --commit-dirty=true

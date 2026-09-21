@@ -11,6 +11,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useT } from '../i18n/context';
 import { API_BASE } from '../widget';
+import { identifyLead, trackEvent } from '../telemetry';
 
 // "Talk to us" lead-capture modal. The button opens a dialog that POSTs to the
 // RunHQ backend's public POST /api/leads endpoint; submissions surface in the
@@ -84,7 +85,8 @@ const COPY = {
 type Status = 'idle' | 'submitting' | 'success' | 'error';
 
 interface TalkToUsContextValue {
-  open: () => void;
+  /** `cta` names the button that opened it, so the funnel can tell them apart. */
+  open: (cta?: string) => void;
 }
 
 const TalkToUsContext = createContext<TalkToUsContextValue | null>(null);
@@ -103,9 +105,16 @@ export function useTalkToUs(): TalkToUsContextValue {
 export function TalkToUsButton({
   className,
   children,
+  cta,
 }: {
   className?: string;
   children: ReactNode;
+  /**
+   * Which CTA this is, for telemetry — `nav`, `hero`, `pricing_footer`, and so
+   * on. Optional so a new button cannot fail to compile, but name it: a funnel
+   * that cannot say which button earned the lead is barely a funnel.
+   */
+  cta?: string;
 }) {
   const { open } = useTalkToUs();
   return (
@@ -115,7 +124,7 @@ export function TalkToUsButton({
       role="button"
       onClick={(e) => {
         e.preventDefault();
-        open();
+        open(cta);
       }}
     >
       {children}
@@ -125,7 +134,13 @@ export function TalkToUsButton({
 
 export function TalkToUsProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
-  const open = useCallback(() => setIsOpen(true), []);
+  const open = useCallback((cta?: string) => {
+    setIsOpen(true);
+    // Opening the form is the top of the lead funnel; `lead_submitted` (below)
+    // is the bottom. Recording both is what makes the drop-off between them
+    // visible, per CTA.
+    trackEvent('talk_to_us_opened', { cta: cta ?? 'unknown', path: window.location.pathname });
+  }, []);
   const close = useCallback(() => setIsOpen(false), []);
 
   return (
@@ -205,6 +220,12 @@ function TalkToUsModal({ onClose }: { onClose: () => void }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStatus('success');
+      // The one moment this site learns who a visitor is. Identifying here
+      // joins everything already recorded under their anonymous id — including
+      // the first-touch referrer that found them — to the lead the sales side
+      // will see in the admin panel. Only sends if they accepted analytics;
+      // the lead itself reaches RunHQ either way, via the POST above.
+      identifyLead({ name, email, website, communitySize, monthlyRevenue });
     } catch {
       setStatus('error');
       setServerError(true);

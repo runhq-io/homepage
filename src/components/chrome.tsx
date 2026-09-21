@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useT, useLocale, useLocalePath, useLocaleSwitch, LOCALES, type Locale } from '../i18n/context';
 import { TalkToUsButton } from './TalkToUsModal';
+import { trackSignInClick } from '../telemetry';
 
 export const SIGNUP_URL = 'https://app.runhq.io/signup';
 export const LOGIN_URL = 'https://app.runhq.io';
@@ -313,8 +314,12 @@ export function Navbar({ active = null }: { active?: NavActive } = {}) {
       </div>
       <div className="rhc-nav-r">
         <LangSwitcher />
-        <a className="rhc-signin" href={LOGIN_URL}>{t.signIn}</a>
-        <TalkToUsButton className="rhc-cta">{t.startFree}</TalkToUsButton>
+        <a
+          className="rhc-signin"
+          href={LOGIN_URL}
+          onClick={() => trackSignInClick('nav')}
+        >{t.signIn}</a>
+        <TalkToUsButton className="rhc-cta" cta="nav">{t.startFree}</TalkToUsButton>
       </div>
     </header>
   );

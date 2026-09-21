@@ -41,6 +41,14 @@ The GitHub Actions workflows set `VITE_API_URL` explicitly per env (`console-sta
 - `npm run deploy:production` locally: safe, defaults match prod.
 - `npm run deploy:staging` locally: **will ship a staging site that hits the prod API** unless you prefix `VITE_API_URL=https://console-staging.runhq.io`. Prefer the GH Actions auto-deploy for staging.
 
+The same applies to `VITE_GA_ID` and `VITE_RUNHQ_ENV` (which environment RunHQ's
+own telemetry reports as). A local staging deploy needs all three or it reports
+into production:
+
+```bash
+VITE_API_URL=https://console-staging.runhq.io VITE_GA_ID=none VITE_RUNHQ_ENV=staging npm run deploy:staging
+```
+
 ### Cloudflare credentials
 
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` live in `.env`. Source it (`set -a && source .env && set +a`) before running `wrangler` or the Cloudflare API directly.

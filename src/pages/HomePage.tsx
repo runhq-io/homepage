@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, LOGIN_URL } from '../components/chrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
+import { trackSignInClick } from '../telemetry';
 import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
 import { useT, useLocalePath } from '../i18n/context';
 import { API_BASE } from '../widget';
@@ -458,7 +459,7 @@ export default function HomePage() {
             {t.heroLede}
           </p>
           <div className="rhw-hero-cta">
-            <TalkToUsButton className="rhw-btn-primary">{t.ctaStartFree} <span>→</span></TalkToUsButton>
+            <TalkToUsButton className="rhw-btn-primary" cta="hero">{t.ctaStartFree} <span>→</span></TalkToUsButton>
             <button
               ref={demoBtnRef}
               type="button"
@@ -604,8 +605,12 @@ export default function HomePage() {
             {t.ctaH2}
           </h2>
           <div className="rhw-cta-actions">
-            <TalkToUsButton className="rhw-btn-primary rhw-btn-lg">{t.ctaBtnPrimary}</TalkToUsButton>
-            <a className="rhw-btn-ghost rhw-btn-lg" href={LOGIN_URL}>{t.ctaBtnSecondary}</a>
+            <TalkToUsButton className="rhw-btn-primary rhw-btn-lg" cta="home_closing">{t.ctaBtnPrimary}</TalkToUsButton>
+            <a
+              className="rhw-btn-ghost rhw-btn-lg"
+              href={LOGIN_URL}
+              onClick={() => trackSignInClick('home_closing')}
+            >{t.ctaBtnSecondary}</a>
           </div>
           <div className="rhw-cta-meta">
             <div><strong>{t.ctaMeta1Strong}</strong> {t.ctaMeta1}</div>

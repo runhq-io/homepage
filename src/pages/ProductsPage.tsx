@@ -329,7 +329,7 @@ export default function ProductsPage() {
           {t.heroLede}
         </p>
         <div className="rhpp-hero-cta">
-          <TalkToUsButton className="rhp-btn-primary">{t.startFree}</TalkToUsButton>
+          <TalkToUsButton className="rhp-btn-primary" cta="products_hero">{t.startFree}</TalkToUsButton>
           <Link className="rhp-btn-ghost" to={lp('/pricing')}>{t.seePricing}</Link>
         </div>
       </section>
@@ -387,7 +387,7 @@ export default function ProductsPage() {
         <h2 className="rhpp-cta-h">{t.ctaH}</h2>
         <p className="rhpp-cta-sub">{t.ctaSub}</p>
         <div className="rhpp-cta-row">
-          <TalkToUsButton className="rhp-btn-primary">{t.startFree}</TalkToUsButton>
+          <TalkToUsButton className="rhp-btn-primary" cta="products_closing">{t.startFree}</TalkToUsButton>
           <Link className="rhp-btn-ghost" to={lp('/pricing')}>{t.seePricing}</Link>
         </div>
       </section>

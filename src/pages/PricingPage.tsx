@@ -1,6 +1,7 @@
 import { Fragment, useState } from 'react';
 import { Navbar, Footer, Wordmark, LOGOS, SIGNUP_URL } from '../components/chrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
+import { trackSignupClick } from '../telemetry';
 import { useT } from '../i18n/context';
 
 type Plan = {
@@ -411,6 +412,7 @@ export default function PricingPage() {
               <a
                 className={p.ghost ? 'rhpx-plan-cta rhpx-plan-cta-ghost' : 'rhpx-plan-cta rhpx-plan-cta-fill'}
                 href={SIGNUP_URL}
+                onClick={() => trackSignupClick('pricing_plan', { plan: p.key })}
               >{p.cta} →</a>
 
               <p className="rhpx-plan-pitch">{p.pitch}</p>
@@ -459,6 +461,7 @@ export default function PricingPage() {
                     <a
                       className={p.ghost ? 'rhpx-th-cta rhpx-plan-cta-ghost' : 'rhpx-th-cta rhpx-plan-cta-fill'}
                       href={SIGNUP_URL}
+                      onClick={() => trackSignupClick('pricing_table', { plan: p.key })}
                     >{p.cta}</a>
                   </th>
                 ))}
@@ -529,8 +532,12 @@ export default function PricingPage() {
       <section className="rhpx-cta">
         <h2 className="rhpx-cta-h">{t.ctaH}</h2>
         <div className="rhpx-cta-row">
-          <a className="rhp-btn-primary" href={SIGNUP_URL}>{t.ctaPrimary}</a>
-          <TalkToUsButton className="rhp-btn-ghost">{t.ctaSecondary}</TalkToUsButton>
+          <a
+            className="rhp-btn-primary"
+            href={SIGNUP_URL}
+            onClick={() => trackSignupClick('pricing_closing')}
+          >{t.ctaPrimary}</a>
+          <TalkToUsButton className="rhp-btn-ghost" cta="pricing_closing">{t.ctaSecondary}</TalkToUsButton>
         </div>
         <div className="rhpx-cta-meta">{t.ctaMeta}</div>
       </section>
