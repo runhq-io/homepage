@@ -41,6 +41,7 @@ function harness(o: { consent?: boolean; config?: ServingConfig | null } = {}) {
     configSnapshot: () => o.config ?? null,
     loadSdk: vi.fn(() => sdkLoad.promise),
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    reportTimeout: vi.fn((_surfaceKey: string) => {}),
   };
   const signal = () => consentListeners.forEach((listener) => listener());
   return {
@@ -309,5 +310,82 @@ describe('mergeFields', () => {
 
   it.each([[null], [undefined], ['a string'], [3], [['heroH1Line1']]])('falls back entirely for %j', (payload) => {
     expect(mergeFields(payload, HERO)).toBe(HERO);
+  });
+});
+
+describe('a tracked read abandoned at its cap is reported (ruling R45)', () => {
+  it('reports evolve_surface_timeout once for a consented first read that hits SURFACE_WAIT_MS', () => {
+    const h = harness();
+    h.store.read('home.hero', HERO);
+    expect(h.env.reportTimeout).not.toHaveBeenCalled();
+    h.fireTimers();
+    expect(h.env.reportTimeout).toHaveBeenCalledTimes(1);
+    expect(h.env.reportTimeout).toHaveBeenCalledWith('home.hero');
+    // Latched: later reads in the page load never report again.
+    h.store.read('home.hero', HERO);
+    h.fireTimers();
+    expect(h.env.reportTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the consent-arrival re-read that hits SURFACE_CONSENT_WAIT_MS', () => {
+    const h = harness({ consent: false });
+    h.store.read('home.hero', HERO);
+    h.store.subscribe('home.hero', vi.fn());
+    h.grant();
+    h.fireTimers();
+    expect(h.env.reportTimeout).toHaveBeenCalledTimes(1);
+    expect(h.env.reportTimeout).toHaveBeenCalledWith('home.hero');
+  });
+
+  it('reports each surface on its own', () => {
+    const h = harness();
+    h.store.read('home.hero', HERO);
+    h.store.read('home.closing', HERO);
+    h.fireTimers();
+    expect(vi.mocked(h.env.reportTimeout).mock.calls).toEqual([['home.hero'], ['home.closing']]);
+  });
+
+  it('does not report a read that settled on the arm inside the cap', async () => {
+    const h = harness();
+    const { sdk, ready } = fakeSdk(ARM);
+    h.store.read('home.hero', HERO);
+    h.sdkLoad.resolve(sdk);
+    ready.resolve();
+    await flush();
+    h.fireTimers();
+    expect(h.env.reportTimeout).not.toHaveBeenCalled();
+  });
+
+  it('does not report a read that settled early because the SDK has no Evolve half', async () => {
+    const h = harness();
+    h.store.read('home.hero', HERO);
+    h.sdkLoad.resolve(null);
+    await flush();
+    h.fireTimers();
+    expect(h.env.reportTimeout).not.toHaveBeenCalled();
+  });
+
+  it('never reports for a visitor without consent — nothing is tracked for them', () => {
+    const h = harness({ consent: false });
+    h.store.read('home.hero', HERO);
+    h.fireTimers();
+    expect(h.env.reportTimeout).not.toHaveBeenCalled();
+  });
+
+  it('does not report when consent was withdrawn before the cap fired', () => {
+    const h = harness();
+    h.store.read('home.hero', HERO);
+    h.decline();
+    h.fireTimers();
+    expect(h.env.reportTimeout).not.toHaveBeenCalled();
+    expect(h.store.read('home.hero', HERO).settled).toBe(true);
+  });
+
+  it('still settles the surface when reporting throws', () => {
+    const h = harness();
+    vi.mocked(h.env.reportTimeout).mockImplementation(() => { throw new Error('boom'); });
+    h.store.read('home.hero', HERO);
+    expect(() => h.fireTimers()).not.toThrow();
+    expect(h.store.read('home.hero', HERO)).toEqual({ value: HERO, settled: true });
   });
 });

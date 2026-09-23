@@ -21,7 +21,7 @@
  */
 import { useCallback, useSyncExternalStore } from 'react';
 import { loadWidgetScript } from '../widget';
-import { telemetryConsented } from '../telemetry';
+import { telemetryConsented, trackEvent } from '../telemetry';
 import { CONSENT_EVENT, CONSENT_KEY } from '../analytics';
 import { bootConfigSnapshot, untrackedPayload, type ServingConfig } from './bootConfig';
 
@@ -37,6 +37,9 @@ export const SURFACE_WAIT_MS = 400;
  * SDK has fetched its config.
  */
 export const SURFACE_CONSENT_WAIT_MS = 3000;
+
+/** The event a tracked read that gave up at its cap records (ruling R45). */
+export const SURFACE_TIMEOUT_EVENT = 'evolve_surface_timeout';
 
 export type SurfaceFields = Readonly<Record<string, string>>;
 
@@ -60,6 +63,12 @@ export interface SurfaceEnv {
   /** The SDK once its script has loaded, or null when it lacks the Evolve half. */
   loadSdk(): Promise<EvolveSdk | null>;
   setTimeout(fn: () => void, ms: number): unknown;
+  /**
+   * A read made with the tracker on gave up at its cap: the visitor was never
+   * assigned, so they are in no arm. Recorded (ruling R45) so the unmeasured
+   * share of consented traffic is visible in Analytics instead of silent.
+   */
+  reportTimeout(surfaceKey: string): void;
 }
 
 export interface SurfaceStore {
@@ -106,6 +115,8 @@ interface Entry {
 
 export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
   const entries = new Map<string, Entry>();
+  /** Surfaces already reported as timed out: once per surface per page load. */
+  const reportedTimeouts = new Set<string>();
   let watchingConsent = false;
 
   const untracked = <T extends SurfaceFields>(surfaceKey: string, fallback: T): T =>
@@ -114,6 +125,18 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
   function publish(entry: Entry, snapshot: SurfaceSnapshot<SurfaceFields>): void {
     entry.snapshot = snapshot;
     for (const listener of [...entry.listeners]) listener();
+  }
+
+  function reportTimedOut(surfaceKey: string): void {
+    // Only a visitor whose tracker is on can be counted; one who withdrew
+    // consent meanwhile is not recorded.
+    if (reportedTimeouts.has(surfaceKey) || !env.consentGranted()) return;
+    reportedTimeouts.add(surfaceKey);
+    try {
+      env.reportTimeout(surfaceKey);
+    } catch {
+      // Measurement never decides what the page renders.
+    }
   }
 
   /** Read the arm with the tracker on; `giveUp` is what the entry settles on without one. */
@@ -133,7 +156,11 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
       publish(entry, { value, settled: true });
     };
 
-    env.setTimeout(() => decide(giveUp), cap);
+    env.setTimeout(() => {
+      if (decided) return;
+      decide(giveUp);
+      reportTimedOut(surfaceKey);
+    }, cap);
     env
       .loadSdk()
       .then(async (sdk) => {
@@ -249,6 +276,8 @@ export const surfaceStore: SurfaceStore = createSurfaceStore({
   configSnapshot: bootConfigSnapshot,
   loadSdk: browserSdk,
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  // Consent-gated, guarded, and queued by the SDK until its tracker starts.
+  reportTimeout: (surfaceKey) => trackEvent(SURFACE_TIMEOUT_EVENT, { surface: surfaceKey }),
 });
 
 /**
