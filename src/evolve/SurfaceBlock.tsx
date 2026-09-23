@@ -3,9 +3,10 @@ import type { ReactNode } from 'react';
 const PENDING = { visibility: 'hidden' } as const;
 
 /**
- * A surface's container. While its variation is pending (≤ SURFACE_WAIT_MS,
- * consented visitors only) it lays out the shipped copy invisibly, so the box
- * already has its size and nothing below it shifts when the arm paints.
+ * A surface's container. While the boot config it decides from is still in
+ * flight (≤ SURFACE_WAIT_MS from the page's request; rare, since index.html
+ * preloads it) it lays out the shipped copy invisibly, so the box already has
+ * a size when the decided copy paints.
  */
 export function SurfaceBlock({
   settled,

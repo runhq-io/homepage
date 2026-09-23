@@ -3,19 +3,20 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css';
 import { initAnalytics } from './analytics';
-import { bootEvolve } from './evolve/bootConfig';
-import { bootWidgetScript } from './widget';
+import { bootEvolve, renderWhenConfigRead } from './evolve/bootConfig';
 
 initAnalytics();
-// Before React mounts: the hero's variation config must already be in flight at
-// first paint, and the SDK adopts this request instead of making its own.
-bootEvolve();
-// Same moment, same reason: the SDK must be running by the time the hero reads
-// its surface (ruling R45). index.html has already preloaded it.
-bootWidgetScript(window.location.pathname);
+// Before React mounts: the Evolve surfaces decide their copy from this config at
+// first render (R114). index.html has already preloaded it. The SDK itself loads
+// after first paint (widget.ts `loadWidgetScript`, R115) and adopts this request.
+const evolveBoot = bootEvolve();
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+// If the preloaded config has already arrived, read it before the first render
+// so every surface's copy is decided in that render (bootConfig.ts).
+renderWhenConfigRead(evolveBoot, () => {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+});

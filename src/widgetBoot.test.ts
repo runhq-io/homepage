@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { API_BASE, bootWidgetScript, loadWidgetScript } from './widget';
-import { resolveApiBase, widgetPreloadTag, widgetScriptUrl } from './apiBase';
 
 /**
- * Ruling R45: the SDK used to be requested only from a component effect, after
- * React mounted, so on a cold load it rarely arrived inside the hero's 400 ms
- * cap and consented first-time visitors were never measured. It is now
- * preloaded from index.html and inserted at boot, before React mounts; the
- * components' later calls reuse that one tag.
+ * R115: the SDK is neither preloaded nor inserted at boot any more. It loaded
+ * in parallel with the app bundle and delayed first paint for every visitor —
+ * mostly visitors whose first paint never needed it. The copy is decided from
+ * the boot config (R114), so the SDK loads after first paint, once, whoever
+ * asks for it first.
  */
+
+const scheduled: Array<() => void> = [];
+vi.mock('./afterFirstPaint', () => ({ afterFirstPaint: (fn: () => void) => { scheduled.push(fn); } }));
 
 interface FakeScript {
   src: string;
@@ -43,73 +44,82 @@ function fakeDom() {
 }
 
 let dom: ReturnType<typeof fakeDom>;
-beforeEach(() => { dom = fakeDom(); });
+beforeEach(() => { scheduled.length = 0; dom = fakeDom(); vi.resetModules(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-describe('bootWidgetScript', () => {
-  it('inserts the SDK script once at boot on a marketing page', () => {
-    bootWidgetScript('/');
+const load = () => import('./widget');
+
+describe('loadWidgetScript', () => {
+  it('inserts nothing before first paint, then the SDK once, for every caller', async () => {
+    const { loadWidgetScript, API_BASE } = await load();
+    const { widgetScriptUrl } = await import('./apiBase');
+    const a = vi.fn();
+    const b = vi.fn();
+    loadWidgetScript(a);
+    loadWidgetScript(b);
+    expect(dom.appended).toHaveLength(0);
+    expect(scheduled).toHaveLength(1);
+    scheduled.splice(0).forEach((fn) => fn());
     expect(dom.appended).toHaveLength(1);
     expect(dom.appended[0]).toMatchObject({ src: widgetScriptUrl(API_BASE), async: true, dataset: { runhqWidget: 'true' } });
-    bootWidgetScript('/');
-    expect(dom.appended).toHaveLength(1);
-  });
-
-  it('makes the component’s later load a no-op that waits on the boot tag', () => {
-    bootWidgetScript('/ko');
-    const onReady = vi.fn();
-    loadWidgetScript(onReady);
-    expect(dom.createElement).toHaveBeenCalledTimes(1);
-    expect(dom.appended).toHaveLength(1);
-    expect(onReady).not.toHaveBeenCalled();
+    // A classic no-cors script, as before.
+    expect(dom.appended[0].crossOrigin ?? null).toBeNull();
+    expect(a).not.toHaveBeenCalled();
     dom.win.RunHQWidget = { init: () => {} };
     dom.appended[0].fire('load');
-    expect(onReady).toHaveBeenCalledTimes(1);
-    // Once the global exists, a later caller runs at once and still adds nothing.
+    expect(a).toHaveBeenCalledTimes(1);
+    expect(b).toHaveBeenCalledTimes(1);
+  });
+
+  it('a caller after the tag exists waits on it; after the global exists, runs at once', async () => {
+    const { loadWidgetScript } = await load();
+    loadWidgetScript(() => {});
+    scheduled.splice(0).forEach((fn) => fn());
     const later = vi.fn();
     loadWidgetScript(later);
+    expect(dom.appended).toHaveLength(1);
+    dom.win.RunHQWidget = { init: () => {} };
+    dom.appended[0].fire('load');
     expect(later).toHaveBeenCalledTimes(1);
+    const now = vi.fn();
+    loadWidgetScript(now);
+    expect(now).toHaveBeenCalledTimes(1);
     expect(dom.appended).toHaveLength(1);
   });
 
-  it('loads nothing at boot on a customer’s board', () => {
-    bootWidgetScript('/arrr');
-    bootWidgetScript('/ko/arrr');
-    bootWidgetScript('/arrr/tickets');
-    expect(dom.createElement).not.toHaveBeenCalled();
+  it('does not insert a second tag when the SDK arrived another way before the scheduled insert ran', async () => {
+    const { loadWidgetScript } = await load();
+    const cb = vi.fn();
+    loadWidgetScript(cb);
+    dom.win.RunHQWidget = { init: () => {} };
+    scheduled.splice(0).forEach((fn) => fn());
     expect(dom.appended).toHaveLength(0);
-  });
-
-  it('never throws — the page renders whatever the loader does', () => {
-    vi.stubGlobal('document', { querySelector: () => { throw new Error('no DOM'); } });
-    expect(() => bootWidgetScript('/')).not.toThrow();
+    expect(cb).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('the preload and the script tag', () => {
-  it('preloads the exact URL the loader inserts', () => {
-    expect(widgetPreloadTag('https://console-staging.runhq.io')).toEqual({
+describe('the build’s preload', () => {
+  it('preloads the Evolve config — never the SDK — with the exact URL and mode the app fetches', async () => {
+    const { evolveConfigPreloadTag, evolveConfigUrl } = await import('./apiBase');
+    const { evolveConfigRequestInit } = await import('./evolve/bootConfig');
+    expect(evolveConfigPreloadTag('https://console-staging.runhq.io', 'staging')).toEqual({
       tag: 'link',
-      attrs: { rel: 'preload', as: 'script', href: 'https://console-staging.runhq.io/widget.js' },
+      attrs: {
+        rel: 'preload', as: 'fetch', crossorigin: 'anonymous',
+        href: 'https://console-staging.runhq.io/api/widget/evolve/config?project=runhq&environment=staging',
+      },
       injectTo: 'head',
     });
-    expect(widgetScriptUrl('https://console-staging.runhq.io')).toBe('https://console-staging.runhq.io/widget.js');
-  });
-
-  it('agree on the request mode, so the browser reuses the preloaded response', () => {
-    // A preload is matched to its consumer by URL AND credentials mode. The
-    // loader inserts a classic no-cors <script>; a `crossorigin` preload would
-    // be a different request, discarded, and the 850 KB script fetched twice.
-    bootWidgetScript('/');
-    expect(dom.appended[0].crossOrigin ?? null).toBeNull();
-    expect(widgetPreloadTag(API_BASE).attrs).not.toHaveProperty('crossorigin');
+    expect(evolveConfigUrl('https://x.test', 'runhq', 'production')).toBe('https://x.test/api/widget/evolve/config?project=runhq&environment=production');
+    // crossorigin="anonymous" ⇔ mode cors + credentials same-origin.
+    expect(evolveConfigRequestInit).toEqual({ mode: 'cors', credentials: 'same-origin' });
   });
 });
 
 describe('resolveApiBase', () => {
-  it('is the build’s VITE_API_URL without trailing slashes, else production', () => {
+  it('is the build’s VITE_API_URL without trailing slashes, else production', async () => {
+    const { resolveApiBase } = await import('./apiBase');
     expect(resolveApiBase('https://console-staging.runhq.io/')).toBe('https://console-staging.runhq.io');
-    expect(resolveApiBase('https://console-staging.runhq.io')).toBe('https://console-staging.runhq.io');
     expect(resolveApiBase(undefined)).toBe('https://console.runhq.io');
     expect(resolveApiBase('')).toBe('https://console.runhq.io');
   });

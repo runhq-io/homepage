@@ -15,19 +15,20 @@
  * set so the two surfaces can never drift apart.
  */
 
-import { resolveApiBase, widgetScriptUrl } from './apiBase';
+import { RUNHQ_PROJECT, resolveApiBase, widgetScriptUrl } from './apiBase';
+import { afterFirstPaint } from './afterFirstPaint';
 
 // The API/script origin. Baked per-env by CI (`console.runhq.io` for prod,
 // `console-staging.runhq.io` for staging); falls back to prod. The same rule
-// writes the SDK preload into index.html (vite.config.ts, apiBase.ts).
+// writes the Evolve config preload into index.html (vite.config.ts, apiBase.ts).
 export const API_BASE = resolveApiBase(import.meta.env.VITE_API_URL as string | undefined);
 
-// The RunHQ-on-RunHQ project: the board where RunHQ's own users file RunHQ bugs.
+// The RunHQ-on-RunHQ project (defined in apiBase.ts so the build can use it).
 // Its board lives at `www.runhq.io/runhq`; the marketing-site launcher points at
 // the same slug. The project's `allowed_origins` must include `www.runhq.io`
 // (and `staging.runhq.io`) for cookie-auth member recognition to succeed —
 // otherwise the widget degrades gracefully to the public/anonymous board.
-export const RUNHQ_PROJECT = 'runhq';
+export { RUNHQ_PROJECT };
 
 // Top-level paths owned by the marketing site (and a few structural names). A
 // project slug can never shadow these — react-router routes declared paths to
@@ -102,11 +103,20 @@ declare global {
   }
 }
 
+/** Callers waiting for the one scheduled insertion. */
+const awaitingScript: Array<() => void> = [];
+let insertionScheduled = false;
+
 /**
  * Ensure the canonical `widget.js` is present, then run `onReady` once the
- * `RunHQWidget` global is available. Idempotent and shared across both embed
- * surfaces: a single `<script data-runhq-widget>` tag is injected for the whole
+ * `RunHQWidget` global is available. Idempotent and shared across every
+ * caller: a single `<script data-runhq-widget>` tag is injected for the whole
  * SPA session and reused on subsequent calls (SPA navigation, re-mounts).
+ *
+ * The tag is inserted AFTER FIRST PAINT (R115), never at boot and never
+ * preloaded: nothing the first paint shows depends on the SDK (Evolve copy is
+ * decided from the boot config, R114), and its download and parse competed
+ * with the app bundle for every visitor's first paint.
  *
  * The tag carries no `data-project`, so the script's declarative auto-init is a
  * no-op — the caller drives `RunHQWidget.init(...)` with the mode it wants
@@ -122,31 +132,29 @@ export function loadWidgetScript(onReady: () => void): void {
     existing.addEventListener('load', onReady, { once: true });
     return;
   }
-  const script = document.createElement('script');
-  script.src = widgetScriptUrl(API_BASE);
-  script.async = true;
-  script.dataset.runhqWidget = 'true';
-  script.addEventListener('load', onReady, { once: true });
-  document.body.appendChild(script);
-}
-
-/**
- * Start loading the SDK at boot, before React mounts (ruling R45).
- *
- * The components ask for the script from an effect, after the first render.
- * On a cold load that was too late for the hero's 400 ms cap, so a consented
- * first-time visitor was never assigned. Inserting the tag here (index.html
- * has already preloaded it) lets the script run as soon as it arrives; every
- * later `loadWidgetScript` reuses this tag. Boards are skipped, like the boot
- * config fetch: BoardPage loads the SDK itself for its own project.
- */
-export function bootWidgetScript(pathname: string): void {
-  try {
-    if (isBoardRoute(pathname)) return;
-    loadWidgetScript(() => {});
-  } catch {
-    // The launcher's own load is the fallback; the page renders regardless.
-  }
+  awaitingScript.push(onReady);
+  if (insertionScheduled) return;
+  insertionScheduled = true;
+  afterFirstPaint(() => {
+    insertionScheduled = false;
+    const waiting = awaitingScript.splice(0);
+    const run = () => waiting.forEach((fn) => fn());
+    if (window.RunHQWidget) {
+      run();
+      return;
+    }
+    const present = document.querySelector<HTMLScriptElement>('script[data-runhq-widget]');
+    if (present) {
+      present.addEventListener('load', run, { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = widgetScriptUrl(API_BASE);
+    script.async = true;
+    script.dataset.runhqWidget = 'true';
+    script.addEventListener('load', run, { once: true });
+    document.body.appendChild(script);
+  });
 }
 
 /**

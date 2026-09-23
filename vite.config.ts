@@ -1,27 +1,33 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import { resolveApiBase, widgetPreloadTag } from './src/apiBase';
+import { evolveConfigPreloadTag, resolveApiBase, resolveTelemetryEnv } from './src/apiBase';
 
 /**
- * Preload the RunHQ SDK from index.html, so its download starts with the HTML
- * rather than after the app bundle has run (ruling R45). The URL is resolved
- * from the very env the app sees as `import.meta.env` (Vite's resolved config),
- * through the same rule the app applies (src/apiBase.ts).
+ * Preload the Evolve serving config from index.html (R114, R115), so the copy
+ * each visitor sees can be decided at first render instead of a round trip
+ * later. The URL is resolved from the very env the app sees as
+ * `import.meta.env` (Vite's resolved config), through the same rules the app
+ * applies (src/apiBase.ts): API origin, project, and environment.
+ *
+ * The SDK (widget.js) is deliberately NOT preloaded: it would compete with the
+ * app bundle for first paint. It loads after first paint (src/widget.ts).
  */
-function preloadWidgetScript(): Plugin {
-  let apiBase = resolveApiBase(undefined);
+function preloadEvolveConfig(): Plugin {
+  let tag = evolveConfigPreloadTag(resolveApiBase(undefined), 'production');
   return {
-    name: 'runhq-preload-widget-script',
+    name: 'runhq-preload-evolve-config',
     configResolved(config) {
-      apiBase = resolveApiBase(config.env.VITE_API_URL as string | undefined);
+      const apiBase = resolveApiBase(config.env.VITE_API_URL as string | undefined);
+      const environment = resolveTelemetryEnv(config.env.VITE_RUNHQ_ENV as string | undefined, apiBase, config.isProduction);
+      tag = evolveConfigPreloadTag(apiBase, environment);
     },
-    transformIndexHtml: () => [widgetPreloadTag(apiBase)],
+    transformIndexHtml: () => [tag],
   };
 }
 
 export default defineConfig({
-  plugins: [react(), preloadWidgetScript()],
+  plugins: [react(), preloadEvolveConfig()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

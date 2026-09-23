@@ -38,37 +38,10 @@
 
 import { storedConsent, type ConsentValue } from './analytics';
 import { API_BASE, loadWidgetScript } from './widget';
+import { resolveTelemetryEnv } from './apiBase';
+import type { TelemetryEnv } from './apiBase';
 
-/** The deployment an event belongs to, as RunHQ segments them. */
-export type TelemetryEnv = 'production' | 'staging' | 'development';
-
-const TELEMETRY_ENVS: readonly string[] = ['production', 'staging', 'development'];
-
-/**
- * Which deployment this build reports as.
- *
- * `VITE_RUNHQ_ENV` is declared per environment in the deploy workflows, next to
- * `VITE_GA_ID`, and wins outright. It is plain config, not a secret.
- *
- * The fallback exists because a forgotten variable must fail towards *quiet*,
- * never towards polluting production:
- *   - a non-production build (local dev, tests) is always "development";
- *   - a production-mode build is read off the API host it was compiled against,
- *     which CI sets per environment (`console-staging.` ⇒ staging), so the
- *     staging site cannot report as production merely because someone forgot.
- *
- * Pure, so it is unit-testable without rebuilding under different envs.
- */
-export function resolveTelemetryEnv(
-  declared: string | undefined,
-  apiBase: string,
-  isProd: boolean,
-): TelemetryEnv {
-  const explicit = typeof declared === 'string' ? declared.trim().toLowerCase() : '';
-  if (TELEMETRY_ENVS.includes(explicit)) return explicit as TelemetryEnv;
-  if (!isProd) return 'development';
-  return /staging/i.test(apiBase) ? 'staging' : 'production';
-}
+export { resolveTelemetryEnv, type TelemetryEnv } from './apiBase';
 
 export const TELEMETRY_ENV = resolveTelemetryEnv(
   import.meta.env.VITE_RUNHQ_ENV,

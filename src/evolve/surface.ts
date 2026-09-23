@@ -1,74 +1,77 @@
 /**
  * Evolve surfaces on the marketing site: the copy a section renders.
  *
- * The rules (spec SP10, "Serving without flicker", amended by ruling R18):
- *   - A visitor who has not consented is never assigned (R4). Their read paints
- *     at once with what an unassignable visitor sees — the live run's control,
- *     an adopted winner, or the shipped copy (bootConfig `untrackedPayload`) —
- *     calls no `variation()`, and is NOT latched.
- *   - A read made with the tracker on is LATCHED for the page load: a later
- *     mount (SPA navigation back home) gets the same copy, and `variation()`
- *     runs once per surface.
- *   - Consent already granted at a surface's first read: wait for the SDK's arm
- *     for at most SURFACE_WAIT_MS, invisibly (SurfaceBlock), then paint.
- *   - Consent granted while a surface is ON SCREEN: re-read it with the tracker
- *     on at once; the painted copy stays visible until the arm replaces it
- *     (cap SURFACE_CONSENT_WAIT_MS). A surface OFF screen at that moment is
- *     re-read at its next mount — never in the background, because reading the
- *     arm IS the exposure (widget.js `evolveVariation`).
- *   - For the same reason a read abandoned at its cap never calls `variation()`:
- *     a visitor who never saw an arm is never counted in it.
+ * The copy is decided SYNCHRONOUSLY from the page's boot config (bootConfig.ts)
+ * and the shared assignment block (evolveAssign.js) — never by waiting for the
+ * SDK script, which loads after first paint (ruling R114):
+ *   - No consent (or no id the SDK could count): the ADOPTED copy — a promoted
+ *     winner, or a live run's control — else the shipped copy. Never an arm,
+ *     nothing recorded (R4).
+ *   - Consent + the SDK's visitor id (visitorId.ts; minted under the SDK's key
+ *     when absent): the arm the shared block picks, painted at once. Its
+ *     exposure is queued for the SDK once the block is on screen (React has
+ *     committed), and the SDK records it when it loads — reading is showing.
+ *   - The config still in flight at first render: the block is laid out
+ *     invisibly (SurfaceBlock) and waits for the CONFIG, at most
+ *     SURFACE_WAIT_MS from when the page asked for it, judged by when the
+ *     answer ARRIVED (bootConfig `arrival`), not by a timer a busy main thread
+ *     cannot fire. Past that, the shipped copy paints and never swaps; a
+ *     consented read that ends there is reported (`evolve_surface_timeout`).
+ *   - Consent granted while a surface is ON SCREEN (R18/R19): it is assigned at
+ *     once, in the same task as the Accept, so the swap is the direct result of
+ *     the visitor's input. A surface OFF screen then is read at its next mount.
+ *   - A tracked read is LATCHED for the page load: a later mount (SPA
+ *     navigation back home) gets the same copy and queues nothing more.
  */
 import { useCallback, useSyncExternalStore } from 'react';
 import { loadWidgetScript } from '../widget';
 import { telemetryConsented, trackEvent } from '../telemetry';
 import { CONSENT_EVENT, CONSENT_KEY } from '../analytics';
-import { bootConfigSnapshot, untrackedPayload, type ServingConfig } from './bootConfig';
+import {
+  currentBoot,
+  flushRendersToOlderSdk,
+  type EvolveBootHandle,
+  type RenderEntry,
+  type ServedArm,
+  type ServedRun,
+  type ServingConfig,
+} from './bootConfig';
+import { evolveAssign } from './evolveAssign.js';
+import { ensureVisitorId, readVisitorId, trackingSuppressed } from './visitorId';
 
-/** The longest a consented visitor's surface stays invisible waiting for its arm. */
+/** The longest a surface stays invisible waiting for the boot config, from when the page asked for it. */
 export const SURFACE_WAIT_MS = 400;
 
-/**
- * How long a surface the visitor is ALREADY looking at waits for its arm after
- * they accept analytics. Nothing is hidden meanwhile — this bounds how late a
- * swap may come, not how long copy is invisible. Longer than SURFACE_WAIT_MS
- * because the tracker starts only once the widget has been rebuilt with
- * tracking on (RunHQWidget.tsx `launcherAction`, polling every 250 ms) and the
- * SDK has fetched its config.
- */
-export const SURFACE_CONSENT_WAIT_MS = 3000;
-
-/** The event a tracked read that gave up at its cap records (ruling R45). */
+/** The event a consented read that missed the config records (ruling R45). */
 export const SURFACE_TIMEOUT_EVENT = 'evolve_surface_timeout';
 
 export type SurfaceFields = Readonly<Record<string, string>>;
 
 export interface SurfaceSnapshot<T extends SurfaceFields> {
   readonly value: T;
-  /** False only while a first read is pending: the block is laid out but invisible. */
+  /** False only while waiting for the config: the block is laid out but invisible. */
   readonly settled: boolean;
-}
-
-/** The two SDK calls a surface read needs. */
-export interface EvolveSdk {
-  ready(): Promise<void>;
-  variation(surfaceKey: string, fallback: unknown): unknown;
 }
 
 export interface SurfaceEnv {
   consentGranted(): boolean;
   /** Calls `listener` whenever the stored consent may have changed; returns an unsubscribe. */
   onConsentChange(listener: () => void): () => void;
-  configSnapshot(): ServingConfig | null;
-  /** The SDK once its script has loaded, or null when it lacks the Evolve half. */
-  loadSdk(): Promise<EvolveSdk | null>;
-  setTimeout(fn: () => void, ms: number): unknown;
+  /** This page load's boot config, or null when none was started. */
+  boot(): EvolveBootHandle | null;
   /**
-   * A read made with the tracker on gave up at its cap: the visitor was never
-   * assigned, so they are in no arm. Recorded (ruling R45) so the unmeasured
-   * share of consented traffic is visible in Analytics instead of silent.
+   * Consented visitors only: the SDK's visitor id (minted under its key when
+   * absent), or null when the SDK could not count this visitor (its tracker is
+   * suppressed, or storage cannot keep an id).
    */
+  visitorId(): string | null;
+  /** A viewer-forced arm for the surface (an arm name or variation id), or null. */
+  forcedArm(surfaceKey: string): string | null;
+  setTimeout(fn: () => void, ms: number): unknown;
+  /** A consented read missed the config: recorded (R45) so the unmeasured share is visible. */
   reportTimeout(surfaceKey: string): void;
+  /** Hand a render to the SDK (the boot queue). */
+  queueRender(entry: RenderEntry): void;
 }
 
 export interface SurfaceStore {
@@ -99,86 +102,150 @@ export function mergeFields<T extends SurfaceFields>(payload: unknown, fallback:
   return changed ? (merged as unknown as T) : fallback;
 }
 
+function sameFields(a: SurfaceFields, b: SurfaceFields): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+}
+
 /**
- * - `untracked`: read before consent; painted, not latched.
- * - `pending`: a read with the tracker on is in flight.
- * - `latched`: settled with the tracker on; final for the page load.
+ * - `waiting`: first read made while the config is in flight; invisible.
+ * - `untracked`: painted with no assignment; may be assigned on consent.
+ * - `latched`: settled with the tracker's id (or past the cap); final.
  */
-type EntryState = 'untracked' | 'pending' | 'latched';
+type EntryState = 'waiting' | 'untracked' | 'latched';
 
 interface Entry {
   state: EntryState;
   snapshot: SurfaceSnapshot<SurfaceFields>;
   readonly fallback: SurfaceFields;
   readonly listeners: Set<() => void>;
+  /** A render not yet handed to the SDK: handed over once the block is on screen. */
+  render: RenderEntry | null;
+}
+
+interface Decision {
+  value: SurfaceFields;
+  state: 'untracked' | 'latched';
+  render: RenderEntry | null;
+}
+
+function forcedIn(run: ServedRun | null | undefined, forced: string | null): ServedArm | null {
+  if (!run || !forced) return null;
+  return run.arms.find((a) => a.name === forced) ?? run.arms.find((a) => a.variationId === forced) ?? null;
 }
 
 export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
   const entries = new Map<string, Entry>();
-  /** Surfaces already reported as timed out: once per surface per page load. */
-  const reportedTimeouts = new Set<string>();
   let watchingConsent = false;
 
-  const untracked = <T extends SurfaceFields>(surfaceKey: string, fallback: T): T =>
-    mergeFields(untrackedPayload(env.configSnapshot(), surfaceKey), fallback);
-
-  function publish(entry: Entry, snapshot: SurfaceSnapshot<SurfaceFields>): void {
-    entry.snapshot = snapshot;
-    for (const listener of [...entry.listeners]) listener();
+  /**
+   * What `surfaceKey` shows now. `config` null with `timedOut` = the config
+   * missed the cap; null without it = there is none to be had.
+   */
+  function decide(surfaceKey: string, fallback: SurfaceFields, config: ServingConfig | null, timedOut: boolean): Decision {
+    const served = config?.surfaces[surfaceKey];
+    const forced = forcedIn(served?.run, env.forcedArm(surfaceKey));
+    const subjectKey = env.consentGranted() ? env.visitorId() : null;
+    if (!subjectKey) {
+      return { value: mergeFields(forced ? forced.payload : served?.adopted, fallback), state: 'untracked', render: null };
+    }
+    if (timedOut) {
+      try {
+        env.reportTimeout(surfaceKey);
+      } catch {
+        // Measurement never decides what the page renders.
+      }
+    }
+    const declaration: RenderEntry = { surfaceKey, defaultPayload: fallback, subjectKey };
+    const liveRun = served?.run;
+    if (liveRun) {
+      const variationId = forced ? forced.variationId : evolveAssign(liveRun, subjectKey);
+      const arm = liveRun.arms.find((a) => a.variationId === variationId);
+      if (arm) {
+        return {
+          value: mergeFields(arm.payload, fallback),
+          state: 'latched',
+          render: { ...declaration, experimentId: liveRun.experimentId, epoch: liveRun.epoch, variationId: arm.variationId },
+        };
+      }
+    }
+    return { value: mergeFields(served?.adopted, fallback), state: 'latched', render: declaration };
   }
 
-  function reportTimedOut(surfaceKey: string): void {
-    // Only a visitor whose tracker is on can be counted; one who withdrew
-    // consent meanwhile is not recorded.
-    if (reportedTimeouts.has(surfaceKey) || !env.consentGranted()) return;
-    reportedTimeouts.add(surfaceKey);
+  function handOver(entry: Entry): void {
+    if (!entry.render || entry.listeners.size === 0) return;
+    const render = entry.render;
+    entry.render = null;
     try {
-      env.reportTimeout(surfaceKey);
+      env.queueRender(render);
     } catch {
-      // Measurement never decides what the page renders.
+      // As above.
     }
   }
 
-  /** Read the arm with the tracker on; `giveUp` is what the entry settles on without one. */
-  function readTracked(entry: Entry, surfaceKey: string, cap: number, giveUp: () => SurfaceFields): void {
-    entry.state = 'pending';
-    let decided = false;
-    const decide = (read: () => SurfaceFields): void => {
-      if (decided) return;
-      decided = true;
-      let value: SurfaceFields;
-      try {
-        value = read();
-      } catch {
-        value = giveUp();
-      }
-      entry.state = 'latched';
-      publish(entry, { value, settled: true });
-    };
-
-    env.setTimeout(() => {
-      if (decided) return;
-      decide(giveUp);
-      reportTimedOut(surfaceKey);
-    }, cap);
-    env
-      .loadSdk()
-      .then(async (sdk) => {
-        if (!sdk) return null;
-        await sdk.ready();
-        return sdk;
-      })
-      .then(
-        // The thunk runs only if the cap has not fired: variation() is the exposure.
-        (sdk) => decide(() => (sdk ? mergeFields(sdk.variation(surfaceKey, entry.fallback), entry.fallback) : giveUp())),
-        () => decide(giveUp),
-      );
+  /** Apply a decision; a new snapshot only when the copy or its settledness changed. */
+  function apply(entry: Entry, decision: Decision): void {
+    entry.state = decision.state;
+    entry.render = decision.render;
+    const current = entry.snapshot;
+    if (!current.settled || !sameFields(current.value, decision.value)) {
+      entry.snapshot = { value: decision.value, settled: true };
+    }
+    handOver(entry);
   }
 
-  /** A surface on screen keeps its painted copy while it is re-read with the tracker on. */
-  function rereadPainted(entry: Entry, surfaceKey: string): void {
-    const painted = entry.snapshot.value;
-    readTracked(entry, surfaceKey, SURFACE_CONSENT_WAIT_MS, () => painted);
+  function publish(entry: Entry): void {
+    for (const listener of [...entry.listeners]) listener();
+  }
+
+  /** Decide now from whatever the boot holds: its config, or nothing. */
+  function decideSettled(surfaceKey: string, entry: Entry, boot: EvolveBootHandle | null): void {
+    apply(entry, decide(surfaceKey, entry.fallback, boot?.config() ?? null, false));
+  }
+
+  /** The config is in flight: wait for it, invisibly, up to the cap. */
+  function awaitConfig(surfaceKey: string, entry: Entry, boot: EvolveBootHandle): void {
+    entry.state = 'waiting';
+    const conclude = (config: ServingConfig | null, timedOut: boolean) => {
+      if (entry.state !== 'waiting') return;
+      apply(entry, decide(surfaceKey, entry.fallback, config, timedOut));
+      publish(entry);
+    };
+    boot.onSettle(() => {
+      const arrival = boot.arrival();
+      if (arrival !== null && arrival <= SURFACE_WAIT_MS) conclude(boot.config(), false);
+      else conclude(null, true);
+    });
+    env.setTimeout(() => {
+      const arrival = boot.arrival();
+      // It arrived in time and its callback is merely queued behind a busy
+      // thread: that callback decides, with the config.
+      if (arrival !== null && arrival <= SURFACE_WAIT_MS) return;
+      conclude(null, true);
+    }, Math.max(0, SURFACE_WAIT_MS - boot.elapsed()));
+  }
+
+  function firstRead(surfaceKey: string, entry: Entry): void {
+    const boot = env.boot();
+    if (!boot || boot.settled()) return decideSettled(surfaceKey, entry, boot);
+    const arrival = boot.arrival();
+    if (arrival !== null) {
+      if (arrival <= SURFACE_WAIT_MS) return awaitConfig(surfaceKey, entry, boot);
+      return apply(entry, decide(surfaceKey, entry.fallback, null, true));
+    }
+    if (boot.elapsed() >= SURFACE_WAIT_MS) return apply(entry, decide(surfaceKey, entry.fallback, null, true));
+    awaitConfig(surfaceKey, entry, boot);
+  }
+
+  /** Assign an untracked surface now, if the visitor has consented and the config is here. */
+  function assignIfConsented(surfaceKey: string, entry: Entry): boolean {
+    if (!env.consentGranted()) return false;
+    const boot = env.boot();
+    if (boot && !boot.settled()) return false;
+    const decision = decide(surfaceKey, entry.fallback, boot?.config() ?? null, false);
+    if (decision.state !== 'latched') return false;
+    apply(entry, decision);
+    return true;
   }
 
   function onConsentChange(): void {
@@ -186,36 +253,29 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
     for (const [surfaceKey, entry] of entries) {
       // Only what the visitor is looking at is read now. Reading IS the
       // exposure, so an off-screen surface waits for its next mount.
-      if (entry.state === 'untracked' && entry.listeners.size > 0) rereadPainted(entry, surfaceKey);
+      if (entry.state === 'untracked' && entry.listeners.size > 0 && assignIfConsented(surfaceKey, entry)) publish(entry);
     }
   }
 
   return {
     read<T extends SurfaceFields>(surfaceKey: string, fallback: T): SurfaceSnapshot<T> {
       const existing = entries.get(surfaceKey);
-      if (existing && existing.state !== 'untracked') return existing.snapshot as SurfaceSnapshot<T>;
-      const consented = env.consentGranted();
-
       if (existing) {
-        // Still no consent: the same snapshot, so React sees a stable value.
-        if (!consented) return existing.snapshot as SurfaceSnapshot<T>;
-        // Consent arrived without the change signal reaching us (e.g. another tab)
-        // while this surface is on screen: keep what is painted, re-read behind it.
-        if (existing.listeners.size > 0) {
-          rereadPainted(existing, surfaceKey);
-          return existing.snapshot as SurfaceSnapshot<T>;
+        if (existing.state === 'untracked') {
+          if (existing.listeners.size > 0) {
+            // On screen: only consent that reached us without its signal
+            // (another tab) changes it. Nothing else swaps a painted block.
+            assignIfConsented(surfaceKey, existing);
+          } else {
+            // A new mount: decided afresh, from whatever the config now says.
+            decideSettled(surfaceKey, existing, env.boot()?.settled() ? env.boot() : null);
+          }
         }
-        // Its next mount after consent: read like a first read with the tracker on.
-        existing.snapshot = { value: fallback, settled: false };
-        readTracked(existing, surfaceKey, SURFACE_WAIT_MS, () => untracked(surfaceKey, fallback));
         return existing.snapshot as SurfaceSnapshot<T>;
       }
-
-      const entry: Entry = consented
-        ? { state: 'pending', snapshot: { value: fallback, settled: false }, fallback, listeners: new Set() }
-        : { state: 'untracked', snapshot: { value: untracked(surfaceKey, fallback), settled: true }, fallback, listeners: new Set() };
+      const entry: Entry = { state: 'waiting', snapshot: { value: fallback, settled: false }, fallback, listeners: new Set(), render: null };
       entries.set(surfaceKey, entry);
-      if (consented) readTracked(entry, surfaceKey, SURFACE_WAIT_MS, () => untracked(surfaceKey, fallback));
+      firstRead(surfaceKey, entry);
       return entry.snapshot as SurfaceSnapshot<T>;
     },
     subscribe(surfaceKey: string, listener: () => void): () => void {
@@ -227,34 +287,12 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
       const entry = entries.get(surfaceKey);
       if (!entry) return () => {};
       entry.listeners.add(listener);
+      handOver(entry);
       return () => {
         entry.listeners.delete(listener);
       };
     },
   };
-}
-
-/** The SDK, via the one shared script tag (widget.ts `loadWidgetScript`). */
-function browserSdk(): Promise<EvolveSdk | null> {
-  return new Promise((resolve) => {
-    try {
-      loadWidgetScript(() => {
-        const sdk = window.RunHQWidget;
-        const ready = sdk?.ready;
-        const variation = sdk?.variation;
-        if (sdk && typeof ready === 'function' && typeof variation === 'function') {
-          resolve({
-            ready: () => ready.call(sdk),
-            variation: (surfaceKey, fallback) => variation.call(sdk, surfaceKey, fallback),
-          });
-        } else {
-          resolve(null);
-        }
-      });
-    } catch {
-      resolve(null);
-    }
-  });
 }
 
 /** Same signals RunHQWidget's useConsent reads: this tab's consent bar, and other tabs. */
@@ -270,14 +308,69 @@ function watchBrowserConsent(listener: () => void): () => void {
   };
 }
 
+/**
+ * The SDK's viewer override (`?runhq_variation=<surface>:<arm>`, remembered for
+ * the tab under `rw_evolve_override`), read the way widget.js
+ * `evolveLoadOverrides` reads it. Read-only: the SDK owns the stored value.
+ */
+export function browserForcedArm(surfaceKey: string): string | null {
+  try {
+    let stored: Record<string, string> = {};
+    try {
+      const raw = sessionStorage.getItem('rw_evolve_override');
+      if (raw) stored = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      stored = {};
+    }
+    const requested = new URLSearchParams(window.location.search || '').get('runhq_variation');
+    if (requested === 'off') return null;
+    if (requested) {
+      const parts = requested.split(':');
+      if (parts.length === 2) stored = { ...stored, [parts[0]]: parts[1] };
+    }
+    const forced = stored[surfaceKey];
+    return typeof forced === 'string' && forced ? forced : null;
+  } catch {
+    return null;
+  }
+}
+
+let olderSdkFlushArmed = false;
+
+/**
+ * Hand a render to the SDK. The SDK takes the boot queue when its tracker
+ * starts; one that predates the queue is handed each render through
+ * `variation()` once it is ready (R118). Either way the SDK loads after first
+ * paint (widget.ts `loadWidgetScript`).
+ */
+function browserQueueRender(entry: RenderEntry): void {
+  const boot = currentBoot();
+  if (!boot) return;
+  boot.queueRender(entry);
+  if (olderSdkFlushArmed) return;
+  olderSdkFlushArmed = true;
+  loadWidgetScript(() => {
+    const sdk = window.RunHQWidget;
+    const ready = sdk?.ready;
+    const variation = sdk?.variation;
+    if (!sdk || typeof ready !== 'function' || typeof variation !== 'function') return;
+    ready.call(sdk).then(
+      () => flushRendersToOlderSdk(boot, { variation: (k, f) => variation.call(sdk, k, f) }, readVisitorId()),
+      () => {},
+    );
+  });
+}
+
 export const surfaceStore: SurfaceStore = createSurfaceStore({
   consentGranted: telemetryConsented,
   onConsentChange: watchBrowserConsent,
-  configSnapshot: bootConfigSnapshot,
-  loadSdk: browserSdk,
+  boot: currentBoot,
+  visitorId: () => (trackingSuppressed() ? null : ensureVisitorId()),
+  forcedArm: browserForcedArm,
   setTimeout: (fn, ms) => window.setTimeout(fn, ms),
   // Consent-gated, guarded, and queued by the SDK until its tracker starts.
   reportTimeout: (surfaceKey) => trackEvent(SURFACE_TIMEOUT_EVENT, { surface: surfaceKey }),
+  queueRender: browserQueueRender,
 });
 
 /**
