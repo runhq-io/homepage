@@ -17,6 +17,7 @@
 
 import { RUNHQ_PROJECT, resolveApiBase, widgetScriptUrl } from './apiBase';
 import { afterFirstPaint } from './afterFirstPaint';
+import { storedConsent } from './analytics';
 
 // The API/script origin. Baked per-env by CI (`console.runhq.io` for prod,
 // `console-staging.runhq.io` for staging); falls back to prod. The same rule
@@ -135,7 +136,7 @@ export function loadWidgetScript(onReady: () => void): void {
   awaitingScript.push(onReady);
   if (insertionScheduled) return;
   insertionScheduled = true;
-  afterFirstPaint(() => {
+  const insert = () => {
     insertionScheduled = false;
     const waiting = awaitingScript.splice(0);
     const run = () => waiting.forEach((fn) => fn());
@@ -154,7 +155,27 @@ export function loadWidgetScript(onReady: () => void): void {
     script.dataset.runhqWidget = 'true';
     script.addEventListener('load', run, { once: true });
     document.body.appendChild(script);
-  });
+  };
+  // A visitor who has already consented needs the SDK soon: it is what sends
+  // the exposure of the arm they are shown (R126). Everyone else's first paint
+  // does not wait on it.
+  if (storedConsent() === 'granted') insert();
+  else afterFirstPaint(insert);
+}
+
+/**
+ * Start the SDK at boot for a visitor whose stored consent is `granted`
+ * (R126): the sooner it runs, the fewer exposures depend on the page's
+ * pagehide beacon. Never preloaded (it would still compete with the app
+ * bundle), never on a board (BoardPage loads it for its own project).
+ */
+export function bootWidgetScriptIfConsented(pathname: string): void {
+  try {
+    if (isBoardRoute(pathname) || storedConsent() !== 'granted') return;
+    loadWidgetScript(() => {});
+  } catch {
+    // The launcher's own load is the fallback.
+  }
 }
 
 /**

@@ -10,6 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const scheduled: Array<() => void> = [];
 vi.mock('./afterFirstPaint', () => ({ afterFirstPaint: (fn: () => void) => { scheduled.push(fn); } }));
+let consent: 'granted' | 'denied' | null = null;
+vi.mock('./analytics', async (importOriginal) => ({ ...(await importOriginal<object>()), storedConsent: () => consent }));
 
 interface FakeScript {
   src: string;
@@ -44,7 +46,7 @@ function fakeDom() {
 }
 
 let dom: ReturnType<typeof fakeDom>;
-beforeEach(() => { scheduled.length = 0; dom = fakeDom(); vi.resetModules(); });
+beforeEach(() => { scheduled.length = 0; consent = null; dom = fakeDom(); vi.resetModules(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 const load = () => import('./widget');
@@ -95,6 +97,34 @@ describe('loadWidgetScript', () => {
     scheduled.splice(0).forEach((fn) => fn());
     expect(dom.appended).toHaveLength(0);
     expect(cb).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a visitor whose stored consent is granted (R126)', () => {
+  it('gets the SDK at boot, not after first paint: their exposures leave through it sooner', async () => {
+    consent = 'granted';
+    const { bootWidgetScriptIfConsented } = await load();
+    bootWidgetScriptIfConsented('/');
+    expect(scheduled).toHaveLength(0);
+    expect(dom.appended).toHaveLength(1);
+  });
+
+  it('any later caller is served at once too, and no second tag is inserted', async () => {
+    consent = 'granted';
+    const { loadWidgetScript, bootWidgetScriptIfConsented } = await load();
+    bootWidgetScriptIfConsented('/');
+    loadWidgetScript(() => {});
+    expect(dom.appended).toHaveLength(1);
+    expect(scheduled).toHaveLength(0);
+  });
+
+  it('everyone else still waits for first paint; a board never loads RunHQ’s SDK at boot', async () => {
+    const { bootWidgetScriptIfConsented } = await load();
+    bootWidgetScriptIfConsented('/');
+    expect(dom.appended).toHaveLength(0);
+    consent = 'granted';
+    bootWidgetScriptIfConsented('/arrr');
+    expect(dom.appended).toHaveLength(0);
   });
 });
 

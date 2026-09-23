@@ -334,3 +334,136 @@ describe('renderWhenConfigRead — first render after an already-arrived answer 
     expect(render).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('the exposure beacon (R126): renders leave the page no later than the visitor', () => {
+  /** Pinned in both repos (platform: be/src/api/services/evolve/pageBeacon.db.test.ts). */
+  const PAGE_BEACON_SHAPE = 'anonId,environment,events,exposures,surfaces|defaultPayload,experimentId,override,surfaceKey,ts,variationId|defaultPayload,surfaceKey,ts';
+  const shapeOf = (batch: { exposures: object[]; surfaces: object[] } & object) => {
+    const keys = (o: object) => Object.keys(o).sort().join(',');
+    return [keys(batch), keys(batch.exposures[0]!), keys(batch.surfaces[0]!)].join('|');
+  };
+  const painted = (over: Partial<RenderEntry> = {}): RenderEntry => ({
+    surfaceKey: 'home.hero', defaultPayload: { heroH1Line1: 'Shipped.' }, subjectKey: 'anon-1',
+    experimentId: 'e1', epoch: 2, variationId: 'v-sharp', override: false, ts: 1_000, ...over,
+  });
+
+  function page(o: { consent?: boolean; beaconOk?: boolean } = {}) {
+    const listeners: Record<string, Array<() => void>> = {};
+    const sent: Array<{ url: string; body: string }> = [];
+    let visibility = 'visible';
+    const env = {
+      addEventListener: (type: string, fn: () => void) => { (listeners[type] ??= []).push(fn); },
+      visibilityState: () => visibility,
+      sendBeacon: (url: string, body: string) => { sent.push({ url, body }); return o.beaconOk ?? true; },
+      consentGranted: () => o.consent ?? true,
+    };
+    return {
+      env,
+      sent,
+      batches: () => sent.map((s) => JSON.parse(s.body)),
+      leave: () => (listeners.pagehide ?? []).forEach((fn) => fn()),
+      hide: () => { visibility = 'hidden'; (listeners.visibilitychange ?? []).forEach((fn) => fn()); },
+      show: () => { visibility = 'visible'; (listeners.visibilitychange ?? []).forEach((fn) => fn()); },
+    };
+  }
+
+  async function booted() {
+    const mod = await fresh();
+    const target: { __runhqEvolve?: EvolveBoot } = {};
+    const boot = mod.startEvolveBoot({ ...ARGS, fetchImpl: respond(NEW_SHAPE), target });
+    await boot.ready;
+    return { ...mod, boot, target };
+  }
+
+  it('builds the SDK’s batch shape: exposures for painted arms, surfaces for every render, no events', async () => {
+    const { pageRenderBatches } = await booted();
+    const batches = pageRenderBatches([painted(), painted({ surfaceKey: 'home.closing', defaultPayload: { c: 1 }, experimentId: undefined, epoch: undefined, variationId: undefined, override: undefined })], 'staging');
+    expect(batches).toEqual([{
+      anonId: 'anon-1',
+      environment: 'staging',
+      events: [],
+      exposures: [{ experimentId: 'e1', surfaceKey: 'home.hero', variationId: 'v-sharp', defaultPayload: { heroH1Line1: 'Shipped.' }, override: false, ts: 1_000 }],
+      surfaces: [
+        { surfaceKey: 'home.hero', defaultPayload: { heroH1Line1: 'Shipped.' }, ts: 1_000 },
+        { surfaceKey: 'home.closing', defaultPayload: { c: 1 }, ts: 1_000 },
+      ],
+    }]);
+    expect(shapeOf(batches[0]!)).toBe(PAGE_BEACON_SHAPE);
+  });
+
+  it('a visitor who leaves before the SDK loads is sent exactly once, to collect, for this project', async () => {
+    const { boot, armExposureBeacon, target } = await booted();
+    const p = page();
+    armExposureBeacon(boot, { apiBase: ARGS.apiBase, project: 'runhq', environment: 'staging', ...p.env });
+    boot.queueRender(painted());
+    p.hide();
+    p.leave();
+    expect(p.sent).toHaveLength(1);
+    expect(p.sent[0]!.url).toBe('https://console-staging.runhq.io/api/widget/collect?project=runhq');
+    expect(p.batches()[0].exposures).toHaveLength(1);
+    // Kept, marked delivered, so an SDK that loads after all (a restored page) does not send it again.
+    expect(target.__runhqEvolve!.renders).toEqual([{ ...painted(), delivered: true }]);
+    // A render queued after the tab came back goes on the next hide, alone.
+    p.show();
+    boot.queueRender(painted({ surfaceKey: 'home.closing', experimentId: 'e2', variationId: 'v-x' }));
+    p.leave();
+    expect(p.sent).toHaveLength(2);
+    expect(p.batches()[1].exposures.map((e: { surfaceKey: string }) => e.surfaceKey)).toEqual(['home.closing']);
+  });
+
+  it('a visitor who stays until the SDK takes the queue is never sent by the page', async () => {
+    const { boot, armExposureBeacon, target } = await booted();
+    const p = page();
+    armExposureBeacon(boot, { apiBase: ARGS.apiBase, project: 'runhq', environment: 'staging', ...p.env });
+    boot.queueRender(painted());
+    (target.__runhqEvolve as { renders: unknown }).renders = { push: vi.fn() };
+    p.hide();
+    p.leave();
+    expect(p.sent).toEqual([]);
+  });
+
+  it('sends nothing for a visitor who withdrew consent, or when nothing is queued', async () => {
+    const { boot, armExposureBeacon } = await booted();
+    const p = page({ consent: false });
+    armExposureBeacon(boot, { apiBase: ARGS.apiBase, project: 'runhq', environment: 'staging', ...p.env });
+    boot.queueRender(painted());
+    p.leave();
+    expect(p.sent).toEqual([]);
+    const q = page();
+    const fresh2 = await booted();
+    fresh2.armExposureBeacon(fresh2.boot, { apiBase: ARGS.apiBase, project: 'runhq', environment: 'staging', ...q.env });
+    q.leave();
+    expect(q.sent).toEqual([]);
+  });
+
+  it('a beacon the browser refused is left undelivered, for the next chance', async () => {
+    const { boot, armExposureBeacon, target } = await booted();
+    const p = page({ beaconOk: false });
+    armExposureBeacon(boot, { apiBase: ARGS.apiBase, project: 'runhq', environment: 'staging', ...p.env });
+    boot.queueRender(painted());
+    p.leave();
+    expect((target.__runhqEvolve!.renders as RenderEntry[])[0]!.delivered).toBeUndefined();
+  });
+});
+
+describe('the beacon lets in-view blocks report before it builds the batch', () => {
+  it('runs beforeFlush first, so a render queued by it is sent', async () => {
+    const mod = await fresh();
+    const target: { __runhqEvolve?: EvolveBoot } = {};
+    const boot = mod.startEvolveBoot({ ...ARGS, fetchImpl: respond(NEW_SHAPE), target });
+    await boot.ready;
+    const sent: string[] = [];
+    let pagehide!: () => void;
+    mod.armExposureBeacon(boot, {
+      apiBase: ARGS.apiBase, project: 'runhq', environment: 'staging',
+      addEventListener: (type, fn) => { if (type === 'pagehide') pagehide = fn; },
+      visibilityState: () => 'hidden',
+      sendBeacon: (_u, body) => { sent.push(body); return true; },
+      consentGranted: () => true,
+      beforeFlush: () => boot.queueRender({ surfaceKey: 'home.hero', defaultPayload: {}, subjectKey: 'anon-9', experimentId: 'e1', epoch: 2, variationId: 'v-a', override: false, ts: 5 }),
+    });
+    pagehide();
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0]!).exposures).toHaveLength(1);
+  });
+});

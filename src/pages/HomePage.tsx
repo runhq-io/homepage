@@ -230,7 +230,7 @@ export default function HomePage() {
 
       {/* HERO */}
       <section className="rhw-hero">
-        <SurfaceBlock className="rhw-hero-side" settled={hero.settled}>
+        <SurfaceBlock className="rhw-hero-side" settled={hero.settled} onSeen={hero.seen}>
           <h1 className="rhw-hero-h1">
             {hero.value.heroH1Line1} {hero.value.heroH1Line2}
           </h1>
@@ -378,7 +378,7 @@ export default function HomePage() {
 
       {/* CTA */}
       <section className="rhw-cta-band">
-        <SurfaceBlock className="rhw-cta-inner" settled={closing.settled}>
+        <SurfaceBlock className="rhw-cta-inner" settled={closing.settled} onSeen={closing.seen}>
           <h2 className="rhw-cta-h">
             {closing.value.ctaH1}<br />
             {closing.value.ctaH2}

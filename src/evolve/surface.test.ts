@@ -57,6 +57,7 @@ function fakeBoot(o: { config?: ServingConfig | null; settled?: boolean; elapsed
     queueRender: vi.fn(),
     rendersTaken: () => false,
     drainUntakenRenders: () => [],
+    untakenRenders: () => [],
   };
   return {
     handle,
@@ -69,13 +70,13 @@ function fakeBoot(o: { config?: ServingConfig | null; settled?: boolean; elapsed
 
 function harness(o: { consent?: boolean; id?: string | null; boot?: ReturnType<typeof fakeBoot> | null; forced?: Record<string, string> } = {}) {
   let consent = o.consent ?? false;
-  const consentListeners = new Set<() => void>();
+  const consentListeners = new Set<(source: 'page' | 'other-tab') => void>();
   const timers: Array<{ fn: () => void; ms: number }> = [];
   const boot = o.boot === undefined ? fakeBoot() : o.boot;
   const queued: RenderEntry[] = [];
   const env: SurfaceEnv = {
     consentGranted: () => consent,
-    onConsentChange: vi.fn((listener: () => void) => {
+    onConsentChange: vi.fn((listener: (source: 'page' | 'other-tab') => void) => {
       consentListeners.add(listener);
       return () => { consentListeners.delete(listener); };
     }),
@@ -93,14 +94,21 @@ function harness(o: { consent?: boolean; id?: string | null; boot?: ReturnType<t
     boot,
     timers,
     queued,
-    /** Mount: first read, then React subscribes after commit. */
-    mount(key = 'home.hero', fallback: Record<string, string> = HERO) {
+    /**
+     * Mount: first read, then React subscribes after commit; the block's
+     * observer reports it seen (the hero is on screen at mount) unless told not to.
+     */
+    mount(key = 'home.hero', fallback: Record<string, string> = HERO, o: { seen?: boolean } = {}) {
       const first = store.read(key, fallback);
       const listener = vi.fn();
       const unsubscribe = store.subscribe(key, listener);
-      return { first, listener, unsubscribe, now: () => store.read(key, fallback) };
+      if (o.seen !== false) store.seen(key);
+      return { first, listener, unsubscribe, now: () => store.read(key, fallback), seen: () => store.seen(key) };
     },
-    grant: () => { consent = true; consentListeners.forEach((l) => l()); },
+    /** The consent bar's Accept on this page: an input. */
+    grant: () => { consent = true; consentListeners.forEach((l) => l('page')); },
+    /** Consent granted in another tab (the `storage` event): no input on this page. */
+    grantInOtherTab: () => { consent = true; consentListeners.forEach((l) => l('other-tab')); },
     fireTimers: () => timers.splice(0).forEach((t) => t.fn()),
   };
 }
@@ -129,11 +137,13 @@ describe('config already in when React renders (the preloaded case)', () => {
       const h = harness({ consent: true, id });
       const first = h.store.read('home.hero', HERO);
       expect(first).toEqual({ settled: true, value: { ...HERO, ...payload } });
-      // Rendering is not showing: nothing is queued until React commits (subscribes).
+      // Rendering is not showing: nothing is queued until the block is seen.
       expect(h.queued).toEqual([]);
       h.store.subscribe('home.hero', () => {});
+      expect(h.queued).toEqual([]);
+      h.store.seen('home.hero');
       expect(h.queued).toEqual([{
-        surfaceKey: 'home.hero', defaultPayload: HERO, subjectKey: id, experimentId: 'e1', epoch: 4, variationId,
+        surfaceKey: 'home.hero', defaultPayload: HERO, subjectKey: id, experimentId: 'e1', epoch: 4, variationId, override: false, ts: expect.any(Number),
       }]);
       expect(h.env.reportTimeout).not.toHaveBeenCalled();
     }
@@ -143,7 +153,7 @@ describe('config already in when React renders (the preloaded case)', () => {
     const h = harness({ consent: true });
     const fallback = { ctaH1: 'Shipped.' };
     expect(h.mount('home.closing', fallback).first.value).toEqual({ ctaH1: 'Closing winner.' });
-    expect(h.queued).toEqual([{ surfaceKey: 'home.closing', defaultPayload: fallback, subjectKey: ID_B }]);
+    expect(h.queued).toEqual([{ surfaceKey: 'home.closing', defaultPayload: fallback, subjectKey: ID_B, ts: expect.any(Number) }]);
   });
 
   it('consent but no countable id (suppressed, or storage that cannot keep one): the adopted copy, nothing queued', () => {
@@ -161,12 +171,16 @@ describe('config already in when React renders (the preloaded case)', () => {
     expect(h.queued).toHaveLength(1);
   });
 
-  it('a viewer-forced arm is painted to anyone (by name or id), like the SDK does', () => {
+  it('a viewer-forced arm is painted to anyone, by NAME only — exactly as the SDK forces — and queued as a preview', () => {
     const h = harness({ consent: false, forced: { 'home.hero': 'bold' } });
     expect(h.mount().first.value).toEqual({ ...HERO, ...ARM_B });
-    const tracked = harness({ consent: true, id: ID_A, forced: { 'home.hero': 'v-b' } });
+    const tracked = harness({ consent: true, id: ID_A, forced: { 'home.hero': 'bold' } });
     tracked.mount();
-    expect(tracked.queued[0]).toMatchObject({ variationId: 'v-b', subjectKey: ID_A });
+    expect(tracked.queued[0]).toMatchObject({ variationId: 'v-b', subjectKey: ID_A, override: true });
+    // A variation id is not an arm name: the SDK would not force it, so neither does the page (re-review m2).
+    const byId = harness({ consent: true, id: ID_A, forced: { 'home.hero': 'v-b' } });
+    byId.mount();
+    expect(byId.queued[0]).toMatchObject({ variationId: 'v-a', override: false });
   });
 
   it('no boot at all (a failure before React): the shipped copy at once', () => {
@@ -209,7 +223,7 @@ describe('config still in flight at first render (R114e)', () => {
     const painted = m.now();
     expect(painted).toEqual({ settled: true, value: HERO });
     expect(h.env.reportTimeout).toHaveBeenCalledWith('home.hero');
-    expect(h.queued).toEqual([{ surfaceKey: 'home.hero', defaultPayload: HERO, subjectKey: ID_B }]);
+    expect(h.queued).toEqual([{ surfaceKey: 'home.hero', defaultPayload: HERO, subjectKey: ID_B, ts: expect.any(Number) }]);
     boot.settle();
     expect(m.now()).toBe(painted);
     expect(h.queued).toHaveLength(1);
@@ -287,11 +301,16 @@ describe('consent granted during the page load (R18/R19)', () => {
     expect(h.queued).toHaveLength(1);
   });
 
-  it('consent that arrived without a signal (another tab) is picked up by the next read', () => {
+  it('consent from another tab (no input here) never swaps a block on screen: it is assigned at its next mount (re-review m5)', () => {
     const h = harness({ consent: false, id: ID_B });
     const m = h.mount();
-    h.env.consentGranted = () => true;
-    expect(m.now().value).toEqual({ ...HERO, ...ARM_B });
+    h.grantInOtherTab();
+    expect(m.now().value).toEqual({ ...HERO, ...ADOPTED });
+    h.env.consentGranted = () => true; // and a read that finds it without any signal
+    expect(m.now().value).toEqual({ ...HERO, ...ADOPTED });
+    expect(h.queued).toEqual([]);
+    m.unsubscribe();
+    expect(h.mount().first.value).toEqual({ ...HERO, ...ARM_B });
     expect(h.queued).toHaveLength(1);
   });
 
@@ -353,5 +372,61 @@ describe('mergeFields', () => {
     expect(mergeFields({ heroH1Line1: 'New.', ctaStartFree: '  ', extra: 'x' }, HERO)).toEqual({ heroH1Line1: 'New.', ctaStartFree: 'Talk to us' });
     expect(mergeFields({ heroH1Line1: 7 }, HERO)).toBe(HERO);
     expect(mergeFields(['x'], HERO)).toBe(HERO);
+  });
+});
+
+describe('exposure when a block is first SEEN (R127)', () => {
+  it('a block below the fold is decided at mount but queues nothing until it is seen, then exactly once', () => {
+    const h = harness({ consent: true, id: ID_B });
+    const m = h.mount('home.hero', HERO, { seen: false });
+    expect(m.first.value).toEqual({ ...HERO, ...ARM_B }); // decided now: no swap when it scrolls in
+    expect(h.queued).toEqual([]);
+    m.seen();
+    m.seen();
+    expect(h.queued).toHaveLength(1);
+    expect(m.now()).toBe(m.first);
+  });
+
+  it('a declaration also waits to be seen', () => {
+    const h = harness({ consent: true });
+    const m = h.mount('home.closing', { ctaH1: 'Shipped.' }, { seen: false });
+    expect(h.queued).toEqual([]);
+    m.seen();
+    expect(h.queued).toMatchObject([{ surfaceKey: 'home.closing' }]);
+  });
+
+  it('on-page consent assigns only blocks already seen; an unseen one stays as painted until its next mount', () => {
+    const h = harness({ consent: false, id: ID_B });
+    const hero = h.mount();
+    const closing = h.mount('home.hero-ko', HERO, { seen: false });
+    h.grant();
+    expect(hero.now().value).toEqual({ ...HERO, ...ARM_B });
+    expect(closing.now().settled).toBe(true);
+    expect(closing.listener).not.toHaveBeenCalled();
+    expect(h.queued.map((e) => e.surfaceKey)).toEqual(['home.hero']);
+    // Seeing it later changes nothing: it was painted untracked, and a swap in view is what R127 forbids.
+    closing.seen();
+    expect(h.queued.map((e) => e.surfaceKey)).toEqual(['home.hero']);
+  });
+
+  it('a remount must be seen again before anything decided at that mount is queued', () => {
+    const h = harness({ consent: false, id: ID_B });
+    const m = h.mount();
+    m.unsubscribe();
+    h.grant();
+    const again = h.mount('home.hero', HERO, { seen: false });
+    expect(again.first.value).toEqual({ ...HERO, ...ARM_B });
+    expect(h.queued).toEqual([]);
+    again.seen();
+    expect(h.queued).toHaveLength(1);
+  });
+
+  it('a block still waiting for the config when seen is queued once it is decided', () => {
+    const boot = fakeBoot({ settled: false });
+    const h = harness({ consent: true, id: ID_B, boot });
+    h.mount();
+    expect(h.queued).toEqual([]);
+    boot.settle();
+    expect(h.queued).toHaveLength(1);
   });
 });

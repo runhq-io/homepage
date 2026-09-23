@@ -9,21 +9,25 @@
  *     nothing recorded (R4).
  *   - Consent + the SDK's visitor id (visitorId.ts; minted under the SDK's key
  *     when absent): the arm the shared block picks, painted at once. Its
- *     exposure is queued for the SDK once the block is on screen (React has
- *     committed), and the SDK records it when it loads — reading is showing.
+ *     exposure (and the surface's declaration) is queued when the block is
+ *     first SEEN (R127: SurfaceBlock's IntersectionObserver calls `seen`), and
+ *     leaves the page through the SDK or, if the visitor goes first, the
+ *     page's own beacon (bootConfig `armExposureBeacon`, R126).
  *   - The config still in flight at first render: the block is laid out
  *     invisibly (SurfaceBlock) and waits for the CONFIG, at most
  *     SURFACE_WAIT_MS from when the page asked for it, judged by when the
  *     answer ARRIVED (bootConfig `arrival`), not by a timer a busy main thread
  *     cannot fire. Past that, the shipped copy paints and never swaps; a
  *     consented read that ends there is reported (`evolve_surface_timeout`).
- *   - Consent granted while a surface is ON SCREEN (R18/R19): it is assigned at
- *     once, in the same task as the Accept, so the swap is the direct result of
- *     the visitor's input. A surface OFF screen then is read at its next mount.
+ *   - Consent granted by the Accept on THIS page (R18/R19): a block already
+ *     seen is assigned at once, in the same task as the Accept, so the swap is
+ *     the direct result of the visitor's input. A block not yet seen, and
+ *     every block when consent arrives from another tab (no input here to
+ *     excuse a shift), keeps its copy until its next mount.
  *   - A tracked read is LATCHED for the page load: a later mount (SPA
  *     navigation back home) gets the same copy and queues nothing more.
  */
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { loadWidgetScript } from '../widget';
 import { telemetryConsented, trackEvent } from '../telemetry';
 import { CONSENT_EVENT, CONSENT_KEY } from '../analytics';
@@ -55,8 +59,11 @@ export interface SurfaceSnapshot<T extends SurfaceFields> {
 
 export interface SurfaceEnv {
   consentGranted(): boolean;
-  /** Calls `listener` whenever the stored consent may have changed; returns an unsubscribe. */
-  onConsentChange(listener: () => void): () => void;
+  /**
+   * Calls `listener` whenever the stored consent may have changed — `page`: this
+   * page's consent bar (an input); `other-tab`: another tab's; returns an unsubscribe.
+   */
+  onConsentChange(listener: (source: 'page' | 'other-tab') => void): () => void;
   /** This page load's boot config, or null when none was started. */
   boot(): EvolveBootHandle | null;
   /**
@@ -65,7 +72,7 @@ export interface SurfaceEnv {
    * suppressed, or storage cannot keep an id).
    */
   visitorId(): string | null;
-  /** A viewer-forced arm for the surface (an arm name or variation id), or null. */
+  /** A viewer-forced arm's NAME for the surface, or null. */
   forcedArm(surfaceKey: string): string | null;
   setTimeout(fn: () => void, ms: number): unknown;
   /** A consented read missed the config: recorded (R45) so the unmeasured share is visible. */
@@ -77,6 +84,8 @@ export interface SurfaceEnv {
 export interface SurfaceStore {
   read<T extends SurfaceFields>(surfaceKey: string, fallback: T): SurfaceSnapshot<T>;
   subscribe(surfaceKey: string, listener: () => void): () => void;
+  /** The mounted block was first seen (its top edge entered the upper 75% of the viewport). */
+  seen(surfaceKey: string): void;
 }
 
 /**
@@ -119,8 +128,10 @@ interface Entry {
   snapshot: SurfaceSnapshot<SurfaceFields>;
   readonly fallback: SurfaceFields;
   readonly listeners: Set<() => void>;
-  /** A render not yet handed to the SDK: handed over once the block is on screen. */
+  /** A render not yet handed over: handed over once the block has been seen. */
   render: RenderEntry | null;
+  /** This mount of the block has been seen. Reset when it unmounts. */
+  seen: boolean;
 }
 
 interface Decision {
@@ -129,9 +140,10 @@ interface Decision {
   render: RenderEntry | null;
 }
 
+/** By name only, exactly as widget.js `evolveResolve` forces (re-review m2). */
 function forcedIn(run: ServedRun | null | undefined, forced: string | null): ServedArm | null {
   if (!run || !forced) return null;
-  return run.arms.find((a) => a.name === forced) ?? run.arms.find((a) => a.variationId === forced) ?? null;
+  return run.arms.find((a) => a.name === forced) ?? null;
 }
 
 export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
@@ -165,7 +177,7 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
         return {
           value: mergeFields(arm.payload, fallback),
           state: 'latched',
-          render: { ...declaration, experimentId: liveRun.experimentId, epoch: liveRun.epoch, variationId: arm.variationId },
+          render: { ...declaration, experimentId: liveRun.experimentId, epoch: liveRun.epoch, variationId: arm.variationId, override: forced !== null },
         };
       }
     }
@@ -173,8 +185,8 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
   }
 
   function handOver(entry: Entry): void {
-    if (!entry.render || entry.listeners.size === 0) return;
-    const render = entry.render;
+    if (!entry.render || !entry.seen) return;
+    const render: RenderEntry = { ...entry.render, ts: Date.now() };
     entry.render = null;
     try {
       env.queueRender(render);
@@ -248,12 +260,13 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
     return true;
   }
 
-  function onConsentChange(): void {
-    if (!env.consentGranted()) return;
+  function onConsentChange(source: 'page' | 'other-tab'): void {
+    // Only this page's Accept is an input that may change what is on screen.
+    if (source !== 'page' || !env.consentGranted()) return;
     for (const [surfaceKey, entry] of entries) {
-      // Only what the visitor is looking at is read now. Reading IS the
-      // exposure, so an off-screen surface waits for its next mount.
-      if (entry.state === 'untracked' && entry.listeners.size > 0 && assignIfConsented(surfaceKey, entry)) publish(entry);
+      // Only blocks the visitor has seen are assigned now; the rest keep their
+      // copy until their next mount, so nothing swaps as it scrolls into view.
+      if (entry.state === 'untracked' && entry.seen && entry.listeners.size > 0 && assignIfConsented(surfaceKey, entry)) publish(entry);
     }
   }
 
@@ -263,9 +276,7 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
       if (existing) {
         if (existing.state === 'untracked') {
           if (existing.listeners.size > 0) {
-            // On screen: only consent that reached us without its signal
-            // (another tab) changes it. Nothing else swaps a painted block.
-            assignIfConsented(surfaceKey, existing);
+            // Mounted: nothing but this page's Accept swaps a painted block.
           } else {
             // A new mount: decided afresh, from whatever the config now says.
             decideSettled(surfaceKey, existing, env.boot()?.settled() ? env.boot() : null);
@@ -273,7 +284,7 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
         }
         return existing.snapshot as SurfaceSnapshot<T>;
       }
-      const entry: Entry = { state: 'waiting', snapshot: { value: fallback, settled: false }, fallback, listeners: new Set(), render: null };
+      const entry: Entry = { state: 'waiting', snapshot: { value: fallback, settled: false }, fallback, listeners: new Set(), render: null, seen: false };
       entries.set(surfaceKey, entry);
       firstRead(surfaceKey, entry);
       return entry.snapshot as SurfaceSnapshot<T>;
@@ -287,29 +298,37 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
       const entry = entries.get(surfaceKey);
       if (!entry) return () => {};
       entry.listeners.add(listener);
-      handOver(entry);
       return () => {
         entry.listeners.delete(listener);
+        // Unmounted: the next mount must be seen again.
+        if (entry.listeners.size === 0) entry.seen = false;
       };
+    },
+    seen(surfaceKey: string): void {
+      const entry = entries.get(surfaceKey);
+      if (!entry || entry.seen) return;
+      entry.seen = true;
+      handOver(entry);
     },
   };
 }
 
 /** Same signals RunHQWidget's useConsent reads: this tab's consent bar, and other tabs. */
-function watchBrowserConsent(listener: () => void): () => void {
+function watchBrowserConsent(listener: (source: 'page' | 'other-tab') => void): () => void {
   const onStorage = (e: StorageEvent) => {
-    if (e.key === null || e.key === CONSENT_KEY) listener();
+    if (e.key === null || e.key === CONSENT_KEY) listener('other-tab');
   };
-  window.addEventListener(CONSENT_EVENT, listener);
+  const onPage = () => listener('page');
+  window.addEventListener(CONSENT_EVENT, onPage);
   window.addEventListener('storage', onStorage);
   return () => {
-    window.removeEventListener(CONSENT_EVENT, listener);
+    window.removeEventListener(CONSENT_EVENT, onPage);
     window.removeEventListener('storage', onStorage);
   };
 }
 
 /**
- * The SDK's viewer override (`?runhq_variation=<surface>:<arm>`, remembered for
+ * The SDK's viewer override (`?runhq_variation=<surface>:<arm name>`, remembered for
  * the tab under `rw_evolve_override`), read the way widget.js
  * `evolveLoadOverrides` reads it. Read-only: the SDK owns the stored value.
  */
@@ -373,11 +392,18 @@ export const surfaceStore: SurfaceStore = createSurfaceStore({
   queueRender: browserQueueRender,
 });
 
+export interface SurfaceView<T extends SurfaceFields> extends SurfaceSnapshot<T> {
+  /** Hand to the block's SurfaceBlock `onSeen`: it calls this once the block is first seen. */
+  readonly seen: () => void;
+}
+
 /**
  * The copy for an Evolve surface. `fallback` must be a stable object (a module
  * constant): it is the shipped copy and the surface's declared default.
  */
-export function useSurface<T extends SurfaceFields>(surfaceKey: string, fallback: T): SurfaceSnapshot<T> {
+export function useSurface<T extends SurfaceFields>(surfaceKey: string, fallback: T): SurfaceView<T> {
   const subscribe = useCallback((listener: () => void) => surfaceStore.subscribe(surfaceKey, listener), [surfaceKey]);
-  return useSyncExternalStore(subscribe, () => surfaceStore.read(surfaceKey, fallback));
+  const snapshot = useSyncExternalStore(subscribe, () => surfaceStore.read(surfaceKey, fallback));
+  const seen = useCallback(() => surfaceStore.seen(surfaceKey), [surfaceKey]);
+  return useMemo(() => ({ ...snapshot, seen }), [snapshot, seen]);
 }

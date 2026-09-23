@@ -16,7 +16,9 @@
  * `evolveBootConfig` and `evolveAdoptPageRenders`):
  *   - `config`: the raw answer, which the SDK validates in its own spelling and
  *     adopts instead of fetching again;
- *   - `renders`: what the page painted before the SDK loaded. The SDK takes the
+ *   - `renders`: what the page painted before the SDK loaded (RenderEntry: the
+ *     surface, its shipped copy as `defaultPayload` — public copy — the visitor
+ *     id, and the arm when one was painted). The SDK takes the
  *     queue (replacing the array with a sink) and records an exposure only when
  *     it would have picked the same arm for the same visitor. An SDK that
  *     predates the queue never takes it; `flushRendersToOlderSdk` then hands
@@ -24,8 +26,9 @@
  * Change both sides or neither.
  */
 import { API_BASE, RUNHQ_PROJECT, isBoardRoute } from '../widget';
-import { TELEMETRY_ENV } from '../telemetry';
+import { TELEMETRY_ENV, telemetryConsented } from '../telemetry';
 import { evolveConfigUrl } from '../apiBase';
+import { checkPendingSightings } from './firstSight';
 
 /** One arm of a running run: what assignment needs, and what to paint. */
 export interface ServedArm {
@@ -68,6 +71,12 @@ export interface RenderEntry {
   experimentId?: string;
   epoch?: number;
   variationId?: string;
+  /** A viewer-forced arm (`?runhq_variation=`): a preview, never an assignment. */
+  override?: boolean;
+  /** Epoch ms when the block was first seen (the exposure's time). */
+  ts?: number;
+  /** Set once the page itself has beaconed this render (R126); the SDK then only notes it. */
+  delivered?: boolean;
 }
 
 /** `window.__runhqEvolve`, as widget.js reads it. */
@@ -231,6 +240,8 @@ export interface EvolveBootHandle {
   rendersTaken(): boolean;
   /** Empties and returns the queue while no SDK has taken it; [] once one has. */
   drainUntakenRenders(): RenderEntry[];
+  /** The queued renders themselves (not copies) while no SDK has taken them; [] once one has. */
+  untakenRenders(): RenderEntry[];
 }
 
 let current: EvolveBootHandle | null = null;
@@ -331,6 +342,7 @@ export function startEvolveBoot(args: {
     },
     rendersTaken: () => !Array.isArray(boot.renders),
     drainUntakenRenders: () => (Array.isArray(boot.renders) ? boot.renders.splice(0) : []),
+    untakenRenders: () => (Array.isArray(boot.renders) ? boot.renders : []),
   };
   current = handle;
   return handle;
@@ -408,6 +420,100 @@ export function renderWhenConfigRead(
   setTimeoutFn(once, ARRIVED_READ_GRACE_MS);
 }
 
+/** A collect batch, in the SDK's shape (widget.js `trackBuildBatch`). */
+export interface PageRenderBatch {
+  anonId: string;
+  environment: string;
+  events: [];
+  exposures: Array<{ experimentId: string; surfaceKey: string; variationId: string; defaultPayload: unknown; override: boolean; ts: number }>;
+  surfaces: Array<{ surfaceKey: string; defaultPayload: unknown; ts: number }>;
+}
+
+/**
+ * Renders as the batches the SDK would have sent for them: one per visitor id
+ * (consent can be withdrawn and granted again within a page load, minting a
+ * new id), an exposure for each painted arm, a surface read for every render.
+ * The shape is pinned against the platform's ingest by PAGE_BEACON_SHAPE
+ * (be/src/api/services/evolve/pageBeacon.db.test.ts).
+ */
+export function pageRenderBatches(entries: readonly RenderEntry[], environment: string): PageRenderBatch[] {
+  const bySubject = new Map<string, PageRenderBatch>();
+  for (const entry of entries) {
+    let batch = bySubject.get(entry.subjectKey);
+    if (!batch) {
+      batch = { anonId: entry.subjectKey, environment, events: [], exposures: [], surfaces: [] };
+      bySubject.set(entry.subjectKey, batch);
+    }
+    const ts = entry.ts ?? Date.now();
+    if (entry.experimentId !== undefined && entry.epoch !== undefined && entry.variationId !== undefined) {
+      batch.exposures.push({
+        experimentId: entry.experimentId,
+        surfaceKey: entry.surfaceKey,
+        variationId: entry.variationId,
+        defaultPayload: entry.defaultPayload,
+        override: entry.override === true,
+        ts,
+      });
+    }
+    batch.surfaces.push({ surfaceKey: entry.surfaceKey, defaultPayload: entry.defaultPayload, ts });
+  }
+  return [...bySubject.values()];
+}
+
+/**
+ * Send what the page painted but no SDK has taken, when the visitor leaves or
+ * hides the tab (ruling R126, re-review I-1).
+ *
+ * The page paints an arm at first render and the SDK — which loads after first
+ * paint — used to be the only way its exposure reached RunHQ. A visitor who
+ * left before it loaded was never exposed; leaving that early depends on the
+ * arm, while a visitor who converts always stays long enough, so the arm that
+ * drove people away kept a better rate than it earned. So the exposure leaves
+ * the page no later than the visitor does: `pagehide` and
+ * `visibilitychange → hidden`, by `sendBeacon`, as the SDK's own batch.
+ *
+ * No new trust: the ingest re-derives the arm from the id and ignores the
+ * claim, and its (experiment, epoch, person) index makes a repeat a no-op.
+ * Each render is sent at most once by the page: it stays in the queue marked
+ * `delivered`, so an SDK that loads after all (a tab that came back, a page
+ * restored from the back/forward cache) notes it without sending it again. A
+ * queue the SDK has taken is the SDK's to flush (it does, on the same events).
+ */
+export function armExposureBeacon(
+  boot: EvolveBootHandle,
+  env: {
+    apiBase: string;
+    project: string;
+    environment: string;
+    addEventListener(type: 'pagehide' | 'visibilitychange', listener: () => void): void;
+    visibilityState(): string;
+    sendBeacon(url: string, body: string): boolean;
+    consentGranted(): boolean;
+    /** Runs first: lets blocks the visitor had in view report themselves (firstSight `checkPendingSightings`). */
+    beforeFlush?: () => void;
+  },
+): void {
+  const url = `${env.apiBase}/api/widget/collect?project=${encodeURIComponent(env.project)}`;
+  const flush = () => {
+    try {
+      if (!env.consentGranted()) return;
+      env.beforeFlush?.();
+      const pending = boot.untakenRenders().filter((entry) => entry.delivered !== true);
+      if (pending.length === 0) return;
+      for (const batch of pageRenderBatches(pending, env.environment)) {
+        if (!env.sendBeacon(url, JSON.stringify(batch))) continue;
+        for (const entry of pending) if (entry.subjectKey === batch.anonId) entry.delivered = true;
+      }
+    } catch {
+      // Measurement never breaks leaving a page.
+    }
+  };
+  env.addEventListener('pagehide', flush);
+  env.addEventListener('visibilitychange', () => {
+    if (env.visibilityState() === 'hidden') flush();
+  });
+}
+
 /** Board routes belong to whichever project the visitor asked for — never RunHQ's config. */
 export function shouldBootEvolve(pathname: string): boolean {
   return !isBoardRoute(pathname);
@@ -422,7 +528,18 @@ export function bootEvolve(): EvolveBootHandle | null {
       fetch(evolveConfigUrl(API_BASE, RUNHQ_PROJECT, TELEMETRY_ENV), evolveConfigRequestInit).catch(() => {});
       return null;
     }
-    return startEvolveBoot({ apiBase: API_BASE, project: RUNHQ_PROJECT, environment: TELEMETRY_ENV });
+    const boot = startEvolveBoot({ apiBase: API_BASE, project: RUNHQ_PROJECT, environment: TELEMETRY_ENV });
+    armExposureBeacon(boot, {
+      apiBase: API_BASE,
+      project: RUNHQ_PROJECT,
+      environment: TELEMETRY_ENV,
+      addEventListener: (type, listener) => window.addEventListener(type, listener),
+      visibilityState: () => document.visibilityState,
+      sendBeacon: (url, body) => typeof navigator.sendBeacon === 'function' && navigator.sendBeacon(url, body),
+      consentGranted: telemetryConsented,
+      beforeFlush: () => checkPendingSightings(),
+    });
+    return boot;
   } catch {
     // Evolve only ever changes copy; the page renders its shipped copy whatever happens here.
     return null;
