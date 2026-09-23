@@ -267,6 +267,17 @@ describe('the render queue (R114d) and an SDK that predates it (R118)', () => {
     expect(variation.mock.calls.map((c) => c[0])).toEqual(['home.closing']);
   });
 
+  it('never hands an older SDK a render the page already beaconed (round-2 re-review m-2)', async () => {
+    const { startEvolveBoot, flushRendersToOlderSdk } = await fresh();
+    const boot = startEvolveBoot({ ...ARGS, fetchImpl: respond(OLD_SHAPE), target: {} });
+    await boot.ready;
+    boot.queueRender({ ...entry(), delivered: true });
+    boot.queueRender(entry({ surfaceKey: 'home.hero-ko' }));
+    const variation = vi.fn();
+    flushRendersToOlderSdk(boot, { variation }, 'anon-1');
+    expect(variation.mock.calls.map((c) => c[0])).toEqual(['home.hero-ko']);
+  });
+
   it('leaves a taken queue to the SDK that took it', async () => {
     const { startEvolveBoot, flushRendersToOlderSdk } = await fresh();
     const target: { __runhqEvolve?: EvolveBoot } = {};
@@ -337,7 +348,7 @@ describe('renderWhenConfigRead — first render after an already-arrived answer 
 
 describe('the exposure beacon (R126): renders leave the page no later than the visitor', () => {
   /** Pinned in both repos (platform: be/src/api/services/evolve/pageBeacon.db.test.ts). */
-  const PAGE_BEACON_SHAPE = 'anonId,environment,events,exposures,surfaces|defaultPayload,experimentId,override,surfaceKey,ts,variationId|defaultPayload,surfaceKey,ts';
+  const PAGE_BEACON_SHAPE = 'anonId,environment,events,exposures,surfaces|defaultPayload,epoch,experimentId,override,surfaceKey,ts,variationId|defaultPayload,surfaceKey,ts';
   const shapeOf = (batch: { exposures: object[]; surfaces: object[] } & object) => {
     const keys = (o: object) => Object.keys(o).sort().join(',');
     return [keys(batch), keys(batch.exposures[0]!), keys(batch.surfaces[0]!)].join('|');
@@ -382,7 +393,8 @@ describe('the exposure beacon (R126): renders leave the page no later than the v
       anonId: 'anon-1',
       environment: 'staging',
       events: [],
-      exposures: [{ experimentId: 'e1', surfaceKey: 'home.hero', variationId: 'v-sharp', defaultPayload: { heroH1Line1: 'Shipped.' }, override: false, ts: 1_000 }],
+      // The epoch rendered: the ingest does not count it into a cohort restarted since (re-review m-1).
+      exposures: [{ experimentId: 'e1', epoch: 2, surfaceKey: 'home.hero', variationId: 'v-sharp', defaultPayload: { heroH1Line1: 'Shipped.' }, override: false, ts: 1_000 }],
       surfaces: [
         { surfaceKey: 'home.hero', defaultPayload: { heroH1Line1: 'Shipped.' }, ts: 1_000 },
         { surfaceKey: 'home.closing', defaultPayload: { c: 1 }, ts: 1_000 },

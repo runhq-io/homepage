@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const scheduled: Array<() => void> = [];
-vi.mock('./afterFirstPaint', () => ({ afterFirstPaint: (fn: () => void) => { scheduled.push(fn); } }));
+const scheduledOptions: Array<{ idle?: boolean } | undefined> = [];
+vi.mock('./afterFirstPaint', () => ({ afterFirstPaint: (fn: () => void, o?: { idle?: boolean }) => { scheduled.push(fn); scheduledOptions.push(o); } }));
 let consent: 'granted' | 'denied' | null = null;
 vi.mock('./analytics', async (importOriginal) => ({ ...(await importOriginal<object>()), storedConsent: () => consent }));
 
@@ -46,7 +47,7 @@ function fakeDom() {
 }
 
 let dom: ReturnType<typeof fakeDom>;
-beforeEach(() => { scheduled.length = 0; consent = null; dom = fakeDom(); vi.resetModules(); });
+beforeEach(() => { scheduled.length = 0; scheduledOptions.length = 0; consent = null; dom = fakeDom(); vi.resetModules(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 const load = () => import('./widget');
@@ -100,31 +101,29 @@ describe('loadWidgetScript', () => {
   });
 });
 
-describe('a visitor whose stored consent is granted (R126)', () => {
-  it('gets the SDK at boot, not after first paint: their exposures leave through it sooner', async () => {
+describe('a visitor whose stored consent is granted (R126, round-2 re-review I-1)', () => {
+  it('gets the SDK right after first paint, without the idle wait — never before first render', async () => {
     consent = 'granted';
-    const { bootWidgetScriptIfConsented } = await load();
-    bootWidgetScriptIfConsented('/');
-    expect(scheduled).toHaveLength(0);
-    expect(dom.appended).toHaveLength(1);
-  });
-
-  it('any later caller is served at once too, and no second tag is inserted', async () => {
-    consent = 'granted';
-    const { loadWidgetScript, bootWidgetScriptIfConsented } = await load();
-    bootWidgetScriptIfConsented('/');
+    const { loadWidgetScript } = await load();
     loadWidgetScript(() => {});
+    // Nothing at call time: starting the SDK during React's first render cost
+    // returning consented visitors 2–4 s of hero image (measured).
+    expect(dom.appended).toHaveLength(0);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduledOptions[0]).toEqual({ idle: false });
+    scheduled.splice(0).forEach((fn) => fn());
     expect(dom.appended).toHaveLength(1);
-    expect(scheduled).toHaveLength(0);
   });
 
-  it('everyone else still waits for first paint; a board never loads RunHQ’s SDK at boot', async () => {
-    const { bootWidgetScriptIfConsented } = await load();
-    bootWidgetScriptIfConsented('/');
-    expect(dom.appended).toHaveLength(0);
-    consent = 'granted';
-    bootWidgetScriptIfConsented('/arrr');
-    expect(dom.appended).toHaveLength(0);
+  it('everyone else waits for first paint AND idle time', async () => {
+    const { loadWidgetScript } = await load();
+    loadWidgetScript(() => {});
+    expect(scheduledOptions[0]).toBeUndefined();
+  });
+
+  it('the boot-time insertion is gone', async () => {
+    const mod = await load();
+    expect((mod as Record<string, unknown>).bootWidgetScriptIfConsented).toBeUndefined();
   });
 });
 

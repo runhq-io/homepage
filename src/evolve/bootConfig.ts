@@ -370,6 +370,9 @@ export function flushRendersToOlderSdk(
   const config = boot.config();
   for (const entry of boot.drainUntakenRenders()) {
     if (entry.subjectKey !== sdkVisitorId) continue;
+    // Already beaconed: the ingest has it, and that SDK's variation() would send
+    // the read (and exposure) again, counting the surface read twice.
+    if (entry.delivered === true) continue;
     if (entry.variationId === undefined && (!config || config.surfaces[entry.surfaceKey]?.run)) continue;
     try {
       sdk.variation(entry.surfaceKey, entry.defaultPayload);
@@ -425,7 +428,7 @@ export interface PageRenderBatch {
   anonId: string;
   environment: string;
   events: [];
-  exposures: Array<{ experimentId: string; surfaceKey: string; variationId: string; defaultPayload: unknown; override: boolean; ts: number }>;
+  exposures: Array<{ experimentId: string; epoch: number; surfaceKey: string; variationId: string; defaultPayload: unknown; override: boolean; ts: number }>;
   surfaces: Array<{ surfaceKey: string; defaultPayload: unknown; ts: number }>;
 }
 
@@ -448,6 +451,8 @@ export function pageRenderBatches(entries: readonly RenderEntry[], environment: 
     if (entry.experimentId !== undefined && entry.epoch !== undefined && entry.variationId !== undefined) {
       batch.exposures.push({
         experimentId: entry.experimentId,
+        // The cohort painted: a render beaconed after a restart is not counted in the new one.
+        epoch: entry.epoch,
         surfaceKey: entry.surfaceKey,
         variationId: entry.variationId,
         defaultPayload: entry.defaultPayload,

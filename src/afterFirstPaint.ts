@@ -19,16 +19,24 @@ function whenIdle(fn: () => void): void {
   else window.setTimeout(fn, 0);
 }
 
-export function afterFirstPaint(fn: () => void): void {
+/**
+ * `idle: false` skips the idle wait: for a visitor whose stored consent is
+ * granted the SDK is what sends their exposures (R126), so it starts right
+ * after the paint — but never during React's first render, which cost those
+ * visitors 2–4 s of hero image when it did (round-2 re-review I-1).
+ */
+export function afterFirstPaint(fn: () => void, options: { idle?: boolean } = {}): void {
+  const next = options.idle === false ? fn : () => whenIdle(fn);
   if (painted || typeof window.requestAnimationFrame !== 'function') {
     painted = true;
-    whenIdle(fn);
+    if (options.idle === false) window.setTimeout(fn, 0);
+    else whenIdle(fn);
     return;
   }
   window.requestAnimationFrame(() => {
     window.setTimeout(() => {
       painted = true;
-      whenIdle(fn);
+      next();
     }, 0);
   });
 }
