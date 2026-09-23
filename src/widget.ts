@@ -15,11 +15,12 @@
  * set so the two surfaces can never drift apart.
  */
 
+import { resolveApiBase, widgetScriptUrl } from './apiBase';
+
 // The API/script origin. Baked per-env by CI (`console.runhq.io` for prod,
-// `console-staging.runhq.io` for staging); falls back to prod.
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/+$/, '') ||
-  'https://console.runhq.io';
+// `console-staging.runhq.io` for staging); falls back to prod. The same rule
+// writes the SDK preload into index.html (vite.config.ts, apiBase.ts).
+export const API_BASE = resolveApiBase(import.meta.env.VITE_API_URL as string | undefined);
 
 // The RunHQ-on-RunHQ project: the board where RunHQ's own users file RunHQ bugs.
 // Its board lives at `www.runhq.io/runhq`; the marketing-site launcher points at
@@ -122,11 +123,30 @@ export function loadWidgetScript(onReady: () => void): void {
     return;
   }
   const script = document.createElement('script');
-  script.src = `${API_BASE}/widget.js`;
+  script.src = widgetScriptUrl(API_BASE);
   script.async = true;
   script.dataset.runhqWidget = 'true';
   script.addEventListener('load', onReady, { once: true });
   document.body.appendChild(script);
+}
+
+/**
+ * Start loading the SDK at boot, before React mounts (ruling R45).
+ *
+ * The components ask for the script from an effect, after the first render.
+ * On a cold load that was too late for the hero's 400 ms cap, so a consented
+ * first-time visitor was never assigned. Inserting the tag here (index.html
+ * has already preloaded it) lets the script run as soon as it arrives; every
+ * later `loadWidgetScript` reuses this tag. Boards are skipped, like the boot
+ * config fetch: BoardPage loads the SDK itself for its own project.
+ */
+export function bootWidgetScript(pathname: string): void {
+  try {
+    if (isBoardRoute(pathname)) return;
+    loadWidgetScript(() => {});
+  } catch {
+    // The launcher's own load is the fallback; the page renders regardless.
+  }
 }
 
 /**
