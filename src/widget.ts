@@ -93,6 +93,10 @@ declare global {
       track?: (name: string, meta?: Record<string, unknown>) => void;
       /** Record revenue against the visitor. */
       revenue?: (amount: number, meta?: Record<string, unknown>) => void;
+      /** The variation for an Evolve surface, or `fallback`. Synchronous; reading it IS the exposure. */
+      variation?: (surfaceKey: string, fallback: unknown) => unknown;
+      /** Resolves once the SDK's variation config has arrived. */
+      ready?: () => Promise<void>;
     };
   }
 }
