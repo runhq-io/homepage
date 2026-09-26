@@ -73,6 +73,16 @@ runs RunHQ's own acquisition/CRM tracker: page views, first-touch attribution,
 anonymous visitor into a person. `src/telemetry.ts` is the whole of the site's
 use of it — one file to read to know what RunHQ records about its own visitors.
 
+Visitor traffic is recorded in its own RunHQ project, **`runhq-homepage`** —
+the feedback widget stays on the `runhq` board. The widget is always initialised
+with `track: false`; the tracker is started by the SDK's tracking-only mode
+(`data-project="runhq-homepage" data-track-only="true" data-environment=…` on
+the `widget.js` tag). For a returning visitor who has already accepted, that is
+the one tag the page loads; a visitor who clicks Accept mid-visit gets a
+tracking-only copy injected then, because the SDK reads that mode only at load.
+Tracking must be switched on in `runhq-homepage`'s SDK settings, or `/collect`
+answers `{"tracking":"disabled"}`.
+
 Two rules govern it:
 
 - **Consent gates it.** Unlike GA this tracker has no cookieless mode — its
@@ -87,9 +97,10 @@ Two rules govern it:
   ever forgotten, the value is inferred from the build mode and API host and can
   only come out `production` for a production build against the production API.
 
-The `/:slug` board never tracks. The SDK pins the project it was initialised
-with for the lifetime of the page, so tracking there wrote RunHQ's own marketing
-page views into whichever customer's project the visitor had opened.
+The `/:slug` board's own `init()` never tracks: the SDK pins the project it was
+initialised with for the lifetime of the page, so tracking there wrote RunHQ's
+own marketing page views into whichever customer's project the visitor had
+opened. Page views on `www.runhq.io/:slug` still go to `runhq-homepage`.
 
 > **Note on the previously-committed GA ID.** An earlier revision briefly
 > hardcoded the Measurement ID `G-PK433W7S1P` in `index.html`. It has been

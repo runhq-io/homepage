@@ -103,11 +103,14 @@ declare global {
  * surfaces: a single `<script data-runhq-widget>` tag is injected for the whole
  * SPA session and reused on subsequent calls (SPA navigation, re-mounts).
  *
- * The tag carries no `data-project`, so the script's declarative auto-init is a
- * no-op — the caller drives `RunHQWidget.init(...)` with the mode it wants
- * (floating launcher vs. standalone board).
+ * `attrs` land on the tag only when this call is the one that injects it. They
+ * are how telemetry.ts starts the SDK's tracking-only mode (`data-track-only`),
+ * which the script reads once, at load. That mode never calls `init()`, so the
+ * caller still drives `RunHQWidget.init(...)` with the mode it wants (floating
+ * launcher vs. standalone board). Without `attrs` the tag carries no
+ * `data-project` and the declarative auto-init is a no-op.
  */
-export function loadWidgetScript(onReady: () => void): void {
+export function loadWidgetScript(onReady: () => void, attrs?: Record<string, string>): void {
   if (window.RunHQWidget) {
     onReady();
     return;
@@ -121,6 +124,7 @@ export function loadWidgetScript(onReady: () => void): void {
   script.src = `${API_BASE}/widget.js`;
   script.async = true;
   script.dataset.runhqWidget = 'true';
+  for (const [name, value] of Object.entries(attrs ?? {})) script.setAttribute(name, value);
   script.addEventListener('load', onReady, { once: true });
   document.body.appendChild(script);
 }

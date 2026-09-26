@@ -11,13 +11,10 @@
  *   - `identify` / `stage` / `track` / `revenue`, which are what turn an
  *     anonymous `rw_anon_id` into a *person* in RunHQ.
  *
- * The site was embedding only the feedback half: it mounted the widget and left
- * the tracker at its defaults, so every visitor stayed an anonymous id forever
- * and RunHQ could not see its own funnel. This module is the whole of the site's
- * use of the tracking half — one place to read to know what RunHQ records about
- * a visitor to its own marketing site.
+ * This module is the whole of the site's use of the tracking half — one place
+ * to read to know what RunHQ records about a visitor to its own marketing site.
  *
- * Two rules shape everything below.
+ * Three rules shape everything below.
  *
  * 1. CONSENT GOVERNS IT. Unlike GA (see analytics.ts), this tracker has no
  *    cookieless mode: its visitor id is a real `rw_anon_id` in localStorage,
@@ -34,10 +31,21 @@
  *    pointing staging at `VITE_GA_ID=none`. So the environment is declared per
  *    build, and the fallback when nobody declared one can never be "production"
  *    unless this really is the production build talking to the production API.
+ *
+ * 3. THE HOMEPAGE HAS ITS OWN PROJECT. Visitor traffic is recorded under
+ *    `runhq-homepage`, not under `runhq` — the feedback board the launcher
+ *    mounts. The SDK takes its tracking project from the first thing that
+ *    starts the tracker and pins it for the page, and `init()` can only start it
+ *    against the board's own project. So the widget is always initialised with
+ *    tracking off, and the tracker is started by the SDK's tracking-only mode
+ *    (`data-track-only` on the script tag) — see `loadSdk` / `startTracking`.
  */
 
 import { storedConsent, type ConsentValue } from './analytics';
 import { API_BASE, loadWidgetScript } from './widget';
+
+/** The RunHQ project that receives the marketing site's visitor traffic. */
+export const TRACKING_PROJECT = 'runhq-homepage';
 
 /** The deployment an event belongs to, as RunHQ segments them. */
 export type TelemetryEnv = 'production' | 'staging' | 'development';
@@ -77,62 +85,42 @@ export const TELEMETRY_ENV = resolveTelemetryEnv(
 );
 
 /**
- * Which of the two embed surfaces is initialising the widget.
- *
- * `marketing` is the floating launcher on RunHQ's own pages; `board` is the
- * full-page `/:slug` board, which belongs to whichever project the visitor
- * asked for — someone else's, usually.
- */
-export type WidgetSurface = 'marketing' | 'board';
-
-/**
- * Whether this widget instance may run the tracker.
- *
- * `board` is always false, and that is a correctness fix rather than caution.
- * The SDK starts tracking inside `init()` against the slug it was given and
- * pins that project for the lifetime of the page — the tracker has no notion of
- * the SPA later navigating away. So a visitor who landed on `www.runhq.io/arrr`
- * and then clicked through to `/pricing` was writing RunHQ's own marketing page
- * views into *arrr's* analytics. A customer's project must never receive
- * RunHQ's traffic, so the board surface mounts the widget with the tracker off.
- *
- * The cost is that a visit which only ever touches a board is not in RunHQ's
- * telemetry. GA still counts it (that is what the Consent Mode work bought),
- * and the moment the visitor reaches a marketing page the launcher starts the
- * tracker for RunHQ's own project.
- */
-export function shouldTrack(consent: ConsentValue | null, surface: WidgetSurface): boolean {
-  if (surface === 'board') return false;
-  return consent === 'granted';
-}
-
-/**
  * The exact options object handed to `RunHQWidget.init()`.
  *
- * Both embed surfaces build their options here so the tracking decision and the
- * environment can never drift between them — the same reason `API_BASE` and
- * `RESERVED_SLUGS` live in one module.
+ * Both embed surfaces build their options here so they can never drift apart —
+ * the same reason `API_BASE` and `RESERVED_SLUGS` live in one module.
+ *
+ * `track` is always false. init() would start the tracker against the widget's
+ * own project (the `runhq` board, or on `/:slug` a customer's), and the SDK
+ * would then pin that project for the page. The marketing site's traffic
+ * belongs to `TRACKING_PROJECT` and is started separately, below.
  */
 export function widgetInitOptions(args: {
   project: string;
-  surface: WidgetSurface;
-  consent: ConsentValue | null;
   standalone?: boolean;
-  environment?: TelemetryEnv;
 }): Record<string, unknown> {
   const opts: Record<string, unknown> = {
     project: args.project,
     // Lets the visitor's same-site `rw_session` cookie flow, so RunHQ members
     // are recognised on both surfaces (see widget.ts).
     useCookieAuth: true,
-    // `track: false` is the SDK's documented opt-out and is what keeps the
-    // tracker dormant until consent; passing it explicitly (rather than relying
-    // on a default) is what makes this readable at the call site.
-    track: shouldTrack(args.consent, args.surface),
-    environment: args.environment ?? TELEMETRY_ENV,
+    track: false,
   };
   if (args.standalone) opts.standalone = true;
   return opts;
+}
+
+/**
+ * The attributes that put a `widget.js` tag in tracking-only mode for
+ * `TRACKING_PROJECT`, or null while the visitor has not accepted analytics.
+ */
+export function trackerTagAttributes(consent: ConsentValue | null): Record<string, string> | null {
+  if (consent !== 'granted') return null;
+  return {
+    'data-project': TRACKING_PROJECT,
+    'data-track-only': 'true',
+    'data-environment': TELEMETRY_ENV,
+  };
 }
 
 /** The SDK's tracking half — declared with the rest of its surface in widget.ts. */
@@ -143,32 +131,113 @@ export function telemetryConsented(): boolean {
   return storedConsent() === 'granted';
 }
 
+/** The SDK instance whose tracker is running for `TRACKING_PROJECT`. */
+let tracker: RunHQTracker | null = null;
+/** A tag that will start the tracker has been injected and has not loaded yet. */
+let trackerLoading = false;
+/** Calls made before the tracker's script loaded, replayed once it has. */
+const pendingCalls: Array<(sdk: RunHQTracker) => void> = [];
+const MAX_PENDING_CALLS = 50;
+
+function run(fn: (sdk: RunHQTracker) => void, sdk: RunHQTracker): void {
+  try {
+    fn(sdk);
+  } catch {
+    // Measurement must never surface an error to a visitor.
+  }
+}
+
+function trackerReady(sdk: RunHQTracker | undefined): void {
+  trackerLoading = false;
+  if (!sdk) return;
+  tracker = sdk;
+  for (const fn of pendingCalls.splice(0)) run(fn, sdk);
+}
+
 /**
- * Hand `emit` the SDK, or do nothing at all.
+ * `loadWidgetScript`, for the embed surfaces: when the visitor has already
+ * accepted and this call is the one that injects the script, the tag also
+ * starts the tracker. That is every page load after the first, and it keeps
+ * the common case to one script.
+ */
+export function loadSdk(onReady: () => void): void {
+  const attrs = trackerTagAttributes(storedConsent());
+  const injecting = !document.querySelector('script[data-runhq-widget]') && !window.RunHQWidget;
+  const startsTracker = injecting && attrs !== null;
+  if (startsTracker) trackerLoading = true;
+  loadWidgetScript(
+    () => {
+      // Before onReady: the launcher's init() runs on this same instance, and
+      // with `track: false` it leaves the running tracker alone.
+      if (startsTracker) trackerReady(window.RunHQWidget);
+      onReady();
+    },
+    startsTracker ? attrs : undefined,
+  );
+}
+
+/**
+ * Start the tracker if the visitor has accepted and it is not running yet.
+ *
+ * The SDK reads tracking-only mode off its tag once, at load, and has no call
+ * to start it later. So when the widget script is already on the page without
+ * it — the visitor just clicked Accept — this loads a second, tracking-only
+ * copy, which is the SDK's documented install. The copy replaces the
+ * `RunHQWidget` global when it runs; the widget's global is put back, because
+ * the mounted widget re-enters through it. Waiting for the widget's script
+ * first keeps the two loads from racing for that global.
+ */
+export function startTracking(): void {
+  if (!telemetryConsented() || tracker || trackerLoading) return;
+  loadSdk(() => {
+    if (tracker || trackerLoading) return;
+    const attrs = trackerTagAttributes(storedConsent());
+    if (!attrs) return;
+    trackerLoading = true;
+    const widgetSdk = window.RunHQWidget;
+    const script = document.createElement('script');
+    script.src = `${API_BASE}/widget.js`;
+    script.async = true;
+    script.dataset.runhqTracker = 'true';
+    for (const [name, value] of Object.entries(attrs)) script.setAttribute(name, value);
+    script.addEventListener(
+      'load',
+      () => {
+        const sdk = window.RunHQWidget;
+        if (widgetSdk) window.RunHQWidget = widgetSdk;
+        trackerReady(sdk);
+      },
+      { once: true },
+    );
+    script.addEventListener('error', () => { trackerLoading = false; }, { once: true });
+    document.body.appendChild(script);
+  });
+}
+
+/**
+ * Hand `emit` the tracker, or do nothing at all.
  *
  * Every call is gated on consent and wrapped: a marketing site must never break
  * because a measurement call threw, and the SDK's own methods already swallow
  * their failures, so the worst case here is silently recording less.
  *
- * `loadWidgetScript` is how we get the global rather than reading it directly —
- * it is idempotent and fires immediately when the script is already there, which
- * it is on every page that can emit. That closes the one real gap: a visitor who
- * submits the lead form before the async script settled would otherwise have
- * their identity dropped, which is the single event we least want to lose.
+ * A call made before the tracker's script has loaded is held and replayed. That
+ * closes the one real gap: a visitor who submits the lead form before the async
+ * script settled would otherwise have their identity dropped, which is the
+ * single event we least want to lose.
  */
 function emit(fn: (sdk: RunHQTracker) => void): void {
   if (!telemetryConsented()) return;
+  if (tracker) {
+    run(fn, tracker);
+    return;
+  }
+  // Bounded: if the script never loads (blocked, offline) this must not grow.
+  if (pendingCalls.length < MAX_PENDING_CALLS) pendingCalls.push(fn);
   try {
-    loadWidgetScript(() => {
-      try {
-        const sdk = window.RunHQWidget;
-        if (sdk) fn(sdk);
-      } catch {
-        // Measurement must never surface an error to a visitor.
-      }
-    });
+    startTracking();
   } catch {
-    // Same, for a failure to even reach the loader.
+    // A failure to even reach the loader — measurement must stay invisible.
   }
 }
 

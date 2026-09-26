@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { Navigate, useLocation, useParams } from 'react-router-dom';
 import NotFoundPage from './NotFoundPage';
-import { RESERVED_SLUGS, loadWidgetScript, removeWidgetHost } from '../widget';
-import { widgetInitOptions } from '../telemetry';
+import { RESERVED_SLUGS, removeWidgetHost } from '../widget';
+import { loadSdk, widgetInitOptions } from '../telemetry';
 
 /**
  * Full-page RunHQ widget board, served at `www.runhq.io/:slug`.
@@ -57,14 +57,11 @@ export default function BoardPage() {
       // single-widget guard.
       removeWidgetHost();
       try {
-        // `surface: 'board'` is what keeps the SDK's tracker off here. The
-        // tracker pins the project it was init'd with for the lifetime of the
-        // page, so a board init was recording RunHQ's own marketing page views
-        // into whichever customer's project the visitor happened to open — see
-        // `shouldTrack` in ../telemetry.
-        window.RunHQWidget?.init(
-          widgetInitOptions({ project: slug, surface: 'board', consent: null, standalone: true }),
-        );
+        // The board's init never tracks: the SDK would pin the customer's
+        // project for the page and record RunHQ's own page views into it. The
+        // site's tracker runs separately, into runhq-homepage — see
+        // ../telemetry.
+        window.RunHQWidget?.init(widgetInitOptions({ project: slug, standalone: true }));
       } catch {
         /* init is idempotent; a redundant call is a no-op */
       }
@@ -72,7 +69,7 @@ export default function BoardPage() {
 
     // Reuse an already-loaded widget script (SPA navigation between boards, or a
     // launcher mounted on a marketing page); otherwise inject it once.
-    loadWidgetScript(start);
+    loadSdk(start);
 
     return () => {
       document.body.style.background = prevBodyBg;

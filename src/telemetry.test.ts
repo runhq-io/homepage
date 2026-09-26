@@ -1,16 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   TELEMETRY_ENV,
+  TRACKING_PROJECT,
   clearTelemetryIdentifiers,
-  identifyLead,
-  identifyUser,
   resolveTelemetryEnv,
-  shouldTrack,
-  trackEvent,
-  trackSignupClick,
+  trackerTagAttributes,
   widgetInitOptions,
 } from './telemetry';
-import { launcherAction } from './components/RunHQWidget';
 
 /**
  * What RunHQ records about a visitor to its own site. Two things are worth
@@ -23,6 +19,9 @@ import { launcherAction } from './components/RunHQWidget';
  *  2. Nothing may be recorded before the visitor accepts. The tracker's id is a
  *     real cookie, so consent is the whole basis on which the consent bar's
  *     copy ("no cookies are set") is true.
+ *
+ * And one that is new: the site's traffic goes to its own project,
+ * `runhq-homepage`, never to the widget's.
  */
 
 const PROD_API = 'https://console.runhq.io';
@@ -61,52 +60,44 @@ describe('resolveTelemetryEnv', () => {
   });
 });
 
-describe('shouldTrack', () => {
-  it('tracks a marketing page only once the visitor has accepted', () => {
-    expect(shouldTrack('granted', 'marketing')).toBe(true);
-    expect(shouldTrack('denied', 'marketing')).toBe(false);
-    expect(shouldTrack(null, 'marketing')).toBe(false);
-  });
-
-  /**
-   * The board belongs to whichever project the visitor asked for. The SDK's
-   * tracker pins the project it was init'd with for the lifetime of the page,
-   * so tracking here wrote RunHQ's own marketing page views into a customer's
-   * analytics as soon as the visitor clicked through to /pricing.
-   */
-  it('never tracks on a board route, however the visitor answered', () => {
-    expect(shouldTrack('granted', 'board')).toBe(false);
-    expect(shouldTrack('denied', 'board')).toBe(false);
-    expect(shouldTrack(null, 'board')).toBe(false);
-  });
-});
-
 describe('widgetInitOptions', () => {
-  it('declares tracking and environment explicitly on the marketing launcher', () => {
-    expect(widgetInitOptions({ project: 'runhq', surface: 'marketing', consent: 'granted' })).toEqual({
+  /**
+   * init() would start the tracker against the widget's own project and pin it
+   * for the page — `runhq` on the launcher, a customer's on `/:slug`. Neither
+   * is where the site's traffic belongs.
+   */
+  it('never lets the widget track, on either surface', () => {
+    expect(widgetInitOptions({ project: 'runhq' })).toEqual({
       project: 'runhq',
       useCookieAuth: true,
-      track: true,
-      environment: TELEMETRY_ENV,
+      track: false,
     });
-  });
-
-  it('mounts the board standalone with tracking off', () => {
-    expect(
-      widgetInitOptions({ project: 'arrr', surface: 'board', consent: 'granted', standalone: true }),
-    ).toEqual({
+    expect(widgetInitOptions({ project: 'arrr', standalone: true })).toEqual({
       project: 'arrr',
       useCookieAuth: true,
       track: false,
       standalone: true,
-      environment: TELEMETRY_ENV,
     });
   });
 
   it('never sends standalone on the launcher, which would take over the page', () => {
-    const opts = widgetInitOptions({ project: 'runhq', surface: 'marketing', consent: null });
-    expect(opts).not.toHaveProperty('standalone');
-    expect(opts.track).toBe(false);
+    expect(widgetInitOptions({ project: 'runhq' })).not.toHaveProperty('standalone');
+  });
+});
+
+describe('trackerTagAttributes', () => {
+  it('starts the tracker for runhq-homepage, with the environment, once accepted', () => {
+    expect(TRACKING_PROJECT).toBe('runhq-homepage');
+    expect(trackerTagAttributes('granted')).toEqual({
+      'data-project': 'runhq-homepage',
+      'data-track-only': 'true',
+      'data-environment': TELEMETRY_ENV,
+    });
+  });
+
+  it('starts nothing before the visitor accepts, or after they decline', () => {
+    expect(trackerTagAttributes(null)).toBeNull();
+    expect(trackerTagAttributes('denied')).toBeNull();
   });
 });
 
@@ -124,21 +115,59 @@ function fakeStorage(initial: Record<string, string> = {}) {
   };
 }
 
-/** Installs a consent choice plus a stand-in `window.RunHQWidget`. */
+type FakeSdk = Record<'init' | 'identify' | 'stage' | 'track', ReturnType<typeof vi.fn>>;
+
+function fakeSdk(): FakeSdk {
+  return { init: vi.fn(), identify: vi.fn(), stage: vi.fn(), track: vi.fn() };
+}
+
+/**
+ * A page where the widget's script has already loaded (the launcher is up),
+ * plus just enough DOM for telemetry to inject the tracking-only tag. The
+ * injected tag is captured so a test can play the browser and "load" it.
+ */
 function setup(consent: 'granted' | 'denied' | null) {
   const store = fakeStorage(consent ? { runhq_analytics_consent: consent } : {});
-  const sdk = {
-    init: vi.fn(),
-    identify: vi.fn(),
-    stage: vi.fn(),
-    track: vi.fn(),
+  const widget = fakeSdk();
+  const injected: Array<{ attrs: Record<string, string>; load: () => void }> = [];
+  const win: { RunHQWidget?: unknown; location: { hostname: string } } = {
+    RunHQWidget: widget,
+    location: { hostname: 'www.runhq.io' },
   };
   vi.stubGlobal('localStorage', store);
-  // `loadWidgetScript` short-circuits to its callback when the global is
-  // already there, so nothing here touches the DOM.
-  vi.stubGlobal('window', { RunHQWidget: sdk, location: { hostname: 'www.runhq.io' } });
-  return { sdk, store };
+  vi.stubGlobal('window', win);
+  vi.stubGlobal('document', {
+    querySelector: () => ({}),
+    createElement: () => {
+      const attrs: Record<string, string> = {};
+      const listeners: Record<string, () => void> = {};
+      const el = {
+        dataset: {} as Record<string, string>,
+        setAttribute: (k: string, v: string) => void (attrs[k] = v),
+        addEventListener: (type: string, fn: () => void) => void (listeners[type] = fn),
+      };
+      injected.push({ attrs, load: () => listeners.load?.() });
+      return el;
+    },
+    body: { appendChild: () => undefined },
+  });
+
+  /** The browser runs the injected tag: it replaces the global, then fires load. */
+  const loadTracker = () => {
+    const tracker = fakeSdk();
+    win.RunHQWidget = tracker;
+    injected[injected.length - 1].load();
+    return tracker;
+  };
+  return { widget, store, win, injected, loadTracker };
 }
+
+// telemetry.ts keeps the running tracker in module state, as a page would.
+let t: typeof import('./telemetry');
+beforeEach(async () => {
+  vi.resetModules();
+  t = await import('./telemetry');
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -146,71 +175,116 @@ afterEach(() => {
 
 describe('telemetry emitters', () => {
   it('records nothing at all before the visitor has chosen', () => {
-    const { sdk } = setup(null);
-    identifyUser('someone@example.com');
-    trackEvent('talk_to_us_opened', { cta: 'nav' });
-    trackSignupClick('pricing_plan', { plan: 'pro' });
-    expect(sdk.identify).not.toHaveBeenCalled();
-    expect(sdk.track).not.toHaveBeenCalled();
-    expect(sdk.stage).not.toHaveBeenCalled();
+    const { widget, injected } = setup(null);
+    t.identifyUser('someone@example.com');
+    t.trackEvent('talk_to_us_opened', { cta: 'nav' });
+    t.trackSignupClick('pricing_plan', { plan: 'pro' });
+    expect(injected).toHaveLength(0);
+    expect(widget.identify).not.toHaveBeenCalled();
+    expect(widget.track).not.toHaveBeenCalled();
   });
 
   it('records nothing after a visitor declines', () => {
-    const { sdk } = setup('denied');
-    identifyUser('someone@example.com');
-    trackEvent('talk_to_us_opened');
-    expect(sdk.identify).not.toHaveBeenCalled();
-    expect(sdk.track).not.toHaveBeenCalled();
-  });
-
-  it('identifies and records once the visitor has accepted', () => {
-    const { sdk } = setup('granted');
-    identifyUser('someone@example.com', { source: 'talk_to_us' });
-    trackEvent('talk_to_us_opened', { cta: 'nav' });
-    expect(sdk.identify).toHaveBeenCalledWith('someone@example.com', { source: 'talk_to_us' });
-    expect(sdk.track).toHaveBeenCalledWith('talk_to_us_opened', { cta: 'nav' });
+    const { widget, injected } = setup('denied');
+    t.identifyUser('someone@example.com');
+    t.startTracking();
+    expect(injected).toHaveLength(0);
+    expect(widget.identify).not.toHaveBeenCalled();
   });
 
   /**
-   * The lead is the only moment this site learns who somebody is. Email is the
-   * identity because it is the key the lead lands under in the admin panel —
-   * the same string on both sides is what lets them be matched.
+   * The visitor accepts with the launcher already on the page. The SDK only
+   * reads tracking-only mode at load, so a tracking-only copy is loaded — and
+   * everything must go to it, never to the widget's instance, whose project is
+   * the `runhq` board.
    */
-  it('joins a submitted lead to its browsing history', () => {
-    const { sdk } = setup('granted');
-    identifyLead({
+  it('starts a runhq-homepage tracker on accept and records into it', () => {
+    const { widget, injected, loadTracker } = setup('granted');
+    t.startTracking();
+    expect(injected).toHaveLength(1);
+    expect(injected[0].attrs).toEqual({
+      'data-project': 'runhq-homepage',
+      'data-track-only': 'true',
+      'data-environment': TELEMETRY_ENV,
+    });
+
+    const tracker = loadTracker();
+    t.identifyUser('someone@example.com', { source: 'talk_to_us' });
+    t.trackEvent('talk_to_us_opened', { cta: 'nav' });
+
+    expect(tracker.identify).toHaveBeenCalledWith('someone@example.com', { source: 'talk_to_us' });
+    expect(tracker.track).toHaveBeenCalledWith('talk_to_us_opened', { cta: 'nav' });
+    expect(widget.identify).not.toHaveBeenCalled();
+    expect(widget.track).not.toHaveBeenCalled();
+  });
+
+  /** The mounted widget re-enters through the global; the copy must not keep it. */
+  it('hands the RunHQWidget global back to the widget', () => {
+    const { widget, win, loadTracker } = setup('granted');
+    t.startTracking();
+    loadTracker();
+    expect(win.RunHQWidget).toBe(widget);
+  });
+
+  it('loads the tracker once, however often it is asked', () => {
+    const { injected, loadTracker } = setup('granted');
+    t.startTracking();
+    t.startTracking();
+    t.trackEvent('a');
+    loadTracker();
+    t.startTracking();
+    t.trackEvent('b');
+    expect(injected).toHaveLength(1);
+  });
+
+  /**
+   * The lead is the only moment this site learns who somebody is, and a
+   * visitor can submit before the tracker's script has loaded. Email is the
+   * identity because it is the key the lead lands under in the admin panel.
+   */
+  it('holds a lead submitted before the tracker loaded, then joins it', () => {
+    const { loadTracker } = setup('granted');
+    t.identifyLead({
       name: 'Ada',
       email: '  Ada@Example.COM ',
       website: 'example.com',
       communitySize: '5000',
       monthlyRevenue: '',
     });
+    const tracker = loadTracker();
 
-    expect(sdk.identify).toHaveBeenCalledWith('ada@example.com', {
+    expect(tracker.identify).toHaveBeenCalledWith('ada@example.com', {
       email: 'ada@example.com',
       name: 'Ada',
       website: 'example.com',
       source: 'talk_to_us',
       community_size: '5000',
     });
-    expect(sdk.stage).toHaveBeenCalledWith('lead');
-    expect(sdk.track).toHaveBeenCalledWith('lead_submitted', {
+    expect(tracker.stage).toHaveBeenCalledWith('lead');
+    expect(tracker.track).toHaveBeenCalledWith('lead_submitted', {
       source: 'talk_to_us',
       website: 'example.com',
     });
   });
 
   it('marks a signup click as funnel progress, a sign-in as not', () => {
-    const { sdk } = setup('granted');
-    trackSignupClick('pricing_plan', { plan: 'pro' });
-    expect(sdk.stage).toHaveBeenCalledWith('signup_started');
-    expect(sdk.track).toHaveBeenCalledWith('signup_click', { source: 'pricing_plan', plan: 'pro' });
+    const { loadTracker } = setup('granted');
+    t.startTracking();
+    const tracker = loadTracker();
+    t.trackSignupClick('pricing_plan', { plan: 'pro' });
+    t.trackSignInClick('nav');
+    expect(tracker.stage).toHaveBeenCalledTimes(1);
+    expect(tracker.stage).toHaveBeenCalledWith('signup_started');
+    expect(tracker.track).toHaveBeenCalledWith('signup_click', { source: 'pricing_plan', plan: 'pro' });
+    expect(tracker.track).toHaveBeenCalledWith('sign_in_click', { source: 'nav' });
   });
 
   it('survives an SDK that predates the tracking half', () => {
-    vi.stubGlobal('localStorage', fakeStorage({ runhq_analytics_consent: 'granted' }));
-    vi.stubGlobal('window', { RunHQWidget: { init: vi.fn() } });
-    expect(() => identifyLead({ name: 'Ada', email: 'a@b.co', website: 'b.co' })).not.toThrow();
+    const { win, injected } = setup('granted');
+    t.startTracking();
+    win.RunHQWidget = { init: vi.fn() };
+    injected[0].load();
+    expect(() => t.identifyLead({ name: 'Ada', email: 'a@b.co', website: 'b.co' })).not.toThrow();
   });
 });
 
@@ -238,50 +312,5 @@ describe('clearTelemetryIdentifiers', () => {
     vi.stubGlobal('sessionStorage', undefined);
     vi.stubGlobal('document', undefined);
     expect(() => clearTelemetryIdentifiers()).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Applying a tracking decision to the widget that is already on the page.
-// ---------------------------------------------------------------------------
-
-describe('launcherAction', () => {
-  it('just initialises when nothing of ours is mounted', () => {
-    expect(launcherAction(null, false, false)).toBe('init');
-    expect(launcherAction(null, false, true)).toBe('init');
-    // The board tore our host down and mounted its own; ours is gone, so there
-    // is nothing to upgrade and nothing to wait for.
-    expect(launcherAction(null, true, true)).toBe('init');
-  });
-
-  it('is a no-op init when the mounted widget already has what we want', () => {
-    expect(launcherAction(true, true, true)).toBe('init');
-    expect(launcherAction(false, true, false)).toBe('init');
-  });
-
-  /**
-   * The visitor just clicked Accept. The SDK decides tracking once, inside
-   * init(), so the only way to start the tracker is to release the host and
-   * initialise again.
-   */
-  it('rebuilds to switch tracking on mid-session', () => {
-    expect(launcherAction(false, true, true)).toBe('rebuild');
-  });
-
-  /**
-   * Accepting during the widget's bootstrap. An init() issued while one is in
-   * flight is dropped as a duplicate — rebuilding then would lose the launcher
-   * AND never start tracking — so wait for the host to appear.
-   */
-  it('waits when the instance to rebuild has not mounted yet', () => {
-    expect(launcherAction(false, false, true)).toBe('wait');
-  });
-
-  /**
-   * Withdrawal cannot be applied this way: the SDK latches its tracker for the
-   * lifetime of the page, so a rebuild would churn the widget and stop nothing.
-   */
-  it('does not rebuild to switch tracking off', () => {
-    expect(launcherAction(true, true, false)).toBe('init');
   });
 });
