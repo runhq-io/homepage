@@ -171,7 +171,7 @@ export function createSurfaceStore(env: SurfaceEnv): SurfaceStore {
     const declaration: RenderEntry = { surfaceKey, defaultPayload: fallback, subjectKey };
     const liveRun = served?.run;
     if (liveRun) {
-      const variationId = forced ? forced.variationId : evolveAssign(liveRun, subjectKey);
+      const variationId = forced ? forced.variationId : evolveAssign(liveRun, subjectKey, config?.poolSalt);
       const arm = liveRun.arms.find((a) => a.variationId === variationId);
       if (arm) {
         return {

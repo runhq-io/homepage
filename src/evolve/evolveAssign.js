@@ -48,11 +48,30 @@ function evolveRoll(salt, experimentId, epoch, subjectKey) {
 }
 
 /**
- * Which arm this subject sees, or null when nothing is servable.
- * `experiment` is { experimentId, epoch, salt, arms: [{ variationId, weight }] };
- * the subject key is the SDK's anon id (`rw_anon_id`).
+ * Which arm this subject sees, or null when the subject is outside the run's
+ * traffic lane or nothing is servable. A null is "show what ships today and
+ * record nothing", never an error.
+ * `experiment` is { experimentId, epoch, salt, lane?, arms: [{ variationId, weight }] };
+ * the subject key is the SDK's anon id (`rw_anon_id`); `poolSalt` is the
+ * serving config's (the project's id).
+ *
+ * The lane ({ start, end }: its campaign's lane of the project's traffic pool)
+ * is decided by the visitor's POOL roll, evolveRoll(poolSalt, "pool", 0,
+ * subjectKey): one roll per visitor per project, independent of every run, so
+ * campaigns holding disjoint lanes never share a visitor, and a lane moving
+ * only lets visitors in or out without moving one already in to another arm.
+ * In the lane when start <= roll < end. Absent (an older API) or the whole
+ * pool: no pool roll. The test is written exactly as packages/protocol's
+ * assignVariation writes it, so a lane or pool salt that cannot be read
+ * admits nobody in every copy alike.
  */
-function evolveAssign(experiment, subjectKey) {
+function evolveAssign(experiment, subjectKey, poolSalt) {
+  var lane = experiment.lane;
+  if (lane !== undefined && !(lane !== null && lane.start <= 0 && lane.end >= 1)) {
+    if (lane === null || typeof lane !== "object" || typeof poolSalt !== "string") return null;
+    var pool = evolveRoll(poolSalt, "pool", 0, subjectKey);
+    if (!(pool >= lane.start && pool < lane.end)) return null;
+  }
   var servable = [];
   for (var i = 0; i < experiment.arms.length; i++) {
     var arm = experiment.arms[i];

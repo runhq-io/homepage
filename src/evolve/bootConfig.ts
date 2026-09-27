@@ -29,6 +29,7 @@ import { API_BASE, RUNHQ_PROJECT, isBoardRoute } from '../widget';
 import { TELEMETRY_ENV, telemetryConsented } from '../telemetry';
 import { evolveConfigUrl } from '../apiBase';
 import { checkPendingSightings } from './firstSight';
+import type { TrafficLane } from './evolveAssign.js';
 
 /** One arm of a running run: what assignment needs, and what to paint. */
 export interface ServedArm {
@@ -43,6 +44,11 @@ export interface ServedRun {
   experimentId: string;
   epoch: number;
   salt: string;
+  /**
+   * The lane of the project's traffic pool the run's campaign holds. Absent
+   * when the answer carries none (an API older than lanes): the whole pool.
+   */
+  lane?: TrafficLane;
   arms: ServedArm[];
 }
 
@@ -57,6 +63,13 @@ export interface ServedSurface {
 
 export interface ServingConfig {
   environment: string;
+  /**
+   * The project's pool salt (its id), which every run's lane is decided
+   * against. Absent only in an answer from an API older than lanes, whose runs
+   * carry no lane: the assignment block then needs none, and admits nobody to
+   * a narrowed lane — exactly as the SDK does with the same answer.
+   */
+  poolSalt?: string;
   surfaces: Readonly<Record<string, ServedSurface>>;
 }
 
@@ -112,6 +125,17 @@ const isRecord = (x: unknown): x is Record<string, unknown> =>
   typeof x === 'object' && x !== null && !Array.isArray(x);
 const isFiniteNumber = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x);
 
+/** A campaign lane as widget.js `evolveValidConfig` accepts one: absent, or 0 <= start < end <= 1. */
+function validLane(lane: unknown): boolean {
+  if (lane === undefined) return true;
+  if (!isRecord(lane) || typeof lane.start !== 'number' || typeof lane.end !== 'number') return false;
+  return lane.start >= 0 && lane.start < lane.end && lane.end <= 1;
+}
+
+/** The lane to hand the assignment block, only when the answer carries one. */
+const laneOf = (lane: unknown): { lane?: TrafficLane } =>
+  isRecord(lane) ? { lane: { start: lane.start as number, end: lane.end as number } } : {};
+
 /** Run-major spelling: every rule of widget.js `evolveValidConfig`. */
 function validRunMajor(raw: Record<string, unknown>): boolean {
   if (!Array.isArray(raw.experiments)) return false;
@@ -124,6 +148,7 @@ function validRunMajor(raw: Record<string, unknown>): boolean {
       if (!isFiniteNumber(a.weight)) return false;
       if (a.isControl !== undefined && typeof a.isControl !== 'boolean') return false;
     }
+    if (!validLane(e.lane)) return false;
   }
   if (raw.defaults !== undefined) {
     if (!Array.isArray(raw.defaults)) return false;
@@ -144,6 +169,7 @@ function validSurfaces(surfaces: unknown): surfaces is Array<{ surfaceKey: strin
     for (const a of run.arms) {
       if (!isRecord(a) || typeof a.variationId !== 'string' || !isFiniteNumber(a.weight)) return false;
     }
+    if (!validLane(run.lane)) return false;
   }
   return true;
 }
@@ -153,6 +179,7 @@ interface RunMajorExperiment {
   surfaceKey: string;
   epoch: number;
   salt: string;
+  lane?: TrafficLane;
   arms: Array<{ variationId: string; name: string; weight: number; payload: unknown; isControl?: boolean }>;
 }
 
@@ -171,6 +198,9 @@ export function parseServingConfig(raw: unknown, environment: string): ServingCo
   if (!hasRunMajor && !hasSurfaces) return null;
   if (hasRunMajor && !validRunMajor(raw)) return null;
   if (hasSurfaces && !validSurfaces(raw.surfaces)) return null;
+  // The key of every visitor's pool roll; an answer that sends one it cannot read is not ours to use.
+  if (raw.poolSalt !== undefined && typeof raw.poolSalt !== 'string') return null;
+  const pool: { poolSalt?: string } = typeof raw.poolSalt === 'string' ? { poolSalt: raw.poolSalt } : {};
 
   const experiments = (hasRunMajor ? raw.experiments : []) as RunMajorExperiment[];
   const surfaces: Record<string, ServedSurface> = {};
@@ -186,6 +216,7 @@ export function parseServingConfig(raw: unknown, environment: string): ServingCo
               experimentId: s.run.experimentId,
               epoch: s.run.epoch,
               salt: s.run.salt,
+              ...laneOf(s.run.lane),
               arms: s.run.arms.map((a) => {
                 const name = named?.arms.find((n) => n.variationId === a.variationId)?.name;
                 return { variationId: a.variationId, ...(name !== undefined ? { name } : {}), weight: a.weight, payload: a.payload };
@@ -194,7 +225,7 @@ export function parseServingConfig(raw: unknown, environment: string): ServingCo
           : null,
       };
     }
-    return { environment, surfaces };
+    return { environment, ...pool, surfaces };
   }
 
   for (const d of (raw.defaults ?? []) as Array<{ surfaceKey: string; payload: unknown }>) {
@@ -209,11 +240,12 @@ export function parseServingConfig(raw: unknown, environment: string): ServingCo
         experimentId: e.experimentId,
         epoch: e.epoch,
         salt: e.salt,
+        ...laneOf(e.lane),
         arms: e.arms.map((a) => ({ variationId: a.variationId, name: a.name, weight: a.weight, payload: a.payload })),
       },
     };
   }
-  return { environment, surfaces };
+  return { environment, ...pool, surfaces };
 }
 
 /** The page's boot config, as the surface store reads it. */

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createSurfaceStore, mergeFields, SURFACE_WAIT_MS, type SurfaceEnv } from './surface';
 import { parseServingConfig, type EvolveBootHandle, type RenderEntry, type ServingConfig } from './bootConfig';
-import { evolveAssign } from './evolveAssign.js';
+import { evolveAssign, evolveRoll } from './evolveAssign.js';
 
 /**
  * R114: the copy is decided SYNCHRONOUSLY from the boot config — never by
@@ -36,7 +36,7 @@ const CONFIG = parseServingConfig({
 /** Two visitor ids, one per arm, found with the shared block itself. */
 const run = CONFIG.surfaces['home.hero']!.run!;
 const idFor = (variationId: string) => {
-  for (let i = 0; ; i++) if (evolveAssign(run, `anon-${i}`) === variationId) return `anon-${i}`;
+  for (let i = 0; ; i++) if (evolveAssign(run, `anon-${i}`, CONFIG.poolSalt) === variationId) return `anon-${i}`;
 };
 const ID_A = idFor('v-a');
 const ID_B = idFor('v-b');
@@ -186,6 +186,53 @@ describe('config already in when React renders (the preloaded case)', () => {
   it('no boot at all (a failure before React): the shipped copy at once', () => {
     const h = harness({ consent: true, boot: null });
     expect(h.mount().first).toEqual({ settled: true, value: HERO });
+  });
+});
+
+describe('a run in a campaign lane of the project traffic pool', () => {
+  const LANE = { start: 0, end: 0.5 };
+  const POOL_SALT = 'wp_homepage';
+  const laned = (poolSalt: string | undefined) => parseServingConfig({
+    environment: 'production',
+    ...(poolSalt !== undefined ? { poolSalt } : {}),
+    surfaces: [{
+      surfaceKey: 'home.hero',
+      adopted: ADOPTED,
+      run: { experimentId: 'e1', epoch: 4, salt: 's', lane: LANE, arms: [
+        { variationId: 'v-a', weight: 1, payload: ADOPTED },
+        { variationId: 'v-b', weight: 1, payload: ARM_B },
+      ] },
+    }],
+  }, 'production')!;
+  /** A visitor on arm v-b whose pool roll is inside the lane, and one outside it — found with the shared block. */
+  const find = (inLane: boolean) => {
+    for (let i = 0; ; i++) {
+      const id = `anon-${i}`;
+      const pool = evolveRoll(POOL_SALT, 'pool', 0, id);
+      if ((pool >= LANE.start && pool < LANE.end) === inLane && evolveAssign(run, id, POOL_SALT) === 'v-b') return id;
+    }
+  };
+
+  it('paints the arm to a visitor inside the lane, with the config’s pool salt', () => {
+    const id = find(true);
+    const h = harness({ consent: true, id, boot: fakeBoot({ config: laned(POOL_SALT) }) });
+    expect(h.mount().first.value).toEqual({ ...HERO, ...ARM_B });
+    expect(h.queued[0]).toMatchObject({ subjectKey: id, experimentId: 'e1', variationId: 'v-b' });
+  });
+
+  it('a visitor outside the lane is assigned nothing: the adopted copy, and a declaration with no arm', () => {
+    const id = find(false);
+    const h = harness({ consent: true, id, boot: fakeBoot({ config: laned(POOL_SALT) }) });
+    expect(h.mount().first.value).toEqual({ ...HERO, ...ADOPTED });
+    expect(h.queued).toEqual([{ surfaceKey: 'home.hero', defaultPayload: HERO, subjectKey: id, ts: expect.any(Number) }]);
+  });
+
+  it('a config with a narrowed lane but no pool salt admits nobody — every visitor sees the adopted (control) copy, as the SDK would', () => {
+    for (const id of [find(true), find(false)]) {
+      const h = harness({ consent: true, id, boot: fakeBoot({ config: laned(undefined) }) });
+      expect(h.mount().first.value).toEqual({ ...HERO, ...ADOPTED });
+      expect(h.queued[0]).not.toHaveProperty('variationId');
+    }
   });
 });
 

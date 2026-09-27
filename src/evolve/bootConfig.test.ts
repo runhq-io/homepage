@@ -186,6 +186,46 @@ describe('parseServingConfig — both spellings (R118)', () => {
     expect(parsed.surfaces['home.hero']!.adopted).toBeUndefined();
   });
 
+  it('carries the project pool salt and each run’s campaign lane through, in both spellings', async () => {
+    const { parseServingConfig } = await fresh();
+    const lane = { start: 0.25, end: 0.5 };
+    const laned = {
+      ...NEW_SHAPE,
+      poolSalt: 'wp_123',
+      experiments: [{ ...OLD_SHAPE.experiments[0], lane }],
+      surfaces: NEW_SHAPE.surfaces.map((s) => (s.run ? { ...s, run: { ...s.run, lane } } : s)),
+    };
+    const parsed = parseServingConfig(laned, 'staging')!;
+    expect(parsed.poolSalt).toBe('wp_123');
+    expect(parsed.surfaces['home.hero']!.run!.lane).toEqual(lane);
+    const { surfaces: _drop, ...runMajor } = laned;
+    expect(parseServingConfig(runMajor, 'staging')).toEqual(parsed);
+  });
+
+  it('an answer from an API older than lanes has no pool salt and whole-pool runs (no lane)', async () => {
+    const { parseServingConfig } = await fresh();
+    for (const raw of [NEW_SHAPE, OLD_SHAPE]) {
+      const parsed = parseServingConfig(raw, 'staging')!;
+      expect(parsed.poolSalt).toBeUndefined();
+      expect(parsed.surfaces['home.hero']!.run).not.toHaveProperty('lane');
+    }
+  });
+
+  const heroRun = NEW_SHAPE.surfaces[1].run!;
+  it.each([
+    ['a pool salt that is not text', { ...NEW_SHAPE, poolSalt: 7 }],
+    ['a run lane that is not an object', { environment: 'staging', surfaces: [{ surfaceKey: 'k', adopted: null, run: { ...heroRun, lane: 'half' } }] }],
+    ['a run lane with a text bound', { environment: 'staging', surfaces: [{ surfaceKey: 'k', adopted: null, run: { ...heroRun, lane: { start: '0', end: 0.5 } } }] }],
+    ['an empty run lane', { environment: 'staging', surfaces: [{ surfaceKey: 'k', adopted: null, run: { ...heroRun, lane: { start: 0.5, end: 0.5 } } }] }],
+    ['a run lane past the pool', { environment: 'staging', surfaces: [{ surfaceKey: 'k', adopted: null, run: { ...heroRun, lane: { start: 0.5, end: 1.5 } } }] }],
+    ['a null run lane', { environment: 'staging', surfaces: [{ surfaceKey: 'k', adopted: null, run: { ...heroRun, lane: null } }] }],
+    ['an experiment lane below the pool (run-major)', { ...OLD_SHAPE, experiments: [{ ...OLD_SHAPE.experiments[0], lane: { start: -0.1, end: 0.5 } }] }],
+    ['an experiment lane with no end (run-major)', { ...OLD_SHAPE, experiments: [{ ...OLD_SHAPE.experiments[0], lane: { start: 0 } }] }],
+  ])('rejects, as widget.js evolveValidConfig does, %s', async (_label, raw) => {
+    const { parseServingConfig } = await fresh();
+    expect(parseServingConfig(raw, 'staging')).toBeNull();
+  });
+
   it.each([
     ['not an object', 'x'],
     ['another environment', { ...NEW_SHAPE, environment: 'production' }],
