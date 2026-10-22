@@ -60,7 +60,7 @@ const Pill = ({ children, kind }: { children: React.ReactNode; kind: 'pending' |
 type Section = { id: string; heading: string; body: React.ReactNode };
 // Group is keyed off the English labels so the registry type stays stable;
 // the displayed label is looked up via GROUP_LABEL at render time.
-type Group = 'Get started' | 'Todos' | 'Channels' | 'Agents' | 'Projects' | 'The widget' | 'Workflows' | 'Team & access';
+type Group = 'Get started' | 'Todos' | 'Channels' | 'Agents' | 'Projects' | 'SDK & widget' | 'Workflows' | 'Team & access';
 
 interface DocPage {
   path: string;
@@ -78,7 +78,7 @@ const GROUP_ORDER: Group[] = [
   'Channels',
   'Agents',
   'Projects',
-  'The widget',
+  'SDK & widget',
   'Workflows',
   'Team & access',
 ];
@@ -90,7 +90,7 @@ const GROUP_LABEL: Record<'en' | 'ko', Record<Group, string>> = {
     'Channels': 'Channels',
     'Agents': 'Agents',
     'Projects': 'Projects',
-    'The widget': 'The widget',
+    'SDK & widget': 'SDK & widget',
     'Workflows': 'Workflows',
     'Team & access': 'Team & access',
   },
@@ -100,7 +100,7 @@ const GROUP_LABEL: Record<'en' | 'ko', Record<Group, string>> = {
     'Channels': '채널',
     'Agents': 'agent',
     'Projects': '프로젝트',
-    'The widget': '위젯',
+    'SDK & widget': 'SDK와 위젯',
     'Workflows': '워크플로',
     'Team & access': '팀 및 접근 권한',
   },
@@ -115,7 +115,7 @@ const DOCS_T = {
     crumbsDocs: 'Docs',
     crumbsNotFound: 'Not found',
     onThisPage: 'On this page',
-    tocMeta: 'v2.2 · last updated May 10',
+    tocMeta: 'v2.3 · last updated Oct 22',
     searchPlaceholder: 'Filter docs…',
     searchClear: 'Clear',
     prevLabel: 'Previous',
@@ -142,7 +142,7 @@ const DOCS_T = {
     crumbsDocs: '문서',
     crumbsNotFound: '찾을 수 없음',
     onThisPage: '이 페이지',
-    tocMeta: 'v2.2 · 최종 업데이트 5월 10일',
+    tocMeta: 'v2.3 · 최종 업데이트 10월 22일',
     searchPlaceholder: '문서 검색…',
     searchClear: '지우기',
     prevLabel: '이전',
@@ -178,7 +178,7 @@ const DOC_CARDS_EN: DocCard[] = [
   { t: 'File a todo',                d: 'Todos are the unit of work. Anyone on the team can file one.',                       tag: 'Get started', icon: '◢', to: '/docs/first-todo' },
   { t: 'Run an agent',               d: 'Hit Run on a todo. Watch Claude or Codex pick it up live.',                          tag: 'Get started', icon: '⚡', to: '/docs/run-agent' },
   { t: 'Review the diff',            d: 'When the agent finishes, you decide what ships.',                                    tag: 'Daily',       icon: '◇', to: '/docs/agents/reviewing' },
-  { t: 'Capture feedback on your site', d: 'Drop the widget on any page. Users file todos straight into your queue.',         tag: 'Setup',       icon: '◉', to: '/docs/widget/overview' },
+  { t: 'Install the SDK',            d: 'One script tag: traffic, signed-in users, errors — and the feedback widget when you want it.', tag: 'Setup', icon: '◉', to: '/docs/sdk/install' },
   { t: 'Invite your team',           d: 'Add teammates. Pick what each role can see and do.',                                 tag: 'For admins',  icon: '◈', to: '/docs/team/invites' },
 ];
 
@@ -187,7 +187,7 @@ const DOC_CARDS_KO: DocCard[] = [
   { t: '할 일 만들기',               d: '할 일은 작업의 기본 단위입니다. 팀의 누구나 만들 수 있습니다.',                          tag: '시작하기',   icon: '◢', to: '/docs/first-todo' },
   { t: '에이전트 실행',              d: '할 일에서 Run을 누르세요. Claude나 Codex가 즉시 이어받아 작업합니다.',                   tag: '시작하기',   icon: '⚡', to: '/docs/run-에이전트' },
   { t: '변경 사항 리뷰',             d: '에이전트가 작업을 마치면, 무엇을 배포할지는 사람이 결정합니다.',                          tag: '일상 작업',  icon: '◇', to: '/docs/에이전트/reviewing' },
-  { t: '사이트에서 피드백 받기',     d: '아무 페이지에나 위젯을 붙이세요. 사용자가 곧장 큐에 할 일을 남깁니다.',                    tag: '설치',      icon: '◉', to: '/docs/widget/overview' },
+  { t: 'SDK 설치',                   d: '스크립트 태그 하나로 유입, 로그인 사용자, 에러 — 원하면 피드백 위젯까지.',                tag: '설치',      icon: '◉', to: '/docs/sdk/install' },
   { t: '팀원 초대',                  d: '팀원을 추가하고, 각 역할이 보고 수행할 수 있는 권한을 설정하세요.',                       tag: '관리자용',  icon: '◈', to: '/docs/team/invites' },
 ];
 
@@ -1020,77 +1020,56 @@ const PAGES_EN: DocPage[] = [
     ],
   },
 
-  // ============================================================ Widget
+  // ============================================================ SDK & widget
   {
-    path: '/docs/widget/overview',
-    group: 'The widget',
-    title: 'Capturing feedback with the widget',
-    lede: <>Drop the widget on any page on your site. When users hit the feedback button, todos land in your project queue with their context already attached.</>,
+    path: '/docs/sdk/install',
+    group: 'SDK & widget',
+    title: 'Installing the SDK',
+    lede: <>One script tag on every page. It records page views and where visitors came from, joins them to your signed-in users, reports your site's errors — and, when you want it, shows the feedback widget.</>,
     sections: [
       {
-        id: 'what',
-        heading: 'What it does',
+        id: 'tag',
+        heading: 'Add the tag',
         body: (
           <>
-            <P>A small button (or any element you choose) opens the widget. The user types their feedback, optionally attaches a screenshot, and submits.</P>
-            <P>RunHQ captures:</P>
-            <UL>
-              <li>The user's identity (whatever you pass in <Em>init</Em>).</li>
-              <li>The page they were on, the browser, the screen size.</li>
-              <li>Any console errors that happened in the session.</li>
-              <li>An auto-generated screenshot if they don't add one.</li>
-            </UL>
+            <P>Put it in your shared layout, so it runs on every page:</P>
+            <Code>{`<script src="https://console.runhq.io/widget.js"
+        data-project="your-project-slug"
+        data-track-only="true"
+        data-environment="auto"></script>`}</Code>
+            <P>Your project slug — and this tag already written for your stack (plain HTML, Next.js, Vite, Nuxt, SvelteKit, Rails, Django, Laravel, WordPress) — is in <Em>Project Settings › CRM › Install</Em>. The slug isn't a secret: it's in your page source either way.</P>
+            <Callout kind="warn">One script per site. If the page already loads <Em>widget.js</Em> for the feedback widget, change that tag — never add a second one. One script, one project, one visitor.</Callout>
           </>
         ),
       },
       {
-        id: 'flow',
-        heading: 'What happens next',
+        id: 'attributes',
+        heading: 'Tag attributes',
         body: (
           <UL>
-            <li>The widget files a todo in the channel you've configured.</li>
-            <li>The triager picks the agent best matched for the work — see <NL to="/docs/widget/triager">How the triager picks an agent</NL>.</li>
-            <li>If you've turned on auto-run, the agent starts immediately. Otherwise the todo waits in the queue.</li>
+            <li><Em>data-project</Em> — your project slug. Required.</li>
+            <li><Em>data-track-only="true"</Em> — tracking only; nothing is drawn on the page. Remove it to show the <NL to="/docs/widget/install">feedback widget</NL> from the same tag.</li>
+            <li><Em>data-environment</Em> — which deployment this is. Defaults to <Em>production</Em>. <Em>auto</Em> treats localhost and private-network hosts as <Em>development</Em>; a preview URL is neither, so pass your framework's own value (<Em>Rails.env</Em>, <Em>NODE_ENV</Em>…) where you have one.</li>
+            <li><Em>data-release</Em> — your build or version. Errors are grouped per release.</li>
+            <li><Em>data-language</Em> — the widget's language.</li>
+            <li><Em>data-server</Em> — the RunHQ API origin, if it isn't the one the script was loaded from.</li>
+            <li><Em>data-track="false"</Em> — don't track this page.</li>
           </UL>
         ),
       },
       {
-        id: 'privacy',
-        heading: 'Privacy',
+        id: 'automatic',
+        heading: 'What it records on its own',
         body: (
           <>
-            <P>Things to know:</P>
             <UL>
-              <li>The widget never sends a private API token from the browser. Captures use a public ingest endpoint that's tied to your project ID.</li>
-              <li>You control which user attributes are sent. By default, just the ID and email you pass to <Em>init</Em>.</li>
-              <li>Screenshots are stored in your workspace, not on the widget CDN.</li>
+              <li><Em>Page views</Em>, including client-side navigations in single-page apps.</li>
+              <li><Em>Where each visitor came from</Em> — referrer, UTM tags and their first touch.</li>
+              <li><Em>Active time</Em> on each page.</li>
+              <li><Em>Errors</Em> — uncaught errors and unhandled promise rejections go to the project's Errors tool, with personal data masked out of the message and stack and the URL stripped of its query string. Errors thrown by browser extensions are ignored.</li>
+              <li><Em>Clicks, form submits and scroll depth</Em> — structure only, never what anyone typed. This is the <Em>Interaction capture</Em> switch, on by default for new projects.</li>
             </UL>
-          </>
-        ),
-      },
-    ],
-  },
-
-  {
-    path: '/docs/widget/install',
-    group: 'The widget',
-    title: 'Installing the widget',
-    lede: <>Two script tags on any page. The widget mounts itself, captures viewport context, and posts back to your workspace.</>,
-    sections: [
-      {
-        id: 'snippet',
-        heading: 'Add the snippet',
-        body: (
-          <>
-            <P>Drop these two tags into the <Em>head</Em> of any page on your site:</P>
-            <Code>{`<script src="https://widget.runhq.io/v1.js"></script>
-<script>
-  RunHQ.init({
-    project: "your-project-id",
-    user: { id: "u_123", email: "ada@hover.dev" }
-  });
-</script>`}</Code>
-            <P>Find your project ID in the project's <Em>Widget</Em> tab — it's a copy-paste away.</P>
+            <P>Product tours and in-app messages load only when one is waiting for the visitor; a page with none downloads nothing extra.</P>
           </>
         ),
       },
@@ -1100,26 +1079,11 @@ const PAGES_EN: DocPage[] = [
         body: (
           <>
             <Steps>
-              <li>Open the page in your browser.</li>
-              <li>You should see a small feedback button in the bottom right.</li>
-              <li>Click it, type "test feedback", submit.</li>
-              <li>Check the project's todo channel — your test should appear within a few seconds.</li>
+              <li>Load your site with the browser's network tab open.</li>
+              <li>Look for a <Em>POST</Em> to <Em>/api/widget/collect</Em>. A response of <Em>{'{"tracking":"disabled"}'}</Em> means tracking is switched off for the project — turn it on in <Em>Project Settings › CRM › Install</Em>.</li>
+              <li>Check the payload's <Em>environment</Em>. A local run that says <Em>production</Em> means <Em>data-environment</Em> isn't wired up.</li>
+              <li>Open the project's <Em>Marketing</Em> tab — your visit should be there.</li>
             </Steps>
-          </>
-        ),
-      },
-      {
-        id: 'theme',
-        heading: 'Matching your design',
-        body: (
-          <>
-            <P>The widget renders inside an isolated frame so it can't fight your page styles. Override its look with a few CSS variables on your host page:</P>
-            <UL>
-              <li><Em>Accent color</Em> — set <Em>--runhq-accent</Em>.</li>
-              <li><Em>Border radius</Em> — set <Em>--runhq-radius</Em>.</li>
-              <li><Em>Position</Em> — set <Em>--runhq-pos</Em> (top-left, top-right, bottom-left, bottom-right).</li>
-            </UL>
-            <P>You can also replace the launcher button entirely — call <Em>RunHQ.open()</Em> from any of your own buttons.</P>
           </>
         ),
       },
@@ -1127,8 +1091,319 @@ const PAGES_EN: DocPage[] = [
   },
 
   {
+    path: '/docs/sdk/javascript',
+    group: 'SDK & widget',
+    title: 'The JavaScript API',
+    lede: <>The tag defines <Em>window.RunHQWidget</Em>. Every call is safe before the script has finished loading — calls queue and send once it's ready — and none of them throw.</>,
+    sections: [
+      {
+        id: 'identify',
+        heading: 'identify — name a signed-in user',
+        body: (
+          <>
+            <Code>{`RunHQWidget.identify(user.id, { email: user.email, name: user.name });`}</Code>
+            <P>Call it once the visitor is known — after sign-in resolves, not on first paint. Their earlier anonymous visits are joined to them. Use your own user id.</P>
+          </>
+        ),
+      },
+      {
+        id: 'group',
+        heading: 'group — their company, team or workspace',
+        body: (
+          <>
+            <Code>{`RunHQWidget.group(company.id, {
+  name: company.name,
+  domain: company.domain,
+  createdAt: company.createdAt,
+  plan: company.plan,
+});`}</Code>
+            <P>Call it after <Em>identify</Em>, with your own id for the group. <Em>name</Em> is what the CRM shows. <Em>createdAt</Em> (ISO-8601 or epoch) is when the group was created in your app — without it the CRM can never count the group as a new account. Any other trait is kept on the group.</P>
+          </>
+        ),
+      },
+      {
+        id: 'track',
+        heading: 'track — a custom event',
+        body: (
+          <>
+            <Code>{`RunHQWidget.track('level_completed', { level: 3 });`}</Code>
+            <UL>
+              <li>The name <Em>is</Em> the measurement. Renaming an event starts a new, empty series.</li>
+              <li>Fire it when the thing happens — once, not on every render.</li>
+              <li>Keep the properties small and non-identifying. Names starting with <Em>$</Em> are reserved for the SDK.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'revenue',
+        heading: 'revenue — money in',
+        body: <Code>{`RunHQWidget.revenue(49, { currency: 'USD', plan: 'pro' });`}</Code>,
+      },
+      {
+        id: 'stage',
+        heading: 'stage — a step in your pipeline',
+        body: (
+          <>
+            <Code>{`RunHQWidget.stage('trial');`}</Code>
+            <P>A stage key from <Em>Project Settings › CRM › Pipeline</Em> (by default <Em>visitor</Em>, <Em>lead</Em>, <Em>qualified</Em>, <Em>trial</Em>, <Em>converted</Em>).</P>
+            <Callout kind="warn">Any visitor can call this from their browser, so CRM automations never act on it. Send stage changes that should trigger anything from <NL to="/docs/sdk/server">your server</NL>.</Callout>
+          </>
+        ),
+      },
+      {
+        id: 'consent',
+        heading: 'consent — permission to message someone',
+        body: (
+          <>
+            <Code>{`await RunHQWidget.consent('sms', { granted: true, text: 'Text me order updates' });`}</Code>
+            <P>Records a signed-in user's consent with the exact wording they were shown. Channels: <Em>sms</Em>, <Em>whatsapp</Em>, <Em>email_marketing</Em>; <Em>granted: false</Em> withdraws. It needs the user's <NL to="/docs/sdk/server">signed identity token</NL> (passed to <Em>init</Em>), returns a promise of <Em>{'{ ok, state }'}</Em>, and rejects with an error whose <Em>code</Em> says why — e.g. <Em>signed_identity_required</Em>.</P>
+          </>
+        ),
+      },
+      {
+        id: 'capture-error',
+        heading: 'captureError — an error you caught',
+        body: (
+          <>
+            <Code>{`try {
+  await checkout();
+} catch (err) {
+  RunHQWidget.captureError(err, { step: 'payment' });
+}`}</Code>
+            <P>Uncaught errors are reported without asking. Use this for ones your code handles but you still want to see. The second argument is a little plain data shown beside the error.</P>
+          </>
+        ),
+      },
+      {
+        id: 'init',
+        heading: 'init — options in code',
+        body: (
+          <>
+            <Code>{`RunHQWidget.init({ project: 'your-project-slug', environment: 'production' });`}</Code>
+            <P>Everything the tag's <Em>data-*</Em> attributes say can be passed here instead: <Em>project</Em>, <Em>token</Em> (the signed identity token), <Em>environment</Em>, <Em>release</Em>, <Em>language</Em>, <Em>server</Em>, <Em>useCookieAuth</Em>, and <Em>track: false</Em>. Calling <Em>init</Em> also shows the <NL to="/docs/widget/install">feedback widget</NL>; <Em>RunHQWidget.openChat()</Em> opens it straight onto the chat.</P>
+          </>
+        ),
+      },
+      {
+        id: 'deprecated',
+        heading: 'Kept for older pages',
+        body: <P><Em>variation(key, fallback)</Em> always returns <Em>fallback</Em>, and <Em>ready()</Em> is an already-resolved promise. They exist so pages that still call them keep working; you can remove those calls.</P>,
+      },
+    ],
+  },
+
+  {
+    path: '/docs/sdk/server',
+    group: 'SDK & widget',
+    title: 'Your server: users and identity',
+    lede: <>Your backend holds the project secret. It tells RunHQ who your users are, and signs the token that proves who is signed in. The secret never goes to the browser.</>,
+    sections: [
+      {
+        id: 'secret',
+        heading: 'The project secret',
+        body: (
+          <UL>
+            <li>Find it in <Em>Project Settings › CRM › Install</Em>.</li>
+            <li>Keep it in an environment variable — <Em>RUNHQ_SECRET</Em> — never in source, never in a client bundle.</li>
+            <li>Rotating it keeps the previous secret valid for 24 hours, so you have a day to redeploy.</li>
+          </UL>
+        ),
+      },
+      {
+        id: 'token',
+        heading: 'The identity token',
+        body: (
+          <>
+            <P>An HS256 JWT, signed with the secret, for the user who is signed in. Serve it from an authenticated route (for example <Em>GET /api/widget-token</Em> → <Em>{'{ "token": "…" }'}</Em>) and hand it to the page with <Em>RunHQWidget.init({'{ token }'})</Em>. It's what lets a user post on the feedback widget as themselves, and what makes <Em>consent()</Em> trustworthy.</P>
+            <Code title="Node.js (jsonwebtoken)">{`const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+const secret = process.env.RUNHQ_SECRET;
+const fp = crypto.createHash('sha256').update(secret).digest('hex').slice(0, 32);
+
+const token = jwt.sign({
+  type: 'widget_user',
+  fp,
+  sub: String(user.id),               // must be a string
+  email: user.email,
+  name: user.name,
+  signed_up_at: Math.floor(user.createdAt.getTime() / 1000),
+  role: user.role,                    // optional: grant widget permissions per role
+  metadata: { plan: user.plan },      // optional: shown on the person
+}, secret, { algorithm: 'HS256', expiresIn: '24h' });`}</Code>
+            <UL>
+              <li><Em>type</Em> <Em>"widget_user"</Em>, <Em>fp</Em> (first 32 hex characters of the secret's SHA-256), <Em>sub</Em>, <Em>iat</Em> and <Em>exp</Em> are required. Tokens issued more than 24 hours ago are refused.</li>
+              <li><Em>sub</Em> must be a non-empty string. A numeric id passes the signature check but identifies nobody.</li>
+              <li><Em>signed_up_at</Em> — when the account was created in your app (ISO-8601 or epoch). The CRM dates new accounts by it.</li>
+              <li><Em>group</Em> — <Em>{'{ "id", "name", "createdAt" }'}</Em>, the organisation the user belongs to, if you don't call <Em>group()</Em> in the page.</li>
+              <li><Em>role</Em> — appears in <Em>Project Settings › CRM › Permissions</Em>, where you decide what each role may do in the widget.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'people',
+        heading: 'Sync your users',
+        body: (
+          <>
+            <P>So the CRM holds every user — not only the ones who open your site — push them from your server. Base URL <Em>https://console.runhq.io/api/sdk/v1</Em>, header <Em>Authorization: Bearer $RUNHQ_SECRET</Em>.</P>
+            <Code>{`PUT    /people/:userId    one person      → { person: { id, created } }
+POST   /people/batch      { people: [...] } (≤ 500)
+                          → { upserted, skipped, rejected: [{ externalId, reason }] }
+DELETE /people/:userId    account deleted → { erased }`}</Code>
+            <Code title="A person">{`{
+  "email": "ada@example.com",
+  "name": "Ada Lovelace",
+  "phone": "+14155550100",
+  "signedUpAt": "2026-01-02T03:04:05Z",
+  "stage": "trial",
+  "updatedAt": "2026-03-04T05:06:07Z",
+  "group": { "id": "acme", "name": "Acme", "createdAt": "2025-06-07T08:09:10Z" },
+  "attributes": { "plan": "pro" }
+}`}</Code>
+            <UL>
+              <li>A present field overwrites, <Em>null</Em> clears, a missing field is left alone. <Em>updatedAt</Em> lets a late retry never roll a person back.</li>
+              <li>Call it on signup, on profile changes and on every lifecycle move (trial, first payment, churn) — this is where <Em>stage</Em> changes that drive automations belong. Never let it slow or break the user's request.</li>
+              <li><Em>consents</Em> — <Em>{'[{ "channel", "granted", "text", "capturedAt", "ip" }]'}</Em> — records what a user agreed to, from a real user action only.</li>
+              <li>Backfill once with <Em>/people/batch</Em>, then reconcile daily. Never send passwords, tokens or payment data.</li>
+              <li>Retry <Em>429</Em> (after <Em>Retry-After</Em>), <Em>408</Em> and <Em>5xx</Em>; don't retry other <Em>4xx</Em>.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'other',
+        heading: 'Other server endpoints',
+        body: (
+          <UL>
+            <li><Em>POST /errors</Em> — <Em>{'{ errors: [...], environment, release }'}</Em>: report up to 50 server-side errors to the Errors tool. Each needs a <Em>message</Em>; <Em>stack</Em>, <Em>type</Em>, <Em>url</Em>, <Em>userId</Em> and <Em>context</Em> are optional.</li>
+            <li><Em>GET /events</Em> — the project's recorded events (<Em>page_view</Em>, <Em>custom</Em>, <Em>stage</Em>, <Em>revenue</Em>), oldest first, paged with <Em>cursor</Em>. Filters: <Em>since</Em>, <Em>until</Em>, <Em>type</Em>, <Em>name</Em>, <Em>environment</Em>, <Em>limit</Em> (≤ 1000).</li>
+            <li><Em>GET /contributions?userIds=a,b</Em> and <Em>GET /contributions/top</Em> — community points per user, for showing them in your own app.</li>
+          </UL>
+        ),
+      },
+    ],
+  },
+
+  {
+    path: '/docs/widget/overview',
+    group: 'SDK & widget',
+    title: 'The feedback widget',
+    lede: <>The same SDK tag can show a widget on your site: a feedback board your users post to, vote on and comment on, plus support chat and help articles. What they file lands in your project as tickets.</>,
+    sections: [
+      {
+        id: 'what',
+        heading: 'What it does',
+        body: (
+          <>
+            <P>A launcher in the corner opens the widget. Signed-in users can file a ticket (with screenshots), vote, comment, chat with support and read your help articles; your team answers from RunHQ.</P>
+            <P>Each ticket carries its context:</P>
+            <UL>
+              <li>Who filed it — from your <NL to="/docs/sdk/server">signed identity token</NL>.</li>
+              <li>The page they were on, their browser and screen size.</li>
+              <li>Errors the page threw during the visit.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'who',
+        heading: 'Who sees what',
+        body: (
+          <UL>
+            <li><Em>Private project</Em> (default) — logged-out visitors see nothing. Signed-in users see the board.</li>
+            <li><Em>Public project</Em> — logged-out visitors see a read-only board; posting sends them to your login page.</li>
+            <li>What each of your app's roles may do — view, vote, create, moderate — is set in <Em>Project Settings › CRM › Permissions</Em>.</li>
+          </UL>
+        ),
+      },
+      {
+        id: 'flow',
+        heading: 'What happens next',
+        body: (
+          <UL>
+            <li>The ticket lands in the project, where your team can triage it, reply and start a job on it.</li>
+            <li>The triager can pick an agent for it — see <NL to="/docs/widget/triager">How the triager picks an agent</NL>.</li>
+            <li>When the fix ships, the people who asked for it see it on the board.</li>
+          </UL>
+        ),
+      },
+      {
+        id: 'privacy',
+        heading: 'Privacy',
+        body: (
+          <UL>
+            <li>The browser never holds your secret — only a public project slug and, for signed-in users, a short-lived token your server signed.</li>
+            <li>A reporter's personal data, and screenshots that show it, are hidden from the public board.</li>
+            <li>Interaction capture records structure only — never what anyone typed.</li>
+          </UL>
+        ),
+      },
+    ],
+  },
+
+  {
+    path: '/docs/widget/install',
+    group: 'SDK & widget',
+    title: 'Adding the feedback widget',
+    lede: <>If the SDK is installed, showing the widget is a deletion: drop one attribute. Letting users post as themselves takes a token from your server.</>,
+    sections: [
+      {
+        id: 'tag',
+        heading: 'Show the widget',
+        body: (
+          <>
+            <P>Take the SDK tag and remove <Em>data-track-only</Em>. The same tag now shows the widget and keeps tracking:</P>
+            <Code>{`<script src="https://console.runhq.io/widget.js" data-project="your-project-slug"></script>`}</Code>
+            <P>That's enough for a public project's read-only board. Whether the project is public, your login URL and the sites allowed to embed it are set in <Em>Project Settings › CRM › Widget</Em>.</P>
+          </>
+        ),
+      },
+      {
+        id: 'signed-in',
+        heading: 'Let signed-in users post',
+        body: (
+          <>
+            <P>Sign an <NL to="/docs/sdk/server">identity token</NL> on your server, serve it from an authenticated route, and pass it in:</P>
+            <Code>{`<script src="https://console.runhq.io/widget.js"></script>
+<script>
+  RunHQWidget.init({ project: "your-project-slug" });
+  // Upgrade signed-in users so they can vote, comment and post.
+  fetch('/api/widget-token', { credentials: 'include' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d.token) RunHQWidget.init({ token: d.token }); })
+    .catch(function () {});
+</script>`}</Code>
+            <P>A logged-out visitor gets no token, so the second <Em>init</Em> simply never happens for them. Tokens last at most 24 hours — sign one per session, never hard-code one.</P>
+          </>
+        ),
+      },
+      {
+        id: 'verify',
+        heading: 'Verify it works',
+        body: (
+          <>
+            <Steps>
+              <li>Open your site signed in. The launcher appears in the corner.</li>
+              <li>Open it, file a test ticket, and submit.</li>
+              <li>The ticket appears in your project within a few seconds.</li>
+            </Steps>
+            <Callout kind="tip">A red “Widget not set up correctly” banner names the problem (<Em>signature_invalid</Em>, <Em>unknown_project</Em>, <Em>token_expired</Em>, <Em>malformed_jwt</Em>). If there's no banner but posting stays locked, the token's <Em>sub</Em> is almost always not a string.</Callout>
+          </>
+        ),
+      },
+      {
+        id: 'chat',
+        heading: 'Your own button',
+        body: <P>Call <Em>RunHQWidget.openChat()</Em> from any button on your page to open the widget straight onto support chat.</P>,
+      },
+    ],
+  },
+
+  {
     path: '/docs/widget/triager',
-    group: 'The widget',
+    group: 'SDK & widget',
     title: 'How the triager picks an agent',
     lede: <>When a todo arrives via the widget, RunHQ scores your agents and picks one. Here's what the triager looks at — and how to override it.</>,
     sections: [
@@ -2044,77 +2319,56 @@ const PAGES_KO: DocPage[] = [
     ],
   },
 
-  // ============================================================ 위젯
+  // ============================================================ SDK와 위젯
   {
-    path: '/docs/widget/overview',
-    group: 'The widget',
-    title: '위젯으로 피드백 받기',
-    lede: <>사이트의 아무 페이지에나 위젯을 올려두세요. 사용자가 피드백 버튼을 누르면 할 일이 컨텍스트가 첨부된 채로 프로젝트 큐에 도착합니다.</>,
+    path: '/docs/sdk/install',
+    group: 'SDK & widget',
+    title: 'SDK 설치',
+    lede: <>모든 페이지에 스크립트 태그 하나. 페이지 조회와 방문자 유입 경로를 기록하고, 로그인한 사용자와 연결하고, 사이트의 에러를 보고합니다. 원하면 피드백 위젯도 띄웁니다.</>,
     sections: [
       {
-        id: 'what',
-        heading: '하는 일',
+        id: 'tag',
+        heading: '태그 추가',
         body: (
           <>
-            <P>작은 버튼(또는 원하는 어떤 요소든)이 위젯을 엽니다. 사용자가 피드백을 입력하고, 선택적으로 스크린샷을 첨부한 뒤 제출합니다.</P>
-            <P>RunHQ가 함께 수집하는 정보:</P>
-            <UL>
-              <li>사용자의 신원(<Em>init</Em>에 전달한 값 기준).</li>
-              <li>접속한 페이지, 브라우저, 화면 크기.</li>
-              <li>세션 중 발생한 콘솔 에러.</li>
-              <li>사용자가 스크린샷을 직접 첨부하지 않은 경우 자동 생성된 스크린샷.</li>
-            </UL>
+            <P>모든 페이지에서 실행되도록 공통 레이아웃에 넣으세요:</P>
+            <Code>{`<script src="https://console.runhq.io/widget.js"
+        data-project="your-project-slug"
+        data-track-only="true"
+        data-environment="auto"></script>`}</Code>
+            <P>프로젝트 슬러그와, 사용하는 스택(HTML, Next.js, Vite, Nuxt, SvelteKit, Rails, Django, Laravel, WordPress)에 맞게 작성된 태그는 <Em>Project Settings › CRM › Install</Em>에 있습니다. 슬러그는 비밀이 아닙니다 — 어차피 페이지 소스에 보입니다.</P>
+            <Callout kind="warn">사이트당 스크립트는 하나입니다. 피드백 위젯 때문에 이미 <Em>widget.js</Em>를 불러오고 있다면 그 태그를 고치세요 — 두 번째 태그를 추가하지 마세요. 스크립트 하나, 프로젝트 하나, 방문자 한 명.</Callout>
           </>
         ),
       },
       {
-        id: 'flow',
-        heading: '그다음에 일어나는 일',
+        id: 'attributes',
+        heading: '태그 속성',
         body: (
           <UL>
-            <li>위젯이 지정한 채널에 할 일을 만듭니다.</li>
-            <li>트리아저가 해당 작업에 가장 잘 맞는 에이전트를 고릅니다 — <NL to="/docs/widget/triager">트리아저가 에이전트를 고르는 방식</NL>을 참고하세요.</li>
-            <li>자동 실행을 켜둔 경우 에이전트가 즉시 시작합니다. 아니라면 할 일이 큐에 대기합니다.</li>
+            <li><Em>data-project</Em> — 프로젝트 슬러그. 필수입니다.</li>
+            <li><Em>data-track-only="true"</Em> — 추적만 하고 페이지에는 아무것도 그리지 않습니다. 이 속성을 빼면 같은 태그가 <NL to="/docs/widget/install">피드백 위젯</NL>을 띄웁니다.</li>
+            <li><Em>data-environment</Em> — 어떤 배포 환경인지. 기본값은 <Em>production</Em>입니다. <Em>auto</Em>는 localhost와 사설망 호스트를 <Em>development</Em>로 봅니다. 프리뷰 URL은 둘 다 아니므로, 프레임워크가 주는 값(<Em>Rails.env</Em>, <Em>NODE_ENV</Em> 등)이 있으면 그 값을 넘기세요.</li>
+            <li><Em>data-release</Em> — 빌드나 버전. 에러가 릴리스별로 묶입니다.</li>
+            <li><Em>data-language</Em> — 위젯의 언어.</li>
+            <li><Em>data-server</Em> — 스크립트를 불러온 곳과 다른 RunHQ API 주소를 쓸 때.</li>
+            <li><Em>data-track="false"</Em> — 이 페이지는 추적하지 않습니다.</li>
           </UL>
         ),
       },
       {
-        id: 'privacy',
-        heading: '개인정보',
+        id: 'automatic',
+        heading: '자동으로 기록되는 것',
         body: (
           <>
-            <P>알아둘 점:</P>
             <UL>
-              <li>위젯은 절대 브라우저에서 비공개 API 토큰을 보내지 않습니다. 캡처는 프로젝트 ID에 매여 있는 공개 인제스트 엔드포인트를 사용합니다.</li>
-              <li>어떤 사용자 속성을 보낼지 직접 통제할 수 있습니다. 기본값은 <Em>init</Em>에 전달한 ID와 이메일뿐입니다.</li>
-              <li>스크린샷은 위젯 CDN이 아니라 워크스페이스에 저장됩니다.</li>
+              <li><Em>페이지 조회</Em> — 싱글 페이지 앱의 클라이언트 측 이동도 포함합니다.</li>
+              <li><Em>방문자의 유입 경로</Em> — 리퍼러, UTM 태그, 첫 유입.</li>
+              <li>페이지별 <Em>실제 이용 시간</Em>.</li>
+              <li><Em>에러</Em> — 처리되지 않은 에러와 promise 거부가 프로젝트의 Errors 도구로 갑니다. 메시지와 스택에서 개인정보는 가려지고, URL에서는 쿼리 문자열이 제거됩니다. 브라우저 확장 프로그램이 던진 에러는 무시합니다.</li>
+              <li><Em>클릭, 폼 제출, 스크롤 깊이</Em> — 구조만 기록하며, 입력한 내용은 절대 기록하지 않습니다. <Em>Interaction capture</Em> 스위치로 켜고 끄며, 새 프로젝트에서는 기본으로 켜져 있습니다.</li>
             </UL>
-          </>
-        ),
-      },
-    ],
-  },
-
-  {
-    path: '/docs/widget/install',
-    group: 'The widget',
-    title: '위젯 설치',
-    lede: <>아무 페이지에 스크립트 태그 두 줄. 위젯은 스스로 마운트되고, 뷰포트 컨텍스트를 캡처해 워크스페이스로 전송합니다.</>,
-    sections: [
-      {
-        id: 'snippet',
-        heading: '스니펫 추가',
-        body: (
-          <>
-            <P>사이트의 아무 페이지든 <Em>head</Em>에 다음 두 태그를 넣으세요:</P>
-            <Code>{`<script src="https://widget.runhq.io/v1.js"></script>
-<script>
-  RunHQ.init({
-    project: "your-project-id",
-    user: { id: "u_123", email: "ada@hover.dev" }
-  });
-</script>`}</Code>
-            <P>프로젝트 ID는 프로젝트의 <Em>Widget</Em> 탭에서 확인할 수 있습니다 — 복사해서 붙여넣기만 하면 됩니다.</P>
+            <P>제품 투어와 인앱 메시지는 방문자를 기다리는 것이 있을 때만 불러옵니다. 없으면 추가로 내려받는 것이 없습니다.</P>
           </>
         ),
       },
@@ -2124,26 +2378,11 @@ const PAGES_KO: DocPage[] = [
         body: (
           <>
             <Steps>
-              <li>브라우저에서 해당 페이지를 엽니다.</li>
-              <li>우측 하단에 작은 피드백 버튼이 보여야 합니다.</li>
-              <li>클릭해서 "test feedback"을 입력하고 제출합니다.</li>
-              <li>프로젝트의 할 일 채널을 확인하세요 — 테스트 항목이 몇 초 안에 보여야 합니다.</li>
+              <li>브라우저의 네트워크 탭을 연 채로 사이트를 엽니다.</li>
+              <li><Em>/api/widget/collect</Em>로 가는 <Em>POST</Em>를 찾으세요. 응답이 <Em>{'{"tracking":"disabled"}'}</Em>라면 프로젝트의 추적이 꺼져 있는 것입니다 — <Em>Project Settings › CRM › Install</Em>에서 켜세요.</li>
+              <li>요청 본문의 <Em>environment</Em>를 확인하세요. 로컬 실행인데 <Em>production</Em>이라면 <Em>data-environment</Em>가 연결되지 않은 것입니다.</li>
+              <li>프로젝트의 <Em>Marketing</Em> 탭을 여세요 — 방금 방문이 보여야 합니다.</li>
             </Steps>
-          </>
-        ),
-      },
-      {
-        id: 'theme',
-        heading: '디자인 맞추기',
-        body: (
-          <>
-            <P>위젯은 격리된 프레임 안에서 렌더링돼 호스트 페이지의 스타일과 충돌하지 않습니다. 호스트 페이지에 다음 CSS 변수 몇 가지를 지정해 외형을 조정하세요:</P>
-            <UL>
-              <li><Em>강조 색상</Em> — <Em>--runhq-accent</Em>를 설정합니다.</li>
-              <li><Em>모서리 반경</Em> — <Em>--runhq-radius</Em>를 설정합니다.</li>
-              <li><Em>위치</Em> — <Em>--runhq-pos</Em>를 설정합니다(top-left, top-right, bottom-left, bottom-right).</li>
-            </UL>
-            <P>런처 버튼 자체를 교체할 수도 있습니다 — 사용자 측 버튼에서 <Em>RunHQ.open()</Em>을 호출하세요.</P>
           </>
         ),
       },
@@ -2151,8 +2390,319 @@ const PAGES_KO: DocPage[] = [
   },
 
   {
+    path: '/docs/sdk/javascript',
+    group: 'SDK & widget',
+    title: 'JavaScript API',
+    lede: <>태그가 <Em>window.RunHQWidget</Em>을 정의합니다. 스크립트가 다 불러와지기 전에 호출해도 안전하고 — 호출은 대기했다가 준비되면 전송됩니다 — 어떤 호출도 예외를 던지지 않습니다.</>,
+    sections: [
+      {
+        id: 'identify',
+        heading: 'identify — 로그인한 사용자 알리기',
+        body: (
+          <>
+            <Code>{`RunHQWidget.identify(user.id, { email: user.email, name: user.name });`}</Code>
+            <P>방문자가 누구인지 알게 된 뒤 — 첫 화면이 아니라 로그인이 끝난 뒤 — 한 번 호출하세요. 이전의 익명 방문이 이 사용자에게 연결됩니다. 앱의 사용자 ID를 그대로 쓰세요.</P>
+          </>
+        ),
+      },
+      {
+        id: 'group',
+        heading: 'group — 사용자의 회사, 팀, 워크스페이스',
+        body: (
+          <>
+            <Code>{`RunHQWidget.group(company.id, {
+  name: company.name,
+  domain: company.domain,
+  createdAt: company.createdAt,
+  plan: company.plan,
+});`}</Code>
+            <P><Em>identify</Em> 다음에, 앱에서 쓰는 그룹 ID로 호출하세요. <Em>name</Em>은 CRM에 표시되는 이름입니다. <Em>createdAt</Em>(ISO-8601 또는 epoch)은 앱에서 그룹이 만들어진 시점으로, 이 값이 없으면 CRM은 그 그룹을 새 계정으로 셀 수 없습니다. 그 밖의 속성은 그룹에 저장됩니다.</P>
+          </>
+        ),
+      },
+      {
+        id: 'track',
+        heading: 'track — 사용자 정의 이벤트',
+        body: (
+          <>
+            <Code>{`RunHQWidget.track('level_completed', { level: 3 });`}</Code>
+            <UL>
+              <li>이벤트 이름이 <Em>곧</Em> 측정 단위입니다. 이름을 바꾸면 새로운 빈 시리즈가 시작됩니다.</li>
+              <li>일이 일어난 순간에 한 번만 보내세요 — 렌더링할 때마다가 아니라.</li>
+              <li>속성은 작고 개인을 식별할 수 없게 유지하세요. <Em>$</Em>로 시작하는 이름은 SDK가 예약해 둔 것입니다.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'revenue',
+        heading: 'revenue — 매출',
+        body: <Code>{`RunHQWidget.revenue(49, { currency: 'USD', plan: 'pro' });`}</Code>,
+      },
+      {
+        id: 'stage',
+        heading: 'stage — 파이프라인 단계',
+        body: (
+          <>
+            <Code>{`RunHQWidget.stage('trial');`}</Code>
+            <P><Em>Project Settings › CRM › Pipeline</Em>의 단계 키입니다(기본값: <Em>visitor</Em>, <Em>lead</Em>, <Em>qualified</Em>, <Em>trial</Em>, <Em>converted</Em>).</P>
+            <Callout kind="warn">누구나 브라우저에서 이 함수를 호출할 수 있으므로 CRM 자동화는 이 호출에 반응하지 않습니다. 무언가를 일으켜야 하는 단계 변경은 <NL to="/docs/sdk/server">서버</NL>에서 보내세요.</Callout>
+          </>
+        ),
+      },
+      {
+        id: 'consent',
+        heading: 'consent — 메시지 수신 동의',
+        body: (
+          <>
+            <Code>{`await RunHQWidget.consent('sms', { granted: true, text: 'Text me order updates' });`}</Code>
+            <P>로그인한 사용자의 동의를, 사용자에게 보여 준 문구 그대로 기록합니다. 채널: <Em>sms</Em>, <Em>whatsapp</Em>, <Em>email_marketing</Em>. <Em>granted: false</Em>는 동의 철회입니다. 사용자의 <NL to="/docs/sdk/server">서명된 신원 토큰</NL>(<Em>init</Em>에 전달)이 필요하며, <Em>{'{ ok, state }'}</Em>를 돌려주는 promise를 반환하고, 실패하면 이유를 담은 <Em>code</Em>(예: <Em>signed_identity_required</Em>)와 함께 reject됩니다.</P>
+          </>
+        ),
+      },
+      {
+        id: 'capture-error',
+        heading: 'captureError — 직접 잡은 에러',
+        body: (
+          <>
+            <Code>{`try {
+  await checkout();
+} catch (err) {
+  RunHQWidget.captureError(err, { step: 'payment' });
+}`}</Code>
+            <P>처리되지 않은 에러는 알아서 보고됩니다. 코드에서 처리하지만 그래도 보고 싶은 에러에 쓰세요. 두 번째 인자는 에러 옆에 표시될 간단한 데이터입니다.</P>
+          </>
+        ),
+      },
+      {
+        id: 'init',
+        heading: 'init — 코드로 옵션 지정',
+        body: (
+          <>
+            <Code>{`RunHQWidget.init({ project: 'your-project-slug', environment: 'production' });`}</Code>
+            <P>태그의 <Em>data-*</Em> 속성으로 지정하는 모든 것을 여기서 넘길 수 있습니다: <Em>project</Em>, <Em>token</Em>(서명된 신원 토큰), <Em>environment</Em>, <Em>release</Em>, <Em>language</Em>, <Em>server</Em>, <Em>useCookieAuth</Em>, <Em>track: false</Em>. <Em>init</Em>을 호출하면 <NL to="/docs/widget/install">피드백 위젯</NL>도 표시되며, <Em>RunHQWidget.openChat()</Em>은 위젯을 바로 채팅 화면으로 엽니다.</P>
+          </>
+        ),
+      },
+      {
+        id: 'deprecated',
+        heading: '이전 페이지를 위해 남겨 둔 것',
+        body: <P><Em>variation(key, fallback)</Em>은 항상 <Em>fallback</Em>을 반환하고, <Em>ready()</Em>는 이미 resolve된 promise입니다. 아직 호출하는 페이지가 깨지지 않도록 남겨 둔 것이니, 해당 호출은 지워도 됩니다.</P>,
+      },
+    ],
+  },
+
+  {
+    path: '/docs/sdk/server',
+    group: 'SDK & widget',
+    title: '서버: 사용자와 신원',
+    lede: <>프로젝트 시크릿은 백엔드가 보관합니다. 백엔드는 RunHQ에 사용자가 누구인지 알려 주고, 누가 로그인했는지 증명하는 토큰에 서명합니다. 시크릿은 절대 브라우저로 가지 않습니다.</>,
+    sections: [
+      {
+        id: 'secret',
+        heading: '프로젝트 시크릿',
+        body: (
+          <UL>
+            <li><Em>Project Settings › CRM › Install</Em>에 있습니다.</li>
+            <li>환경 변수(<Em>RUNHQ_SECRET</Em>)에 두세요. 소스 코드나 클라이언트 번들에는 절대 넣지 마세요.</li>
+            <li>시크릿을 교체해도 이전 시크릿이 24시간 동안 유효하므로, 하루 안에 다시 배포하면 됩니다.</li>
+          </UL>
+        ),
+      },
+      {
+        id: 'token',
+        heading: '신원 토큰',
+        body: (
+          <>
+            <P>로그인한 사용자를 위해 시크릿으로 서명한 HS256 JWT입니다. 인증된 경로(예: <Em>GET /api/widget-token</Em> → <Em>{'{ "token": "…" }'}</Em>)에서 내려 주고, 페이지에서 <Em>RunHQWidget.init({'{ token }'})</Em>으로 넘기세요. 이 토큰이 있어야 사용자가 피드백 위젯에 본인으로 글을 쓸 수 있고, <Em>consent()</Em>도 신뢰할 수 있게 됩니다.</P>
+            <Code title="Node.js (jsonwebtoken)">{`const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+const secret = process.env.RUNHQ_SECRET;
+const fp = crypto.createHash('sha256').update(secret).digest('hex').slice(0, 32);
+
+const token = jwt.sign({
+  type: 'widget_user',
+  fp,
+  sub: String(user.id),               // 반드시 문자열
+  email: user.email,
+  name: user.name,
+  signed_up_at: Math.floor(user.createdAt.getTime() / 1000),
+  role: user.role,                    // 선택: 역할별 위젯 권한
+  metadata: { plan: user.plan },      // 선택: 사람 정보에 표시
+}, secret, { algorithm: 'HS256', expiresIn: '24h' });`}</Code>
+            <UL>
+              <li><Em>type</Em>(<Em>"widget_user"</Em>), <Em>fp</Em>(시크릿 SHA-256의 앞 32자리 16진수), <Em>sub</Em>, <Em>iat</Em>, <Em>exp</Em>는 필수입니다. 24시간보다 오래전에 발급된 토큰은 거부됩니다.</li>
+              <li><Em>sub</Em>는 비어 있지 않은 문자열이어야 합니다. 숫자 ID는 서명 검사는 통과하지만 아무도 식별하지 못합니다.</li>
+              <li><Em>signed_up_at</Em> — 앱에서 계정이 만들어진 시점(ISO-8601 또는 epoch). CRM은 이 값으로 새 계정을 셉니다.</li>
+              <li><Em>group</Em> — <Em>{'{ "id", "name", "createdAt" }'}</Em>. 페이지에서 <Em>group()</Em>을 호출하지 않는다면, 사용자가 속한 조직을 여기에 넣으세요.</li>
+              <li><Em>role</Em> — <Em>Project Settings › CRM › Permissions</Em>에 나타나며, 거기서 역할마다 위젯에서 할 수 있는 일을 정합니다.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'people',
+        heading: '사용자 동기화',
+        body: (
+          <>
+            <P>사이트를 연 사람만이 아니라 모든 사용자가 CRM에 있도록, 서버에서 보내 주세요. 기본 URL은 <Em>https://console.runhq.io/api/sdk/v1</Em>, 헤더는 <Em>Authorization: Bearer $RUNHQ_SECRET</Em>입니다.</P>
+            <Code>{`PUT    /people/:userId    한 명            → { person: { id, created } }
+POST   /people/batch      { people: [...] } (≤ 500)
+                          → { upserted, skipped, rejected: [{ externalId, reason }] }
+DELETE /people/:userId    계정 삭제        → { erased }`}</Code>
+            <Code title="사람 한 명">{`{
+  "email": "ada@example.com",
+  "name": "Ada Lovelace",
+  "phone": "+14155550100",
+  "signedUpAt": "2026-01-02T03:04:05Z",
+  "stage": "trial",
+  "updatedAt": "2026-03-04T05:06:07Z",
+  "group": { "id": "acme", "name": "Acme", "createdAt": "2025-06-07T08:09:10Z" },
+  "attributes": { "plan": "pro" }
+}`}</Code>
+            <UL>
+              <li>있는 필드는 덮어쓰고, <Em>null</Em>은 지우고, 없는 필드는 그대로 둡니다. <Em>updatedAt</Em>이 있으면 늦게 도착한 재시도가 정보를 되돌리지 않습니다.</li>
+              <li>가입, 프로필 변경, 그리고 모든 라이프사이클 변화(체험 시작, 첫 결제, 이탈) 때 호출하세요 — 자동화를 움직이는 <Em>stage</Em> 변경은 여기서 보내야 합니다. 사용자의 요청을 느리게 하거나 실패시키지 않도록 하세요.</li>
+              <li><Em>consents</Em> — <Em>{'[{ "channel", "granted", "text", "capturedAt", "ip" }]'}</Em> — 사용자가 동의한 내용을 기록합니다. 실제 사용자 동작에서만 보내세요.</li>
+              <li>처음 한 번 <Em>/people/batch</Em>로 채우고, 이후 매일 맞춰 주세요. 비밀번호, 토큰, 결제 정보는 절대 보내지 마세요.</li>
+              <li><Em>429</Em>(<Em>Retry-After</Em> 이후), <Em>408</Em>, <Em>5xx</Em>는 재시도하고, 그 밖의 <Em>4xx</Em>는 재시도하지 마세요.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'other',
+        heading: '그 밖의 서버 엔드포인트',
+        body: (
+          <UL>
+            <li><Em>POST /errors</Em> — <Em>{'{ errors: [...], environment, release }'}</Em>: 서버 쪽 에러를 최대 50개까지 Errors 도구로 보냅니다. 각 항목에 <Em>message</Em>가 필요하고, <Em>stack</Em>, <Em>type</Em>, <Em>url</Em>, <Em>userId</Em>, <Em>context</Em>는 선택입니다.</li>
+            <li><Em>GET /events</Em> — 프로젝트에 기록된 이벤트(<Em>page_view</Em>, <Em>custom</Em>, <Em>stage</Em>, <Em>revenue</Em>)를 오래된 순으로, <Em>cursor</Em>로 페이지를 넘기며 읽습니다. 필터: <Em>since</Em>, <Em>until</Em>, <Em>type</Em>, <Em>name</Em>, <Em>environment</Em>, <Em>limit</Em>(≤ 1000).</li>
+            <li><Em>GET /contributions?userIds=a,b</Em>와 <Em>GET /contributions/top</Em> — 사용자별 커뮤니티 포인트. 앱 안에서 보여 줄 때 씁니다.</li>
+          </UL>
+        ),
+      },
+    ],
+  },
+
+  {
+    path: '/docs/widget/overview',
+    group: 'SDK & widget',
+    title: '피드백 위젯',
+    lede: <>같은 SDK 태그로 사이트에 위젯을 띄울 수 있습니다. 사용자가 글을 쓰고, 투표하고, 댓글을 다는 피드백 보드에 더해 고객 지원 채팅과 도움말 문서까지 담겨 있습니다. 사용자가 남긴 글은 프로젝트에 티켓으로 들어옵니다.</>,
+    sections: [
+      {
+        id: 'what',
+        heading: '하는 일',
+        body: (
+          <>
+            <P>구석의 런처 버튼이 위젯을 엽니다. 로그인한 사용자는 티켓을 남기고(스크린샷 첨부 가능), 투표하고, 댓글을 달고, 지원팀과 채팅하고, 도움말 문서를 읽을 수 있습니다. 팀은 RunHQ에서 답합니다.</P>
+            <P>티켓마다 맥락이 함께 담깁니다:</P>
+            <UL>
+              <li>누가 남겼는지 — <NL to="/docs/sdk/server">서명된 신원 토큰</NL> 기준.</li>
+              <li>보고 있던 페이지, 브라우저, 화면 크기.</li>
+              <li>방문 중 페이지에서 발생한 에러.</li>
+            </UL>
+          </>
+        ),
+      },
+      {
+        id: 'who',
+        heading: '누가 무엇을 보는가',
+        body: (
+          <UL>
+            <li><Em>비공개 프로젝트</Em>(기본값) — 로그아웃한 방문자에게는 아무것도 보이지 않습니다. 로그인한 사용자는 보드를 봅니다.</li>
+            <li><Em>공개 프로젝트</Em> — 로그아웃한 방문자에게 읽기 전용 보드가 보이고, 글을 쓰려 하면 로그인 페이지로 이동합니다.</li>
+            <li>앱의 역할마다 할 수 있는 일(보기, 투표, 작성, 관리)은 <Em>Project Settings › CRM › Permissions</Em>에서 정합니다.</li>
+          </UL>
+        ),
+      },
+      {
+        id: 'flow',
+        heading: '그다음에 일어나는 일',
+        body: (
+          <UL>
+            <li>티켓이 프로젝트에 도착하면 팀이 분류하고, 답하고, 잡을 시작할 수 있습니다.</li>
+            <li>트리아저가 에이전트를 골라 줄 수도 있습니다 — <NL to="/docs/widget/triager">트리아저가 에이전트를 고르는 방식</NL>을 참고하세요.</li>
+            <li>수정 사항이 배포되면, 요청한 사람들이 보드에서 확인할 수 있습니다.</li>
+          </UL>
+        ),
+      },
+      {
+        id: 'privacy',
+        heading: '개인정보',
+        body: (
+          <UL>
+            <li>브라우저는 시크릿을 갖지 않습니다 — 공개 프로젝트 슬러그와, 로그인한 사용자라면 서버가 서명한 짧은 수명의 토큰뿐입니다.</li>
+            <li>작성자의 개인정보와, 개인정보가 보이는 스크린샷은 공개 보드에서 가려집니다.</li>
+            <li>상호작용 기록은 구조만 남기며, 입력한 내용은 절대 기록하지 않습니다.</li>
+          </UL>
+        ),
+      },
+    ],
+  },
+
+  {
+    path: '/docs/widget/install',
+    group: 'SDK & widget',
+    title: '피드백 위젯 추가',
+    lede: <>SDK가 설치되어 있다면, 위젯을 띄우는 건 속성 하나를 지우는 일입니다. 사용자가 본인으로 글을 쓰게 하려면 서버가 발급한 토큰이 필요합니다.</>,
+    sections: [
+      {
+        id: 'tag',
+        heading: '위젯 띄우기',
+        body: (
+          <>
+            <P>SDK 태그에서 <Em>data-track-only</Em>를 지우세요. 같은 태그가 이제 위젯을 띄우면서 추적도 계속합니다:</P>
+            <Code>{`<script src="https://console.runhq.io/widget.js" data-project="your-project-slug"></script>`}</Code>
+            <P>공개 프로젝트의 읽기 전용 보드라면 이것으로 충분합니다. 공개 여부, 로그인 URL, 위젯을 넣을 수 있는 사이트는 <Em>Project Settings › CRM › Widget</Em>에서 정합니다.</P>
+          </>
+        ),
+      },
+      {
+        id: 'signed-in',
+        heading: '로그인한 사용자가 글을 쓰게 하기',
+        body: (
+          <>
+            <P>서버에서 <NL to="/docs/sdk/server">신원 토큰</NL>에 서명하고, 인증된 경로로 내려 준 뒤, 페이지에서 넘기세요:</P>
+            <Code>{`<script src="https://console.runhq.io/widget.js"></script>
+<script>
+  RunHQWidget.init({ project: "your-project-slug" });
+  // 로그인한 사용자는 투표, 댓글, 작성이 가능하도록 업그레이드합니다.
+  fetch('/api/widget-token', { credentials: 'include' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d.token) RunHQWidget.init({ token: d.token }); })
+    .catch(function () {});
+</script>`}</Code>
+            <P>로그아웃한 방문자는 토큰을 받지 못하므로 두 번째 <Em>init</Em>이 일어나지 않습니다. 토큰은 최대 24시간만 유효합니다 — 세션마다 새로 서명하고, 코드에 박아 두지 마세요.</P>
+          </>
+        ),
+      },
+      {
+        id: 'verify',
+        heading: '동작 확인',
+        body: (
+          <>
+            <Steps>
+              <li>로그인한 상태로 사이트를 엽니다. 구석에 런처가 보입니다.</li>
+              <li>위젯을 열고 테스트 티켓을 작성해 제출합니다.</li>
+              <li>몇 초 안에 프로젝트에 티켓이 나타납니다.</li>
+            </Steps>
+            <Callout kind="tip">빨간 “Widget not set up correctly” 배너는 문제를 알려 줍니다(<Em>signature_invalid</Em>, <Em>unknown_project</Em>, <Em>token_expired</Em>, <Em>malformed_jwt</Em>). 배너는 없는데 글쓰기가 계속 막혀 있다면, 거의 항상 토큰의 <Em>sub</Em>가 문자열이 아니기 때문입니다.</Callout>
+          </>
+        ),
+      },
+      {
+        id: 'chat',
+        heading: '직접 만든 버튼',
+        body: <P>페이지의 아무 버튼에서나 <Em>RunHQWidget.openChat()</Em>을 호출하면 위젯이 바로 지원 채팅 화면으로 열립니다.</P>,
+      },
+    ],
+  },
+
+  {
     path: '/docs/widget/triager',
-    group: 'The widget',
+    group: 'SDK & widget',
     title: '트리아저가 에이전트를 고르는 방식',
     lede: <>위젯을 통해 할 일이 도착하면 RunHQ는 에이전트를 점수화해 하나를 고릅니다. 트리아저가 무엇을 보는지 — 그리고 어떻게 재정의할지 살펴보세요.</>,
     sections: [
@@ -2340,7 +2890,7 @@ function buildSidebar(pages: DocPage[]) {
     'Channels': [],
     'Agents': [],
     'Projects': [],
-    'The widget': [],
+    'SDK & widget': [],
     'Workflows': [],
     'Team & access': [],
   };
