@@ -533,7 +533,7 @@ const HOME_STYLES = `
     --rhw-accent:    #0B7A5C;
     --rhw-accent-soft: rgba(11, 122, 92, 0.10);
     --rhh-amber:     #B26A00;
-    --rhh-display:   'Bricolage Grotesque', 'Geist', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', system-ui, sans-serif;
+    --rhh-display:   'Geist', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', system-ui, sans-serif;
     --rhh-mono:      'JetBrains Mono', ui-monospace, monospace;
     --rhh-gutter:    clamp(20px, 5vw, 64px);
 
@@ -552,9 +552,9 @@ const HOME_STYLES = `
   /* Type scale: 16 / 18 / 22 / 36 / 56 / 96 */
   .rhh-h1 {
     font-family: var(--rhh-display);
-    font-size: clamp(46px, 7.4vw, 96px);
-    line-height: 0.98;
-    letter-spacing: -0.022em;
+    font-size: clamp(44px, 6.4vw, 84px);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
     font-weight: 600;
     max-width: 13ch;
     margin: 0 0 28px;
@@ -563,8 +563,8 @@ const HOME_STYLES = `
   .rhh-h2 {
     font-family: var(--rhh-display);
     font-size: clamp(34px, 4.4vw, 56px);
-    line-height: 1.02;
-    letter-spacing: -0.02em;
+    line-height: 1.04;
+    letter-spacing: -0.03em;
     font-weight: 600;
     margin: 0 0 16px;
     max-width: 18ch;
@@ -626,7 +626,7 @@ const HOME_STYLES = `
     font-family: var(--rhh-display);
     font-size: clamp(26px, 3.6vw, 48px);
     line-height: 1.15;
-    letter-spacing: -0.018em;
+    letter-spacing: -0.028em;
     font-weight: 600;
     background: none; border: 0; padding: 0 0 6px; margin: 0;
     cursor: pointer;
@@ -807,8 +807,8 @@ const HOME_STYLES = `
   .rhh-close-h {
     font-family: var(--rhh-display);
     font-size: clamp(40px, 6vw, 80px);
-    line-height: 1;
-    letter-spacing: -0.022em;
+    line-height: 1.02;
+    letter-spacing: -0.035em;
     font-weight: 600;
     margin: 0 0 20px;
     max-width: 14ch;
