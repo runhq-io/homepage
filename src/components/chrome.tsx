@@ -28,7 +28,7 @@ const NAV_T = {
 
 const FOOTER_T = {
   en: {
-    blurb: 'The operations layer for AI coding agents. Vancouver, BC.',
+    blurb: 'One workspace to build and run your product with AI agents. Vancouver, BC.',
     productsH: 'Products',
     agentAutomation: 'Agent automation',
     projectManagement: 'Project management',
@@ -44,7 +44,7 @@ const FOOTER_T = {
     builtFor: 'Built for agent-driven product teams',
   },
   ko: {
-    blurb: 'AI 코딩 에이전트를 위한 운영 레이어. 캐나다 밴쿠버.',
+    blurb: 'AI 에이전트로 제품을 만들고 운영하는 하나의 워크스페이스. 캐나다 밴쿠버.',
     productsH: '제품',
     agentAutomation: '에이전트 자동화',
     projectManagement: '프로젝트 관리',

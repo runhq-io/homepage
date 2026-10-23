@@ -1,242 +1,194 @@
-import { useEffect, useRef, useState } from 'react';
-import { Navbar, Footer, Avatar, AgentIcon, SourceIcon, Wordmark, LOGOS, LOGIN_URL } from '../components/chrome';
+import { useEffect, useState } from 'react';
+import { Navbar, Footer, Wordmark, LOGOS, LOGIN_URL } from '../components/chrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
 import { trackSignInClick } from '../telemetry';
-import { PipelineCanvas, BEFORE_STATIONS, AFTER_STATIONS, VP_STYLES } from './VisualPage';
-import { useT, useLocalePath } from '../i18n/context';
+import { useT } from '../i18n/context';
 import { API_BASE } from '../widget';
-import heroScreenshot from '../assets/screenshot.png';
-import heroScreenshotSm from '../assets/smaller_screenshot.png';
 import arrrCover from '../assets/arrr-cover.jpg';
 
 const HOME_T = {
   en: {
     // Hero
-    heroH1Line1: 'Signal-to-code.',
-    heroH1Line2: 'Ship what users actually need.',
-    heroLede: 'RunHQ turns user feedback, telemetry, and support tickets into agent-built PRs — ready to review and ship. Come to work, approve the diff, merge.',
-    ctaStartFree: 'Talk to us',
-    ctaWatchDemo: 'Watch Demo',
-    heroScreenshotAlt: 'RunHQ workspace — preview improvement task',
-    heroScreenshotSmAlt: 'RunHQ feedback widget and latest updates',
-    // Hero roles
+    heroH1: 'Your product, built and run by agents.',
+    heroLede: 'Write a ticket. Claude Code or Codex works it in its own branch, opens a pull request, and ships it once you approve. After launch, RunHQ also runs your inbox, error tracking and experiments, and anything they turn up becomes the next ticket.',
+    ctaTalk: 'Talk to us',
+    ctaBoard: 'See a live board',
+    // Hero status rail: the six real ticket statuses, in order
+    railAria: 'One ticket moving through RunHQ',
+    railReplay: 'Replay',
+    status1: 'Pending',
+    status2: 'In progress',
+    status3: 'Done',
+    status4: 'Reviewed',
+    status5: 'Merged',
+    status6: 'Deployed',
+    ticketTitle: 'Safari drops the Stripe session at checkout',
+    ticketFrom: 'Filed from the widget by Jen K.',
+    stage1: 'Waiting for an agent. You can add screenshots, logs or a repro first.',
+    stage2: 'Codex is working on ticket-4821, with its own worktree and preview.',
+    stage3: 'Pull request #212 opened. The audit found nothing to fix.',
+    stage4: 'You read the diff, tried the preview and approved it.',
+    stage5: 'Merged into main.',
+    stage6: 'Live in production. Jen gets a reply in the widget.',
     // Logos
-    logosH: 'Trusted by engineering teams shipping with agents',
-    // Pipeline section
-    pipelineH2Line1: 'Why teams ship faster',
-    pipelineH2Line2: 'on RunHQ.',
-    pipelineDeck: 'Same feedback rate into both pipelines. The human handoff chain piles up at every step. Parallel coding agents drain the queue as fast as it arrives.',
-    pipelineLabelBefore: 'BEFORE',
-    pipelineLabelAfter: 'WITH RUNHQ',
-    // Loop section
-    loopH2Line1: 'Every release walks',
-    loopH2Line2: 'the same loop.',
-    loopDeck: 'Most coding-agent stacks stop at “the agent finished.” That’s the middle. RunHQ owns the ends — capture before, review after — so the middle can run unattended without scaring anyone.',
-    // Loop stage 01 — Collect feedback
-    loop1Title: 'Collect feedback',
-    loop1Sub: 'One widget, no extra login.',
-    loop1Body: 'Users and teammates send feedback straight from your product through an embedded widget — no separate account, no login wall. Each report lands in RunHQ with the page, the user, and repro context attached.',
-    loop1Key1: 'Embedded widget',
-    loop1Key2: 'No login wall',
-    loop1Key3: 'Auto-context',
-    // Loop stage 02 — Assign coding agents
-    loop2Title: 'Assign coding agents',
-    loop2Sub: 'Run them in parallel.',
-    loop2Body: 'Assign tasks to your custom agents equipped with Claude Code, Cursor, Codex, or your own. RunHQ spawns processes in parallel while logging the important details for full transparency.',
-    loop2Key1: 'BYO agent',
-    loop2Key2: 'Parallel runs',
-    loop2Key3: 'Full audit log',
-    // Loop stage 03 — Review code
-    loop3Title: 'Review code',
-    loop3Sub: 'PRs land ready to read.',
-    loop3Body: 'Every agent run lands as a clean pull request with diff, summary, and provenance attached — so reviewers can scan, comment, and approve in the GitHub flow they already use.',
-    loop3Key1: 'GitHub PRs',
-    loop3Key2: 'Inline diff',
-    loop3Key3: 'One-click revert',
-    // Loop stage 04 — Test + Deploy
-    loop4Title: 'Test + Deploy',
-    loop4Sub: 'Run the app before you ship.',
-    loop4Body: 'RunHQ spins up a fully functioning server for every PR — its own URL, its own environment — so you can actually exercise the change end-to-end before it merges into the deploy pipeline you already run.',
-    loop4Key1: 'Live preview env',
-    loop4Key2: 'Per-PR sandbox',
-    loop4Key3: 'Ships via your CD',
-    // LoopCapture demo rows
-    captureWho1: 'Jen K.',
-    captureTxt1: 'Stripe portal drops session on Safari',
-    captureWho2: 'Tomas R.',
-    captureTxt2: 'Bulk archive in projects table',
-    captureWho3: 'Andre B.',
-    captureTxt3: 'Doc page returns 504 on cold start',
-    // LoopAssign demo rows
-    assignTask1: 'Stripe portal redirect',
-    assignTask2: 'Bulk archive in projects',
-    assignTask3: 'Doc page 504 on cold start',
-    assignStatusRunning: 'running',
-    assignStatusQueued: 'queued',
-    assignStatusStandby: 'standby',
-    assignLabel: 'assigned to',
-    // LoopReview demo
-    reviewPrH: 'PR #4821 · portal: cross-site cookies',
-    reviewPrMeta: '+8 −3 · 1 file changed · ready for review',
-    reviewBtnApprove: 'Approve',
-    reviewBtnRequest: 'Request edits',
-    reviewBtnRevert: 'Revert',
-    // LoopDeploy demo
-    deployPreviewLabel: 'preview:',
-    deployPreviewV: 'pr-4821.runhq.dev · ready',
-    deployTestsLabel: 'tests:',
-    deployTestsV: '23 passed · 142s',
-    deployDeployLabel: 'deploy:',
-    deployDeployV: 'vercel · production',
-    deployLiveLabel: 'live:',
-    deployLiveV: 'portal.runhq.io · 200 OK',
-    // Showcase — live boards
-    showcaseEyebrow: 'Live boards',
-    showcaseH2Line1: 'Real projects.',
-    showcaseH2Line2: 'Running right now.',
-    showcaseDeck: 'Every RunHQ project gets a public board — the same tickets, agent runs, and deploys you would run on your own product. Open one and watch the loop turn in real time.',
+    logosH: 'Teams shipping on RunHQ',
+    // Build
+    buildH2: 'From ticket to production',
+    buildDeck: 'Every change follows the same path, and you only step in where judgment matters: what to build and whether it is right.',
+    build1T: 'Write a ticket',
+    build1B: 'Type it, dictate it, or let it arrive on its own from the widget, the error tracker or a failed deploy. Attach screenshots and logs; agents use them.',
+    build1A: 'Bulk archive in the projects table',
+    build2T: 'An agent takes it',
+    build2B: 'Each job gets its own worktree, branch, terminal and chat. Run as many in parallel as you like, and switch a job between Claude Code and Codex without losing its place.',
+    build2A: 'Codex is running on ticket-4821',
+    build3T: 'Try it before it merges',
+    build3B: 'Every worktree has its own preview of your app, so you click through the change instead of imagining it from a diff.',
+    build3A: 'Preview for ticket-4821 is ready',
+    build4T: 'Audit and review',
+    build4B: 'The pull request is audited automatically, and findings go straight back to the agent that wrote it. You review the diff in Git when it is clean.',
+    build4A: 'git push && runhq ready-for-review',
+    build5T: 'Merge and deploy',
+    build5B: 'Merge with one shortcut. Each deploy shows exactly which tickets it carries, and a failed deploy offers a ticket to fix itself.',
+    build5A: 'Next deploy: 6 tickets',
+    // Run
+    runH2: 'After it ships, it keeps listening',
+    runDeck: 'The tools that run a live product sit in the same workspace as the agents, so whatever users run into can become work without being copied anywhere.',
+    runColTool: 'Tool',
+    runColDoes: 'What it does',
+    runColFiles: 'What it hands the agents',
+    run1T: 'CRM and inbox',
+    run1D: 'Email on your own domain, SMS, WhatsApp, calls and a help centre, with one timeline per person. A support agent answers from your knowledge base.',
+    run1F: 'Requests worth building',
+    run2T: 'Widget',
+    run2D: 'A chat and feedback board inside your app. Users report, vote and follow along without making an account.',
+    run2F: 'Bug reports with the page and user attached',
+    run3T: 'Errors',
+    run3D: 'Errors from your app and server, grouped by cause.',
+    run3F: 'A fix ticket in one click, with an agent on it',
+    run4T: 'Analytics',
+    run4D: 'Funnels for what first-time users actually do.',
+    run4F: 'The step where people drop off',
+    run5T: 'Evolve',
+    run5Beta: 'beta',
+    run5D: 'Tracks which variations are live and assesses them against Mixpanel, PostHog or your own data.',
+    run5F: 'Jobs that build the next generation',
+    // Showcase: live boards
+    showcaseH2: 'Real projects, running right now',
+    showcaseDeck: 'Every RunHQ project can have a public board with its real tickets, agent work and deploys. Open one and watch it move.',
     showcaseOpenBoard: 'Open the live board',
     showcaseOpen: 'Open board',
     showcaseLive: 'live',
     showcaseStatTicketsWeek: 'tickets this week',
     showcaseStatContributors: 'contributors',
     showcaseStatDeploysWeek: 'deploys this week',
-    showcaseStatTicketsTotal: 'total tickets',
+    showcaseStatTicketsTotal: 'tickets so far',
     showcaseArrrName: 'ARRR',
-    showcaseArrrTagline: 'A community shipping features by vote — hundreds of tickets a week, agents merging around the clock.',
-    showcaseArrrArtAlt: 'ARRR — a voxel pirate game built on RunHQ',
+    showcaseArrrTagline: 'A voxel pirate game whose players vote on features and agents build them.',
+    showcaseArrrArtAlt: 'ARRR, a voxel pirate game built on RunHQ',
     showcaseRunhqName: 'RunHQ',
-    showcaseRunhqTagline: 'Our own board. We run RunHQ on RunHQ — every fix you see ships through this loop.',
+    showcaseRunhqTagline: 'Our own board. We build RunHQ on RunHQ.',
     showcaseModdioName: 'Moddio',
-    showcaseModdioTagline: 'A game platform routing player feedback straight into agent-built changes.',
-    // CTA band
-    ctaH1: 'Stop translating feedback by hand.',
-    ctaH2: 'Start shipping it.',
-    ctaBtnPrimary: 'Talk to us →',
-    ctaBtnSecondary: 'Book a 20-min demo',
-    ctaMeta1Strong: 'Live in 60 minutes.',
-    ctaMeta1: 'Drop the widget, connect a source, ship before lunch.',
-    ctaMeta2Strong: 'Audit log export.',
-    ctaMeta2: 'PII strip at ingest. Every agent action versioned.',
-    ctaMeta3Strong: 'Cancel anytime.',
-    ctaMeta3: 'Take the audit log with you on the way out.',
-    // Modal
-    modalAriaLabel: 'Demo video',
-    modalCloseLabel: 'Close demo video',
+    showcaseModdioTagline: 'A game platform turning player feedback into agent-built changes.',
+    // Where it runs
+    whereH2: 'Runs where you want it',
+    where1T: 'Cloud workspace',
+    where1B: 'Describe what you want to build and get a hosted workspace with a Claude Code and a Codex agent ready to go.',
+    where2T: 'Your own machine',
+    where2B: 'Connect a computer you already have with one Docker command. Your code stays where it is.',
+    where3T: 'Desktop and phone',
+    where3B: 'Desktop, iOS and Android apps, so you can answer a stuck agent or approve a merge from anywhere.',
+    // Closing
+    ctaH: 'Write your first ticket today.',
+    ctaDeck: 'Tell us what you are building and we will set up a workspace with you.',
+    ctaSignIn: 'Sign in',
   },
   ko: {
     // Hero
-    heroH1Line1: '시그널에서 코드로.',
-    heroH1Line2: '사용자가 실제로 필요한 걸 배포하세요.',
-    heroLede: 'RunHQ는 사용자 피드백, 텔레메트리, 지원 티켓을 에이전트가 만든 PR로 바꿔줍니다 — 검토하고 배포할 준비가 된 채로. 출근해서 diff 승인하고 머지하세요.',
-    ctaStartFree: '문의하기',
-    ctaWatchDemo: '데모 보기',
-    heroScreenshotAlt: 'RunHQ 워크스페이스 — 개선 작업 미리보기',
-    heroScreenshotSmAlt: 'RunHQ 피드백 위젯과 최신 업데이트',
-    // Hero roles
-    // Logos
-    logosH: '에이전트와 함께 배포하는 엔지니어링 팀들이 신뢰합니다',
-    // Pipeline section
-    pipelineH2Line1: 'RunHQ에서 팀이',
-    pipelineH2Line2: '더 빠르게 배포하는 이유.',
-    pipelineDeck: '두 파이프라인에 같은 속도로 피드백이 들어옵니다. 사람 인수인계 방식은 매 단계마다 쌓이고, 병렬로 실행되는 코딩 에이전트는 들어오는 속도만큼 빠르게 큐를 비워냅니다.',
-    pipelineLabelBefore: '이전',
-    pipelineLabelAfter: 'RUNHQ와 함께',
-    // Loop section
-    loopH2Line1: '모든 릴리스는 같은',
-    loopH2Line2: '루프를 따라갑니다.',
-    loopDeck: '대부분의 코딩 에이전트 스택은 “에이전트 완료”에서 멈춥니다. 그건 중간 단계일 뿐입니다. RunHQ는 양쪽 끝 — 앞에서의 수집과 뒤에서의 리뷰 — 을 책임지기 때문에, 중간은 누구도 불안하지 않게 무인으로 돌아갈 수 있습니다.',
-    // Loop stage 01 — Collect feedback
-    loop1Title: '피드백 수집',
-    loop1Sub: '위젯 하나, 추가 로그인 없음.',
-    loop1Body: '사용자와 동료가 임베디드 위젯을 통해 제품에서 바로 피드백을 보냅니다 — 별도의 계정도, 로그인 장벽도 없습니다. 모든 리포트는 페이지, 사용자, 재현 컨텍스트가 함께 RunHQ로 도착합니다.',
-    loop1Key1: '임베디드 위젯',
-    loop1Key2: '로그인 장벽 없음',
-    loop1Key3: '자동 컨텍스트',
-    // Loop stage 02 — Assign coding agents
-    loop2Title: '코딩 에이전트 할당',
-    loop2Sub: '병렬로 실행하세요.',
-    loop2Body: 'Claude Code, Cursor, Codex, 또는 직접 만든 커스텀 에이전트에 작업을 할당하세요. RunHQ는 프로세스를 병렬로 띄우면서 중요한 세부 사항을 모두 기록해 완전한 투명성을 제공합니다.',
-    loop2Key1: '내 에이전트 연결',
-    loop2Key2: '병렬 실행',
-    loop2Key3: '전체 감사 로그',
-    // Loop stage 03 — Review code
-    loop3Title: '코드 리뷰',
-    loop3Sub: 'PR이 바로 읽을 준비된 채로 도착합니다.',
-    loop3Body: '모든 에이전트 실행은 diff, 요약, 출처가 첨부된 깔끔한 풀 리퀘스트로 도착합니다 — 리뷰어는 이미 쓰던 GitHub 플로우 안에서 훑고, 코멘트하고, 승인하면 됩니다.',
-    loop3Key1: 'GitHub PR',
-    loop3Key2: '인라인 diff',
-    loop3Key3: '원클릭 되돌리기',
-    // Loop stage 04 — Test + Deploy
-    loop4Title: '테스트 + 배포',
-    loop4Sub: '배포 전에 앱을 직접 돌려보세요.',
-    loop4Body: 'RunHQ는 모든 PR에 대해 자체 URL과 자체 환경을 갖춘 완전한 서버를 띄워줍니다 — 그래서 이미 사용 중인 배포 파이프라인에 머지되기 전에 변경 사항을 엔드 투 엔드로 실제로 돌려볼 수 있습니다.',
-    loop4Key1: '라이브 프리뷰 환경',
-    loop4Key2: 'PR별 샌드박스',
-    loop4Key3: '기존 CD로 배포',
-    // LoopCapture demo rows
-    captureWho1: 'Jen K.',
-    captureTxt1: 'Safari에서 Stripe 포털 세션이 끊김',
-    captureWho2: 'Tomas R.',
-    captureTxt2: '프로젝트 테이블에서 일괄 아카이브',
-    captureWho3: 'Andre B.',
-    captureTxt3: '콜드 스타트 시 문서 페이지가 504 반환',
-    // LoopAssign demo rows
-    assignTask1: 'Stripe 포털 리다이렉트',
-    assignTask2: '프로젝트 일괄 아카이브',
-    assignTask3: '콜드 스타트 시 문서 페이지 504',
-    assignStatusRunning: '실행 중',
-    assignStatusQueued: '대기 중',
-    assignStatusStandby: '대기',
-    assignLabel: '할당 대상',
-    // LoopReview demo
-    reviewPrH: 'PR #4821 · portal: cross-site cookies',
-    reviewPrMeta: '+8 −3 · 파일 1개 변경 · 리뷰 준비됨',
-    reviewBtnApprove: '승인',
-    reviewBtnRequest: '수정 요청',
-    reviewBtnRevert: '되돌리기',
-    // LoopDeploy demo
-    deployPreviewLabel: '프리뷰:',
-    deployPreviewV: 'pr-4821.runhq.dev · 준비됨',
-    deployTestsLabel: '테스트:',
-    deployTestsV: '23개 통과 · 142s',
-    deployDeployLabel: '배포:',
-    deployDeployV: 'vercel · production',
-    deployLiveLabel: '라이브:',
-    deployLiveV: 'portal.runhq.io · 200 OK',
-    // Showcase — live boards
-    showcaseEyebrow: '라이브 보드',
-    showcaseH2Line1: '실제 프로젝트가',
-    showcaseH2Line2: '지금 돌아가고 있습니다.',
-    showcaseDeck: '모든 RunHQ 프로젝트에는 공개 보드가 있습니다 — 여러분이 자기 제품에서 돌릴 것과 똑같은 티켓, 에이전트 실행, 배포가 담겨 있죠. 하나 열어서 루프가 실시간으로 도는 걸 지켜보세요.',
+    heroH1: '에이전트가 만들고 운영하는 당신의 제품.',
+    heroLede: '티켓을 쓰세요. Claude Code나 Codex가 자기 브랜치에서 작업하고, 풀 리퀘스트를 열고, 승인하면 배포합니다. 출시 후에는 RunHQ가 인박스, 에러 추적, 실험까지 맡고, 거기서 나온 것은 다음 티켓이 됩니다.',
+    ctaTalk: '문의하기',
+    ctaBoard: '라이브 보드 보기',
+    railAria: 'RunHQ를 거쳐 가는 티켓 하나',
+    railReplay: '다시 보기',
+    status1: '대기',
+    status2: '진행 중',
+    status3: '완료',
+    status4: '리뷰됨',
+    status5: '머지됨',
+    status6: '배포됨',
+    ticketTitle: 'Safari에서 결제 중 Stripe 세션이 끊김',
+    ticketFrom: 'Jen K.님이 위젯으로 접수',
+    stage1: '에이전트를 기다리는 중. 먼저 스크린샷, 로그, 재현 방법을 붙일 수 있습니다.',
+    stage2: 'Codex가 자체 워크트리와 프리뷰를 갖춘 ticket-4821에서 작업 중입니다.',
+    stage3: '풀 리퀘스트 #212가 열렸습니다. 감사에서 고칠 점이 없었습니다.',
+    stage4: 'diff를 읽고, 프리뷰를 써 보고, 승인했습니다.',
+    stage5: 'main에 머지됐습니다.',
+    stage6: '프로덕션에 반영됐습니다. Jen에게 위젯으로 답장이 갑니다.',
+    logosH: 'RunHQ로 배포하는 팀들',
+    buildH2: '티켓에서 프로덕션까지',
+    buildDeck: '모든 변경은 같은 길을 갑니다. 당신은 판단이 필요한 곳, 즉 무엇을 만들지와 그것이 맞는지에만 개입하면 됩니다.',
+    build1T: '티켓 작성',
+    build1B: '직접 쓰거나, 받아쓰거나, 위젯, 에러 추적, 실패한 배포에서 저절로 들어오게 하세요. 스크린샷과 로그를 붙이면 에이전트가 활용합니다.',
+    build1A: '프로젝트 테이블에서 일괄 아카이브',
+    build2T: '에이전트가 맡음',
+    build2B: '작업마다 자체 워크트리, 브랜치, 터미널, 채팅이 생깁니다. 원하는 만큼 병렬로 돌리고, 진행 상황을 잃지 않고 Claude Code와 Codex 사이를 전환하세요.',
+    build2A: 'Codex가 ticket-4821에서 실행 중',
+    build3T: '머지 전에 직접 써 보기',
+    build3B: '워크트리마다 앱 프리뷰가 있어서, diff로 상상하는 대신 변경 사항을 직접 클릭해 볼 수 있습니다.',
+    build3A: 'ticket-4821 프리뷰 준비됨',
+    build4T: '감사와 리뷰',
+    build4B: '풀 리퀘스트는 자동으로 감사되고, 지적 사항은 작성한 에이전트에게 바로 돌아갑니다. 깔끔해지면 Git에서 diff를 리뷰하세요.',
+    build4A: 'git push && runhq ready-for-review',
+    build5T: '머지와 배포',
+    build5B: '단축키 하나로 머지하세요. 배포마다 어떤 티켓이 실렸는지 보이고, 실패한 배포는 스스로 고칠 티켓을 제안합니다.',
+    build5A: '다음 배포: 티켓 6개',
+    runH2: '배포 후에도 계속 듣습니다',
+    runDeck: '라이브 제품을 운영하는 도구가 에이전트와 같은 워크스페이스에 있어서, 사용자가 겪은 일이 어디에도 옮겨 적지 않고 바로 작업이 됩니다.',
+    runColTool: '도구',
+    runColDoes: '하는 일',
+    runColFiles: '에이전트에게 넘기는 것',
+    run1T: 'CRM과 인박스',
+    run1D: '자체 도메인 이메일, SMS, WhatsApp, 전화, 헬프 센터를 사람별 타임라인 하나로. 지원 에이전트가 지식 베이스로 답합니다.',
+    run1F: '만들 가치가 있는 요청',
+    run2T: '위젯',
+    run2D: '앱 안의 채팅과 피드백 보드. 사용자는 계정 없이 신고하고, 투표하고, 진행 상황을 지켜봅니다.',
+    run2F: '페이지와 사용자 정보가 붙은 버그 리포트',
+    run3T: '에러',
+    run3D: '앱과 서버의 에러를 원인별로 묶어 보여줍니다.',
+    run3F: '클릭 한 번으로 수정 티켓과 담당 에이전트',
+    run4T: '애널리틱스',
+    run4D: '처음 온 사용자가 실제로 무엇을 하는지 보여주는 퍼널.',
+    run4F: '사람들이 떠나는 단계',
+    run5T: 'Evolve',
+    run5Beta: '베타',
+    run5D: '어떤 변형이 라이브인지 추적하고 Mixpanel, PostHog, 자체 데이터로 평가합니다.',
+    run5F: '다음 세대를 만드는 작업',
+    showcaseH2: '지금 돌아가는 실제 프로젝트',
+    showcaseDeck: 'RunHQ 프로젝트는 실제 티켓, 에이전트 작업, 배포가 담긴 공개 보드를 가질 수 있습니다. 하나 열어서 움직이는 걸 보세요.',
     showcaseOpenBoard: '라이브 보드 열기',
     showcaseOpen: '보드 열기',
     showcaseLive: '라이브',
     showcaseStatTicketsWeek: '이번 주 티켓',
     showcaseStatContributors: '기여자',
     showcaseStatDeploysWeek: '이번 주 배포',
-    showcaseStatTicketsTotal: '전체 티켓',
+    showcaseStatTicketsTotal: '누적 티켓',
     showcaseArrrName: 'ARRR',
-    showcaseArrrTagline: '투표로 기능을 배포하는 커뮤니티 — 매주 수백 개의 티켓, 24시간 내내 머지하는 에이전트.',
-    showcaseArrrArtAlt: 'ARRR — RunHQ로 만든 복셀 해적 게임',
+    showcaseArrrTagline: '플레이어가 기능에 투표하고 에이전트가 만드는 복셀 해적 게임.',
+    showcaseArrrArtAlt: 'ARRR, RunHQ로 만든 복셀 해적 게임',
     showcaseRunhqName: 'RunHQ',
-    showcaseRunhqTagline: '우리 자신의 보드. RunHQ는 RunHQ 위에서 돌아갑니다 — 여러분이 보는 모든 수정이 이 루프를 거쳐 배포됩니다.',
+    showcaseRunhqTagline: '우리 자신의 보드. RunHQ는 RunHQ 위에서 만들어집니다.',
     showcaseModdioName: 'Moddio',
-    showcaseModdioTagline: '플레이어 피드백을 에이전트가 만든 변경으로 곧장 연결하는 게임 플랫폼.',
-    // CTA band
-    ctaH1: '피드백을 손으로 옮기는 건 그만.',
-    ctaH2: '바로 배포하세요.',
-    ctaBtnPrimary: '문의하기 →',
-    ctaBtnSecondary: '20분 데모 예약하기',
-    ctaMeta1Strong: '60분 안에 라이브.',
-    ctaMeta1: '위젯을 붙이고, 소스를 연결하고, 점심 전에 배포하세요.',
-    ctaMeta2Strong: '감사 로그 내보내기.',
-    ctaMeta2: '수집 단계에서 PII 제거. 모든 에이전트 액션 버전 관리.',
-    ctaMeta3Strong: '언제든 해지.',
-    ctaMeta3: '나갈 때 감사 로그를 그대로 가져가세요.',
-    // Modal
-    modalAriaLabel: '데모 영상',
-    modalCloseLabel: '데모 영상 닫기',
+    showcaseModdioTagline: '플레이어 피드백을 에이전트가 만든 변경으로 바꾸는 게임 플랫폼.',
+    whereH2: '원하는 곳에서 실행',
+    where1T: '클라우드 워크스페이스',
+    where1B: '만들고 싶은 것을 설명하면 Claude Code와 Codex 에이전트가 준비된 호스팅 워크스페이스가 생깁니다.',
+    where2T: '내 컴퓨터',
+    where2B: 'Docker 명령 하나로 이미 가진 컴퓨터를 연결하세요. 코드는 그 자리에 그대로 있습니다.',
+    where3T: '데스크톱과 휴대폰',
+    where3B: '데스크톱, iOS, Android 앱으로 막힌 에이전트에 답하거나 머지를 승인하세요. 어디서든.',
+    ctaH: '오늘 첫 티켓을 써 보세요.',
+    ctaDeck: '무엇을 만들고 있는지 알려주시면 함께 워크스페이스를 준비해 드립니다.',
+    ctaSignIn: '로그인',
   },
 } as const;
 
@@ -256,7 +208,9 @@ const SHOWCASE_FALLBACK = {
 } as const;
 
 type ShowcaseStats = {
-  arrr: { ticketsWeek: number; contributors: number; deploysWeek: number };
+  // `quiet`: the live API reported no tickets this week, so the card shows the
+  // all-time total instead of a row of zeros.
+  arrr: { ticketsWeek: number; contributors: number; deploysWeek: number; quiet: boolean };
   totals: { arrr: number; runhq: number; moddio: number };
 };
 
@@ -266,6 +220,7 @@ function useBoardStats(): ShowcaseStats {
       ticketsWeek: SHOWCASE_FALLBACK.arrr.ticketsWeek,
       contributors: SHOWCASE_FALLBACK.arrr.contributors,
       deploysWeek: SHOWCASE_FALLBACK.arrr.deploysWeek,
+      quiet: false,
     },
     totals: {
       arrr: SHOWCASE_FALLBACK.arrr.ticketsTotal,
@@ -305,6 +260,7 @@ function useBoardStats(): ShowcaseStats {
             ticketsWeek: d.ticketsCreated7d ?? s.arrr.ticketsWeek,
             contributors: d.activeContributors7d ?? s.arrr.contributors,
             deploysWeek: deploysWeek || s.arrr.deploysWeek,
+            quiet: d.ticketsCreated7d === 0,
           },
         }));
       })
@@ -316,1062 +272,572 @@ function useBoardStats(): ShowcaseStats {
   return stats;
 }
 
-function DemoModal({ onClose, triggerRef }: { onClose: () => void; triggerRef: React.RefObject<HTMLButtonElement | null> }) {
+const LAST_STEP = 5;
+
+/**
+ * The hero's signature: one ticket walking the six real ticket statuses
+ * (pending → in progress → done → reviewed → merged → deployed). It plays once,
+ * then rests on Deployed with a Replay button. Clicking any status jumps to it
+ * and stops the autoplay. Reduced motion starts (and stays) on Deployed.
+ */
+function TicketRail() {
   const t = useT(HOME_T);
-  const closeRef = useRef<HTMLButtonElement>(null);
+  const statuses = [t.status1, t.status2, t.status3, t.status4, t.status5, t.status6];
+  const stages = [t.stage1, t.stage2, t.stage3, t.stage4, t.stage5, t.stage6];
+  const [step, setStep] = useState(0);
+  const [auto, setAuto] = useState(true);
 
   useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    closeRef.current?.focus();
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      setAuto(false);
+      setStep(LAST_STEP);
+    }
+  }, []);
 
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
+  useEffect(() => {
+    if (!auto || step >= LAST_STEP) return;
+    const id = window.setTimeout(() => setStep((s) => s + 1), step === 0 ? 1800 : 2000);
+    return () => window.clearTimeout(id);
+  }, [auto, step]);
 
-    return () => {
-      document.body.style.overflow = prevOverflow;
-      window.removeEventListener('keydown', onKey);
-      triggerRef.current?.focus();
-    };
-  }, [onClose, triggerRef]);
+  const jump = (i: number) => {
+    setAuto(false);
+    setStep(i);
+  };
+  const replay = () => {
+    setStep(0);
+    setAuto(!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+  };
 
   return (
-    <div className="rhw-modal" role="dialog" aria-modal="true" aria-label={t.modalAriaLabel} onClick={onClose}>
-      <div className="rhw-modal-frame" onClick={(e) => e.stopPropagation()}>
-        <button ref={closeRef} className="rhw-modal-close" onClick={onClose} aria-label={t.modalCloseLabel}>✕</button>
-        <video className="rhw-modal-video" autoPlay controls playsInline src="/images/demo.mp4" />
+    <figure className="rhh-rail" aria-label={t.railAria}>
+      <ol className="rhh-rail-steps">
+        {statuses.map((label, i) => (
+          <li key={label}>
+            <button
+              type="button"
+              className={`rhh-rail-step ${i < step ? 'is-past' : i === step ? 'is-now' : 'is-next'}`}
+              aria-current={i === step ? 'step' : undefined}
+              onClick={() => jump(i)}
+            >
+              {label}
+            </button>
+          </li>
+        ))}
+      </ol>
+      <div className="rhh-ticket">
+        <div className="rhh-ticket-meter" aria-hidden="true">
+          {statuses.map((label, i) => (
+            <span key={label} className={i <= step ? 'is-on' : undefined} />
+          ))}
+        </div>
+        <div className="rhh-ticket-title">{t.ticketTitle}</div>
+        <div className="rhh-ticket-from">{t.ticketFrom}</div>
+        <p className="rhh-ticket-stage" key={step}>
+          <strong className={step === 0 ? 'rhh-needs-you' : undefined}>{statuses[step]}.</strong> {stages[step]}
+        </p>
+        {step === LAST_STEP && (
+          <button type="button" className="rhh-replay" onClick={replay}>{t.railReplay}</button>
+        )}
       </div>
-    </div>
+    </figure>
   );
 }
 
 export default function HomePage() {
   const t = useT(HOME_T);
-  const lp = useLocalePath();
-  // lp is wired up for any future internal links; current CTAs use external auth URLs.
-  void lp;
-  const [demoOpen, setDemoOpen] = useState(false);
-  const demoBtnRef = useRef<HTMLButtonElement>(null);
-  const [pipelineResetTick, setPipelineResetTick] = useState(0);
   const boardStats = useBoardStats();
 
-  useEffect(() => {
-    const id = setInterval(() => setPipelineResetTick(tick => tick + 1), 4 * 60 * 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const LoopCapture = () => (
-    <div className="rhw-lv">
-      {[
-        { src: 'intercom', who: t.captureWho1, txt: t.captureTxt1 },
-        { src: 'linear',   who: t.captureWho2, txt: t.captureTxt2 },
-        { src: 'widget',   who: t.captureWho3, txt: t.captureTxt3 },
-      ].map((r, i) => (
-        <div key={i} className="rhw-lv-row">
-          <SourceIcon src={r.src} size={14} />
-          <div className="rhw-lv-row-txt">{r.txt}</div>
-          <div className="rhw-lv-row-who">{r.who}</div>
-        </div>
-      ))}
-    </div>
-  );
-
-  const LoopAssign = () => (
-    <div className="rhw-lv rhw-lv-assign">
-      {[
-        { task: t.assignTask1, statusKey: 'running' as const, statusLabel: t.assignStatusRunning, agent: 'claude' as const, name: 'claude-sonnet-4' },
-        { task: t.assignTask2, statusKey: 'queued'  as const, statusLabel: t.assignStatusQueued,  agent: 'cursor' as const, name: 'cursor-3' },
-        { task: t.assignTask3, statusKey: 'standby' as const, statusLabel: t.assignStatusStandby, agent: 'codex'  as const, name: 'codex' },
-      ].map((r, i) => (
-        <div key={i} className="rhw-lv-assign-item">
-          <div className="rhw-lv-assign-task">
-            <span className="rhw-lv-assign-name">{r.task}</span>
-            <span className={`rhw-lv-assign-status rhw-lv-assign-status-${r.statusKey}`}>{r.statusLabel}</span>
-          </div>
-          <div className="rhw-lv-assign-agent">
-            <span className="rhw-lv-assign-label">{t.assignLabel}</span>
-            <AgentIcon agent={r.agent} size={12} />
-            <span className="rhw-lv-assign-aname">{r.name}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-
-  const LoopReview = () => (
-    <div className="rhw-lv">
-      <div className="rhw-lv-pr">
-        <div className="rhw-lv-pr-h">{t.reviewPrH}</div>
-        <div className="rhw-lv-pr-meta">{t.reviewPrMeta}</div>
-        <div className="rhw-lv-pr-actions">
-          <span className="rhw-lv-pr-btn rhw-lv-pr-btn-on">{t.reviewBtnApprove}</span>
-          <span className="rhw-lv-pr-btn">{t.reviewBtnRequest}</span>
-          <span className="rhw-lv-pr-btn">{t.reviewBtnRevert}</span>
-        </div>
-      </div>
-    </div>
-  );
-
-  const LoopDeploy = () => (
-    <div className="rhw-lv rhw-lv-mono">
-      <div><strong>{t.deployPreviewLabel}</strong> {t.deployPreviewV}</div>
-      <div><strong>{t.deployTestsLabel}</strong> {t.deployTestsV}</div>
-      <div><strong>{t.deployDeployLabel}</strong> {t.deployDeployV}</div>
-      <div><strong>{t.deployLiveLabel}</strong> {t.deployLiveV}</div>
-    </div>
-  );
-
-  const LOOP_STAGES = [
-    { n: '01', t: t.loop1Title, s: t.loop1Sub,
-      body: t.loop1Body,
-      keys: [t.loop1Key1, t.loop1Key2, t.loop1Key3],
-      Visual: LoopCapture },
-    { n: '02', t: t.loop2Title, s: t.loop2Sub,
-      body: t.loop2Body,
-      keys: [t.loop2Key1, t.loop2Key2, t.loop2Key3],
-      Visual: LoopAssign },
-    { n: '03', t: t.loop3Title, s: t.loop3Sub,
-      body: t.loop3Body,
-      keys: [t.loop3Key1, t.loop3Key2, t.loop3Key3],
-      Visual: LoopReview },
-    { n: '04', t: t.loop4Title, s: t.loop4Sub,
-      body: t.loop4Body,
-      keys: [t.loop4Key1, t.loop4Key2, t.loop4Key3],
-      Visual: LoopDeploy },
+  const BUILD = [
+    { title: t.build1T, body: t.build1B, artifact: t.build1A },
+    { title: t.build2T, body: t.build2B, artifact: t.build2A },
+    { title: t.build3T, body: t.build3B, artifact: t.build3A },
+    { title: t.build4T, body: t.build4B, artifact: t.build4A },
+    { title: t.build5T, body: t.build5B, artifact: t.build5A },
+  ];
+  const RUN = [
+    { title: t.run1T, does: t.run1D, files: t.run1F },
+    { title: t.run2T, does: t.run2D, files: t.run2F },
+    { title: t.run3T, does: t.run3D, files: t.run3F },
+    { title: t.run4T, does: t.run4D, files: t.run4F },
+    { title: t.run5T, does: t.run5D, files: t.run5F, beta: t.run5Beta },
+  ];
+  const WHERE = [
+    { title: t.where1T, body: t.where1B },
+    { title: t.where2T, body: t.where2B },
+    { title: t.where3T, body: t.where3B },
   ];
 
   return (
-    <div className="rhw-root">
+    <div className="rhh-root">
       <style>{HOME_STYLES}</style>
-      <style>{VP_STYLES}</style>
-
       <Navbar />
 
       {/* HERO */}
-      <section className="rhw-hero">
-        <div className="rhw-hero-side">
-          <h1 className="rhw-hero-h1">
-            {t.heroH1Line1} {t.heroH1Line2}
-          </h1>
-          <p className="rhw-hero-lede">
-            {t.heroLede}
-          </p>
-          <div className="rhw-hero-cta">
-            <TalkToUsButton className="rhw-btn-primary" cta="hero">{t.ctaStartFree} <span>→</span></TalkToUsButton>
-            <button
-              ref={demoBtnRef}
-              type="button"
-              className="rhw-btn-ghost"
-              onClick={() => setDemoOpen(true)}
-            >
-              <span className="rhw-play">▶</span>
-              {t.ctaWatchDemo}
-            </button>
-          </div>
-
+      <section className="rhh-hero">
+        <h1 className="rhh-h1">{t.heroH1}</h1>
+        <p className="rhh-lede">{t.heroLede}</p>
+        <div className="rhh-actions">
+          <TalkToUsButton className="rhh-btn rhh-btn-primary" cta="hero">{t.ctaTalk}</TalkToUsButton>
+          {/* Boards are never locale-prefixed (see BoardPage.LocalizedBoardRedirect). */}
+          <a className="rhh-btn rhh-btn-quiet" href="/arrr">{t.ctaBoard}</a>
         </div>
-
-        <div className="rhw-hero-app">
-          <div className="rhw-hero-shot">
-            <img src={heroScreenshot} alt={t.heroScreenshotAlt} />
-          </div>
-
-          <div className="rhw-hero-shot-sm">
-            <img src={heroScreenshotSm} alt={t.heroScreenshotSmAlt} />
-          </div>
-        </div>
+        <TicketRail />
       </section>
 
       {/* LOGOS */}
-      <section className="rhw-logos">
-        <div className="rhw-logos-h">{t.logosH}</div>
-        <div className="rhw-logos-row">
-          {LOGOS.map((name) => (
-            <Wordmark key={name} name={name} size={18} color="var(--rhw-ink-mute)" />
-          ))}
-        </div>
+      <section className="rhh-logos" aria-label={t.logosH}>
+        <span className="rhh-logos-h">{t.logosH}</span>
+        {LOGOS.map((name) => (
+          <Wordmark key={name} name={name} size={17} color="var(--rhw-ink-mute)" />
+        ))}
       </section>
 
-      {/* BEFORE / AFTER pipeline simulation */}
-      <section className="rhw-pipeline">
-        <div className="rhw-section-head">
-          <h2 className="rhw-h2">{t.pipelineH2Line1}<br />{t.pipelineH2Line2}</h2>
-          <p className="rhw-section-deck">
-            {t.pipelineDeck}
-          </p>
+      {/* BUILD — ticket to production, a genuine sequence */}
+      <section className="rhh-build">
+        <div className="rhh-build-head">
+          <h2 className="rhh-h2">{t.buildH2}</h2>
+          <p className="rhh-deck">{t.buildDeck}</p>
         </div>
-        <div className="rhw-pipeline-grid">
-          <PipelineCanvas configs={BEFORE_STATIONS} label={t.pipelineLabelBefore} resetTick={pipelineResetTick} height={200} />
-          <PipelineCanvas configs={AFTER_STATIONS} label={t.pipelineLabelAfter} resetTick={pipelineResetTick} height={360} />
-        </div>
+        <ol className="rhh-steps">
+          {BUILD.map((s, i) => (
+            <li key={s.title} className="rhh-step">
+              <span className="rhh-step-n" aria-hidden="true">{i + 1}</span>
+              <div>
+                <h3 className="rhh-h3">{s.title}</h3>
+                <p className="rhh-body">{s.body}</p>
+                <code className="rhh-artifact">{s.artifact}</code>
+              </div>
+            </li>
+          ))}
+        </ol>
       </section>
 
-      {/* THE LOOP */}
-      <section className="rhw-loop">
-        <div className="rhw-section-head">
-          <h2 className="rhw-h2">{t.loopH2Line1}<br />{t.loopH2Line2}</h2>
-          <p className="rhw-section-deck">
-            {t.loopDeck}
-          </p>
-        </div>
-
-        <div className="rhw-loop-grid">
-          {LOOP_STAGES.map((s) => (
-            <div key={s.n} className="rhw-loop-card">
-              <div className="rhw-loop-card-h">
-                <div className="rhw-loop-num">{s.n}</div>
-                <div>
-                  <div className="rhw-loop-name">{s.t}</div>
-                  <div className="rhw-loop-sub">{s.s}</div>
-                </div>
-              </div>
-              <div className="rhw-loop-visual"><s.Visual /></div>
-              <p className="rhw-loop-body">{s.body}</p>
-              <div className="rhw-loop-keys">
-                {s.keys.map((k) => <span key={k} className="rhw-key">{k}</span>)}
-              </div>
-            </div>
-          ))}
-        </div>
+      {/* RUN — the post-launch tools, and what each hands back to the agents */}
+      <section className="rhh-run">
+        <h2 className="rhh-h2">{t.runH2}</h2>
+        <p className="rhh-deck">{t.runDeck}</p>
+        <table className="rhh-ledger">
+          <thead>
+            <tr>
+              <th scope="col">{t.runColTool}</th>
+              <th scope="col">{t.runColDoes}</th>
+              <th scope="col">{t.runColFiles}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {RUN.map((r) => (
+              <tr key={r.title}>
+                <th scope="row">
+                  {r.title}
+                  {r.beta && <span className="rhh-beta">{r.beta}</span>}
+                </th>
+                <td>{r.does}</td>
+                <td className="rhh-ledger-files" data-label={t.runColFiles}>{r.files}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </section>
 
       {/* SHOWCASE — real, live project boards */}
-      <section className="rhw-showcase">
-        <div className="rhw-section-head">
-          <div className="rhw-eyebrow"><span className="rhw-dot" />{t.showcaseEyebrow}</div>
-          <h2 className="rhw-h2">{t.showcaseH2Line1}<br />{t.showcaseH2Line2}</h2>
-          <p className="rhw-section-deck">{t.showcaseDeck}</p>
-        </div>
-
-        <div className="rhw-showcase-grid">
-          {/* Hero — ARRR */}
-          <a className="rhw-sc-card rhw-sc-hero" href="/arrr">
-            <img className="rhw-sc-hero-art" src={arrrCover} alt={t.showcaseArrrArtAlt} loading="lazy" />
-            <div className="rhw-sc-hero-body">
-              <div>
-                <div className="rhw-sc-top">
-                  <div className="rhw-sc-name">{t.showcaseArrrName}</div>
-                  <span className="rhw-sc-live"><span className="rhw-live-dot" />{t.showcaseLive}</span>
-                </div>
-                <p className="rhw-sc-tagline">{t.showcaseArrrTagline}</p>
+      <section className="rhh-show">
+        <h2 className="rhh-h2">{t.showcaseH2}</h2>
+        <p className="rhh-deck">{t.showcaseDeck}</p>
+        <div className="rhh-show-grid">
+          <a className="rhh-arrr" href="/arrr">
+            <img className="rhh-arrr-art" src={arrrCover} alt={t.showcaseArrrArtAlt} loading="lazy" />
+            <div className="rhh-arrr-body">
+              <div className="rhh-board-name">
+                {t.showcaseArrrName}
+                <span className="rhh-live"><span className="rhh-live-dot" />{t.showcaseLive}</span>
               </div>
-              <div className="rhw-sc-stats">
-                <div className="rhw-sc-stat">
-                  <div className="rhw-sc-stat-n">{boardStats.arrr.ticketsWeek.toLocaleString()}</div>
-                  <div className="rhw-sc-stat-l">{t.showcaseStatTicketsWeek}</div>
-                </div>
-                <div className="rhw-sc-stat">
-                  <div className="rhw-sc-stat-n">{boardStats.arrr.contributors.toLocaleString()}</div>
-                  <div className="rhw-sc-stat-l">{t.showcaseStatContributors}</div>
-                </div>
-                <div className="rhw-sc-stat">
-                  <div className="rhw-sc-stat-n">{boardStats.arrr.deploysWeek.toLocaleString()}</div>
-                  <div className="rhw-sc-stat-l">{t.showcaseStatDeploysWeek}</div>
-                </div>
-              </div>
-              <span className="rhw-sc-open rhw-sc-open-primary">{t.showcaseOpenBoard} <span>→</span></span>
+              <p className="rhh-body">{t.showcaseArrrTagline}</p>
+              <dl className="rhh-stats">
+                {boardStats.arrr.quiet ? (
+                  <div><dt>{t.showcaseStatTicketsTotal}</dt><dd>{boardStats.totals.arrr.toLocaleString()}</dd></div>
+                ) : (
+                  <>
+                    <div><dt>{t.showcaseStatTicketsWeek}</dt><dd>{boardStats.arrr.ticketsWeek.toLocaleString()}</dd></div>
+                    <div><dt>{t.showcaseStatContributors}</dt><dd>{boardStats.arrr.contributors.toLocaleString()}</dd></div>
+                    <div><dt>{t.showcaseStatDeploysWeek}</dt><dd>{boardStats.arrr.deploysWeek.toLocaleString()}</dd></div>
+                  </>
+                )}
+              </dl>
+              <span className="rhh-link">{t.showcaseOpenBoard}</span>
             </div>
           </a>
-
-          {/* Secondary — RunHQ, Moddio */}
-          <div className="rhw-sc-side">
-            <a className="rhw-sc-card rhw-sc-sm" href="/runhq">
-              <div className="rhw-sc-name">{t.showcaseRunhqName}</div>
-              <p className="rhw-sc-tagline">{t.showcaseRunhqTagline}</p>
-              <div className="rhw-sc-sm-foot">
-                <span className="rhw-sc-sm-stat"><strong>{boardStats.totals.runhq.toLocaleString()}</strong> {t.showcaseStatTicketsTotal}</span>
-                <span className="rhw-sc-open">{t.showcaseOpen} <span>→</span></span>
-              </div>
-            </a>
-            <a className="rhw-sc-card rhw-sc-sm" href="/moddio">
-              <div className="rhw-sc-name">{t.showcaseModdioName}</div>
-              <p className="rhw-sc-tagline">{t.showcaseModdioTagline}</p>
-              <div className="rhw-sc-sm-foot">
-                <span className="rhw-sc-sm-stat"><strong>{boardStats.totals.moddio.toLocaleString()}</strong> {t.showcaseStatTicketsTotal}</span>
-                <span className="rhw-sc-open">{t.showcaseOpen} <span>→</span></span>
-              </div>
-            </a>
+          <div className="rhh-boards">
+            {[
+              { slug: 'runhq', name: t.showcaseRunhqName, tagline: t.showcaseRunhqTagline, total: boardStats.totals.runhq },
+              { slug: 'moddio', name: t.showcaseModdioName, tagline: t.showcaseModdioTagline, total: boardStats.totals.moddio },
+            ].map((b) => (
+              <a key={b.slug} className="rhh-board" href={`/${b.slug}`}>
+                <div className="rhh-board-name">{b.name}</div>
+                <p className="rhh-body">{b.tagline}</p>
+                <div className="rhh-board-foot">
+                  <span><strong>{b.total.toLocaleString()}</strong> {t.showcaseStatTicketsTotal}</span>
+                  <span className="rhh-link">{t.showcaseOpen}</span>
+                </div>
+              </a>
+            ))}
           </div>
         </div>
       </section>
 
-      {/* CTA */}
-      <section className="rhw-cta-band">
-        <div className="rhw-cta-inner">
-          <h2 className="rhw-cta-h">
-            {t.ctaH1}<br />
-            {t.ctaH2}
-          </h2>
-          <div className="rhw-cta-actions">
-            <TalkToUsButton className="rhw-btn-primary rhw-btn-lg" cta="home_closing">{t.ctaBtnPrimary}</TalkToUsButton>
-            <a
-              className="rhw-btn-ghost rhw-btn-lg"
-              href={LOGIN_URL}
-              onClick={() => trackSignInClick('home_closing')}
-            >{t.ctaBtnSecondary}</a>
-          </div>
-          <div className="rhw-cta-meta">
-            <div><strong>{t.ctaMeta1Strong}</strong> {t.ctaMeta1}</div>
-            <div><strong>{t.ctaMeta2Strong}</strong> {t.ctaMeta2}</div>
-            <div><strong>{t.ctaMeta3Strong}</strong> {t.ctaMeta3}</div>
-          </div>
+      {/* WHERE IT RUNS */}
+      <section className="rhh-where">
+        <h2 className="rhh-h2">{t.whereH2}</h2>
+        <div className="rhh-where-grid">
+          {WHERE.map((w) => (
+            <div key={w.title}>
+              <h3 className="rhh-h3">{w.title}</h3>
+              <p className="rhh-body">{w.body}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* CLOSING */}
+      <section className="rhh-close">
+        <h2 className="rhh-close-h">{t.ctaH}</h2>
+        <p className="rhh-close-deck">{t.ctaDeck}</p>
+        <div className="rhh-actions">
+          <TalkToUsButton className="rhh-btn rhh-btn-primary" cta="home_closing">{t.ctaTalk}</TalkToUsButton>
+          <a
+            className="rhh-btn rhh-btn-onink"
+            href={LOGIN_URL}
+            onClick={() => trackSignInClick('home_closing')}
+          >{t.ctaSignIn}</a>
         </div>
       </section>
 
       <Footer />
-
-      {demoOpen && <DemoModal onClose={() => setDemoOpen(false)} triggerRef={demoBtnRef} />}
     </div>
   );
 }
 
 const HOME_STYLES = `
-  .rhw-root {
+  /* The homepage's own palette. Overriding the shared --rhw-* tokens on the root
+     lets the Navbar and Footer (rendered inside it) pick the palette up too. */
+  .rhh-root {
+    --rhw-bg:        #F1F2EE;
+    --rhw-bg-2:      #E6E8E2;
+    --rhw-surface:   #FAFAF8;
+    --rhw-ink:       #15171C;
+    --rhw-ink-soft:  #3E434C;
+    --rhw-ink-mute:  #5D636D;
+    --rhw-ink-faint: #8D939C;
+    --rhw-line:      #D6D9D1;
+    --rhw-line-soft: #E2E4DE;
+    --rhw-accent:    #0B7A5C;
+    --rhw-accent-soft: rgba(11, 122, 92, 0.10);
+    --rhh-amber:     #B26A00;
+    --rhh-display:   'Bricolage Grotesque', 'Geist', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', system-ui, sans-serif;
+    --rhh-mono:      'JetBrains Mono', ui-monospace, monospace;
+    --rhh-gutter:    clamp(20px, 5vw, 64px);
+
     background: var(--rhw-bg);
     color: var(--rhw-ink);
-    font-family: 'Geist', 'Inter Tight', system-ui, sans-serif;
-    font-size: 15px;
+    font-family: 'Geist', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
     min-height: 100vh;
   }
-  .rhw-root *, .rhw-root *::before, .rhw-root *::after { box-sizing: border-box; }
-  .rhw-root a { color: inherit; text-decoration: none; }
-  .rhw-root code { font-family: 'JetBrains Mono', monospace; font-size: 0.92em; background: var(--rhw-bg-2); padding: 1px 6px; border-radius: 4px; }
+  .rhh-root *, .rhh-root *::before, .rhh-root *::after { box-sizing: border-box; }
+  .rhh-root a { color: inherit; text-decoration: none; }
+  .rhh-root :focus-visible { outline: 2px solid var(--rhw-accent); outline-offset: 3px; border-radius: 4px; }
+
+  /* Type scale: 16 / 18 / 22 / 36 / 56 / 96 */
+  .rhh-h1 {
+    font-family: var(--rhh-display);
+    font-size: clamp(46px, 7.4vw, 96px);
+    line-height: 0.98;
+    letter-spacing: -0.022em;
+    font-weight: 600;
+    max-width: 13ch;
+    margin: 0 0 28px;
+    text-wrap: balance;
+  }
+  .rhh-h2 {
+    font-family: var(--rhh-display);
+    font-size: clamp(34px, 4.4vw, 56px);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+    margin: 0 0 16px;
+    max-width: 18ch;
+    text-wrap: balance;
+  }
+  .rhh-h3 {
+    font-family: var(--rhh-display);
+    font-size: 22px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .rhh-lede {
+    font-size: clamp(18px, 1.5vw, 20px);
+    line-height: 1.55;
+    color: var(--rhw-ink-soft);
+    max-width: 60ch;
+    margin: 0 0 32px;
+    text-wrap: pretty;
+  }
+  .rhh-deck {
+    font-size: 18px;
+    color: var(--rhw-ink-soft);
+    max-width: 58ch;
+    margin: 0 0 48px;
+    text-wrap: pretty;
+  }
+  .rhh-body { color: var(--rhw-ink-soft); margin: 0; max-width: 62ch; text-wrap: pretty; }
+
+  /* Buttons */
+  .rhh-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+  .rhh-btn {
+    display: inline-flex; align-items: center;
+    padding: 13px 22px;
+    border-radius: 8px;
+    font: inherit; font-size: 15px; font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background-color 0.15s, border-color 0.15s;
+  }
+  .rhh-btn-primary { background: var(--rhw-accent); color: #fff !important; }
+  .rhh-btn-primary:hover { background: #086149; }
+  .rhh-btn-quiet { border-color: var(--rhw-line); background: var(--rhw-surface); }
+  .rhh-btn-quiet:hover { border-color: var(--rhw-ink); }
+  .rhh-btn-onink { border-color: rgba(241, 242, 238, 0.28); color: #F1F2EE !important; }
+  .rhh-btn-onink:hover { border-color: #F1F2EE; }
 
   /* Hero */
-  .rhw-hero {
-    display: grid; grid-template-columns: 1fr 1.6fr;
-    gap: 48px;
-    padding: 64px 48px 96px;
-    border-bottom: 1px solid var(--rhw-line);
-    align-items: start;
-    overflow: hidden;
-    background:
-      radial-gradient(ellipse 80% 60% at 90% 10%, oklch(0.52 0.20 277 / 0.06), transparent 60%),
-      var(--rhw-bg);
-  }
-  .rhw-hero-side { padding-top: 24px; max-width: 600px; }
-  .rhw-hero-h1 {
-    font-size: clamp(44px, 4.6vw, 56px); line-height: 1.05;
-    letter-spacing: -0.032em; font-weight: 600;
-    margin: 0 0 22px;
-    color: var(--rhw-ink);
-    text-wrap: balance;
-  }
-  .rhw-hero-lede {
-    font-size: 18px; line-height: 1.55;
-    color: var(--rhw-ink-soft);
-    margin: 0 0 28px;
-    text-wrap: pretty;
-  }
-  .rhw-hero-cta { display: flex; gap: 10px; margin-bottom: 36px; flex-wrap: wrap; }
+  .rhh-hero { padding: clamp(48px, 7vw, 96px) var(--rhh-gutter) 72px; }
 
-  .rhw-btn-primary {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 12px 22px;
-    background: var(--rhw-ink); color: #fff !important;
-    border-radius: 9px;
-    font-size: 14px; font-weight: 500;
-    transition: background 0.15s;
+  /* Hero rail — the one bold moment on the page */
+  .rhh-rail { margin: clamp(48px, 6vw, 72px) 0 0; padding-top: 28px; border-top: 1px solid var(--rhw-line); }
+  .rhh-rail-steps {
+    list-style: none; margin: 0 0 32px; padding: 0;
+    display: flex; flex-wrap: wrap; column-gap: clamp(18px, 2.6vw, 40px); row-gap: 8px;
   }
-  .rhw-btn-primary:hover { background: var(--rhw-accent); }
-  .rhw-btn-ghost {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 12px 20px;
-    background: var(--rhw-surface);
-    color: var(--rhw-ink) !important;
-    border: 1px solid var(--rhw-line);
-    border-radius: 9px;
-    font-size: 14px; font-weight: 500;
-    transition: border-color 0.15s;
+  .rhh-rail-step {
+    font-family: var(--rhh-display);
+    font-size: clamp(26px, 3.6vw, 48px);
+    line-height: 1.15;
+    letter-spacing: -0.018em;
+    font-weight: 600;
+    background: none; border: 0; padding: 0 0 6px; margin: 0;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    transition: color 0.35s ease, border-color 0.35s ease;
   }
-  .rhw-btn-ghost:hover { border-color: var(--rhw-ink); }
-  .rhw-play {
-    width: 18px; height: 18px; border-radius: 50%;
-    background: var(--rhw-accent); color: #fff;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 8px; padding-left: 1px;
-  }
-  .rhw-btn-lg { padding: 16px 28px; font-size: 15px; }
+  .rhh-rail-step.is-past { color: var(--rhw-ink); }
+  .rhh-rail-step.is-now  { color: var(--rhw-accent); border-bottom-color: var(--rhw-accent); }
+  .rhh-rail-step.is-next { color: var(--rhw-ink-faint); }
+  .rhh-rail-step:hover   { color: var(--rhw-ink); }
+  .rhh-rail-step.is-now:hover { color: var(--rhw-accent); }
 
-  .rhw-hero-app {
-    position: relative;
-    padding-top: 14px;
-    padding-bottom: 60px;
-    margin-right: -120px;
-    width: calc(100% + 120px);
-  }
-
-  /* App frame */
-  .rhw-app {
+  .rhh-ticket {
+    max-width: 560px;
     background: var(--rhw-surface);
     border: 1px solid var(--rhw-line);
-    border-radius: 14px;
-    box-shadow: 0 30px 80px -30px rgba(20, 19, 15, 0.18), 0 6px 18px -8px rgba(20, 19, 15, 0.10);
-    overflow: hidden;
+    border-radius: 10px;
+    padding: 20px 22px 22px;
   }
-  .rhw-app-chrome {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 14px;
-    background: var(--rhw-bg-2);
-    border-bottom: 1px solid var(--rhw-line);
-    font-size: 11.5px;
+  .rhh-ticket-meter { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; margin-bottom: 16px; }
+  .rhh-ticket-meter span { height: 4px; border-radius: 2px; background: var(--rhw-line-soft); transition: background-color 0.35s ease; }
+  .rhh-ticket-meter span.is-on { background: var(--rhw-accent); }
+  .rhh-ticket-title { font-weight: 600; font-size: 17px; }
+  .rhh-ticket-from { font-size: 14px; color: var(--rhw-ink-mute); margin-top: 2px; }
+  .rhh-ticket-stage { margin: 14px 0 0; color: var(--rhw-ink-soft); min-height: 3.1em; animation: rhh-in 0.35s ease; }
+  .rhh-ticket-stage strong { color: var(--rhw-accent); font-weight: 600; }
+  .rhh-ticket-stage strong.rhh-needs-you { color: var(--rhh-amber); }
+  @keyframes rhh-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  .rhh-replay {
+    margin-top: 12px; padding: 0;
+    background: none; border: 0;
+    font: inherit; font-size: 14px; font-weight: 500;
+    color: var(--rhw-accent); cursor: pointer;
+    text-decoration: underline; text-underline-offset: 3px;
   }
-  .rhw-app-dots { display: flex; gap: 6px; }
-  .rhw-app-dots span {
-    width: 10px; height: 10px; border-radius: 50%;
-    background: #d8d2c2;
-  }
-  .rhw-app-title {
-    margin-left: 4px;
-    color: var(--rhw-ink-mute);
-    font-family: 'JetBrains Mono', monospace;
-    letter-spacing: 0.02em;
-  }
-  .rhw-app-keys {
-    margin-left: auto;
-    font-family: 'JetBrains Mono', monospace;
-    color: var(--rhw-ink-faint);
-  }
-  .rhw-hero-shot { line-height: 0; }
-  .rhw-hero-shot img {
-    display: block;
-    width: 100%;
-    height: auto;
-    border-radius: 12px 0 0 0;
-    border: 1px solid var(--rhw-line);
-    border-right: none;
-    border-bottom: none;
-    -webkit-mask-image: linear-gradient(to bottom,
-      #000 calc(100% - 90px),
-      rgba(0,0,0,0.92) calc(100% - 70px),
-      rgba(0,0,0,0.72) calc(100% - 50px),
-      rgba(0,0,0,0.42) calc(100% - 30px),
-      rgba(0,0,0,0.16) calc(100% - 14px),
-      transparent 100%);
-            mask-image: linear-gradient(to bottom,
-      #000 calc(100% - 90px),
-      rgba(0,0,0,0.92) calc(100% - 70px),
-      rgba(0,0,0,0.72) calc(100% - 50px),
-      rgba(0,0,0,0.42) calc(100% - 30px),
-      rgba(0,0,0,0.16) calc(100% - 14px),
-      transparent 100%);
-  }
-  .rhw-hero-shot-sm {
-    position: absolute;
-    right: 60px;
-    bottom: clamp(-40px, calc(-40px + (100vw - 1280px) * 0.18), 140px);
-    width: 460px;
-    max-width: 60%;
-    line-height: 0;
-    border-radius: 12px 0 0 0;
-    overflow: hidden;
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-right: none;
-    border-bottom: none;
-    -webkit-mask-image: linear-gradient(to bottom,
-      #000 calc(100% - 90px),
-      rgba(0,0,0,0.92) calc(100% - 70px),
-      rgba(0,0,0,0.72) calc(100% - 50px),
-      rgba(0,0,0,0.42) calc(100% - 30px),
-      rgba(0,0,0,0.16) calc(100% - 14px),
-      transparent 100%);
-            mask-image: linear-gradient(to bottom,
-      #000 calc(100% - 90px),
-      rgba(0,0,0,0.92) calc(100% - 70px),
-      rgba(0,0,0,0.72) calc(100% - 50px),
-      rgba(0,0,0,0.42) calc(100% - 30px),
-      rgba(0,0,0,0.16) calc(100% - 14px),
-      transparent 100%);
-  }
-  .rhw-hero-shot-sm img {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-  .rhw-app-toolbar {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--rhw-line-soft);
-  }
-  .rhw-app-tabs { display: flex; gap: 4px; }
-  .rhw-app-tab {
-    padding: 4px 10px; border-radius: 6px;
-    font-size: 12px; color: var(--rhw-ink-mute);
-    display: inline-flex; gap: 6px; align-items: center;
-  }
-  .rhw-app-tab em {
-    font-style: normal; font-size: 10px;
-    background: var(--rhw-bg-2);
-    padding: 1px 5px; border-radius: 4px;
-    color: var(--rhw-ink-faint);
-  }
-  .rhw-app-tab-on { background: var(--rhw-bg-2); color: var(--rhw-ink); }
-  .rhw-app-tab-on em { background: var(--rhw-surface); color: var(--rhw-accent); }
-  .rhw-app-filter {
-    margin-left: auto;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11.5px;
-    background: var(--rhw-bg-2);
-    padding: 5px 10px;
-    border-radius: 6px;
-    color: var(--rhw-ink-mute);
-  }
-  .rhw-app-list { display: flex; flex-direction: column; }
-  .rhw-app-row {
-    display: flex; align-items: center; gap: 14px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--rhw-line-soft);
-  }
-  .rhw-app-row:last-child { border-bottom: none; }
-  .rhw-app-row:hover { background: var(--rhw-bg-2); }
-  .rhw-app-row-l { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
-  .rhw-app-id {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    color: var(--rhw-ink-mute);
-    min-width: 56px;
-  }
-  .rhw-app-row-meta { min-width: 0; }
-  .rhw-app-row-title {
-    font-size: 13.5px;
-    color: var(--rhw-ink);
-    margin-bottom: 2px;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    overflow: hidden;
-  }
-  .rhw-app-row-sub { font-size: 11.5px; color: var(--rhw-ink-mute); }
-  .rhw-app-row-r { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-
-  .rhw-sev {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid;
-    letter-spacing: 0.04em;
-  }
-  .rhw-sev-P1 { color: var(--rhw-bad); border-color: rgba(212,74,58,0.3); }
-  .rhw-sev-P2 { color: var(--rhw-warn); border-color: rgba(201,140,31,0.3); }
-  .rhw-sev-P3 { color: var(--rhw-ink-mute); border-color: var(--rhw-line); }
-
-  .rhw-app-foot {
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 14px;
-    background: var(--rhw-bg-2);
-    border-top: 1px solid var(--rhw-line-soft);
-    font-size: 11px;
-    color: var(--rhw-ink-mute);
-  }
-  .rhw-app-foot-spacer { flex: 1; }
-  .rhw-app-foot-keys { font-family: 'JetBrains Mono', monospace; }
-  .rhw-live-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--rhw-good);
-    box-shadow: 0 0 0 3px rgba(28,139,80,0.18);
-    animation: rhw-pulse 2.4s ease-in-out infinite;
-    display: inline-block;
-  }
-  @keyframes rhw-pulse { 50% { box-shadow: 0 0 0 6px rgba(28,139,80,0.05); } }
-
-  /* Run card */
-  .rhw-run-card {
-    position: absolute;
-    bottom: 0;
-    right: -12px;
-    width: 360px;
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-radius: 12px;
-    padding: 16px;
-    box-shadow: 0 30px 60px -20px rgba(20, 19, 15, 0.2);
-  }
-  .rhw-run-card-h {
-    display: flex; align-items: center; gap: 10px;
-    padding-bottom: 12px; margin-bottom: 12px;
-    border-bottom: 1px solid var(--rhw-line-soft);
-  }
-  .rhw-run-card-h > div:nth-child(2) { flex: 1; min-width: 0; }
-  .rhw-run-card-title { font-size: 13.5px; font-weight: 500; }
-  .rhw-run-card-meta {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: var(--rhw-ink-mute);
-    margin-top: 2px;
-  }
-  .rhw-run-bars {
-    display: flex; gap: 3px;
-    height: 32px; align-items: flex-end;
-    margin-bottom: 14px;
-    padding: 0 2px;
-  }
-  .rhw-run-bars span {
-    flex: 1;
-    background: var(--rhw-accent);
-    opacity: 0.8;
-    border-radius: 1.5px;
-  }
-  .rhw-run-card-row {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 12.5px;
-    color: var(--rhw-ink-mute);
-    padding: 4px 0;
-  }
-  .rhw-run-card-active { color: var(--rhw-ink); font-weight: 500; }
-  .rhw-run-step {
-    width: 18px; height: 18px; border-radius: 50%;
-    background: var(--rhw-bg-2);
-    color: var(--rhw-accent);
-    font-size: 10px; font-weight: 600;
-    display: inline-flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .rhw-run-step-done { background: var(--rhw-good); color: #fff; }
 
   /* Logos */
-  .rhw-logos {
-    padding: 36px 48px;
-    border-bottom: 1px solid var(--rhw-line);
-    text-align: center;
-  }
-  .rhw-logos-h {
-    font-size: 12px; letter-spacing: 0.06em;
-    color: var(--rhw-ink-mute);
-    margin-bottom: 22px;
-  }
-  .rhw-logos-row {
-    display: flex; gap: 38px; flex-wrap: wrap;
-    justify-content: center; align-items: center;
-  }
-
-  /* Section heads */
-  .rhw-section-head {
-    padding: 80px 48px 36px;
-    max-width: 880px;
-  }
-  .rhw-eyebrow {
-    display: inline-flex; align-items: center; gap: 9px;
-    padding: 4px 12px;
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-radius: 999px;
-    font-size: 12px;
-    color: var(--rhw-accent);
-    margin-bottom: 16px;
-    font-weight: 500;
-  }
-  .rhw-dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--rhw-accent);
-    box-shadow: 0 0 0 4px var(--rhw-accent-soft);
-  }
-  .rhw-h2 {
-    font-size: 56px; line-height: 1.04;
-    letter-spacing: -0.03em; font-weight: 600;
-    margin: 0 0 16px;
-    color: var(--rhw-ink);
-    text-wrap: balance;
-  }
-  .rhw-section-deck {
-    font-size: 18px; line-height: 1.55;
-    color: var(--rhw-ink-soft);
-    margin: 0;
-    max-width: 640px;
-    text-wrap: pretty;
-  }
-
-  /* Demo modal */
-  .rhw-modal {
-    position: fixed; inset: 0;
-    background: rgba(20, 19, 15, 0.78);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    display: flex; align-items: center; justify-content: center;
-    padding: 32px;
-    z-index: 1000;
-    animation: rhw-modal-fade 0.18s ease-out;
-  }
-  @keyframes rhw-modal-fade { from { opacity: 0; } to { opacity: 1; } }
-  .rhw-modal-frame {
-    position: relative;
-    width: 100%; max-width: 960px;
-    aspect-ratio: 16 / 9;
-    background: #000;
-    border-radius: 14px;
-    overflow: hidden;
-    box-shadow: 0 40px 100px -20px rgba(0, 0, 0, 0.6);
-  }
-  .rhw-modal-close {
-    position: absolute; top: -42px; right: 0;
-    width: 32px; height: 32px;
-    background: transparent;
-    color: rgba(255,255,255,0.85);
-    border: none;
-    font-size: 18px;
-    cursor: pointer;
-    display: inline-flex; align-items: center; justify-content: center;
-    border-radius: 6px;
-    transition: background 0.15s, color 0.15s;
-  }
-  .rhw-modal-close:hover { background: rgba(255,255,255,0.12); color: #fff; }
-  .rhw-modal-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-  .rhw-modal-video { width: 100%; height: 100%; display: block; }
-
-  /* Before / After pipeline simulation */
-  .rhw-pipeline { padding-bottom: 80px; }
-  .rhw-pipeline-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    padding: 0 48px;
-    max-width: 1200px;
-    margin: 0 auto;
-  }
-  @media (max-width: 768px) {
-    .rhw-pipeline-grid { padding: 0 16px; }
-  }
-
-  .rhw-loop {
-    background: var(--rhw-bg-2);
+  .rhh-logos {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 16px 36px;
+    padding: 24px var(--rhh-gutter);
     border-top: 1px solid var(--rhw-line);
     border-bottom: 1px solid var(--rhw-line);
-    padding-bottom: 80px;
   }
-  .rhw-loop-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-    padding: 0 48px;
-  }
-  .rhw-loop-card {
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line);
-    border-radius: 14px;
-    padding: 24px 22px 22px;
-    display: flex; flex-direction: column;
-    gap: 14px;
-  }
-  .rhw-loop-card-h { display: flex; gap: 14px; align-items: center; }
-  .rhw-loop-num {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 14px;
-    width: 36px; height: 36px;
-    border-radius: 8px;
-    background: var(--rhw-accent-soft);
-    color: var(--rhw-accent);
-    display: inline-flex; align-items: center; justify-content: center;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-  .rhw-loop-name { font-size: 18px; font-weight: 600; letter-spacing: -0.015em; }
-  .rhw-loop-sub { font-size: 12px; color: var(--rhw-ink-mute); margin-top: 2px; }
-  .rhw-loop-visual {
-    background: var(--rhw-bg-2);
-    border: 1px solid var(--rhw-line-soft);
-    border-radius: 10px;
-    padding: 12px;
-    height: 140px;
-    overflow: hidden;
-    font-size: 11.5px;
-  }
-  .rhw-loop-body { font-size: 13.5px; line-height: 1.55; color: var(--rhw-ink-soft); margin: 0; }
-  .rhw-loop-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
-  .rhw-key {
-    font-size: 10.5px;
-    padding: 3px 8px;
-    background: var(--rhw-bg-2);
-    border: 1px solid var(--rhw-line);
-    border-radius: 999px;
-    color: var(--rhw-ink-soft);
-  }
+  .rhh-logos-h { font-size: 14px; color: var(--rhw-ink-mute); }
 
-  /* Loop visuals */
-  .rhw-lv { display: flex; flex-direction: column; gap: 6px; height: 100%; }
-  .rhw-lv-row {
-    display: flex; align-items: center; gap: 8px;
-    background: var(--rhw-surface);
-    border: 1px solid var(--rhw-line-soft);
-    border-radius: 6px;
-    padding: 6px 8px;
+  /* Build */
+  .rhh-build {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px;
+    padding: clamp(72px, 10vw, 128px) var(--rhh-gutter);
   }
-  .rhw-lv-row-txt { flex: 1; font-size: 11.5px; color: var(--rhw-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .rhw-lv-row-who { font-size: 10.5px; color: var(--rhw-ink-mute); }
-  .rhw-lv-mono { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--rhw-ink); line-height: 1.7; }
-  .rhw-lv-mono strong { color: var(--rhw-accent); font-weight: 500; }
-  .rhw-lv-bar { height: 6px; background: var(--rhw-line-soft); border-radius: 3px; overflow: hidden; }
-  .rhw-lv-bar > span {
-    display: block; height: 100%;
-    background: var(--rhw-accent);
-    animation: rhw-bar 4s ease-in-out infinite;
+  .rhh-build-head { position: sticky; top: 32px; align-self: start; }
+  .rhh-build-head .rhh-deck { margin-bottom: 0; }
+  .rhh-steps { list-style: none; margin: 0; padding: 0; }
+  .rhh-step {
+    display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px;
+    padding: 28px 0;
+    border-top: 1px solid var(--rhw-line);
   }
-  @keyframes rhw-bar { 0%, 100% { width: 35%; } 50% { width: 92%; } }
-  .rhw-lv-exec-row {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 11px; color: var(--rhw-ink); margin-top: 2px;
+  .rhh-step:first-child { border-top: 0; padding-top: 0; }
+  .rhh-step-n {
+    font-family: var(--rhh-display);
+    font-size: 36px; line-height: 1; font-weight: 600;
+    color: var(--rhw-ink-faint);
   }
-  .rhw-lv-exec-row span { color: var(--rhw-ink-mute); margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px; }
-
-  .rhw-lv-assign { gap: 10px; }
-  .rhw-lv-assign-item { display: flex; flex-direction: column; gap: 3px; }
-  .rhw-lv-assign-task {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 11.5px; color: var(--rhw-ink);
-  }
-  .rhw-lv-assign-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .rhw-lv-assign-status {
-    font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
-    padding: 1px 6px; border-radius: 3px;
-    background: var(--rhw-bg-2); color: var(--rhw-ink-mute);
-    text-transform: lowercase; letter-spacing: 0.02em;
-    flex-shrink: 0;
-  }
-  .rhw-lv-assign-status-running { background: oklch(0.92 0.10 145 / 0.5); color: var(--rhw-good); }
-  .rhw-lv-assign-status-queued  { background: oklch(0.92 0.08 85  / 0.5); color: oklch(0.45 0.12 65); }
-  .rhw-lv-assign-status-standby { background: var(--rhw-bg-2); color: var(--rhw-ink-mute); }
-  .rhw-lv-assign-agent {
-    display: flex; align-items: center; gap: 6px;
-    padding-left: 14px;
-    font-size: 10.5px; color: var(--rhw-ink-mute);
-  }
-  .rhw-lv-assign-label { font-family: 'JetBrains Mono', monospace; font-size: 10px; }
-  .rhw-lv-assign-aname { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--rhw-ink); }
-  .rhw-lv-pr {
+  .rhh-artifact {
+    display: inline-block;
+    margin-top: 14px;
+    padding: 6px 10px;
+    font-family: var(--rhh-mono); font-size: 13px;
+    color: var(--rhw-ink);
     background: var(--rhw-surface);
     border: 1px solid var(--rhw-line);
-    border-radius: 8px;
-    padding: 10px;
-  }
-  .rhw-lv-pr-h { font-size: 12px; font-weight: 500; margin-bottom: 4px; }
-  .rhw-lv-pr-meta { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--rhw-ink-mute); margin-bottom: 8px; }
-  .rhw-lv-pr-actions { display: flex; gap: 4px; flex-wrap: wrap; }
-  .rhw-lv-pr-btn {
-    font-size: 10px;
-    padding: 3px 8px;
-    background: var(--rhw-bg-2);
-    border: 1px solid var(--rhw-line-soft);
+    border-left: 3px solid var(--rhw-accent);
     border-radius: 4px;
-    color: var(--rhw-ink-soft);
   }
-  .rhw-lv-pr-btn-on { background: var(--rhw-good); color: #fff; border-color: var(--rhw-good); }
 
-  /* Showcase — live boards */
-  .rhw-showcase { padding-bottom: 80px; }
-  .rhw-showcase-grid {
-    display: grid; grid-template-columns: 1.4fr 1fr;
-    gap: 14px;
-    padding: 0 48px;
-    align-items: stretch;
+  /* Run ledger */
+  .rhh-run { padding: clamp(72px, 10vw, 128px) var(--rhh-gutter); background: var(--rhw-surface); border-top: 1px solid var(--rhw-line); border-bottom: 1px solid var(--rhw-line); }
+  .rhh-ledger { width: 100%; border-collapse: collapse; text-align: left; }
+  .rhh-ledger thead th {
+    font-size: 14px; font-weight: 500; color: var(--rhw-ink-mute);
+    padding: 0 24px 12px 0;
+    border-bottom: 1px solid var(--rhw-ink);
   }
-  .rhw-sc-card {
-    display: flex; flex-direction: column;
+  .rhh-ledger tbody th, .rhh-ledger td {
+    padding: 22px 24px 22px 0;
+    border-bottom: 1px solid var(--rhw-line);
+    vertical-align: top;
+  }
+  .rhh-ledger tbody th {
+    width: 22%;
+    font-family: var(--rhh-display); font-size: 22px; font-weight: 600; letter-spacing: -0.01em;
+  }
+  .rhh-ledger td { color: var(--rhw-ink-soft); width: 46%; }
+  .rhh-ledger td.rhh-ledger-files { color: var(--rhw-accent); font-weight: 500; width: 32%; }
+  .rhh-beta {
+    margin-left: 10px; vertical-align: middle;
+    font-family: 'Geist', system-ui, sans-serif; font-size: 12px; font-weight: 500; letter-spacing: 0;
+    padding: 2px 8px; border-radius: 999px;
+    color: var(--rhh-amber); border: 1px solid currentColor;
+  }
+
+  /* Showcase */
+  .rhh-show { padding: clamp(72px, 10vw, 128px) var(--rhh-gutter); }
+  .rhh-show-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); gap: 24px; }
+  .rhh-arrr {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     background: var(--rhw-surface);
     border: 1px solid var(--rhw-line);
     border-radius: 14px;
-    padding: 26px 24px;
-    color: inherit;
-    transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+    overflow: hidden;
+    transition: border-color 0.15s;
   }
-  .rhw-sc-card:hover {
-    border-color: var(--rhw-accent);
-    transform: translateY(-2px);
-    box-shadow: 0 24px 56px -28px rgba(20, 19, 15, 0.24);
+  .rhh-arrr:hover, .rhh-board:hover { border-color: var(--rhw-ink); }
+  .rhh-arrr-art { width: 100%; height: 100%; min-height: 280px; object-fit: cover; display: block; }
+  .rhh-arrr-body { padding: 28px; display: flex; flex-direction: column; gap: 18px; }
+  .rhh-board-name {
+    display: flex; align-items: center; gap: 12px;
+    font-family: var(--rhh-display); font-size: 28px; font-weight: 600; letter-spacing: -0.02em;
   }
-  .rhw-sc-hero { flex-direction: row; padding: 0; gap: 0; overflow: hidden; }
-  .rhw-sc-hero-art {
-    flex: 0 0 42%;
-    align-self: stretch;
-    width: 42%;
-    object-fit: cover;
-    object-position: center;
-    display: block;
-    border-right: 1px solid var(--rhw-line);
-    background: var(--rhw-bg-2);
+  .rhh-live {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'Geist', system-ui, sans-serif; font-size: 13px; font-weight: 500; letter-spacing: 0;
+    color: var(--rhw-accent);
   }
-  .rhw-sc-hero-body {
-    flex: 1; min-width: 0;
-    display: flex; flex-direction: column;
-    justify-content: space-between;
-    gap: 24px;
-    padding: 26px 24px;
+  .rhh-live-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--rhw-accent);
+    box-shadow: 0 0 0 3px var(--rhw-accent-soft);
+    animation: rhh-pulse 2.4s ease-in-out infinite;
   }
-  .rhw-sc-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .rhw-sc-name { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
-  .rhw-sc-hero .rhw-sc-name { font-size: 28px; }
-  .rhw-sc-live {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: var(--rhw-good);
-    text-transform: uppercase; letter-spacing: 0.08em;
-  }
-  .rhw-sc-tagline {
-    font-size: 14px; line-height: 1.55;
-    color: var(--rhw-ink-soft);
-    margin: 10px 0 0;
-    text-wrap: pretty;
-  }
-  .rhw-sc-hero .rhw-sc-tagline { font-size: 15px; max-width: 480px; }
-  .rhw-sc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-  .rhw-sc-stat {
-    background: var(--rhw-bg-2);
-    border: 1px solid var(--rhw-line-soft);
-    border-radius: 10px;
-    padding: 16px 14px;
-  }
-  .rhw-sc-stat-n {
-    font-size: 30px; font-weight: 600; letter-spacing: -0.02em;
-    line-height: 1; color: var(--rhw-ink);
+  @keyframes rhh-pulse { 50% { box-shadow: 0 0 0 6px rgba(11, 122, 92, 0.04); } }
+  .rhh-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+  .rhh-stats div { display: flex; flex-direction: column-reverse; }
+  .rhh-stats dt { font-size: 13px; color: var(--rhw-ink-mute); }
+  .rhh-stats dd {
+    margin: 0;
+    font-family: var(--rhh-display); font-size: 36px; line-height: 1.1; font-weight: 600; letter-spacing: -0.02em;
     font-variant-numeric: tabular-nums;
   }
-  .rhw-sc-stat-l { font-size: 12px; color: var(--rhw-ink-mute); margin-top: 6px; }
-  .rhw-sc-open {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 13px; font-weight: 500;
-    color: var(--rhw-accent) !important;
+  .rhh-link {
+    margin-top: auto;
+    font-weight: 500; color: var(--rhw-accent);
+    text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
   }
-  .rhw-sc-open span { transition: transform 0.15s; }
-  .rhw-sc-card:hover .rhw-sc-open span { transform: translateX(3px); }
-  .rhw-sc-open-primary {
-    align-self: flex-start;
-    padding: 11px 18px;
-    background: var(--rhw-ink);
-    color: #fff !important;
-    border-radius: 9px;
-    font-size: 14px;
-    transition: background 0.15s;
-  }
-  .rhw-sc-hero:hover .rhw-sc-open-primary { background: var(--rhw-accent); }
-  .rhw-sc-side { display: flex; flex-direction: column; gap: 14px; }
-  .rhw-sc-sm { flex: 1; }
-  .rhw-sc-sm-foot {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; margin-top: auto; padding-top: 18px;
-  }
-  .rhw-sc-sm-stat { font-size: 12.5px; color: var(--rhw-ink-mute); }
-  .rhw-sc-sm-stat strong { color: var(--rhw-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-  @media (max-width: 1100px) {
-    .rhw-showcase-grid { grid-template-columns: 1fr; padding: 0 32px; }
-  }
-  @media (max-width: 720px) {
-    .rhw-sc-stats { gap: 8px; }
-    .rhw-sc-stat { padding: 13px 10px; }
-    .rhw-sc-stat-n { font-size: 24px; }
-    .rhw-sc-hero .rhw-sc-name { font-size: 24px; }
-    .rhw-sc-hero { flex-direction: column; }
-    .rhw-sc-hero-art {
-      width: 100%; flex-basis: auto;
-      height: 200px;
-      object-position: center 42%;
-      border-right: none;
-      border-bottom: 1px solid var(--rhw-line);
-    }
-  }
-
-  /* Integrations */
-  .rhw-int { padding-bottom: 80px; }
-  .rhw-int-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-    padding: 0 48px;
-  }
-  .rhw-int-col {
-    background: var(--rhw-surface);
+  .rhh-boards { display: flex; flex-direction: column; gap: 24px; }
+  .rhh-board {
+    flex: 1;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 24px;
     border: 1px solid var(--rhw-line);
     border-radius: 14px;
-    padding: 22px 22px 18px;
+    transition: border-color 0.15s;
   }
-  .rhw-int-h {
-    font-size: 11px; letter-spacing: 0.16em;
-    color: var(--rhw-accent);
-    margin-bottom: 16px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--rhw-line-soft);
-    text-transform: uppercase;
+  .rhh-board .rhh-board-name { font-size: 22px; }
+  .rhh-board-foot {
+    margin-top: auto; padding-top: 8px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    font-size: 14px; color: var(--rhw-ink-mute);
   }
-  .rhw-int-list { display: flex; flex-direction: column; gap: 8px; }
-  .rhw-int-i {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 13.5px; color: var(--rhw-ink);
-    padding: 4px 0;
-  }
-  .rhw-int-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--rhw-ink-faint);
-  }
+  .rhh-board-foot strong { color: var(--rhw-ink); font-variant-numeric: tabular-nums; }
+  .rhh-board-foot .rhh-link { margin-top: 0; }
 
-  /* CTA */
-  .rhw-cta-band {
-    margin: 0 48px 56px;
+  /* Where it runs */
+  .rhh-where { padding: 0 var(--rhh-gutter) clamp(72px, 10vw, 128px); }
+  .rhh-where-grid {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px;
+    margin-top: 40px;
+  }
+  .rhh-where-grid > div { border-top: 2px solid var(--rhw-ink); padding-top: 20px; }
+
+  /* Closing */
+  .rhh-close {
     background: var(--rhw-ink);
-    color: #fff;
-    border-radius: 24px;
-    padding: 80px 48px;
-    overflow: hidden;
-    position: relative;
+    color: #F1F2EE;
+    padding: clamp(72px, 10vw, 120px) var(--rhh-gutter);
   }
-  .rhw-cta-band::before {
-    content: '';
-    position: absolute; inset: 0;
-    background: radial-gradient(ellipse 60% 80% at 50% 0%, oklch(0.55 0.20 277 / 0.5), transparent 60%);
-    pointer-events: none;
+  .rhh-close-h {
+    font-family: var(--rhh-display);
+    font-size: clamp(40px, 6vw, 80px);
+    line-height: 1;
+    letter-spacing: -0.022em;
+    font-weight: 600;
+    margin: 0 0 20px;
+    max-width: 14ch;
   }
-  .rhw-cta-inner { text-align: center; position: relative; }
-  .rhw-cta-eyebrow {
-    display: inline-flex; align-items: center; gap: 9px;
-    padding: 5px 14px;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.16);
-    border-radius: 999px;
-    font-size: 12px;
-    margin-bottom: 22px;
-  }
-  .rhw-cta-h {
-    font-size: 64px; line-height: 1.04;
-    letter-spacing: -0.03em; font-weight: 600;
-    margin: 0 auto 32px;
-    max-width: 1000px;
-    text-wrap: balance;
-  }
-  .rhw-cta-actions { display: inline-flex; gap: 12px; margin-bottom: 36px; flex-wrap: wrap; justify-content: center; }
-  .rhw-cta-band .rhw-btn-primary { background: #fff; color: var(--rhw-ink) !important; }
-  .rhw-cta-band .rhw-btn-primary:hover { background: oklch(0.85 0.18 145); }
-  .rhw-cta-band .rhw-btn-ghost {
-    background: transparent; color: #fff !important;
-    border-color: rgba(255,255,255,0.3);
-  }
-  .rhw-cta-band .rhw-btn-ghost:hover { border-color: #fff; }
-  .rhw-cta-meta {
-    display: grid; grid-template-columns: repeat(3, 1fr);
-    gap: 32px;
-    max-width: 1000px;
-    margin: 0 auto;
-    padding-top: 36px;
-    border-top: 1px solid rgba(255,255,255,0.12);
-    text-align: left;
-  }
-  .rhw-cta-meta div { font-size: 13.5px; line-height: 1.5; color: rgba(255,255,255,0.7); }
-  .rhw-cta-meta strong { color: #fff; font-weight: 500; display: block; margin-bottom: 4px; }
+  .rhh-close-deck { font-size: 18px; color: #C4C8CE; margin: 0 0 32px; max-width: 52ch; }
 
-  /* Responsive */
-  @media (max-width: 1100px) {
-    .rhw-hero { grid-template-columns: 1fr; padding: 48px 32px 64px; gap: 36px; }
-    .rhw-hero-app { margin-right: 0; width: 100%; padding-bottom: 80px; }
-    .rhw-run-card { right: 0; }
-    .rhw-section-head { padding: 64px 32px 28px; }
-    .rhw-loop-grid { grid-template-columns: repeat(2, 1fr); padding: 0 32px; }
-    .rhw-int-grid { grid-template-columns: repeat(2, 1fr); padding: 0 32px; }
-    .rhw-cta-band { margin: 0 32px 48px; padding: 56px 28px; }
-    .rhw-cta-h { font-size: 40px; }
-    .rhw-cta-meta { grid-template-columns: 1fr; gap: 16px; }
-    .rhw-modal { padding: 16px; }
-    .rhw-modal-close { top: -36px; }
+  @media (max-width: 960px) {
+    .rhh-build { grid-template-columns: 1fr; }
+    .rhh-build-head { position: static; }
+    .rhh-show-grid { grid-template-columns: 1fr; }
+    .rhh-where-grid { grid-template-columns: 1fr; gap: 28px; }
   }
   @media (max-width: 720px) {
-    .rhw-hero-h1 { font-size: 44px; }
-    .rhw-h2 { font-size: 36px; }
-    .rhw-loop-grid, .rhw-int-grid { grid-template-columns: 1fr; }
-    .rhw-run-card { width: 100%; right: 0; }
-    .rhw-cta-h { font-size: 32px; }
+    .rhh-arrr { grid-template-columns: 1fr; }
+    .rhh-arrr-art { min-height: 0; aspect-ratio: 16 / 9; }
+    .rhh-ledger thead { display: none; }
+    .rhh-ledger, .rhh-ledger tbody, .rhh-ledger tr, .rhh-ledger th, .rhh-ledger td { display: block; width: auto !important; }
+    .rhh-ledger tr { padding: 20px 0; border-bottom: 1px solid var(--rhw-line); }
+    .rhh-ledger tbody th, .rhh-ledger td { padding: 0; border: 0; }
+    .rhh-ledger td { margin-top: 6px; }
+    .rhh-ledger td.rhh-ledger-files::before {
+      content: attr(data-label) ': ';
+      color: var(--rhw-ink-mute); font-weight: 400;
+    }
+    .rhh-step { grid-template-columns: 40px minmax(0, 1fr); }
+    .rhh-step-n { font-size: 28px; }
+    .rhh-stats dd { font-size: 28px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rhh-root *, .rhh-root *::before, .rhh-root *::after { animation: none !important; transition: none !important; }
   }
 `;
