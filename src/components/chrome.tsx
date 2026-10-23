@@ -364,38 +364,8 @@ export function Footer() {
   );
 }
 
-const NAV_STYLES = `
-  .rhc-nav {
-    display: grid;
-    grid-template-columns: auto auto 1fr auto;
-    gap: 18px;
-    align-items: center;
-    padding: 14px 28px;
-    border-bottom: 1px solid var(--rhw-line);
-    background: var(--rhw-surface);
-    position: sticky; top: 0; z-index: 30;
-    font-family: 'Geist', 'Inter Tight', system-ui, sans-serif;
-  }
-  .rhc-nav *, .rhc-nav *::before, .rhc-nav *::after { box-sizing: border-box; }
-  .rhc-nav a { color: inherit; text-decoration: none; }
-  .rhc-nav-l { display: contents; }
-  .rhc-brand {
-    display: inline-flex; align-items: center; gap: 9px;
-    font-weight: 600; font-size: 16px; letter-spacing: -0.01em;
-    color: var(--rhw-ink);
-  }
-  .rhc-brand-mark {
-    width: 28px; height: 28px; border-radius: 8px;
-    background: radial-gradient(120% 140% at 30% 20%, #1d1a2e 0%, #0c0b14 70%);
-    box-shadow:
-      inset 0 0 0 1px rgba(255,255,255,0.05),
-      0 4px 14px -6px rgba(108, 89, 255, 0.45);
-    display: inline-flex; align-items: center; justify-content: center;
-    overflow: visible;
-    position: relative;
-  }
-  .rhc-brand:hover .rhc-merc { filter: drop-shadow(0 2px 8px rgba(124, 109, 255, 0.7)); }
-
+/** The brand mark's styles, for pages that render MercuryMark without the Navbar. */
+export const MERCURY_STYLES = `
   /* ================================================================
      Mercury — liquid-metal brand mark
      Base + 6 perimeter-traveling bulges share an SVG goo filter for a
@@ -506,6 +476,41 @@ const NAV_STYLES = `
     .rhc-merc-tint,
     .rhc-merc-spec { animation: none; }
   }
+`;
+
+const NAV_STYLES = `
+  .rhc-nav {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    gap: 18px;
+    align-items: center;
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--rhw-line);
+    background: var(--rhw-surface);
+    position: sticky; top: 0; z-index: 30;
+    font-family: 'Geist', 'Inter Tight', system-ui, sans-serif;
+  }
+  .rhc-nav *, .rhc-nav *::before, .rhc-nav *::after { box-sizing: border-box; }
+  .rhc-nav a { color: inherit; text-decoration: none; }
+  .rhc-nav-l { display: contents; }
+  .rhc-brand {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-weight: 600; font-size: 16px; letter-spacing: -0.01em;
+    color: var(--rhw-ink);
+  }
+  .rhc-brand-mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: radial-gradient(120% 140% at 30% 20%, #1d1a2e 0%, #0c0b14 70%);
+    box-shadow:
+      inset 0 0 0 1px rgba(255,255,255,0.05),
+      0 4px 14px -6px rgba(108, 89, 255, 0.45);
+    display: inline-flex; align-items: center; justify-content: center;
+    overflow: visible;
+    position: relative;
+  }
+  .rhc-brand:hover .rhc-merc { filter: drop-shadow(0 2px 8px rgba(124, 109, 255, 0.7)); }
+
+${MERCURY_STYLES}
   .rhc-nav-c { display: flex; gap: 4px; }
   .rhc-nav-i {
     padding: 7px 12px;

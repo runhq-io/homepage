@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { trackPageview } from './analytics';
 import HomePage from './pages/HomePage';
+import QuietHomePage from './pages/QuietHomePage';
 import ProductsPage from './pages/ProductsPage';
 import PricingPage from './pages/PricingPage';
 import DocsPage from './pages/DocsPage';
@@ -71,6 +72,8 @@ function App() {
             <Route path="/about" element={<AboutPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />
             <Route path="/terms" element={<TermsPage />} />
+            {/* Preview of a pared-back homepage, pending approval. */}
+            <Route path="/quiet" element={<QuietHomePage />} />
 
             <Route path="/ko" element={<HomePage />} />
             <Route path="/ko/products" element={<ProductsPage />} />
@@ -80,6 +83,7 @@ function App() {
             <Route path="/ko/about" element={<AboutPage />} />
             <Route path="/ko/privacy" element={<PrivacyPage />} />
             <Route path="/ko/terms" element={<TermsPage />} />
+            <Route path="/ko/quiet" element={<QuietHomePage />} />
 
             {/* Boards have no Korean twin, so /ko/<slug> is never a URL we mint —
                 but the locale auto-detector used to produce (and visitors shared)
