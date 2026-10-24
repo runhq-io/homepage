@@ -5,6 +5,7 @@ import HomePage from './pages/HomePage';
 import QuietHomePage from './pages/QuietHomePage';
 import ProductsPage from './pages/ProductsPage';
 import PricingPage from './pages/PricingPage';
+import HowItWorksPage from './pages/HowItWorksPage';
 import DocsPage from './pages/DocsPage';
 import VisualPage from './pages/VisualPage';
 import AboutPage from './pages/AboutPage';
@@ -66,6 +67,7 @@ function App() {
           <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/products" element={<ProductsPage />} />
+            <Route path="/how-it-works" element={<HowItWorksPage />} />
             <Route path="/pricing" element={<PricingPage />} />
             <Route path="/docs/*" element={<DocsPage />} />
             <Route path="/visual" element={<VisualPage />} />
@@ -77,6 +79,7 @@ function App() {
 
             <Route path="/ko" element={<HomePage />} />
             <Route path="/ko/products" element={<ProductsPage />} />
+            <Route path="/ko/how-it-works" element={<HowItWorksPage />} />
             <Route path="/ko/pricing" element={<PricingPage />} />
             <Route path="/ko/docs/*" element={<DocsPage />} />
             <Route path="/ko/visual" element={<VisualPage />} />

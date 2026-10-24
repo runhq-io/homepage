@@ -1,9 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react';
-import { Link } from 'react-router-dom';
-import { LOGIN_URL } from '../components/chrome';
-import { TalkToUsButton } from '../components/TalkToUsModal';
-import { trackSignInClick } from '../telemetry';
-import { useT, useLocalePath } from '../i18n/context';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { HomeNav, HomeFooter, HOME_CHROME_STYLES, SHOWCASE_BOARD_URL } from '../components/homeChrome';
+import { useT } from '../i18n/context';
 import '../components/rq-blob.js';
 
 /**
@@ -16,13 +13,7 @@ import '../components/rq-blob.js';
  */
 const HOME_T = {
   en: {
-    signIn: 'Sign in',
-    contactSales: 'Contact sales',
-    howItWorks: 'How it works',
-    docs: 'Docs',
-    pricing: 'Pricing',
     work: 'Work',
-    manual: 'Manual',
     heroA: 'Make your company ',
     heroB: 'self‑evolve.',
     evoA: 'Evolution, ',
@@ -43,13 +34,7 @@ const HOME_T = {
     ],
   },
   ko: {
-    signIn: '로그인',
-    contactSales: '영업팀 문의',
-    howItWorks: '작동 방식',
-    docs: '문서',
-    pricing: '요금제',
     work: '사례',
-    manual: '매뉴얼',
     heroA: '회사가 스스로 ',
     heroB: '진화하도록.',
     evoA: '진화, ',
@@ -313,8 +298,6 @@ function Closing() {
 
 /* ------------------------------------------------------------------------ */
 
-const HOW_IT_WORKS_ID = 'how-it-works';
-
 function PixelBlob() {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -329,48 +312,25 @@ function PixelBlob() {
 
 export default function HomePage() {
   const t = useT(HOME_T);
-  const lp = useLocalePath();
-  const reduce = usePrefersReducedMotion();
-
-  // Scroll to the evolution section in place of a hard anchor jump; the hash
-  // still updates so the link can be shared.
-  const goToHowItWorks = (e: MouseEvent<HTMLAnchorElement>) => {
-    const target = document.getElementById(HOW_IT_WORKS_ID);
-    if (!target) return;
-    e.preventDefault();
-    target.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' });
-    history.replaceState(null, '', `#${HOW_IT_WORKS_ID}`);
-  };
 
   return (
     <div className="rhn-root">
-      <style>{HOME_STYLES}</style>
+      <style>{HOME_CHROME_STYLES + HOME_STYLES}</style>
 
       <div className="rhn-hero">
-        <nav className="rhn-nav">
-          <div className="rhn-nav-group">
-            <a href={`#${HOW_IT_WORKS_ID}`} onClick={goToHowItWorks}>{t.howItWorks}</a>
-            <Link to={lp('/docs')}>{t.docs}</Link>
-            <Link to={lp('/pricing')}>{t.pricing}</Link>
-          </div>
-          <div className="rhn-nav-group">
-            <a href={LOGIN_URL} onClick={() => trackSignInClick('home_nav')}>{t.signIn}</a>
-            <TalkToUsButton className="rhn-start" cta="home_nav">{t.contactSales}</TalkToUsButton>
-          </div>
-        </nav>
+        <HomeNav source="home" />
         <div className="rhn-hero-copy">
           <h1 className="rhn-h1">{t.heroA}<em>{t.heroB}</em></h1>
         </div>
         <PixelBlob />
         <div className="rhn-hero-meta">
           <span />
-          {/* Boards are never locale-prefixed (see BoardPage.LocalizedBoardRedirect). */}
-          <a href="/arrr">{t.work} ↗</a>
+          <a href={SHOWCASE_BOARD_URL}>{t.work} ↗</a>
         </div>
         <div className="rhn-wordmark" aria-label="RunHQ">RunHQ</div>
       </div>
 
-      <section className="rhn-evo" id={HOW_IT_WORKS_ID}>
+      <section className="rhn-evo">
         <div className="rhn-evo-inner">
           <div className="rhn-evo-head">
             <h2 className="rhn-h2">{t.evoA}<em>{t.evoB}</em></h2>
@@ -382,51 +342,17 @@ export default function HomePage() {
 
       <Closing />
 
-      <footer className="rhn-foot">
-        <span>RunHQ © {new Date().getFullYear()}</span>
-        <div>
-          <Link to={lp('/docs')}>{t.manual}</Link>
-          <a href={LOGIN_URL} onClick={() => trackSignInClick('home_footer')}>{t.signIn}</a>
-        </div>
-      </footer>
+      <HomeFooter source="home" />
     </div>
   );
 }
 
 const HOME_STYLES = `
-  .rhn-root {
-    --rhn-bg: #cfcdc6;
-    --rhn-ink: #141412;
-    --rhn-mute: #5c5b55;
-    --rhn-serif: 'Instrument Serif', Georgia, serif;
-    --rhn-sans: 'Geist', Helvetica, sans-serif;
-    --rhn-mono: 'Geist Mono', ui-monospace, monospace;
-    --rhn-pad: 48px;
-    background: var(--rhn-bg);
-    color: var(--rhn-ink);
-    font-family: var(--rhn-sans);
-    -webkit-font-smoothing: antialiased;
-  }
-  .rhn-root a { color: inherit; text-decoration: none; }
-  .rhn-root a:hover { opacity: .6; }
-  .rhn-root em { font-style: italic; }
-
   /* HERO */
   .rhn-hero {
     height: 100vh; height: 100svh; min-height: 620px;
     display: flex; flex-direction: column;
     overflow: hidden; position: relative;
-  }
-  .rhn-nav {
-    display: flex; justify-content: space-between; align-items: center; gap: 28px;
-    padding: 32px var(--rhn-pad);
-    font: 400 14px var(--rhn-sans);
-    position: relative; z-index: 3;
-  }
-  .rhn-nav-group { display: flex; align-items: center; gap: 28px; }
-  .rhn-root .rhn-start {
-    background: var(--rhn-ink); color: var(--rhn-bg);
-    padding: 9px 18px; border-radius: 999px;
   }
   .rhn-hero-copy {
     flex: 1; min-height: 0;
@@ -530,24 +456,7 @@ const HOME_STYLES = `
   .rhn-swap { display: inline-grid; grid-template-columns: minmax(0, 1fr); justify-items: center; }
   .rhn-swap > span { grid-area: 1 / 1; white-space: nowrap; }
 
-  .rhn-foot {
-    background: var(--rhn-ink); color: #6f6d66;
-    display: flex; justify-content: space-between; gap: 24px;
-    padding: 28px var(--rhn-pad);
-    font: 400 12px var(--rhn-mono); letter-spacing: .04em;
-    border-top: 1px solid #2a2a27;
-  }
-  .rhn-foot > div { display: flex; gap: 28px; }
-
-  @media (prefers-reduced-motion: reduce) {
-    .rhn-root *, .rhn-root *::before, .rhn-root *::after { transition: none !important; }
-  }
-
   @media (max-width: 720px) {
-    .rhn-root { --rhn-pad: 24px; }
-    .rhn-nav { padding-top: 24px; padding-bottom: 24px; gap: 16px; font-size: 13px; }
-    .rhn-nav-group { gap: 16px; }
-    .rhn-root .rhn-start { padding: 8px 14px; }
     .rhn-h1 { font-size: clamp(44px, 12vw, 56px); }
     .rhn-wordmark { font-size: 34vw; }
     .rhn-evo { padding-top: 96px; padding-bottom: 96px; }
