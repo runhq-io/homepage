@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react';
-import { Navbar, Footer, Wordmark, LOGOS, SIGNUP_URL } from '../components/chrome';
+import { Footer, Wordmark, LOGOS, SIGNUP_URL } from '../components/chrome';
+import { HomeNav, HOME_CHROME_STYLES } from '../components/homeChrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
 import { trackSignupClick } from '../telemetry';
 import { useT } from '../i18n/context';
@@ -350,7 +351,10 @@ export default function PricingPage() {
   return (
     <div className="rhp-root rhpx-root">
       <style>{PRICING_STYLES}</style>
-      <Navbar active="pricing" />
+      <div className="rhn-root">
+        <style>{HOME_CHROME_STYLES}</style>
+        <HomeNav source="pricing" />
+      </div>
 
       <section className="rhp-hero">
         <div className="rhp-hero-eyebrow">{t.eyebrow}</div>

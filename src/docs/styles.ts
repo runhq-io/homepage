@@ -42,7 +42,10 @@ export const DOCS_STYLES = `
     gap: 40px;
     align-items: start;
   }
-  .rhpd-side { position: sticky; top: 78px; max-height: calc(100vh - 88px); overflow-y: auto; }
+  /* HomeNav isn't sticky (it scrolls off with the page), so the sidebar, TOC
+     and h2 anchors only need a small gap from the viewport top, not the
+     nav's height. */
+  .rhpd-side { position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow-y: auto; }
   .rhpd-side-search {
     display: flex; align-items: center; gap: 8px;
     padding: 9px 12px;
@@ -106,7 +109,7 @@ export const DOCS_STYLES = `
   .rhpd-cur { color: var(--rhw-ink); }
 
   .rhpd-h1 { font-size: 44px; letter-spacing: -0.028em; font-weight: 600; margin: 0 0 14px; }
-  .rhpd-h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 56px 0 18px; scroll-margin-top: 90px; }
+  .rhpd-h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 56px 0 18px; scroll-margin-top: 24px; }
   .rhpd-lede { font-size: 17px; line-height: 1.6; color: var(--rhw-ink-soft); margin: 0 0 26px; max-width: 720px; }
   .rhpd-actions { display: inline-flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
 
@@ -328,7 +331,7 @@ export const DOCS_STYLES = `
   .rhpd-help .rhp-btn-primary { background: #fff; color: var(--rhw-ink) !important; }
   .rhpd-help .rhp-btn-primary:hover { background: oklch(0.85 0.18 145); }
 
-  .rhpd-toc { position: sticky; top: 78px; max-height: calc(100vh - 88px); overflow-y: auto; }
+  .rhpd-toc { position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow-y: auto; }
   .rhpd-toc-h {
     font-size: 11px; letter-spacing: 0.14em;
     text-transform: uppercase;

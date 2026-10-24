@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
-import { Navbar, Footer } from '../components/chrome';
+import { Footer } from '../components/chrome';
+import { HomeNav, HOME_CHROME_STYLES } from '../components/homeChrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT, useLocale, useLocalePath } from '../i18n/context';
 import { GROUP_LABEL, GROUP_ORDER, PAGES, REDIRECTS } from '../docs/registry';
@@ -238,7 +239,10 @@ export default function DocsPage() {
   return (
     <div className="rhp-root rhpd-root">
       <style>{DOCS_STYLES}</style>
-      <Navbar active="docs" />
+      <div className="rhn-root">
+        <style>{HOME_CHROME_STYLES}</style>
+        <HomeNav source="docs" />
+      </div>
 
       <div className="rhpd-shell">
         <Sidebar currentPath={path} />
