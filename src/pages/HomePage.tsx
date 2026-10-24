@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { HomeNav, HomeFooter, HOME_CHROME_STYLES } from '../components/homeChrome';
+import { HomeNav, HomeFooter, HOME_CHROME_STYLES, SHOWCASE_BOARD_URL } from '../components/homeChrome';
 import { useT } from '../i18n/context';
 import '../components/rq-blob.js';
 
@@ -325,8 +325,7 @@ export default function HomePage() {
         <PixelBlob />
         <div className="rhn-hero-meta">
           <span />
-          {/* Boards are never locale-prefixed (see BoardPage.LocalizedBoardRedirect). */}
-          <a href="/arrr">{t.work} ↗</a>
+          <a href={SHOWCASE_BOARD_URL}>{t.work} ↗</a>
         </div>
         <div className="rhn-wordmark" aria-label="RunHQ">RunHQ</div>
       </div>

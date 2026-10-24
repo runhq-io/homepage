@@ -33,6 +33,15 @@ const HOME_CHROME_T = {
 } as const;
 
 /**
+ * The public board the marketing pages point to as a working example: ARRR, a
+ * voxel pirate game whose players file and vote on tickets that agents build.
+ * Served by the `/:slug` board route (BoardPage). Boards are never
+ * locale-prefixed (see BoardPage.LocalizedBoardRedirect), so don't wrap it in
+ * useLocalePath.
+ */
+export const SHOWCASE_BOARD_URL = '/arrr';
+
+/**
  * `source` names the page for telemetry. `brand` shows the RunHQ wordmark as a
  * home link; the homepage leaves it off because its hero is the wordmark.
  */

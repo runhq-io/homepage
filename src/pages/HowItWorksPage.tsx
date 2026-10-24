@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { HomeNav, HomeFooter, HOME_CHROME_STYLES } from '../components/homeChrome';
+import { HomeNav, HomeFooter, HOME_CHROME_STYLES, SHOWCASE_BOARD_URL } from '../components/homeChrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT, useLocalePath } from '../i18n/context';
 
@@ -223,8 +223,7 @@ export default function HowItWorksPage() {
         <h2 className="rhh-cta-h">{t.ctaH}</h2>
         <p className="rhh-cta-d">{t.ctaDeck}</p>
         <div className="rhh-cta-row">
-          {/* Boards are never locale-prefixed (see BoardPage.LocalizedBoardRedirect). */}
-          <a className="rhh-btn" href="/arrr">{t.ctaBoard}</a>
+          <a className="rhh-btn" href={SHOWCASE_BOARD_URL}>{t.ctaBoard}</a>
           <TalkToUsButton className="rhh-btn rhh-btn-ghost" cta="how_it_works_cta">{t.ctaTalk}</TalkToUsButton>
           <Link className="rhh-cta-link" to={lp('/docs')}>{t.ctaDocs} →</Link>
         </div>
