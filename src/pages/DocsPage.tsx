@@ -2514,7 +2514,7 @@ export default function DocsPage() {
       <style>{DOCS_STYLES}</style>
       <div className="rhn-root">
         <style>{HOME_CHROME_STYLES}</style>
-        <HomeNav source="docs" brand />
+        <HomeNav source="docs" />
       </div>
 
       <div className="rhpd-shell">

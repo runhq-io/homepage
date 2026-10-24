@@ -155,7 +155,7 @@ export default function HowItWorksPage() {
   return (
     <div className="rhn-root">
       <style>{HOME_CHROME_STYLES + HIW_STYLES}</style>
-      <HomeNav source="how_it_works" brand />
+      <HomeNav source="how_it_works" />
 
       <header className="rhh-hero">
         <p className="rhh-eyebrow">{t.eyebrow}</p>

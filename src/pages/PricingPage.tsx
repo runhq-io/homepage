@@ -353,7 +353,7 @@ export default function PricingPage() {
       <style>{PRICING_STYLES}</style>
       <div className="rhn-root">
         <style>{HOME_CHROME_STYLES}</style>
-        <HomeNav source="pricing" brand />
+        <HomeNav source="pricing" />
       </div>
 
       <section className="rhp-hero">
