@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react';
-import { Footer, Wordmark, LOGOS, SIGNUP_URL } from '../components/chrome';
+import { Footer, CustomerLogo, LOGOS, SIGNUP_URL } from '../components/chrome';
 import { HomeNav, HOME_CHROME_STYLES } from '../components/homeChrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
 import { trackSignupClick } from '../telemetry';
@@ -438,7 +438,7 @@ export default function PricingPage() {
       <section className="rhpx-trust">
         <div className="rhpx-trust-h">{t.trustH}</div>
         <div className="rhpx-trust-row">
-          {LOGOS.map((name) => <Wordmark key={name} name={name} size={18} color="var(--rhw-ink-mute)" />)}
+          {LOGOS.map((logo) => <CustomerLogo key={logo.name} logo={logo} height={22} />)}
         </div>
       </section>
 
@@ -726,7 +726,7 @@ const PRICING_STYLES = `
   }
   .rhpx-trust-row {
     display: flex; flex-wrap: wrap;
-    justify-content: center;
+    align-items: center; justify-content: center;
     gap: 32px 40px;
     opacity: 0.85;
   }
