@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { HomeNav, HomeFooter, HOME_CHROME_STYLES, SHOWCASE_BOARD_URL } from '../components/homeChrome';
-import { LOGOS } from '../components/chrome';
+import { CustomerLogo, LOGOS } from '../components/chrome';
 import { useT } from '../i18n/context';
 import '../components/rq-blob.js';
 
@@ -336,7 +336,7 @@ export default function HomePage() {
       <section className="rhn-customers" aria-label={t.customersH}>
         <span className="rhn-customers-h">{t.customersH}</span>
         <ul className="rhn-customers-list">
-          {LOGOS.map((name) => <li key={name}>{name}</li>)}
+          {LOGOS.map((logo) => <li key={logo.name}><CustomerLogo logo={logo} height={30} /></li>)}
         </ul>
       </section>
 
@@ -397,7 +397,7 @@ const HOME_STYLES = `
   .rhn-customers {
     border-top: 1px solid #a9a79f;
     padding: 40px var(--rhn-pad);
-    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
     gap: 16px 48px;
   }
   .rhn-customers-h {
@@ -405,12 +405,9 @@ const HOME_STYLES = `
   }
   .rhn-customers-list {
     margin: 0; padding: 0; list-style: none;
-    display: flex; flex-wrap: wrap; gap: 12px 56px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 20px 56px;
   }
-  .rhn-customers-list li {
-    font: 500 clamp(20px, 2vw, 28px)/1 var(--rhn-sans);
-    letter-spacing: -.03em; white-space: nowrap;
-  }
+  .rhn-customers-list li { display: flex; align-items: center; }
 
   /* EVOLUTION */
   .rhn-evo {

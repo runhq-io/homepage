@@ -196,16 +196,24 @@ export const MercuryMark = ({ size = 24 }: { size?: number }) => (
   </span>
 );
 
-export const Wordmark = ({ name, size = 14, color = 'currentColor' }: { name: string; size?: number; color?: string }) => (
-  <span style={{
-    fontFamily: 'Geist, "Inter Tight", system-ui, sans-serif',
-    fontWeight: 600,
-    fontSize: size,
-    letterSpacing: '-0.02em',
-    color,
-    opacity: 0.78,
-    whiteSpace: 'nowrap',
-  }}>{name}</span>
+// Customer logos render as single-colour silhouettes (filter: brightness(0)) so
+// the strip reads as one row whatever each brand's palette is — Staircase's
+// logo is white-on-transparent and would otherwise vanish on a light page.
+// `scale` evens out optical weight: wide, thin marks need more height.
+export const CustomerLogo = ({ logo, height = 24 }: { logo: Logo; height?: number }) => (
+  <img
+    src={logo.src}
+    alt={logo.name}
+    title={logo.name}
+    loading="lazy"
+    style={{
+      height: Math.round(height * logo.scale),
+      width: 'auto',
+      display: 'block',
+      filter: 'brightness(0)',
+      opacity: 0.82,
+    }}
+  />
 );
 
 export const Avatar = ({ name, size = 28, bg }: { name: string; size?: number; bg?: string }) => {
@@ -289,8 +297,14 @@ export const AgentIcon = ({ agent, size = 14 }: { agent: string; size?: number }
   );
 };
 
-export const LOGOS = [
-  'jeju.com', 'smartbid.ai', 'socialrealtr.com',
+export type Logo = { name: string; src: string; scale: number };
+
+export const LOGOS: Logo[] = [
+  { name: 'jeju.com',           src: '/images/customers/jeju.png',              scale: 1 },
+  { name: 'indie.fun',          src: '/images/customers/indie-fun.png',         scale: 0.85 },
+  { name: 'Social Realtr',      src: '/images/customers/socialrealtr.png',      scale: 0.7 },
+  { name: 'SmartBid',           src: '/images/customers/smartbid.svg',          scale: 1.2 },
+  { name: 'Staircase Studios',  src: '/images/customers/staircase-studios.png', scale: 1.1 },
 ];
 
 type NavActive = 'products' | 'pricing' | 'docs' | null;
