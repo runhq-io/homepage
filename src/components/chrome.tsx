@@ -13,7 +13,7 @@ const NAV_T = {
     pricing: 'Pricing',
     docs: 'Docs',
     signIn: 'Sign in',
-    startFree: 'Talk to us',
+    startFree: 'Contact sales',
     langMenuAria: 'Change language',
   },
   ko: {
@@ -21,7 +21,7 @@ const NAV_T = {
     pricing: '요금제',
     docs: '문서',
     signIn: '로그인',
-    startFree: '문의하기',
+    startFree: '영업팀 문의',
     langMenuAria: '언어 변경',
   },
 } as const;
