@@ -100,13 +100,32 @@ const ROW_H = 64;
 const EASE = 'cubic-bezier(.65,0,.35,1)';
 const pos = (v: number) => `${(((v - 30) / 60) * 100).toFixed(1)}%`;
 
+// Visitors who ask for reduced motion get one still frame of each animation.
+function usePrefersReducedMotion() {
+  const query = '(prefers-reduced-motion: reduce)';
+  const [reduce, setReduce] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setReduce(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return reduce;
+}
+
+// The still frame: the last generation judged, with kept and pruned variants.
+const STILL_STEP = SEQUENCE.findIndex(([g, p]) => g === 3 && p === 'judge');
+
 function useGenerations() {
-  const [step, setStep] = useState(0);
+  const reduce = usePrefersReducedMotion();
+  const [playStep, setStep] = useState(0);
   const [, setTick] = useState(0);
   const growT0 = useRef(0);
+  const step = reduce ? STILL_STEP : playStep;
   const [gi, gp] = SEQUENCE[step];
 
   useEffect(() => {
+    if (reduce) return;
     const t = setTimeout(() => setStep((s) => (s + 1) % SEQUENCE.length), PHASE_MS[gp]);
     if (gp !== 'grow') return () => clearTimeout(t);
     growT0.current = performance.now();
@@ -117,7 +136,7 @@ function useGenerations() {
     };
     raf = requestAnimationFrame(tick);
     return () => { clearTimeout(t); cancelAnimationFrame(raf); };
-  }, [step, gp]);
+  }, [reduce, step, gp]);
 
   const judged = gp === 'judge' || gp === 'prune' || gp === 'promote';
   const childRow = (v: (typeof VARIANTS)[number]) => (v.g === 0 ? v.i : v.lin * 3 + 1 + v.i);
@@ -261,11 +280,13 @@ function SwapSlot({ words, frame, delay }: { words: readonly string[]; frame: nu
 
 function Closing() {
   const t = useT(HOME_T);
+  const reduce = usePrefersReducedMotion();
   const [frame, setFrame] = useState(0);
   useEffect(() => {
+    if (reduce) { setFrame(0); return; }
     const id = setInterval(() => setFrame((f) => (f ? 0 : 1)), 4800);
     return () => clearInterval(id);
-  }, []);
+  }, [reduce]);
   const line = (l: SwapLine, delay: number, className: string) => (
     <span className={className}>
       {l.pre && <span className="rhn-swap-pre">{l.pre}</span>}
@@ -493,6 +514,10 @@ const HOME_STYLES = `
     border-top: 1px solid #2a2a27;
   }
   .rhn-foot > div { display: flex; gap: 28px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rhn-root *, .rhn-root *::before, .rhn-root *::after { transition: none !important; }
+  }
 
   @media (max-width: 720px) {
     .rhn-root { --rhn-pad: 24px; }
