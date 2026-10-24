@@ -4,149 +4,87 @@ import { TalkToUsButton } from '../components/TalkToUsModal';
 import { useT, useLocalePath } from '../i18n/context';
 
 /**
- * /how-it-works: the RunHQ loop in three stages. Build (ticket to deploy), Run
- * (the live-product tools that hand work back to the agents) and Evolve
- * (variations measured against a goal), then where people step in.
+ * /how-it-works: follows one change from a user's report to a shipped fix,
+ * then how the product keeps improving, then who does what.
  *
- * Copy is drawn from the site's existing product copy. Same rules as the
- * homepage: no em dashes, the product is live, and only claims true today.
+ * Plain language on purpose: no product jargon (worktrees, audits,
+ * generations). Same copy rules as the homepage: no em dashes, the product is
+ * live, and only claims true today.
  */
 const HIW_T = {
   en: {
     eyebrow: 'How it works',
-    h1A: 'One loop that builds, runs and ',
-    h1B: 'evolves your product.',
-    lede: 'RunHQ is one workspace where AI agents build your product, run it after launch and keep improving it. You decide what matters and approve what ships.',
+    h1A: 'You decide what to build. ',
+    h1B: 'Agents do the rest.',
+    lede: 'RunHQ connects your users, AI coding agents and you in one loop. Users tell you what is wrong, agents fix it, you approve, and it ships. Here is one change, start to finish.',
 
-    loop: [
-      { k: 'Build', b: 'Agents turn tickets into shipped changes.' },
-      { k: 'Run', b: 'The live product turns what users hit into tickets.' },
-      { k: 'Evolve', b: 'Variations are measured and the best survive.' },
+    flowH: 'Follow one change',
+    flow: [
+      { who: 'User', t: 'A user hits a problem.', b: 'Jen can’t pay on Safari, so she reports it from the chat widget in your app. It could just as well come from an email, an error alert or a teammate.' },
+      { who: 'RunHQ', t: 'It becomes a ticket.', b: 'Her message, the page she was on and any errors are attached automatically, and an AI agent (Claude Code or Codex) is assigned.' },
+      { who: 'Agent', t: 'An agent writes the fix.', b: 'It works on its own copy of your code, so nothing live is touched. Several agents can work at once.' },
+      { who: 'RunHQ', t: 'It’s checked and previewed.', b: 'The code is reviewed automatically and any problems go back to the agent. You get a working preview to click through.' },
+      { who: 'You', you: true, t: 'You approve.', b: 'Looks right? Approve it. Not quite? Send it back with a comment.' },
+      { who: 'RunHQ', t: 'It ships, and Jen hears back.', b: 'RunHQ merges and deploys the fix, then replies to Jen in the widget.' },
     ],
 
-    stages: [
-      {
-        k: 'Build',
-        h: 'From ticket to production',
-        deck: 'Every change follows the same path. You step in only where judgment matters.',
-        rows: [
-          { t: 'Write a ticket', b: 'Type it, dictate it, or let it arrive from the widget, the error tracker or a failed deploy. Attach screenshots and logs; agents use them.' },
-          { t: 'An agent takes it', b: 'Claude Code or Codex works it in its own worktree, branch and terminal. Run as many in parallel as you like.' },
-          { t: 'Try it before it merges', b: 'Every worktree has its own preview of your app, so you click through the change instead of imagining it from a diff.' },
-          { t: 'Audit and review', b: 'The pull request is audited automatically and findings go back to the agent that wrote it. You review the diff when it is clean.' },
-          { t: 'Merge and deploy', b: 'Merge with one shortcut. Each deploy shows which tickets it carries, and a failed deploy offers a ticket to fix itself.' },
-        ],
-      },
-      {
-        k: 'Run',
-        h: 'After it ships, it keeps listening',
-        deck: 'The tools that run a live product sit next to the agents, so whatever users run into becomes work without being copied anywhere.',
-        rows: [
-          { t: 'CRM and inbox', b: 'Email, SMS, WhatsApp, calls and a help centre on one timeline per person. A support agent answers from your knowledge base.', f: 'Requests worth building' },
-          { t: 'Widget', b: 'A chat and feedback board inside your app. Users report, vote and follow along without an account.', f: 'Bug reports with the page and user attached' },
-          { t: 'Errors', b: 'Errors from your app and server, grouped by cause.', f: 'A fix ticket in one click, with an agent on it' },
-          { t: 'Analytics', b: 'Funnels for what first-time users actually do.', f: 'The step where people drop off' },
-        ],
-      },
-      {
-        k: 'Evolve',
-        beta: true,
-        h: 'Evolution, automated',
-        deck: 'Instead of guessing which version is best, RunHQ tries several and keeps what works.',
-        rows: [
-          { t: 'Set a goal', b: 'Pick the number that matters, like checkout conversion, measured in Mixpanel, PostHog or your own data.' },
-          { t: 'Build variations', b: 'Agents build them as ordinary jobs, through the same preview, audit and review.' },
-          { t: 'Measure', b: 'Evolve tracks which variations are live and assesses each one against the goal.' },
-          { t: 'Keep the best', b: 'Losers are pruned. Winners seed the jobs that build the next generation.' },
-        ],
-      },
+    moreH: 'Then it keeps improving',
+    more: [
+      { t: 'Problems find you.', b: 'Errors, support messages and the steps where users drop off become tickets on their own.' },
+      { t: 'It tests better versions.', beta: true, b: 'Set a goal, like more completed checkouts. Agents build a few versions, RunHQ measures them with your analytics, and the best one stays.' },
+      { t: 'The loop repeats.', b: 'Every release brings new feedback, and any of it can become the next fix.' },
     ],
     beta: 'beta',
-    handsOff: 'Hands the agents',
 
-    youH: 'Where you come in',
-    you: [
-      { t: 'What to build', b: 'Write and prioritise tickets, or set a goal for Evolve.' },
-      { t: 'Whether it is right', b: 'Try the preview, read the diff, approve or send it back.' },
-      { t: 'When it ships', b: 'Merge and deploy.' },
-    ],
-    youNote: 'Everything else, the agents handle.',
+    whoH: 'Who does what',
+    you: 'You',
+    youList: ['Decide what matters', 'Try the preview', 'Approve or send it back'],
+    them: 'RunHQ and its agents',
+    themList: ['Collect feedback and errors', 'Write and check the code', 'Ship it and reply to users'],
 
-    ctaH: 'See it on a real project.',
-    ctaDeck: 'Every RunHQ project can have a public board with its real tickets, agent work and deploys.',
-    ctaBoard: 'Open a live board ↗',
+    ctaH: 'See it running.',
+    ctaDeck: 'ARRR’s board is public: every ticket, agent and release, live.',
+    ctaBoard: 'Open the ARRR board ↗',
     ctaTalk: 'Contact sales',
     ctaDocs: 'Read the docs',
   },
   ko: {
     eyebrow: '작동 방식',
-    h1A: '제품을 만들고, 운영하고, ',
-    h1B: '진화시키는 하나의 루프.',
-    lede: 'RunHQ는 AI 에이전트가 제품을 만들고, 출시 후 운영하고, 계속 개선하는 하나의 워크스페이스입니다. 무엇이 중요한지 정하고 무엇을 배포할지 승인하는 건 당신입니다.',
+    h1A: '무엇을 만들지는 당신이 정합니다. ',
+    h1B: '나머지는 에이전트가 합니다.',
+    lede: 'RunHQ는 사용자, AI 코딩 에이전트, 그리고 당신을 하나의 루프로 연결합니다. 사용자가 문제를 알리면 에이전트가 고치고, 당신이 승인하면 배포됩니다. 변경 하나가 처음부터 끝까지 어떻게 가는지 보세요.',
 
-    loop: [
-      { k: '만들기', b: '에이전트가 티켓을 배포된 변경으로 바꿉니다.' },
-      { k: '운영', b: '라이브 제품이 사용자가 겪은 일을 티켓으로 바꿉니다.' },
-      { k: '진화', b: '변형을 측정하고 가장 좋은 것만 남깁니다.' },
+    flowH: '변경 하나 따라가기',
+    flow: [
+      { who: '사용자', t: '사용자가 문제를 겪습니다.', b: 'Jen이 Safari에서 결제를 못 해서 앱 안의 채팅 위젯으로 알립니다. 이메일, 에러 알림, 팀원에게서 들어올 수도 있습니다.' },
+      { who: 'RunHQ', t: '티켓이 됩니다.', b: '메시지, 보던 페이지, 에러가 자동으로 붙고, AI 에이전트(Claude Code 또는 Codex)가 배정됩니다.' },
+      { who: '에이전트', t: '에이전트가 수정합니다.', b: '코드의 별도 사본에서 작업하므로 라이브 서비스는 건드리지 않습니다. 여러 에이전트가 동시에 일할 수 있습니다.' },
+      { who: 'RunHQ', t: '검사하고 미리 봅니다.', b: '코드는 자동으로 검토되고 문제는 에이전트에게 돌아갑니다. 당신은 직접 눌러 볼 수 있는 프리뷰를 받습니다.' },
+      { who: '당신', you: true, t: '당신이 승인합니다.', b: '괜찮으면 승인하고, 아니면 코멘트와 함께 돌려보내세요.' },
+      { who: 'RunHQ', t: '배포되고, Jen이 답을 받습니다.', b: 'RunHQ가 수정을 머지하고 배포한 뒤 위젯으로 Jen에게 답장합니다.' },
     ],
 
-    stages: [
-      {
-        k: '만들기',
-        h: '티켓에서 프로덕션까지',
-        deck: '모든 변경은 같은 길을 갑니다. 당신은 판단이 필요한 곳에만 개입하면 됩니다.',
-        rows: [
-          { t: '티켓 작성', b: '직접 쓰거나, 받아쓰거나, 위젯, 에러 추적, 실패한 배포에서 들어오게 하세요. 스크린샷과 로그를 붙이면 에이전트가 활용합니다.' },
-          { t: '에이전트가 맡음', b: 'Claude Code나 Codex가 자체 워크트리, 브랜치, 터미널에서 작업합니다. 원하는 만큼 병렬로 돌리세요.' },
-          { t: '머지 전에 직접 써 보기', b: '워크트리마다 앱 프리뷰가 있어서, diff로 상상하는 대신 변경 사항을 직접 클릭해 볼 수 있습니다.' },
-          { t: '감사와 리뷰', b: '풀 리퀘스트는 자동으로 감사되고, 지적 사항은 작성한 에이전트에게 돌아갑니다. 깔끔해지면 diff를 리뷰하세요.' },
-          { t: '머지와 배포', b: '단축키 하나로 머지하세요. 배포마다 어떤 티켓이 실렸는지 보이고, 실패한 배포는 스스로 고칠 티켓을 제안합니다.' },
-        ],
-      },
-      {
-        k: '운영',
-        h: '배포 후에도 계속 듣습니다',
-        deck: '라이브 제품을 운영하는 도구가 에이전트 바로 옆에 있어서, 사용자가 겪은 일이 어디에도 옮겨 적지 않고 바로 작업이 됩니다.',
-        rows: [
-          { t: 'CRM과 인박스', b: '이메일, SMS, WhatsApp, 전화, 헬프 센터를 사람별 타임라인 하나로. 지원 에이전트가 지식 베이스로 답합니다.', f: '만들 가치가 있는 요청' },
-          { t: '위젯', b: '앱 안의 채팅과 피드백 보드. 사용자는 계정 없이 신고하고, 투표하고, 진행 상황을 지켜봅니다.', f: '페이지와 사용자 정보가 붙은 버그 리포트' },
-          { t: '에러', b: '앱과 서버의 에러를 원인별로 묶어 보여줍니다.', f: '클릭 한 번으로 수정 티켓과 담당 에이전트' },
-          { t: '애널리틱스', b: '처음 온 사용자가 실제로 무엇을 하는지 보여주는 퍼널.', f: '사람들이 떠나는 단계' },
-        ],
-      },
-      {
-        k: '진화',
-        beta: true,
-        h: '진화, 자동으로',
-        deck: '어떤 버전이 가장 좋을지 추측하는 대신, RunHQ가 여러 버전을 시도하고 효과 있는 것을 남깁니다.',
-        rows: [
-          { t: '목표 정하기', b: '결제 전환율처럼 중요한 숫자를 고르세요. Mixpanel, PostHog, 또는 자체 데이터로 측정합니다.' },
-          { t: '변형 만들기', b: '에이전트가 일반 작업으로 만들고, 같은 프리뷰, 감사, 리뷰를 거칩니다.' },
-          { t: '측정', b: 'Evolve가 어떤 변형이 라이브인지 추적하고 각각을 목표에 비춰 평가합니다.' },
-          { t: '최고만 남기기', b: '진 변형은 정리되고, 이긴 변형이 다음 세대를 만드는 작업의 출발점이 됩니다.' },
-        ],
-      },
+    moreH: '그리고 계속 나아집니다',
+    more: [
+      { t: '문제가 먼저 찾아옵니다.', b: '에러, 고객 문의, 사용자가 이탈하는 단계가 저절로 티켓이 됩니다.' },
+      { t: '더 나은 버전을 시험합니다.', beta: true, b: '결제 완료 늘리기 같은 목표를 정하세요. 에이전트가 몇 가지 버전을 만들고, RunHQ가 애널리틱스로 측정해 가장 좋은 것을 남깁니다.' },
+      { t: '루프가 반복됩니다.', b: '배포마다 새 피드백이 생기고, 그중 무엇이든 다음 수정이 될 수 있습니다.' },
     ],
     beta: '베타',
-    handsOff: '에이전트에게 넘기는 것',
 
-    youH: '당신이 개입하는 곳',
-    you: [
-      { t: '무엇을 만들지', b: '티켓을 쓰고 우선순위를 정하거나, Evolve 목표를 정합니다.' },
-      { t: '그것이 맞는지', b: '프리뷰를 써 보고, diff를 읽고, 승인하거나 돌려보냅니다.' },
-      { t: '언제 배포할지', b: '머지하고 배포합니다.' },
-    ],
-    youNote: '나머지는 에이전트가 합니다.',
+    whoH: '누가 무엇을 하나',
+    you: '당신',
+    youList: ['무엇이 중요한지 정하기', '프리뷰 써 보기', '승인하거나 돌려보내기'],
+    them: 'RunHQ와 에이전트',
+    themList: ['피드백과 에러 모으기', '코드 작성하고 검사하기', '배포하고 사용자에게 답하기'],
 
-    ctaH: '실제 프로젝트에서 확인하세요.',
-    ctaDeck: 'RunHQ 프로젝트는 실제 티켓, 에이전트 작업, 배포가 담긴 공개 보드를 가질 수 있습니다.',
-    ctaBoard: '라이브 보드 열기 ↗',
+    ctaH: '실제로 돌아가는 모습을 보세요.',
+    ctaDeck: 'ARRR의 보드는 공개되어 있습니다. 모든 티켓, 에이전트, 배포를 실시간으로.',
+    ctaBoard: 'ARRR 보드 열기 ↗',
     ctaTalk: '영업팀 문의',
     ctaDocs: '문서 읽기',
   },
 } as const;
-
-const num = (i: number) => String(i + 1).padStart(2, '0');
 
 export default function HowItWorksPage() {
   const t = useT(HIW_T);
@@ -157,67 +95,57 @@ export default function HowItWorksPage() {
       <style>{HOME_CHROME_STYLES + HIW_STYLES}</style>
       <HomeNav source="how_it_works" />
 
-      <header className="rhh-hero">
-        <p className="rhh-eyebrow">{t.eyebrow}</p>
-        <h1 className="rhh-h1">{t.h1A}<em>{t.h1B}</em></h1>
-        <p className="rhh-lede">{t.lede}</p>
-        <ol className="rhh-loop">
-          {t.loop.map((s, i) => (
-            <li key={s.k}>
-              <span className="rhh-num">{num(i)}</span>
-              <span className="rhh-loop-k">{s.k}</span>
-              <span className="rhh-loop-b">{s.b}</span>
-            </li>
-          ))}
-        </ol>
-      </header>
+      <main className="rhh-col">
+        <header>
+          <p className="rhh-eyebrow">{t.eyebrow}</p>
+          <h1 className="rhh-h1">{t.h1A}<em>{t.h1B}</em></h1>
+          <p className="rhh-lede">{t.lede}</p>
+        </header>
 
-      {t.stages.map((stage, si) => (
-        <section className="rhh-sec" key={stage.k} aria-labelledby={`rhh-s${si}`}>
-          <div className="rhh-wrap">
-          <div className="rhh-head">
-            <p className="rhh-eyebrow">
-              {num(si)} · {stage.k}
-              {'beta' in stage && <span className="rhh-beta">{t.beta}</span>}
-            </p>
-            <h2 id={`rhh-s${si}`} className="rhh-h2">{stage.h}</h2>
-            <p className="rhh-deck">{stage.deck}</p>
-          </div>
-          <ol className="rhh-rows">
-            {stage.rows.map((r) => (
-              <li key={r.t}>
-                <h3 className="rhh-row-t">{r.t}</h3>
-                <p className="rhh-row-b">
-                  {r.b}
-                  {'f' in r && (
-                    <span className="rhh-row-f">
-                      <span className="rhh-sr">{t.handsOff}: </span>→ {r.f}
-                    </span>
-                  )}
-                </p>
+        <section aria-labelledby="rhh-flow">
+          <h2 id="rhh-flow" className="rhh-h2">{t.flowH}</h2>
+          <ol className="rhh-flow">
+            {t.flow.map((s) => (
+              <li key={s.t} className={'you' in s ? 'rhh-flow-you' : undefined}>
+                <span className="rhh-who">{s.who}</span>
+                <div>
+                  <h3 className="rhh-t">{s.t}</h3>
+                  <p className="rhh-b">{s.b}</p>
+                </div>
               </li>
             ))}
           </ol>
+        </section>
+
+        <section aria-labelledby="rhh-more">
+          <h2 id="rhh-more" className="rhh-h2">{t.moreH}</h2>
+          <ul className="rhh-more">
+            {t.more.map((m) => (
+              <li key={m.t}>
+                <h3 className="rhh-t">
+                  {m.t}
+                  {'beta' in m && <span className="rhh-beta">{t.beta}</span>}
+                </h3>
+                <p className="rhh-b">{m.b}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section aria-labelledby="rhh-who">
+          <h2 id="rhh-who" className="rhh-h2">{t.whoH}</h2>
+          <div className="rhh-who-grid">
+            <div>
+              <h3 className="rhh-who-h">{t.you}</h3>
+              <ul>{t.youList.map((x) => <li key={x}>{x}</li>)}</ul>
+            </div>
+            <div>
+              <h3 className="rhh-who-h">{t.them}</h3>
+              <ul>{t.themList.map((x) => <li key={x}>{x}</li>)}</ul>
+            </div>
           </div>
         </section>
-      ))}
-
-      <section className="rhh-sec" aria-labelledby="rhh-you">
-        <div className="rhh-wrap">
-        <div className="rhh-head">
-          <h2 id="rhh-you" className="rhh-h2">{t.youH}</h2>
-          <p className="rhh-deck">{t.youNote}</p>
-        </div>
-        <ol className="rhh-rows">
-          {t.you.map((r) => (
-            <li key={r.t}>
-              <h3 className="rhh-row-t">{r.t}</h3>
-              <p className="rhh-row-b">{r.b}</p>
-            </li>
-          ))}
-        </ol>
-        </div>
-      </section>
+      </main>
 
       <section className="rhh-cta">
         <h2 className="rhh-cta-h">{t.ctaH}</h2>
@@ -235,77 +163,64 @@ export default function HowItWorksPage() {
 }
 
 const HIW_STYLES = `
-  .rhh-hero { max-width: 1040px; margin: 0 auto; padding: clamp(56px, 10vh, 120px) var(--rhn-pad) 128px; }
+  .rhh-col { max-width: 680px; margin: 0 auto; padding: 40px var(--rhn-pad) 96px; }
+  .rhh-col section { margin-top: 72px; }
+  .rhh-col ol, .rhh-col ul { list-style: none; margin: 0; padding: 0; }
+
   .rhh-eyebrow {
-    display: flex; align-items: center; gap: 10px;
-    margin: 0 0 20px;
+    margin: 0 0 16px;
     font: 400 12px var(--rhn-mono); letter-spacing: .08em; text-transform: uppercase;
     color: var(--rhn-mute);
   }
   .rhh-h1 {
     margin: 0;
-    font: 400 clamp(52px, 6.4vw, 104px)/0.98 var(--rhn-serif);
+    font: 400 clamp(44px, 5.4vw, 68px)/1 var(--rhn-serif);
     letter-spacing: -.03em; text-wrap: balance;
   }
-  .rhh-lede {
-    margin: 32px 0 0; max-width: 620px;
-    font: 400 19px/1.55 var(--rhn-sans); color: var(--rhn-mute); text-wrap: pretty;
-  }
-  .rhh-loop, .rhh-rows { list-style: none; margin: 0; padding: 0; }
-  .rhh-num { font: 400 12px var(--rhn-mono); color: var(--rhn-mute); }
+  .rhh-lede { margin: 24px 0 0; font: 400 18px/1.55 var(--rhn-sans); color: var(--rhn-mute); text-wrap: pretty; }
+  .rhh-h2 { margin: 0 0 12px; font: 400 34px/1.1 var(--rhn-serif); letter-spacing: -.02em; }
+  .rhh-t { margin: 0; font: 500 17px/1.4 var(--rhn-sans); display: flex; align-items: center; gap: 10px; }
+  .rhh-b { margin: 4px 0 0; font: 400 15px/1.55 var(--rhn-sans); color: var(--rhn-mute); text-wrap: pretty; }
 
-  .rhh-loop {
-    display: grid; grid-template-columns: repeat(3, 1fr);
-    margin-top: 80px; border-top: 1px solid var(--rhn-ink);
+  /* The flow: who acts on the left, a rail with a dot per step on the right. */
+  .rhh-flow > li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 20px; padding: 16px 0; }
+  .rhh-flow > li > div { position: relative; padding-left: 28px; }
+  .rhh-flow > li > div::before {
+    content: ''; position: absolute; left: 0; top: 7px;
+    width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
+    background: var(--rhn-bg); border: 1.5px solid var(--rhn-ink);
   }
-  .rhh-loop > li { display: flex; flex-direction: column; gap: 10px; padding: 24px 28px 0 0; }
-  .rhh-loop > li + li { padding-left: 28px; border-left: 1px solid var(--rhn-rule); }
-  .rhh-loop-k { font: 400 40px/1 var(--rhn-serif); letter-spacing: -.02em; }
-  .rhh-loop-b { font: 400 15px/1.5 var(--rhn-sans); color: var(--rhn-mute); }
+  .rhh-flow > li > div::after {
+    content: ''; position: absolute; left: 4px; top: 20px; bottom: -28px;
+    border-left: 1px solid var(--rhn-rule);
+  }
+  .rhh-flow > li:last-child > div::after { display: none; }
+  .rhh-flow-you > div::before { background: var(--rhn-ink) !important; }
+  .rhh-who {
+    padding-top: 3px; text-align: right;
+    font: 400 12px var(--rhn-mono); letter-spacing: .04em; color: var(--rhn-mute);
+  }
+  .rhh-flow-you .rhh-who { color: var(--rhn-ink); }
 
-  .rhh-sec { border-top: 1px solid var(--rhn-rule); padding: 112px var(--rhn-pad); }
-  .rhh-wrap {
-    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 64px;
-    max-width: 1040px; margin: 0 auto;
-  }
-  .rhh-head { align-self: start; position: sticky; top: 40px; }
-  .rhh-h2 {
-    margin: 0;
-    font: 400 clamp(36px, 3.8vw, 52px)/1.02 var(--rhn-serif);
-    letter-spacing: -.03em; text-wrap: balance;
-  }
-  .rhh-deck { margin: 20px 0 0; font: 400 16px/1.55 var(--rhn-sans); color: var(--rhn-mute); text-wrap: pretty; }
+  .rhh-more { border-top: 1px solid var(--rhn-ink); }
+  .rhh-more > li { padding: 16px 0; border-bottom: 1px solid #b9b7af; }
   .rhh-beta {
     padding: 1px 8px; border: 1px solid var(--rhn-mute); border-radius: 999px;
-    text-transform: none; letter-spacing: .02em;
+    font: 400 11px var(--rhn-mono); color: var(--rhn-mute);
   }
 
-  .rhh-rows { border-top: 1px solid var(--rhn-ink); counter-reset: rhh; }
-  .rhh-rows > li {
-    counter-increment: rhh;
-    display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: 16px;
-    padding: 24px 0; border-bottom: 1px solid #b9b7af;
-  }
-  .rhh-rows > li::before {
-    content: counter(rhh, decimal-leading-zero);
-    grid-row: span 2; padding-top: 4px;
-    font: 400 12px var(--rhn-mono); color: var(--rhn-mute);
-  }
-  .rhh-row-t { margin: 0 0 6px; font: 500 17px/1.35 var(--rhn-sans); }
-  .rhh-row-b { margin: 0; font: 400 15px/1.55 var(--rhn-sans); color: var(--rhn-mute); text-wrap: pretty; }
-  .rhh-row-f { display: block; margin-top: 10px; color: var(--rhn-ink); }
-  .rhh-sr {
-    position: absolute; width: 1px; height: 1px; overflow: hidden;
-    clip: rect(0 0 0 0); white-space: nowrap;
-  }
+  .rhh-who-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .rhh-who-grid > div { border-top: 1px solid var(--rhn-ink); padding-top: 14px; }
+  .rhh-who-h { margin: 0 0 4px; font: 400 12px var(--rhn-mono); letter-spacing: .08em; text-transform: uppercase; }
+  .rhh-who-grid li { padding: 10px 0; font: 400 15px/1.5 var(--rhn-sans); border-bottom: 1px solid #b9b7af; }
 
   .rhh-cta {
     background: var(--rhn-ink); color: #e8e6df;
-    padding: 140px var(--rhn-pad); text-align: center;
+    padding: 88px var(--rhn-pad); text-align: center;
     display: flex; flex-direction: column; align-items: center;
   }
-  .rhh-cta-h { margin: 0; font: 400 clamp(40px, 5.2vw, 80px)/1.02 var(--rhn-serif); letter-spacing: -.03em; }
-  .rhh-cta-d { margin: 20px 0 40px; max-width: 520px; font: 400 17px/1.55 var(--rhn-sans); color: #a8a69e; }
+  .rhh-cta-h { margin: 0; font: 400 clamp(36px, 4.4vw, 56px)/1.05 var(--rhn-serif); letter-spacing: -.03em; }
+  .rhh-cta-d { margin: 16px 0 32px; max-width: 520px; font: 400 16px/1.55 var(--rhn-sans); color: #a8a69e; }
   .rhh-cta-row { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 16px 24px; }
   .rhn-root .rhh-btn {
     background: #e8e6df; color: var(--rhn-ink);
@@ -314,17 +229,17 @@ const HIW_STYLES = `
   .rhn-root .rhh-btn-ghost { background: transparent; color: #e8e6df; border: 1px solid #5c5b55; }
   .rhh-cta-link { font: 400 15px var(--rhn-sans); color: #a8a69e; }
 
-  @media (max-width: 860px) {
-    .rhh-wrap { grid-template-columns: 1fr; gap: 40px; }
-    .rhh-head { position: static; }
-  }
   @media (max-width: 720px) {
-    .rhh-hero { padding-top: 56px; padding-bottom: 88px; }
+    .rhh-col { padding-top: 24px; }
+    .rhh-col section { margin-top: 56px; }
     .rhh-lede { font-size: 17px; }
-    .rhh-loop { grid-template-columns: 1fr; margin-top: 56px; }
-    .rhh-loop > li { padding: 20px 0; }
-    .rhh-loop > li + li { padding-left: 0; border-left: 0; border-top: 1px solid var(--rhn-rule); }
-    .rhh-sec { padding-top: 80px; padding-bottom: 80px; }
-    .rhh-cta { padding-top: 96px; padding-bottom: 96px; }
+    .rhh-h2 { font-size: 30px; }
+    /* Stack the actor above each step; the rail stays on the left. */
+    .rhh-flow > li { grid-template-columns: 1fr; gap: 4px; position: relative; padding-left: 28px; }
+    .rhh-flow > li > div { position: static; padding-left: 0; }
+    .rhh-flow > li > div::before { top: 20px; }
+    .rhh-flow > li > div::after { top: 33px; bottom: -20px; }
+    .rhh-who { text-align: left; padding-top: 0; }
+    .rhh-who-grid { grid-template-columns: 1fr; gap: 24px; }
   }
 `;
