@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { LOGIN_URL } from '../components/chrome';
 import { TalkToUsButton } from '../components/TalkToUsModal';
@@ -18,6 +18,7 @@ const HOME_T = {
   en: {
     signIn: 'Sign in',
     contactSales: 'Contact sales',
+    howItWorks: 'How it works',
     docs: 'Docs',
     pricing: 'Pricing',
     work: 'Work',
@@ -44,6 +45,7 @@ const HOME_T = {
   ko: {
     signIn: '로그인',
     contactSales: '영업팀 문의',
+    howItWorks: '작동 방식',
     docs: '문서',
     pricing: '요금제',
     work: '사례',
@@ -311,6 +313,8 @@ function Closing() {
 
 /* ------------------------------------------------------------------------ */
 
+const HOW_IT_WORKS_ID = 'how-it-works';
+
 function PixelBlob() {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -326,6 +330,17 @@ function PixelBlob() {
 export default function HomePage() {
   const t = useT(HOME_T);
   const lp = useLocalePath();
+  const reduce = usePrefersReducedMotion();
+
+  // Scroll to the evolution section in place of a hard anchor jump; the hash
+  // still updates so the link can be shared.
+  const goToHowItWorks = (e: MouseEvent<HTMLAnchorElement>) => {
+    const target = document.getElementById(HOW_IT_WORKS_ID);
+    if (!target) return;
+    e.preventDefault();
+    target.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' });
+    history.replaceState(null, '', `#${HOW_IT_WORKS_ID}`);
+  };
 
   return (
     <div className="rhn-root">
@@ -334,6 +349,7 @@ export default function HomePage() {
       <div className="rhn-hero">
         <nav className="rhn-nav">
           <div className="rhn-nav-group">
+            <a href={`#${HOW_IT_WORKS_ID}`} onClick={goToHowItWorks}>{t.howItWorks}</a>
             <Link to={lp('/docs')}>{t.docs}</Link>
             <Link to={lp('/pricing')}>{t.pricing}</Link>
           </div>
@@ -354,7 +370,7 @@ export default function HomePage() {
         <div className="rhn-wordmark" aria-label="RunHQ">RunHQ</div>
       </div>
 
-      <section className="rhn-evo">
+      <section className="rhn-evo" id={HOW_IT_WORKS_ID}>
         <div className="rhn-evo-inner">
           <div className="rhn-evo-head">
             <h2 className="rhn-h2">{t.evoA}<em>{t.evoB}</em></h2>
