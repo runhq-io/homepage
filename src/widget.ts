@@ -34,7 +34,7 @@ export const RUNHQ_PROJECT = 'runhq';
 // source of truth and a hard backstop. Keep in sync when adding a marketing
 // route. Mirrors the routes declared in App.tsx.
 export const RESERVED_SLUGS = new Set([
-  'products', 'pricing', 'docs', 'visual', 'about', 'privacy', 'terms', 'quiet',
+  'products', 'how-it-works', 'pricing', 'docs', 'visual', 'about', 'privacy', 'terms', 'quiet',
   'ko', 'api', 'w', 'assets', 'images', 'robots.txt', 'favicon.svg', 'favicon.ico',
 ]);
 
