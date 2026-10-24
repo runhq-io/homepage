@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { LOGIN_URL, SIGNUP_URL } from '../components/chrome';
-import { trackSignInClick, trackSignupClick } from '../telemetry';
+import { LOGIN_URL } from '../components/chrome';
+import { TalkToUsButton } from '../components/TalkToUsModal';
+import { trackSignInClick } from '../telemetry';
 import { useT, useLocalePath } from '../i18n/context';
 import '../components/rq-blob.js';
 
@@ -16,7 +17,9 @@ import '../components/rq-blob.js';
 const HOME_T = {
   en: {
     signIn: 'Sign in',
-    start: 'Start',
+    contactSales: 'Contact sales',
+    docs: 'Docs',
+    pricing: 'Pricing',
     work: 'Work',
     manual: 'Manual',
     heroA: 'Make your company ',
@@ -40,7 +43,9 @@ const HOME_T = {
   },
   ko: {
     signIn: '로그인',
-    start: '시작하기',
+    contactSales: '영업팀 문의',
+    docs: '문서',
+    pricing: '요금제',
     work: '사례',
     manual: '매뉴얼',
     heroA: '회사가 스스로 ',
@@ -328,12 +333,14 @@ export default function HomePage() {
 
       <div className="rhn-hero">
         <nav className="rhn-nav">
-          <a href={LOGIN_URL} onClick={() => trackSignInClick('home_nav')}>{t.signIn}</a>
-          <a
-            className="rhn-start"
-            href={SIGNUP_URL}
-            onClick={() => trackSignupClick('home_nav')}
-          >{t.start} →</a>
+          <div className="rhn-nav-group">
+            <Link to={lp('/docs')}>{t.docs}</Link>
+            <Link to={lp('/pricing')}>{t.pricing}</Link>
+          </div>
+          <div className="rhn-nav-group">
+            <a href={LOGIN_URL} onClick={() => trackSignInClick('home_nav')}>{t.signIn}</a>
+            <TalkToUsButton className="rhn-start" cta="home_nav">{t.contactSales}</TalkToUsButton>
+          </div>
         </nav>
         <div className="rhn-hero-copy">
           <h1 className="rhn-h1">{t.heroA}<em>{t.heroB}</em></h1>
@@ -395,11 +402,12 @@ const HOME_STYLES = `
     overflow: hidden; position: relative;
   }
   .rhn-nav {
-    display: flex; justify-content: flex-end; align-items: center; gap: 28px;
+    display: flex; justify-content: space-between; align-items: center; gap: 28px;
     padding: 32px var(--rhn-pad);
     font: 400 14px var(--rhn-sans);
     position: relative; z-index: 3;
   }
+  .rhn-nav-group { display: flex; align-items: center; gap: 28px; }
   .rhn-root .rhn-start {
     background: var(--rhn-ink); color: var(--rhn-bg);
     padding: 9px 18px; border-radius: 999px;
@@ -521,7 +529,9 @@ const HOME_STYLES = `
 
   @media (max-width: 720px) {
     .rhn-root { --rhn-pad: 24px; }
-    .rhn-nav { padding-top: 24px; padding-bottom: 24px; }
+    .rhn-nav { padding-top: 24px; padding-bottom: 24px; gap: 16px; font-size: 13px; }
+    .rhn-nav-group { gap: 16px; }
+    .rhn-root .rhn-start { padding: 8px 14px; }
     .rhn-h1 { font-size: clamp(44px, 12vw, 56px); }
     .rhn-wordmark { font-size: 34vw; }
     .rhn-evo { padding-top: 96px; padding-bottom: 96px; }
