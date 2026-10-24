@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { HomeNav, HomeFooter, HOME_CHROME_STYLES, SHOWCASE_BOARD_URL } from '../components/homeChrome';
+import { LOGOS } from '../components/chrome';
 import { useT } from '../i18n/context';
 import '../components/rq-blob.js';
 
@@ -14,6 +15,7 @@ import '../components/rq-blob.js';
 const HOME_T = {
   en: {
     work: 'Work',
+    customersH: 'Companies evolving on RunHQ',
     heroA: 'Make your company ',
     heroB: 'self‑evolve.',
     evoA: 'Evolution, ',
@@ -35,6 +37,7 @@ const HOME_T = {
   },
   ko: {
     work: '사례',
+    customersH: 'RunHQ로 진화하는 회사들',
     heroA: '회사가 스스로 ',
     heroB: '진화하도록.',
     evoA: '진화, ',
@@ -330,6 +333,13 @@ export default function HomePage() {
         <div className="rhn-wordmark" aria-label="RunHQ">RunHQ</div>
       </div>
 
+      <section className="rhn-customers" aria-label={t.customersH}>
+        <span className="rhn-customers-h">{t.customersH}</span>
+        <ul className="rhn-customers-list">
+          {LOGOS.map((name) => <li key={name}>{name}</li>)}
+        </ul>
+      </section>
+
       <section className="rhn-evo">
         <div className="rhn-evo-inner">
           <div className="rhn-evo-head">
@@ -381,6 +391,25 @@ const HOME_STYLES = `
     margin: 0 0 -0.02em -0.05em;
     white-space: nowrap; position: relative; z-index: 1;
     user-select: none;
+  }
+
+  /* CUSTOMERS */
+  .rhn-customers {
+    border-top: 1px solid #a9a79f;
+    padding: 40px var(--rhn-pad);
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+    gap: 16px 48px;
+  }
+  .rhn-customers-h {
+    font: 400 12px var(--rhn-mono); letter-spacing: .04em; color: var(--rhn-mute);
+  }
+  .rhn-customers-list {
+    margin: 0; padding: 0; list-style: none;
+    display: flex; flex-wrap: wrap; gap: 12px 56px;
+  }
+  .rhn-customers-list li {
+    font: 500 clamp(20px, 2vw, 28px)/1 var(--rhn-sans);
+    letter-spacing: -.03em; white-space: nowrap;
   }
 
   /* EVOLUTION */
@@ -459,6 +488,8 @@ const HOME_STYLES = `
   @media (max-width: 720px) {
     .rhn-h1 { font-size: clamp(44px, 12vw, 56px); }
     .rhn-wordmark { font-size: 34vw; }
+    .rhn-customers { padding-top: 32px; padding-bottom: 32px; }
+    .rhn-customers-list { gap: 10px 32px; }
     .rhn-evo { padding-top: 96px; padding-bottom: 96px; }
     .rhn-h2 { white-space: normal; }
     .rhn-gen-grid { grid-template-columns: minmax(0, 132px) minmax(0, 1fr) 44px; gap: 14px; }
