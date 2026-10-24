@@ -73,7 +73,7 @@ const PRICING_T = {
     planEnterpriseH3: 'Custom DPA + MSA',
     planEnterpriseH4: 'Dedicated POC',
     // Trust
-    trustH: 'Trusted by 1,400+ teams shipping with agents',
+    trustH: 'Companies evolving on RunHQ',
     // Compare
     compareH: 'Compare every feature.',
     compareSub: 'Side-by-side, all four plans, every line item.',
@@ -184,7 +184,7 @@ const PRICING_T = {
     planEnterpriseH3: '맞춤 DPA + MSA',
     planEnterpriseH4: '전담 담당자',
     // Trust
-    trustH: '에이전트로 출시 중인 1,400+ 팀이 신뢰합니다',
+    trustH: 'RunHQ로 진화하는 회사들',
     // Compare
     compareH: '모든 기능을 비교하세요.',
     compareSub: '네 가지 플랜을 항목별로 나란히.',
