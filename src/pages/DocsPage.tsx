@@ -2616,6 +2616,9 @@ const DOCS_STYLES = `
     gap: 40px;
     align-items: start;
   }
+  /* HomeNav isn't sticky (it scrolls off with the page), so the sidebar, TOC
+     and h2 anchors only need a small gap from the viewport top, not the
+     nav's height. */
   .rhpd-side { position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow-y: auto; }
   .rhpd-side-search {
     display: flex; align-items: center; gap: 8px;
