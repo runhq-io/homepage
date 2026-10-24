@@ -41,19 +41,14 @@ const HOME_CHROME_T = {
  */
 export const SHOWCASE_BOARD_URL = '/arrr';
 
-/**
- * `source` names the page for telemetry. `brand` shows the RunHQ wordmark as a
- * home link; the homepage leaves it off because its hero is the wordmark.
- */
-export function HomeNav({ source, brand = false }: { source: string; brand?: boolean }) {
+/** `source` names the page for telemetry. */
+export function HomeNav({ source }: { source: string }) {
   const t = useT(HOME_CHROME_T);
   const lp = useLocalePath();
   return (
     <nav className="rhn-nav">
       <div className="rhn-nav-group">
-        {brand && (
-          <Link className="rhn-brand" to={lp('/')} aria-label={t.home}>RunHQ</Link>
-        )}
+        <Link className="rhn-brand" to={lp('/')} aria-label={t.home}>RunHQ</Link>
         <NavLink to={lp('/how-it-works')}>{t.howItWorks}</NavLink>
         <NavLink to={lp('/docs')}>{t.docs}</NavLink>
         <NavLink to={lp('/pricing')}>{t.pricing}</NavLink>
