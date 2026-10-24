@@ -55,8 +55,8 @@ export function HomeNav({ source, brand = false }: { source: string; brand?: boo
           <Link className="rhn-brand" to={lp('/')} aria-label={t.home}>RunHQ</Link>
         )}
         <NavLink to={lp('/how-it-works')}>{t.howItWorks}</NavLink>
-        <Link to={lp('/docs')}>{t.docs}</Link>
-        <Link to={lp('/pricing')}>{t.pricing}</Link>
+        <NavLink to={lp('/docs')}>{t.docs}</NavLink>
+        <NavLink to={lp('/pricing')}>{t.pricing}</NavLink>
       </div>
       <div className="rhn-nav-group">
         <a href={LOGIN_URL} onClick={() => trackSignInClick(`${source}_nav`)}>{t.signIn}</a>
