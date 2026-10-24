@@ -137,7 +137,9 @@
       this._mm = e => { mouse.x = e.clientX / innerWidth - .5; mouse.y = e.clientY / innerHeight - .5; };
       window.addEventListener('mousemove', this._mm);
       let vis = true; this._io = new IntersectionObserver(es => { vis = es[0].isIntersecting; }); this._io.observe(this);
-      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      // Tracked live: the start/stop below reacts if the preference changes mid-visit.
+      const motionMq = matchMedia('(prefers-reduced-motion: reduce)');
+      let reduce = motionMq.matches;
 
       const Lx = -.45, Ly = -.55, Lz = .7, Ll = Math.hypot(Lx, Ly, Lz);
       let tAbs = 0, genStart = 0;
@@ -221,14 +223,20 @@
         if (!vis || document.hidden) return;
         try { frame(Math.min(.05, raw / 1000)); } catch (err) { if (!this._errd) { this._errd = true; console.error('rq-blob', err); } }
       };
+      let started = false;
       const start = () => {
         if (this._dead) return;
+        started = true;
+        cancelAnimationFrame(this._raf);
         if (reduce) { species = NS - 1; frame(.016); return; }
         last = performance.now(); this._raf = requestAnimationFrame(loop);
       };
+      this._motion = () => { reduce = motionMq.matches; if (started) start(); };
+      motionMq.addEventListener('change', this._motion);
+      this._motionMq = motionMq;
       if (document.readyState === 'complete') setTimeout(start, 100); else window.addEventListener('load', () => setTimeout(start, 100), { once: true });
     }
-    disconnectedCallback() { setTimeout(() => { if (this.isConnected) return; this._dead = true; cancelAnimationFrame(this._raf); this._io && this._io.disconnect(); window.removeEventListener('mousemove', this._mm); }, 0); }
+    disconnectedCallback() { setTimeout(() => { if (this.isConnected) return; this._dead = true; cancelAnimationFrame(this._raf); this._io && this._io.disconnect(); window.removeEventListener('mousemove', this._mm); this._motionMq && this._motionMq.removeEventListener('change', this._motion); }, 0); }
   }
   customElements.define('rq-blob', RqBlob);
 })();
